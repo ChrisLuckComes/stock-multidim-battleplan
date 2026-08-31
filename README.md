@@ -4,7 +4,7 @@
 
 把"研究"和"下单计划"合成一套可复用的流程：对任意 A 股 / 美股个股，先跑卖方级六维研究，再套用一套实战交易纪律框架，最终输出一份**带具体入场价、止损位、目标价与减仓节奏**的作战计划，而不是"逢低布局、注意风险"式的模糊建议。
 
-**跨平台**：原生支持 WorkBuddy、Cursor，以及任何能加载 SKILL.md 的通用 AI Agent。无外部付费数据源、零密钥依赖——A 股走东方财富、美股走 Yahoo/CBOE，本仓库自带全部取数与判定脚本。
+**跨平台**：原生支持 WorkBuddy、Cursor，以及任何能加载 SKILL.md 的通用 AI Agent。无外部付费数据源、零密钥依赖——A 股走东方财富、美股走 Yahoo，本仓库自带全部取数与判定脚本。不使用期权 Gamma / GEX。
 
 ---
 
@@ -28,12 +28,12 @@
 | 催化剂 | 业绩/产品/监管/国际化、下次财报日期（本地 + 北京双标） |
 | 风险 | 短期 vs 中期分开，不泛泛提示 |
 
-美股标的额外叠加 **Gamma 期权流分析（第七维 overlay）**：用 dealer gamma 环境（正/负 gamma）、零 gamma(flip) 位、Put/Call Wall 修正支撑阻力有效性，并直接触发"正 gamma → 支撑位买入胜率更高"的买点规则。
+支撑阻力只用价格结构、均线、VWAP、斐波那契，不使用期权 Gamma / GEX。
 
 ### 2. 实战交易纪律框架（用户固化，自动套用）
 - **Swing 双分类**：`Pullback 回踩确认买`（买尖顶/趋势回踩缩量企稳）vs `Breakout 突破确认买`（买跳空/平台突破收盘确认）。
 - **买点三模式**：低吸 / 尾盘 / 不追高，叠加量能过滤（缩量站回 = 假确认 / 接力陷阱）。
-- **123 趋势法则硬门控**（Victor Sperandeo《专业投机原理》）：买入前先判 1-2-3 三条件是否全过；**不符合则 verdict 只写"不推荐/观察/等突破确认"，绝不写"推荐买入"**。
+- **方向感知结构门控**（`rule123.py`）：先判 `continuation` / `reversal` / `mixed`。上升走买点 A（VWAP/0.382/EMA10 回踩）与买点 B（收盘过 R1 + RVOL>1.5）；下跌才用 Vic 底部 123 硬门控（三条件全过才推荐）。**>2×ATR 不追**。
 - **止损 ATR + 结构双校准**，禁用整数关 / 心理位当止损。
 - **强股回踩锚 VWAP / 0.382 浅回撤**，而非深度 MA20。
 - **高 β 集中度规避**：禁止双高 β 票叠加。
@@ -52,31 +52,26 @@ stock-multidim-battleplan/
 ├── README.md            # 本文件
 ├── SKILL.md             # 主技能定义（Agent 加载的核心指令）
 ├── fetch_market.py      # 通用行情取数（零外部 skill：A股东方财富 / 美股 Yahoo）
-├── rule123.py           # 123 趋势法则自动判定（自动识别 A股/美股）
-└── gamma-gex/           # 配套子技能：美股 Gamma 期权流数据源
-    ├── SKILL.md         # gamma-gex 技能定义
-    └── gamma_gex.py     # GEX 估算器（CBOE 延迟期权 API，零密钥）
+├── rule123.py           # 方向感知结构判定（延续回踩/突破 vs 反转 123）
+├── report-template.html # 研报 HTML 模板
+└── scripts/
+    └── fetch_market.js  # 美股 Yahoo 失败时的东财公开 JSON 兜底
 ```
 
 - **SKILL.md**：主技能的"大脑"，定义了全部分析维度、纪律框架与输出规范。Agent 通过它理解如何工作。
 - **fetch_market.py**：通用取数兜底。当运行环境**没有** wb-finance-skill 时使用（如 Cursor / 通用 Agent）；有 wb-finance-skill 的 WorkBuddy 环境可优先用前者，仍可用本脚本做结构判定。
-- **rule123.py**：命令行工具，自动识别市场取日线，判定 1-2-3 三条件并输出 verdict（符合 / 部分符合 / 不符合）。
-- **gamma-gex/**：美股 Gamma 期权流分析的数据源子技能。`gamma_gex.py` 抓取 CBOE 延迟期权行情，用 Black-Scholes 重算并聚合 net dealer GEX，输出零 gamma(flip)位、Put/Call Wall、最大痛点与正/负 gamma 环境。
+- **rule123.py**：命令行工具，自动识别市场取日线，先判 continuation / reversal / mixed，再给出 setup（pullback / breakout / wait / reversal_123）。
 
 ---
 
 ## 安装（多平台）
 
 ### A. WorkBuddy
-克隆到用户级技能目录（仓库含主技能 + `gamma-gex` 子技能，两个都要到位）：
+克隆到用户级技能目录：
 
 ```bash
 git clone https://github.com/ChrisLuckComes/stock-multidim-battleplan.git \
   ~/.workbuddy/skills/stock-multidim-battleplan
-
-# 把 gamma-gex 子目录也放到技能目录（美股 Gamma 分析依赖它）
-cp -r ~/.workbuddy/skills/stock-multidim-battleplan/gamma-gex \
-      ~/.workbuddy/skills/gamma-gex
 ```
 
 重启 / 刷新 WorkBuddy 后，在对话中输入 `/stock-multidim-battleplan 贵州茅台`。
@@ -88,8 +83,6 @@ Cursor 的 skills 目录为 `~/.cursor/skills/`。把整个仓库放进去即可
 ```bash
 git clone https://github.com/ChrisLuckComes/stock-multidim-battleplan.git \
   ~/.cursor/skills/stock-multidim-battleplan
-
-# Cursor 中 gamma-gex 作为子技能在主技能内被调用，无需单独复制
 ```
 
 在 Cursor 聊天中：`/stock-multidim-battleplan 赛轮轮胎`。无 wb-finance-skill 时，Agent 会自动改用 `fetch_market.py` 取数。
@@ -107,8 +100,8 @@ python --version   # 需 3.8+
 
 ## 依赖
 
-- **Python 3.8+**（运行 `fetch_market.py` / `rule123.py` / `gamma_gex.py`）。
-- **联网**（脚本实时抓取东方财富 / Yahoo / CBOE 公开行情，零密钥、零付费）。
+- **Python 3.8+**（运行 `fetch_market.py` / `rule123.py`）。
+- **联网**（脚本实时抓取东方财富 / Yahoo 公开行情，零密钥、零付费）。
 - **可选 · wb-finance-skill**：仅在 WorkBuddy 且已安装该技能时优先用于取数；**未安装不影响本仓库任何功能**——`fetch_market.py` 会自动接管。
 - **Node.js**：非必需。本仓库全部脚本为 Python；若你的 Agent 生态更偏 Node，可把 `fetch_market.py` 的逻辑等价为 `fetch_market.js`（SKILL.md 调用处保持一致即可）。
 
@@ -122,37 +115,29 @@ python fetch_market.py 601233 --out data/601233.json   # A股（自动识别沪/
 python fetch_market.py 688002                          # A股科创板
 python fetch_market.py CF --out data/cf.json           # 美股
 ```
-输出统一 JSON（见上文目录结构说明），供 `rule123.py` 或 `gamma_gex.py` 消费。
+输出统一 JSON（见上文目录结构说明），供 `rule123.py` 消费。
 
-### 2. 123 判定 `rule123.py`
+### 2. 结构判定 `rule123.py`
 ```bash
 python rule123.py 601233                 # A股
 python rule123.py CF LLY MU              # 美股批量
 python rule123.py CF --data data/cf.json # 直接消费 fetch_market.py 产出（推荐）
 ```
-输出各标的三条件勾选 + verdict，并写入 `rule123_out.json`。
-
-### 3. Gamma 期权流 `gamma-gex/gamma_gex.py`
-```bash
-python gamma-gex/gamma_gex.py CF            # 单标的
-python gamma-gex/gamma_gex.py TEM RVMD      # 多标的
-python gamma-gex/gamma_gex.py CF --r 0.043  # 指定无风险利率
-python gamma-gex/gamma_gex.py CF --text      # 人类可读格式
-```
-默认输出 JSON（每行一个标的，便于管道消费）；`--text` 切换人类可读。输出：净 dealer gamma（正/负环境）、零 gamma(flip)位、Put/Call Wall、最大痛点、数据质量评级。
-
-> 数据来自 CBOE 延迟期权 API（免费、零密钥）。flip 绝对价位与机构源（SpotGamma/富途）可能 ±5-10% 偏差，价位分歧时以机构源定止损。小盘股 GEX 噪声大（脚本会标"数据质量=低"），仅作确认信号、不可作核心依据。
+输出 `regime` / `setup` / HH/HL / 均线 / RVOL / verdict / recommend，并写入 `rule123_out.json`。
 
 ---
 
-## 123 趋势法则是什么
+## 方向感知结构门控是什么
 
-源自道氏理论（Victor Sperandeo《专业投机原理》）：
-1. **① 趋势线被突破**：下跌（或回调）段的下降趋势连线被收盘价站上；
-2. **② 不再创新低**：最近摆动低点 P1 高于前一个摆动低点 P0（更高低点）；
-3. **③ 穿越前期高点**：最新收盘价 > P0~P1 之间的前期反应高点 R1。
+先判趋势，再决定 123 怎么用（不用 MA60）：
 
-三项全过 = **符合**（推荐）；过 2 项 = **部分符合**（不推荐）；过 ≤1 项 = **不符合**。
+1. **continuation（上升延续）**：收盘 > SMA20，且 (EMA10 > SMA20 > SMA50 或 SMA20 上行)，且 HH/HL intact。不用底部 123 否决整笔。买点 A = 回踩 VWAP/0.382/EMA10（HL + 不破 P1 + 缩量）；买点 B = 收盘过 R1 且 RVOL > 1.5。
+2. **reversal（下跌反转）**：收盘 < SMA20，或 HH/HL 坏了。走 Vic 底部 123 硬门控——①趋势线突破 ②更高低点 ③收盘过 R1，三项全过才推荐。
+3. **mixed**：只观察。
+
+>2×ATR 不追压在两条路径之上。
+
+Vic 底部 123 源自道氏理论（Victor Sperandeo《专业投机原理》），**只用于下跌反转路径**。
 
 ---
 

@@ -7,7 +7,7 @@
 wb-finance-skill 不可用，Agent 应改用本脚本取数。
 
 支持 A 股（东方财富）与美股（Yahoo v8 chart），输出统一 JSON 到 stdout，
-供 rule123.py / gamma_gex.py / Agent 直接消费。
+供 rule123.py / Agent 直接消费。
 
 用法:
   python fetch_market.py 601233          # A股上海

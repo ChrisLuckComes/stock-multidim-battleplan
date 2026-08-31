@@ -1,25 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-123 趋势法则判定（Victor Sperandeo《专业投机原理》/ Trader Vic 1-2-3）
-======================================================================
-源于道氏理论：上升趋势=更高的高点+更高的低点；下降趋势反之。
-多头（买入）1-2-3 底部/中继确认三条件：
-  ① 趋势线被突破  → 下跌(或回调)段的下降趋势连线被收盘价站上
-  ② 不再创出新低  → 最近摆动低点 P1 高于前一个摆动低点 P0（更高低点）
-  ③ 穿越前期高点  → 最新收盘价 > P0~P1 之间的前期反应高点 R1
-三项全过 = 符合123（可推荐）；任一不过 = 不符合（仅观察/不推荐）。
+方向感知结构判定（延续 vs 反转）
+================================
+先判趋势方向，再决定 123 怎么用。
 
-数据源（自动识别，零外部 skill 依赖）：
-  - A 股（6 位数字代码）走东方财富日线 API
-  - 美股（字母代码）走 Yahoo v8 chart
-  - 也可通过 --data path.json 直接喂入 fetch_market.py 输出（通用环境首选）
-输出：统一 JSON 到 stdout（同时写入 rule123_out.json 便于 HTML 注入）。
+上升延续候选（收盘>SMA20 且 (EMA10>SMA20>SMA50 或 SMA20 上行) 且 HH/HL 还在）：
+  - 不用底部 123 否决整笔
+  - cond1 不作为门控
+  - cond2 / HL = 回踩买点 A 的结构条件（还要 VWAP/0.382/EMA10，由 skill 再判）
+  - cond3（收盘>R1）= Breakout 买点 B 的触发，需放量（RVOL>1.5）才算确认
 
-用法:
-  python rule123.py 601233            # A股
-  python rule123.py CF LLY MU         # 美股批量
-  python rule123.py CF --data cf.json # 用 fetch_market.py 的产出
+下跌反转候选（收盘<SMA20，或 HH/HL 坏了）：
+  - 走 Vic 底部 123 硬门控：①趋势线突破 ②更高低点 ③收盘过 R1
+  - 三项全过才 recommend
+
+方向不明（mixed）：只观察。
+
+数据：A 股东财 / 美股 Yahoo / --data 喂 fetch_market.py JSON。
 """
 import urllib.request, json, sys, datetime, re, time
 
@@ -159,6 +157,36 @@ def line_val(p_b, p_a, idx):
     return y_b + (y_a - y_b) * (idx - i_b) / (i_a - i_b)
 
 
+def sma(closes, n):
+    if len(closes) < n:
+        return None
+    return sum(closes[-n:]) / n
+
+
+def ema(closes, n):
+    if len(closes) < n:
+        return None
+    k = 2.0 / (n + 1)
+    e = sum(closes[:n]) / n
+    for i in range(n, len(closes)):
+        e = closes[i] * k + e * (1 - k)
+    return e
+
+
+def classify_regime(last_c, ema10, sma20, sma50, sma20_up, hh, hl):
+    above20 = sma20 is not None and last_c > sma20
+    bull_stack = (
+        ema10 is not None and sma20 is not None and sma50 is not None
+        and ema10 > sma20 > sma50
+    )
+    up_ma = bull_stack or bool(sma20_up)
+    if above20 and up_ma and hh and hl:
+        return "continuation"
+    if (sma20 is not None and last_c < sma20) or (not hh) or (not hl):
+        return "reversal"
+    return "mixed"
+
+
 def evaluate(sym, data_file=None):
     bars, last_q = get_bars(sym, data_file)
     Hs, Ls = pivots(bars, w=3)
@@ -173,31 +201,107 @@ def evaluate(sym, data_file=None):
     h_b = Hs_before[-2] if len(Hs_before) >= 2 else None
     last_i = len(bars) - 1
     last_c = bars[-1]["c"]
+    closes = [b["c"] for b in bars]
+    vols = [float(b.get("v") or 0) for b in bars]
+    ema10 = ema(closes, 10)
+    sma20 = sma(closes, 20)
+    sma50 = sma(closes, 50)
+    sma20_prev = sma(closes[:-5], 20) if len(closes) >= 25 else None
+    sma20_up = sma20 is not None and sma20_prev is not None and sma20 > sma20_prev
+    hh = Hs[-1][1] > Hs[-2][1]
+    hl = P1[1] > P0[1]
+    vol_base = sma(vols[:-1], 20) if len(vols) > 20 else None
+    last_v = vols[-1] if vols else 0
+    rvol20 = (last_v / vol_base) if vol_base else None
 
-    out = {
-        "sym": sym, "last": round(last_c, 2), "last_date": bars[-1]["d"],
-        "P0": {"i": P0[0], "d": bars[P0[0]]["d"], "price": round(P0[1], 2)},
-        "P1": {"i": P1[0], "d": bars[P1[0]]["d"], "price": round(P1[1], 2)},
-    }
-    if R1:
-        out["R1"] = {"i": R1[0], "d": bars[R1[0]]["d"], "price": round(R1[1], 2)}
-    c2 = P1[1] > P0[1]
+    c2 = hl
     c3 = (R1 is not None) and (last_c > R1[1])
     c1 = False
     tl_note = "N/A"
     if h_a and h_b:
         tl_at_last = line_val(h_b, h_a, last_i)
         c1 = last_c > tl_at_last
-        tl_note = f"下跌段趋势线@末根≈{round(tl_at_last,2)}（连 {bars[h_b[0]]['d']}高{bars[h_b[0]]['h']:.2f}→{bars[h_a[0]]['d']}高{h_a[1]:.2f}）"
-        out["trendline_at_last"] = round(tl_at_last, 2)
-    out["cond1_trendline_break"] = c1
-    out["cond2_no_new_low"] = c2
-    out["cond3_break_prior_high"] = c3
-    out["cond1_note"] = tl_note
+        tl_note = (
+            f"下跌段趋势线@末根≈{round(tl_at_last, 2)}"
+            f"（连 {bars[h_b[0]]['d']}高{bars[h_b[0]]['h']:.2f}→{bars[h_a[0]]['d']}高{h_a[1]:.2f}）"
+        )
+
+    regime = classify_regime(last_c, ema10, sma20, sma50, sma20_up, hh, hl)
     passed = sum([c1, c2, c3])
-    out["passed"] = passed
-    out["verdict"] = "符合" if passed == 3 else ("部分符合" if passed == 2 else "不符合")
-    out["recommend"] = (passed == 3)
+    setup = "wait"
+    recommend = False
+    note = ""
+
+    if regime == "reversal":
+        recommend = passed == 3
+        if recommend:
+            setup = "reversal_123"
+            verdict = "反转·123符合"
+        elif passed == 2:
+            verdict = "反转·123部分符合"
+        else:
+            verdict = "反转·123不符合"
+    elif regime == "continuation":
+        r1_px = R1[1] if R1 else None
+        above_r1 = r1_px is not None and last_c > r1_px
+        below_r1 = r1_px is None or last_c <= r1_px
+        structure_ok = hl and last_c > P1[1]
+        vol_ok = rvol20 is None or rvol20 > 1.5
+        if above_r1 and vol_ok:
+            setup = "breakout"
+            recommend = True
+            verdict = "延续·突破触发"
+            if rvol20 is None:
+                note = "过 R1 但无量能数据，突破确认打折"
+        elif above_r1:
+            setup = "wait"
+            verdict = "延续·过R1但量能不足"
+            note = f"RVOL={round(rvol20, 2)} ≤ 1.5"
+        elif structure_ok and below_r1:
+            setup = "pullback"
+            recommend = False
+            verdict = "延续·回踩路径"
+            note = "cond3 不作否决；买点 A 须再落在 VWAP/0.382/EMA10 且缩量"
+        else:
+            setup = "wait"
+            verdict = "延续·等待结构"
+    else:
+        verdict = "方向不明·观察"
+        note = "未同时满足 SMA20 上方 + 均线向上 + HH/HL"
+
+    def rnd(v):
+        if v is None:
+            return None
+        return round(v, 2)
+
+    out = {
+        "sym": sym,
+        "last": rnd(last_c),
+        "last_date": bars[-1]["d"],
+        "P0": {"i": P0[0], "d": bars[P0[0]]["d"], "price": rnd(P0[1])},
+        "P1": {"i": P1[0], "d": bars[P1[0]]["d"], "price": rnd(P1[1])},
+        "regime": regime,
+        "setup": setup,
+        "hh": hh,
+        "hl": hl,
+        "ema10": rnd(ema10),
+        "sma20": rnd(sma20),
+        "sma50": rnd(sma50),
+        "sma20_up": sma20_up,
+        "rvol20": rnd(rvol20),
+        "cond1_trendline_break": c1,
+        "cond1_note": tl_note,
+        "cond2_no_new_low": c2,
+        "cond3_break_prior_high": c3,
+        "passed": passed,
+        "verdict": verdict,
+        "recommend": recommend,
+        "note": note,
+    }
+    if R1:
+        out["R1"] = {"i": R1[0], "d": bars[R1[0]]["d"], "price": rnd(R1[1])}
+    if h_a and h_b:
+        out["trendline_at_last"] = rnd(line_val(h_b, h_a, last_i))
     return out
 
 
@@ -232,9 +336,11 @@ if __name__ == "__main__":
             r = {"sym": s, "verdict": "ERR", "reason": f"{type(e).__name__}: {e}"}
         res.append(r)
         print(f"=== {r['sym']} ===")
-        for k in ["verdict", "last", "last_date", "P0", "P1", "R1",
+        for k in ["regime", "setup", "verdict", "recommend", "note",
+                  "last", "last_date", "ema10", "sma20", "sma50", "sma20_up",
+                  "hh", "hl", "rvol20", "P0", "P1", "R1",
                   "cond1_trendline_break", "cond1_note", "cond2_no_new_low",
-                  "cond3_break_prior_high", "passed", "recommend", "reason"]:
+                  "cond3_break_prior_high", "passed", "reason"]:
             if k in r:
                 print(f"  {k}: {r[k]}")
 
