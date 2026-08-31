@@ -145,11 +145,18 @@ def main():
     r = 0.043
     text = False
     syms = []
+    skip_next = False
     for i, a in enumerate(args):
-        if a == "--r":
+        if skip_next:
+            skip_next = False
             continue
-        if a == "--text":
-            text = True
+        if a == "--r":
+            if i + 1 < len(args):
+                try:
+                    r = float(args[i + 1])
+                except ValueError:
+                    pass
+                skip_next = True
             continue
         if a.startswith("--r="):
             try:
@@ -157,14 +164,10 @@ def main():
             except ValueError:
                 pass
             continue
+        if a == "--text":
+            text = True
+            continue
         syms.append(a.upper())
-    # 重新解析 r (--r <val> 形式)
-    for i, a in enumerate(args):
-        if a == "--r" and i + 1 < len(args):
-            try:
-                r = float(args[i + 1])
-            except ValueError:
-                pass
 
     results = [analyze(s, r) for s in syms]
     if text:

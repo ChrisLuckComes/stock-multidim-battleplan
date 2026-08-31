@@ -216,7 +216,7 @@ if __name__ == "__main__":
                 data_map[k.upper()] = v
             else:
                 if syms:
-                    data_map[syms[-1].upper()] = v
+                    data_map[syms[-1].upper()] = spec
             continue
         syms.append(a)
         i += 1
