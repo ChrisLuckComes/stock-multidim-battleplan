@@ -3,19 +3,23 @@
 """
 方向感知结构判定（延续 vs 反转）
 ================================
-先判趋势方向，再决定 123 怎么用。
+先判趋势方向，再决定怎么写路径。HH 两两比较不作门控。
 
-上升延续候选（收盘>SMA20 且 (EMA10>SMA20>SMA50 或 SMA20 上行) 且 HH/HL 还在）：
-  - 不用底部 123 否决整笔
+cond2 = 自最近摆动低点 P1 以来未再创新低（不是 P1>P0）。
+结构完好 = 收盘>P1 且 cond2。
+
+上升延续候选（收盘>SMA20 且 (EMA10>SMA20>SMA50 或 SMA20 上行) 且结构完好）：
+  - 123 未完成时不用底部 123 否决整笔
   - cond1 不作为门控
-  - cond2 / HL = 回踩买点 A 的结构条件（还要 VWAP/0.382/EMA10，由 skill 再判）
+  - cond2 = 回踩买点 A 的结构条件（还要 VWAP/0.382/EMA10，由 skill 再判）
   - cond3（收盘>R1）= Breakout 买点 B 的触发，需放量（RVOL>1.5）才算确认
 
-下跌反转候选（收盘<SMA20，或 HH/HL 坏了）：
-  - 走 Vic 底部 123 硬门控：①趋势线突破 ②更高低点 ③收盘过 R1
-  - 三项全过才 recommend
+下跌反转候选（收盘<SMA20，或 cond2 坏了）：
+  - 123 未完成则硬否决
 
-方向不明（mixed）：只观察。
+123 三项全过优先于 regime：无论方向都 recommend（量能不足则文案打折）。
+
+方向不明（mixed）且 123 未完成：只观察。
 
 数据：A 股东财 / 美股 Yahoo / --data 喂 fetch_market.py JSON。
 """
@@ -237,12 +241,29 @@ def evaluate(sym, data_file=None):
     recommend = False
     note = ""
 
-    if regime == "reversal":
-        recommend = passed == 3
-        if recommend:
+    # 123 三项全过 = Sperandeo 买点，与 regime 标签无关（标签仅决定 setup/文案）
+    if passed == 3:
+        recommend = True
+        if regime == "reversal":
             setup = "reversal_123"
             verdict = "反转·123符合"
-        elif passed == 2:
+        elif regime == "continuation":
+            if rvol20 is None or rvol20 > 1.5:
+                setup = "breakout"
+                verdict = "延续·突破触发"
+            else:
+                setup = "breakout_lightvol"
+                verdict = "延续·突破(量能偏弱)"
+        else:
+            setup = "base_breakout"
+            verdict = "123符合·基底突破"
+        if rvol20 is not None and rvol20 <= 1.5:
+            note = f"123 三项全过 ✓ 但突破量能偏弱（RVOL={round(rvol20, 2)}≤1.5），按突破买点B纪律需放量确认或回踩不破 R1 再介入"
+        elif rvol20 is None:
+            note = "123 三项全过 ✓ 但缺量能数据，突破确认打折"
+    elif regime == "reversal":
+        recommend = False
+        if passed == 2:
             verdict = "反转·123部分符合"
         else:
             verdict = "反转·123不符合"
@@ -272,7 +293,7 @@ def evaluate(sym, data_file=None):
             verdict = "延续·等待结构"
     else:
         verdict = "方向不明·观察"
-        note = "未同时满足 SMA20 上方 + 均线向上 + HH/HL"
+        note = "未同时满足 SMA20 上方 + 均线向上 + 结构完好（收盘>P1 且自 P1 未创新低），且 123 未完成"
 
     def rnd(v):
         if v is None:

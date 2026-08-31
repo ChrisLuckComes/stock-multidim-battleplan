@@ -1,6 +1,6 @@
 ---
 name: stock-multidim-battleplan
-description: 美股/A股个股的多维度分析 + 作战计划。当用户要求多维度分析、买卖计划/作战计划、该不该买/怎么买/止损止盈时使用。卖方级六维（基本面/估值/技术面/资金面/催化剂/风险）叠加 Swing 纪律（pullback/breakout、低吸/尾盘/不追高、止损 ATR+结构双校准、强股回踩 VWAP/0.382、高β不双持、Conviction vs Swing 二分）。强制产出目标价与退出条件（T1/T2）。结构门控方向感知：上升走回踩/突破两条买点，下跌才用 Vic 底部 123 硬门控。
+description: 美股/A股个股的多维度分析 + 作战计划。当用户要求多维度分析、买卖计划/作战计划、该不该买/怎么买/止损止盈时使用。卖方级六维（基本面/估值/技术面/资金面/催化剂/风险）叠加 Swing 纪律（pullback/breakout、低吸/尾盘/不追高、止损 ATR+结构双校准、强股回踩 VWAP/0.382、高β不双持、Conviction vs Swing 二分）。强制产出目标价与退出条件（T1/T2）。结构门控：延续走回踩/突破；123 三项全过则无论方向都可推荐；下跌且 123 未完成才硬否决。
 disable-model-invocation: true
 ---
 
@@ -44,20 +44,24 @@ disable-model-invocation: true
   - **ETF 比单点高β 个股更易走出可持续 band-walk**（成分分散、波动平滑），单日 +X% 后是否 walk 需看后续贴轨持续性。
 
 ## 方向感知结构门控（强制调用 `rule123.py`）
-先判趋势方向，再决定 123 怎么用。**不用 MA60**（与 EMA10/SMA20/SMA50 栈重复）。**>2×ATR 不追**压在两条路径之上。
+先判趋势方向，再决定怎么写路径。**不用 MA60**（与 EMA10/SMA20/SMA50 栈重复）。**>2×ATR 不追**压在两条路径之上。**HH 两两比较不作门控**（只当备注）。
+
+cond2 定义：自最近摆动低点 P1 以来未再创新低（不是 P1>P0 的两两 HL）。结构完好 = 收盘 > P1 且 cond2。
 
 趋势判定（脚本输出 `regime`）：
-1. 收盘在 **SMA20 之上**，且 **(EMA10 > SMA20 > SMA50 或 SMA20 上行)**，且最近摆动 **HH/HL intact** → `continuation`（上升延续）。
-2. 收盘在 SMA20 下，或 HH/HL **任一坏了** → `reversal`（下跌反转）。
+1. 收盘在 **SMA20 之上**，且 **(EMA10 > SMA20 > SMA50 或 SMA20 上行)**，且结构完好 → `continuation`（上升延续）。
+2. 收盘在 SMA20 下，或 cond2 坏了（自 P1 后再创新低）→ `reversal`（下跌反转）。
 3. 其余 → `mixed`（观察）。
 
-**上升延续（continuation）**：不用底部 123 否决整笔；**cond1 不作门控**。研报拆成两张路径卡，**不要把上升路径叫「123 门控」**。
-- **买点 A（回踩 / Pullback）**：cond2/HL = 结构条件；再叠加 **VWAP / 0.382 / EMA10 + 不破 P1 + 缩量**。脚本 `setup=pullback` 时 `recommend=False`，由研报再判现价是否落在买区 A。
+**123 三项全过优先于 regime**：cond1（趋势线突破）+ cond2 + cond3（收盘 > R1）全过 → `recommend=True`，与方向标签无关。延续标 `breakout`（RVOL≤1.5 则 `breakout_lightvol`，文案打折）；反转标 `reversal_123`；mixed 标 `base_breakout`。
+
+**上升延续（continuation）且 123 未完成**：不用底部 123 否决整笔；**cond1 不作门控**。研报拆成两张路径卡，**不要把上升路径叫「123 门控」**。
+- **买点 A（回踩 / Pullback）**：cond2 + 不破 P1；再叠加 **VWAP / 0.382 / EMA10 + 缩量**。脚本 `setup=pullback` 时 `recommend=False`，由研报再判现价是否落在买区 A。
 - **买点 B（突破 / Breakout）**：cond3（收盘 > R1）为触发，须 **RVOL > 1.5** 才算确认。`setup=breakout` 才 `recommend=True`。
 
-**下跌反转（reversal）**：走 Vic 底部 123 硬门控——cond1（趋势线突破）+ cond2（更高低点）+ cond3（收盘过 R1）**三项全过**才 `recommend`。研报输出「123 趋势法则判定」卡。
+**下跌反转（reversal）且 123 未完成**：走 Vic 底部 123 硬门控，三项不全过 → 不推荐。研报输出「123 趋势法则判定」卡。
 
-**mixed**：只观察，不写推荐买入。
+**mixed 且 123 未完成**：只观察，不写推荐买入。
 
 ## Swing 双分类（用户框架，必须贴标签）
 - **Pullback 回踩确认买**：买在尖顶/趋势回踩缩量企稳位（非尖顶追高）。
@@ -93,9 +97,10 @@ disable-model-invocation: true
 
 ## 作战计划结构（输出必备）
 0. **结构门控（前置，强制调用 `rule123.py`）**：先输出方向卡（`regime` / `setup` / `verdict`）。
-   - `continuation`：两张路径卡——**买点 A 回踩**（VWAP/0.382/EMA10 + HL + 不破 P1 + 缩量）、**买点 B 突破**（收盘过 R1 + RVOL>1.5）。现价不在 A、也没触发 B → 不推荐，只写预案。
-   - `reversal`：输出「123 趋势法则判定」卡；三条件不全过 → verdict「不推荐/观察」，入场/止损/目标仅作预案。
-   - `mixed`：观察。
+   - **123 三项全过**：无论 regime，按突破买点写（量能不足则打折）。
+   - `continuation` 且未完成 123：两张路径卡——**买点 A 回踩**（VWAP/0.382/EMA10 + 自 P1 未创新低 + 缩量）、**买点 B 突破**（收盘过 R1 + RVOL>1.5）。现价不在 A、也没触发 B → 不推荐，只写预案。
+   - `reversal` 且 123 未完成：输出「123 趋势法则判定」卡；入场/止损/目标仅作预案。
+   - `mixed` 且 123 未完成：观察。
    - 现价距买区 **>2×ATR** → 不追，等回踩或等突破确认。
 1. **入场**：分买区 A（首选回踩）/ B（突破）/ C（预案）。**强股首选买区锚定 VWAP / 0.382 / EMA10**，深调 MA20 仅作极端情景；写明与哪条均线/结构/VWAP 重合；确认方式（尾盘+量比>1）。支撑阻力只用价格结构、均线、VWAP、斐波那契，不用期权墙。
 2. **分仓路径**：试错仓 10–20% → 确认仓 +20–30% → 加仓仓 +20–30% → 极强势 >70%。不一把梭。
@@ -135,12 +140,12 @@ python rule123.py 601233                 # A股
 python rule123.py CF LLY MU              # 美股批量
 python rule123.py CF --data data/cf.json # 直接消费 fetch_market.py 产出（推荐）
 ```
-输出 `regime`（continuation / reversal / mixed）、`setup`（pullback / breakout / wait / reversal_123）、HH/HL、均线、RVOL、verdict、recommend，并写入 `rule123_out.json`。
+输出 `regime`（continuation / reversal / mixed）、`setup`（pullback / breakout / breakout_lightvol / wait / reversal_123 / base_breakout）、cond2（自 P1 未创新低）、均线、RVOL、verdict、recommend，并写入 `rule123_out.json`。HH 仅备注，不作门控。
 
 > **环境探测技巧**：数据获取的优先级为 **① wb-finance-skill（WorkBuddy 内可用时）→ ② 本仓库 `fetch_market.py` → ③ WebSearch/WebFetch 手工检索兜底**。`fetch_market.py` 测的是本机能否直接取数，不是测 `wb-finance-skill` 在不在；如果身处 WorkBuddy 且 `wb-finance-skill` 可用，优先用它拿实时行情，再拿 `fetch_market.py` / `rule123.py` 做结构判定。若 `fetch_market.py` 也失败（无网络/无 Python/外网被墙），则退回 WebSearch + WebFetch 手工检索，并在研报标注"数据来源：公开检索"。
 
 ## 输出规范（环境自适应）
-- **优先 HTML（环境支持文件写入+预览时）**：落盘 `C:\Users\luoyu\stock-reports\<TICKER>-<YYYYMMDD>.html`（不要写入代码仓库）。浅底深字研报风，首屏结论先行，含价格图（关键位 markLine：买区 A/突破位 R1/EMA10/SMA20/止损/目标/52w 高低）。**HTML 必须含独立的「目标价 / 退出条件」卡片**（T1/T2 价+依据+减仓节奏+移动止损），与「入场」「止损」卡并列、首屏可见。**不输出 Gamma / 期权流卡片。** `continuation` 出两张路径卡（买点 A 回踩 / 买点 B 突破），不要叫「123 门控」。`reversal` 才出「123 趋势法则判定」卡（逐项勾选三条件，标 P0/P1/R1）。**预览环境屏蔽外链 CDN 导致整页空白时，生成 `*_standalone.html` 去外链版保底**（内联 JS，不引用 echarts CDN）。
+- **优先 HTML（环境支持文件写入+预览时）**：落盘 `C:\Users\luoyu\stock-reports\<TICKER>-<YYYYMMDD>.html`（不要写入代码仓库）。浅底深字研报风，首屏结论先行，含价格图（关键位 markLine：买区 A/突破位 R1/EMA10/SMA20/止损/目标/52w 高低）。**HTML 必须含独立的「目标价 / 退出条件」卡片**（T1/T2 价+依据+减仓节奏+移动止损），与「入场」「止损」卡并列、首屏可见。**不输出 Gamma / 期权流卡片。** 123 三项全过：写突破确认，附三条件勾选。`continuation` 且 123 未完成：两张路径卡（买点 A 回踩 / 买点 B 突破），不要叫「123 门控」。`reversal` 且 123 未完成：出「123 趋势法则判定」卡（逐项勾选，标 P0/P1/R1）。**预览环境屏蔽外链 CDN 导致整页空白时，生成 `*_standalone.html` 去外链版保底**（内联 JS，不引用 echarts CDN）。
 - **无文件写入环境（通用 Agent）**：直接输出 **markdown 研报**到对话，结构同上（结论先行 → 方向/路径卡 → 六维 → 作战计划卡含入场/止损/目标价退出条件）。图表以文字/关键价位列表替代。
 - 对话正文附 200–300 字摘要 + 文件路径（或 markdown 结论）。
 - 含具体操作价位/买卖判断的，末尾必须附固定免责声明：

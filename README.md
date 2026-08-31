@@ -33,7 +33,7 @@
 ### 2. 实战交易纪律框架（用户固化，自动套用）
 - **Swing 双分类**：`Pullback 回踩确认买`（买尖顶/趋势回踩缩量企稳）vs `Breakout 突破确认买`（买跳空/平台突破收盘确认）。
 - **买点三模式**：低吸 / 尾盘 / 不追高，叠加量能过滤（缩量站回 = 假确认 / 接力陷阱）。
-- **方向感知结构门控**（`rule123.py`）：先判 `continuation` / `reversal` / `mixed`。上升走买点 A（VWAP/0.382/EMA10 回踩）与买点 B（收盘过 R1 + RVOL>1.5）；下跌才用 Vic 底部 123 硬门控（三条件全过才推荐）。**>2×ATR 不追**。
+- **方向感知结构门控**（`rule123.py`）：先判 `continuation` / `reversal` / `mixed`（结构完好=收盘>P1 且自 P1 未创新低；HH 不作门控）。延续走买点 A（VWAP/0.382/EMA10 回踩）与买点 B（收盘过 R1 + RVOL>1.5）。**123 三项全过则无论方向都可推荐**。下跌且 123 未完成才硬否决。**>2×ATR 不追**。
 - **止损 ATR + 结构双校准**，禁用整数关 / 心理位当止损。
 - **强股回踩锚 VWAP / 0.382 浅回撤**，而非深度 MA20。
 - **高 β 集中度规避**：禁止双高 β 票叠加。
@@ -60,7 +60,7 @@ stock-multidim-battleplan/
 
 - **SKILL.md**：主技能的"大脑"，定义了全部分析维度、纪律框架与输出规范。Agent 通过它理解如何工作。
 - **fetch_market.py**：通用取数兜底。当运行环境**没有** wb-finance-skill 时使用（如 Cursor / 通用 Agent）；有 wb-finance-skill 的 WorkBuddy 环境可优先用前者，仍可用本脚本做结构判定。
-- **rule123.py**：命令行工具，自动识别市场取日线，先判 continuation / reversal / mixed，再给出 setup（pullback / breakout / wait / reversal_123）。
+- **rule123.py**：命令行工具，自动识别市场取日线，先判 continuation / reversal / mixed，再给出 setup（pullback / breakout / breakout_lightvol / wait / reversal_123 / base_breakout）。123 三项全过优先于 regime。
 
 ---
 
@@ -123,21 +123,23 @@ python rule123.py 601233                 # A股
 python rule123.py CF LLY MU              # 美股批量
 python rule123.py CF --data data/cf.json # 直接消费 fetch_market.py 产出（推荐）
 ```
-输出 `regime` / `setup` / HH/HL / 均线 / RVOL / verdict / recommend，并写入 `rule123_out.json`。
+输出 `regime` / `setup` / cond2（自 P1 未创新低）/ 均线 / RVOL / verdict / recommend，并写入 `rule123_out.json`。HH 仅备注。
 
 ---
 
 ## 方向感知结构门控是什么
 
-先判趋势，再决定 123 怎么用（不用 MA60）：
+先判趋势，再决定怎么写路径（不用 MA60）。**HH 两两比较不作门控**。cond2 = 自 P1 以来未再创新低。
 
-1. **continuation（上升延续）**：收盘 > SMA20，且 (EMA10 > SMA20 > SMA50 或 SMA20 上行)，且 HH/HL intact。不用底部 123 否决整笔。买点 A = 回踩 VWAP/0.382/EMA10（HL + 不破 P1 + 缩量）；买点 B = 收盘过 R1 且 RVOL > 1.5。
-2. **reversal（下跌反转）**：收盘 < SMA20，或 HH/HL 坏了。走 Vic 底部 123 硬门控——①趋势线突破 ②更高低点 ③收盘过 R1，三项全过才推荐。
-3. **mixed**：只观察。
+1. **continuation（上升延续）**：收盘 > SMA20，且 (EMA10 > SMA20 > SMA50 或 SMA20 上行)，且收盘 > P1、自 P1 未创新低。123 未完成时不用底部 123 否决整笔。买点 A = 回踩 VWAP/0.382/EMA10（cond2 + 缩量）；买点 B = 收盘过 R1 且 RVOL > 1.5。
+2. **reversal（下跌反转）**：收盘 < SMA20，或自 P1 后再创新低。123 未完成则硬否决。
+3. **mixed**：123 未完成则只观察。
+
+**123 三项全过优先于方向标签**：①趋势线突破 ②自 P1 未创新低 ③收盘过 R1。全过即推荐（量能不足则突破确认打折）。
 
 >2×ATR 不追压在两条路径之上。
 
-Vic 底部 123 源自道氏理论（Victor Sperandeo《专业投机原理》），**只用于下跌反转路径**。
+Vic 底部 123 源自道氏理论（Victor Sperandeo《专业投机原理》）。三项全过是 Sperandeo 买点；未完成时只在下跌反转路径上作硬门控。
 
 ---
 
