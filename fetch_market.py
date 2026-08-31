@@ -175,14 +175,17 @@ def fetch_us(symbol):
             if None in (o, h, l, c):
                 continue
             bars.append({
-                "d": datetime.datetime.utcfromtimestamp(t).strftime("%Y-%m-%d"),
+                "d": datetime.datetime.fromtimestamp(t, tz=datetime.timezone.utc).strftime("%Y-%m-%d"),
                 "o": float(o), "h": float(h), "l": float(l), "c": float(c),
                 "v": float(v or 0),
             })
         if bars:
             last = bars[-1]
             spot = spot if spot is not None else last["c"]
-            prev_close = prev_close if prev_close is not None else (bars[-2]["c"] if len(bars) > 1 else last["o"])
+            # Yahoo meta 的 chartPreviousClose 偶尔 stale（如返回数月前的价），优先用 bars[-2] 的收盘
+            bars_prev_close = bars[-2]["c"] if len(bars) > 1 else last["o"]
+            if prev_close is None or (prev_close > 0 and abs(prev_close - bars_prev_close) / prev_close > 0.05):
+                prev_close = bars_prev_close
         change_pct = round((spot - prev_close) / prev_close * 100, 2) if prev_close else None
 
         return {

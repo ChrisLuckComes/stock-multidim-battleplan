@@ -58,7 +58,7 @@ disable-model-invocation: true
 - **最大痛点（max pain）** = 到期日 magnet，震荡中枢参考。
 
 ### 实战映射（用户框架硬规则）
-1. **正 gamma（价在 flip 上方）+ 处于 put wall 与 call wall 之间 → 明确推荐买入**；买区设在支撑（**put wall / 零 gamma(flip) 下方 / VWAP 浅回撤 三者重合处**，或回踩 flip 本身缩量企稳），**支撑位入市胜率更高**（dealer 在支撑自动买＝天然接盘，均值回归有效）。
+1. **正 gamma（价在 flip 上方）+ 处于 put wall 与 call wall 之间 → 明确推荐买入**；买区设在支撑（**put wall / 零 gamma(flip) 上方 / VWAP 浅回撤 三者重合处**，或回踩 flip 本身缩量企稳），**支撑位入市胜率更高**（dealer 在支撑自动买＝天然接盘，均值回归有效）。
 2. **负 gamma（价在 flip 下方）→ 动量/突破优先，非均值回归**：dealer 空 gamma 使跌时卖、涨时买（正反馈），**下行支撑易破、价格向 Put Wall 加速**；上行若放量突破 Call Wall 则动量延伸。故负 gamma 下禁"支撑接刀"，改用突破收盘确认（Breakout）跟动量，或紧贴 flip 上方设硬止损（**升破 flip = 转正 gamma、均值回归恢复**）。强股可小仓跟突破、严止损，不重仓赌反转。
 3. **支撑/阻力优先用 gamma 墙与零 gamma 位标注**，再与技术前高/前低、均线交叉验证；**gamma 墙与技术位重合 = 高置信关键位**（双重确认）。
 4. **胜率排序（用户原话）**：支撑位入市胜率 > 阻力位入市胜率；正 gamma 环境下此差被放大，故正 gamma 时优先在支撑买、不在阻力追。
@@ -113,7 +113,7 @@ python gamma-gex/gamma_gex.py CF --text      # 人类可读格式
 
 ## 作战计划结构（输出必备）
 0. **123 法则门控（前置硬规则）**：研报须先输出「123 趋势法则判定」卡。不符合 → verdict 直接定为"不推荐/观察"，下方入场/止损/目标仅作"若未来符合后的预案"，不当前置推荐；符合 → 才进入下列细化。**判定强制调用本仓库 `rule123.py`**（见「数据获取与脚本调用」节）。
-1. **入场（美股先定 Gamma 环境）**：美股须先判 Gamma 正负——**正 gamma → 买区优先落在支撑（put wall / 零 gamma 下方 / VWAP 浅回撤 三者重合），明确标注"支撑位入市胜率更高"**；**负 gamma → 买区改为突破收盘确认（Breakout），禁止在支撑盲目接刀**。分买区 A（首选）/ B / C，**强股首选买区锚定 VWAP / 0.382 浅回撤**，深调 MA20 仅作极端情景；写明与哪条均线/结构/VWAP 重合；确认方式（尾盘+量比>1）。
+1. **入场（美股先定 Gamma 环境）**：美股须先判 Gamma 正负——**正 gamma → 买区优先落在支撑（put wall / 零 gamma 上方 / VWAP 浅回撤 三者重合），明确标注"支撑位入市胜率更高"**；**负 gamma → 买区改为突破收盘确认（Breakout），禁止在支撑盲目接刀**。分买区 A（首选）/ B / C，**强股首选买区锚定 VWAP / 0.382 浅回撤**，深调 MA20 仅作极端情景；写明与哪条均线/结构/VWAP 重合；确认方式（尾盘+量比>1）。
 2. **分仓路径**：试错仓 10–20% → 确认仓 +20–30% → 加仓仓 +20–30% → 极强势 >70%。不一把梭。
 3. **止损（三维，用户框架硬约束）**：
    - 价格：结构位（前低/MA5/MA20/突破位）或幅度 -5%~-8%（按波动率，高β放宽）。
@@ -158,7 +158,7 @@ python rule123.py CF --data data/cf.json # 直接消费 fetch_market.py 产出�
 python gamma-gex/gamma_gex.py CF --text
 ```
 
-> **环境探测技巧**：若不确定当前是否 WorkBuddy，先跑 `python fetch_market.py CF`——返回正常 JSON 即本地取数可用；若报错（无网络/无 Python）则退回 WebSearch + WebFetch 手工检索，并在研报标注"数据来源：公开检索"。
+> **环境探测技巧**：数据获取的优先级为 **① wb-finance-skill（WorkBuddy 内可用时）→ ② 本仓库 `fetch_market.py` → ③ WebSearch/WebFetch 手工检索兜底**。`fetch_market.py` 测的是本机能否直接取数，不是测 `wb-finance-skill` 在不在；如果身处 WorkBuddy 且 `wb-finance-skill` 可用，优先用它拿实时行情，再拿 `fetch_market.py` / `rule123.py` / `gamma_gex.py` 做结构与 Gamma 判定。若 `fetch_market.py` 也失败（无网络/无 Python/外网被墙），则退回 WebSearch + WebFetch 手工检索，并在研报标注"数据来源：公开检索"。
 
 ## 输出规范（环境自适应）
 - **优先 HTML（环境支持文件写入+预览时）**：落盘 `output/<标的>-<YYYYMMDD>.html`，浅底深字研报风，首屏结论先行，含价格图（关键位 markLine：买区/突破位/MA20/止损/目标/52w 高低）。**HTML 必须含独立的「目标价 / 退出条件」卡片**（T1/T2 价+依据+减仓节奏+移动止损），与「入场」「止损」卡并列、首屏可见。**美股研报须额外含「Gamma 期权流」卡片**：标明正/负 gamma、零 gamma(flip)位、put wall(支撑)/call wall(阻力)、最大痛点；正 gamma 时标注"推荐买入·支撑位入场胜率高"。**研报必须含「123 趋势法则判定」卡片**：逐项 ✅/❌ 勾选三条件，标 P0/P1/R1 价位与日期，结论=符合/不符合/部分符合；不符合时 verdict 同步写"不推荐/观察"。**预览环境屏蔽外链 CDN 导致整页空白时，生成 `*_standalone.html` 去外链版保底**（内联 JS，不引用 echarts CDN）。

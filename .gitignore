@@ -1,4 +1,7 @@
 rule123_out.json
+*_data.json
 data/
 __pycache__/
 *.pyc
+output/
+_gen_*.py

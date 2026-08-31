@@ -80,7 +80,7 @@ def bars_from_yahoo(sym, range_="6mo"):
             if None in (o, h, l, c):
                 continue
             bars.append({
-                "d": datetime.datetime.utcfromtimestamp(t).strftime("%Y-%m-%d"),
+                "d": datetime.datetime.fromtimestamp(t, tz=datetime.timezone.utc).strftime("%Y-%m-%d"),
                 "o": o, "h": h, "l": l, "c": c, "v": q["volume"][i] or 0,
             })
         return bars, r["meta"].get("regularMarketPrice")
