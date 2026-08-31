@@ -173,16 +173,18 @@ def ema(closes, n):
     return e
 
 
-def classify_regime(last_c, ema10, sma20, sma50, sma20_up, hh, hl):
+def classify_regime(last_c, ema10, sma20, sma50, sma20_up, hh, hl, c2, p1_px):
     above20 = sma20 is not None and last_c > sma20
     bull_stack = (
         ema10 is not None and sma20 is not None and sma50 is not None
         and ema10 > sma20 > sma50
     )
     up_ma = bull_stack or bool(sma20_up)
-    if above20 and up_ma and hh and hl:
+    # 结构完好：站在底部 P1 之上 且 自底部以来未再创新低（替代脆弱的两两 hl）
+    structure_ok = (p1_px is not None and last_c > p1_px) and c2
+    if above20 and up_ma and structure_ok:
         return "continuation"
-    if (sma20 is not None and last_c < sma20) or (not hh) or (not hl):
+    if (sma20 is not None and last_c < sma20) or (not c2):
         return "reversal"
     return "mixed"
 
@@ -214,7 +216,10 @@ def evaluate(sym, data_file=None):
     last_v = vols[-1] if vols else 0
     rvol20 = (last_v / vol_base) if vol_base else None
 
-    c2 = hl
+    # cond2 (Vic 123 原意): 自底部 P1 以来未再创新低（非两两 hl 比较）
+    p1_px = P1[1]
+    lows_since_p1 = [b["l"] for b in bars[P1[0]:]]
+    c2 = min(lows_since_p1) >= p1_px - 1e-9
     c3 = (R1 is not None) and (last_c > R1[1])
     c1 = False
     tl_note = "N/A"
@@ -226,7 +231,7 @@ def evaluate(sym, data_file=None):
             f"（连 {bars[h_b[0]]['d']}高{bars[h_b[0]]['h']:.2f}→{bars[h_a[0]]['d']}高{h_a[1]:.2f}）"
         )
 
-    regime = classify_regime(last_c, ema10, sma20, sma50, sma20_up, hh, hl)
+    regime = classify_regime(last_c, ema10, sma20, sma50, sma20_up, hh, hl, c2, p1_px)
     passed = sum([c1, c2, c3])
     setup = "wait"
     recommend = False
@@ -245,7 +250,7 @@ def evaluate(sym, data_file=None):
         r1_px = R1[1] if R1 else None
         above_r1 = r1_px is not None and last_c > r1_px
         below_r1 = r1_px is None or last_c <= r1_px
-        structure_ok = hl and last_c > P1[1]
+        structure_ok = c2 and last_c > P1[1]
         vol_ok = rvol20 is None or rvol20 > 1.5
         if above_r1 and vol_ok:
             setup = "breakout"
