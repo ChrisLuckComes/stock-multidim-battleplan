@@ -46,38 +46,52 @@
 
 ```
 stock-multidim-battleplan/
-├── LICENSE          # MIT
-├── README.md        # 本文件
-├── SKILL.md         # 技能定义（Agent 加载的核心指令）
-└── rule123.py       # 123 趋势法则自动判定脚本（Yahoo 6mo 日线）
+├── LICENSE              # MIT
+├── README.md            # 本文件
+├── SKILL.md             # 主技能定义（Agent 加载的核心指令）
+├── rule123.py           # 123 趋势法则自动判定脚本（Yahoo 6mo 日线）
+└── gamma-gex/           # 配套子技能：美股 Gamma 期权流数据源
+    ├── SKILL.md         # gamma-gex 技能定义
+    └── gamma_gex.py     # GEX 估算器（CBOE 延迟期权 API，零密钥）
 ```
 
-- **SKILL.md**：技能的"大脑"，定义了全部分析维度、纪律框架与输出规范。Agent 通过它理解如何工作。
+- **SKILL.md**：主技能的"大脑"，定义了全部分析维度、纪律框架与输出规范。Agent 通过它理解如何工作。
 - **rule123.py**：命令行工具，抓取标的 6 个月日线，自动判定 1-2-3 三条件并输出 verdict（符合 / 部分符合 / 不符合）。
+- **gamma-gex/**：美股 Gamma 期权流分析的数据源子技能。`gamma_gex.py` 抓取 CBOE 延迟期权行情，用 Black-Scholes 重算并聚合 net dealer GEX，输出零 gamma(flip)位、Put/Call Wall、最大痛点与正/负 gamma 环境；`SKILL.md` 说明其与主技能的衔接规则。
 
 ---
 
 ## 安装到 WorkBuddy
 
-把本仓库克隆 / 复制到 WorkBuddy 的用户级技能目录即可：
+把本仓库克隆到 WorkBuddy 的用户级技能目录即可（仓库内含主技能 + `gamma-gex` 子技能，两个文件夹都要到位）：
 
 ```bash
 # 用户级技能目录（跨项目可用）
 git clone https://github.com/ChrisLuckComes/stock-multidim-battleplan.git \
   ~/.workbuddy/skills/stock-multidim-battleplan
 
+# 把仓库内的 gamma-gex 子目录也放到技能目录（美股 Gamma 分析依赖它）
+cp -r ~/.workbuddy/skills/stock-multidim-battleplan/gamma-gex \
+      ~/.workbuddy/skills/gamma-gex
+
 # Windows 用户：
 git clone https://github.com/ChrisLuckComes/stock-multidim-battleplan.git `
   "$env:USERPROFILE\.workbuddy\skills\stock-multidim-battleplan"
+Copy-Item "$env:USERPROFILE\.workbuddy\skills\stock-multidim-battleplan\gamma-gex" `
+  "$env:USERPROFILE\.workbuddy\skills\gamma-gex" -Recurse
 ```
 
-目录结构需满足：`~/.workbuddy/skills/stock-multidim-battleplan/SKILL.md` 存在。重启 / 刷新 WorkBuddy 后，在对话中输入：
+目录结构需满足：
+- `~/.workbuddy/skills/stock-multidim-battleplan/SKILL.md` 存在（主技能）
+- `~/.workbuddy/skills/gamma-gex/SKILL.md` 与 `gamma_gex.py` 存在（配套 Gamma 数据源）
+
+重启 / 刷新 WorkBuddy 后，在对话中输入：
 
 ```
 /stock-multidim-battleplan 贵州茅台
 ```
 
-或直接用自然语言："多维度分析一下赛轮轮胎，给个作战计划"。
+或直接用自然语言："多维度分析一下赛轮轮胎，给个作战计划"。美股标的会自动调用 `gamma-gex` 生成 Gamma 期权流卡片。
 
 ---
 
@@ -104,7 +118,23 @@ python rule123.py CF LLY MU TEM RVMD
 
 ## 依赖说明
 
-- **美股 Gamma 分析**依赖配套技能 `gamma-gex`（同作者维护，位于 WorkBuddy 用户级技能目录 `~/.workbuddy/skills/gamma-gex/`）里的 `gamma_gex.py`，抓取 CBOE 延迟期权行情聚合 net dealer GEX。本仓库不重复包含该脚本，需另行安装 `gamma-gex` 技能后方可启用美股 Gamma 卡片。
+- **美股 Gamma 分析**依赖本仓库内的 `gamma-gex/` 子技能（已随仓库一并提供，安装时按上文复制到 `~/.workbuddy/skills/gamma-gex/` 即可）。`gamma_gex.py` 抓取 CBOE 延迟期权行情聚合 net dealer GEX，主技能的美股研报会直接调用它填充 Gamma 卡片。
+- 金融数据取数路由遵循上游 `wb-finance-skill` 的红线，分析前应先加载其 references（stock-deep-research / valuation-pricing / trade-plan / stop-discipline）。
+
+## 使用 gamma_gex.py（独立运行，美股期权流）
+
+```bash
+python gamma-gex/gamma_gex.py CF            # 单标的
+python gamma-gex/gamma_gex.py TEM RVMD      # 多标的
+python gamma-gex/gamma_gex.py CF --r 0.043  # 指定无风险利率（默认 0.043）
+```
+
+输出（接入 CBOE 延迟期权 API，零密钥）：
+- **净 dealer gamma（当前）**：>0 = 正 gamma（波动被压制，均值回归有效，**支撑位买胜率高，推荐买入**）；<0 = 负 gamma（波动放大，**谨慎，支撑易破，改突破收盘确认**）。
+- **零 gamma / Flip 位**：gamma 环境切换边界，价在 flip 上方 = 正 gamma 稳定区。
+- **Put Wall（支撑）/ Call Wall（阻力）**：最大 put/call OI 行权价；与技术前高/前低重合 = 高置信关键位。
+- **最大痛点 Max Pain**：到期日 magnet / 震荡中枢参考。
+- **数据质量评级**：小盘/低流动性标的值得警惕——远端虚值 call OI 占比 >25% 或贴价 call 占比 <15% 时标「低（仅确认）」，GEX 噪声大，仅作确认信号、不可作核心依据。
 - 金融数据取数路由遵循上游 `wb-finance-skill` 的红线，分析前应先加载其 references（stock-deep-research / valuation-pricing / trade-plan / stop-discipline）。
 
 ---
