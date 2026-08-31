@@ -127,7 +127,13 @@ python gamma-gex/gamma_gex.py CF --text      # 人类可读格式
 7. **执行前环境适配**：大盘支持/中性/不支持、板块主线/跟风/退潮、资金进攻/防守/观望。
 
 ## 数据获取与脚本调用（环境自适应·强制）
-**通用环境（无 wb-finance-skill）必须按此取数**，WorkBuddy 环境可选（已有更好数据源时优先用 wb-finance-skill，但仍可用本仓库脚本做结构判定）：
+**通用环境（无 wb-finance-skill）必须按此取数**，WorkBuddy 环境可选（已有更好数据源时优先用 wb-finance-skill，但仍可用本仓库脚本做结构判定）。
+
+**路径写法**：脚本示例里的 `python fetch_market.py`、`python rule123.py`、`python gamma-gex/gamma_gex.py` 是相对仓库根目录的写法。**实际运行时请以 skill 安装目录的绝对路径调用**，避免 Agent 当前工作目录不一致导致找不到脚本：
+- WorkBuddy：`~/.workbuddy/skills/stock-multidim-battleplan/fetch_market.py`、`~/.workbuddy/skills/stock-multidim-battleplan/rule123.py`、`~/.workbuddy/skills/stock-multidim-battleplan/gamma-gex/gamma_gex.py`
+- Cursor / 通用 Agent：`<你 clone 到的绝对路径>/stock-multidim-battleplan/fetch_market.py` 等。
+
+下文示例仍用相对路径以保持简洁，但**执行时必须替换为绝对路径**。
 
 ### 1. 行情取数 → `fetch_market.py`（仓库根目录）
 ```bash

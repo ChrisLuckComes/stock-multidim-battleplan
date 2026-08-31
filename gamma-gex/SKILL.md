@@ -28,9 +28,9 @@ python gamma-gex/gamma_gex.py <TICKER> [--r 0.043]
 - 关键档表：按 |净GEX| 排序，看 gamma 集中在哪些价位、多空哪边主导。
 
 ## 计算约定（重要·避免误读）
-- net dealer GEX = Σ_puts(Γ·OI) − Σ_calls(Γ·OI)：dealer 为空头对手方——空 put 提供支撑性 +gamma，空 call 提供阻力性 −gamma；近月(≤30d)权重 1，远月线性衰减至 0.2。
+- net dealer GEX = Σ_calls(Γ·OI) − Σ_puts(Γ·OI)：dealer 为空头对手方——空 call 提供阻力性 −gamma，空 put 提供支撑性 +gamma；代码实现 `return -base if typ == "P" else base`，即 net gamma = call gamma − put gamma；近月(≤30d)权重 1，远月线性衰减至 0.2。
 - GEX 量级为近似（γ·OI·S²·0.01·100），**仅用于相对排序与正负符号判断**，不代表精确美元敞口。
 - 正/负 gamma 与 flip 的相对关系：**价在 flip 上方 = 净 gamma 为正 = 稳定区（支撑有效）**；价在 flip 下方 = 净 gamma 为负 = 放大区（支撑易破）。买点优先落在「flip 上方 / Put Wall 附近 的正 gamma 支撑带」。
 
 ## 与 battleplan 的衔接
-美股研报的「Gamma 期权流」卡片直接填本工具输出：标正负 gamma 环境 → 正 gamma 时明确写"推荐买入·支撑位(put wall/flip 下方)入市胜率更高"；负 gamma 时写"谨慎·支撑易破·改突破收盘确认"。
+美股研报的「Gamma 期权流」卡片直接填本工具输出：标正负 gamma 环境 → 正 gamma 时明确写"推荐买入·支撑位(put wall / flip 上方)入市胜率更高"；负 gamma 时写"谨慎·支撑易破·改突破收盘确认"。

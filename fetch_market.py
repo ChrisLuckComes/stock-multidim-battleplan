@@ -21,7 +21,7 @@ wb-finance-skill 不可用，Agent 应改用本脚本取数。
   volume, turnover, change_pct, pe_ttm, pb, market_cap, float_cap,
   bars[{d,o,h,l,c,v}], source
 """
-import sys, json, re, urllib.request, datetime, time
+import sys, json, re, urllib.request, datetime, time, os
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
@@ -242,6 +242,9 @@ def main():
         data = {"ticker": ticker, "market": market, "error": f"{type(e).__name__}: {e}"}
     print(json.dumps(data, ensure_ascii=False, indent=2))
     if out_path:
+        dir_ = os.path.dirname(os.path.abspath(out_path))
+        if dir_:
+            os.makedirs(dir_, exist_ok=True)
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         print(f"# written to {out_path}", file=sys.stderr)
