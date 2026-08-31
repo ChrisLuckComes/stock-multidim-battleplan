@@ -1,13 +1,17 @@
 ---
 name: stock-multidim-battleplan
 description: 美股/A股个股的"多维度分析 + 作战计划"一体化工作流。当用户要求"多维度分析某只股票""分析X并给买卖计划/作战计划""研究某股该不该买、怎么买、止损止盈怎么定"时使用。融合卖方级六维研究（基本面/估值/技术面/资金面/催化剂/风险）与用户个人交易纪律框架（Swing双分类 pullback/breakout、买点三模式低吸/尾盘/不追高、止损ATR+结构双校准禁整数关、高β集中度规避、强股回踩锚定VWAP/浅回撤(0.382)而非深度MA20、顶层过滤器强势股+资金流入、Conviction franchise 买(信早信/付溢价)与 Swing 技术买(等VWAP回踩)二分）。**强制产出"目标价与退出条件"一级模块**（T1/T2 来自技术阻力+估值中枢+催化情景三交叉验证，并写明减仓节奏与移动止损），否则作战计划不可执行。** · 美股须叠加 **Gamma 期权流分析**（正 gamma→推荐买入、用 gamma 墙/零 gamma 位定支撑阻力、支撑位入市胜率更高）。**买卖前置硬门控**：**123 趋势法则（Victor Sperandeo《专业投机原理》）**——仅"符合"（三条件全过）的标的才推荐，否则 verdict 只写"不推荐/观察/等突破确认"，禁写"推荐买入"。
+disable-model-invocation: true
 ---
 
 # 个股多维度分析 + 作战计划（stock-multidim-battleplan）
 
-> **何时用**：用户要求对某只股票做"多维度分析""作战计划""该不该买/怎么买/止损止盈"。本 skill 把"研究"和"下单计划"合成一套可复用流程，输出一份 HTML 研报 + 对话摘要。
+> **何时用**：用户要求对某只股票做"多维度分析""作战计划""该不该买/怎么买/止损止盈"。本 skill 把"研究"和"下单计划"合成一套可复用流程，输出一份 HTML 研报 + 对话摘要（无文件写入环境时改输出 markdown 研报）。
 >
-> **前置依赖**：金融数据必须走 `agentic_search`（wb-finance-skill 硬约束），禁止凭记忆裸答。本 skill 不替代 wb-finance-skill 的红线与取数路由，分析前先加载 `wb-finance-skill` 读红线 + 按场景加载其 references（stock-deep-research / valuation-pricing / trade-plan / stop-discipline）。
+> **前置依赖（环境自适应——两端都可用）**：
+> - **场景 A · WorkBuddy 等已装 `wb-finance-skill` 的环境**：金融数据优先走 `agentic_search`（wb-finance-skill 硬约束），禁止凭记忆裸答。分析前先加载 `wb-finance-skill` 读红线 + 按场景加载其 references（stock-deep-research / valuation-pricing / trade-plan / stop-discipline）。本仓库的 `fetch_market.py` 在该环境下**可选**（你已有更好的数据源）。
+> - **场景 B · Cursor / 通用 AI Agent（无 wb-finance-skill）**：用本仓库自带的 `fetch_market.py` 取数（零密钥、A 股走东方财富、美股走 Yahoo），再调用 `rule123.py` / `gamma_gex.py` 做结构判定。判定本环境是否缺 wb-finance-skill：先试 `python fetch_market.py CF`，若返回正常 JSON 即说明本地取数可用。
+> - **两端共用**：123 结构判定用 `rule123.py`、美股 Gamma 用 `gamma-gex/gamma_gex.py`，这两个脚本本仓库自带、零外部 skill 依赖。
 
 ## 核心目标
 研究端回答"市场为什么买它、未来还买不买"；计划端给出"具体条件 + 具体动作"的可执行单，而非"逢低布局、注意风险"。
@@ -59,9 +63,15 @@ description: 美股/A股个股的"多维度分析 + 作战计划"一体化工作
 3. **支撑/阻力优先用 gamma 墙与零 gamma 位标注**，再与技术前高/前低、均线交叉验证；**gamma 墙与技术位重合 = 高置信关键位**（双重确认）。
 4. **胜率排序（用户原话）**：支撑位入市胜率 > 阻力位入市胜率；正 gamma 环境下此差被放大，故正 gamma 时优先在支撑买、不在阻力追。
 
-### 数据来源（已接通·CBOE）
-已接入 **CBOE 延迟期权行情 API**（免费、零密钥）：由 `gamma-gex` skill 的 `gamma_gex.py` 抓取每档 OI/IV/gamma 并聚合 net dealer GEX，输出 **零 gamma(flip)位 / Put Wall(支撑) / Call Wall(阻力) / 最大痛点 / 正负 gamma 环境**（运行：`python gamma_gex.py <TICKER> [--r 0.043]`）。
-**本工具即实盘数据源——美股研报的「Gamma 期权流」卡片须调用它填值，不得再写"数据缺失·定性框架"。** flip 绝对价位以机构源（SpotGamma/富途）为准；本 CBOE 工具方向一致但价位可能 ±5-10% 偏差（到期权重方法差异），价位分歧时以机构源定止损。若 CBOE 对某标的返回无期权/无有效 OI → 标注「Gamma 数据 N/A」退回纯技术位，不造假数字。
+### 数据来源（已接通·CBOE + 本仓库脚本）
+**本仓库自带 `gamma-gex/gamma_gex.py`**，抓取 CBOE 延迟期权行情 API（免费、零密钥），用 Black-Scholes 重算并聚合 net dealer GEX，输出零 gamma(flip)位 / Put Wall(支撑) / Call Wall(阻力) / 最大痛点 / 正负 gamma 环境 / 数据质量。运行方式（相对仓库根目录）：
+```bash
+python gamma-gex/gamma_gex.py CF            # 单标的
+python gamma-gex/gamma_gex.py TEM RVMD      # 多标的
+python gamma-gex/gamma_gex.py CF --r 0.043  # 指定无风险利率
+python gamma-gex/gamma_gex.py CF --text      # 人类可读格式
+```
+**美股研报的「Gamma 期权流」卡片必须调用它填值，不得再写"数据缺失·定性框架"。** flip 绝对价位以机构源（SpotGamma/富途）为准；本 CBOE 工具方向一致但价位可能 ±5-10% 偏差（到期权重方法差异），价位分歧时以机构源定止损。若 CBOE 对某标的返回无期权/无有效 OI → 标注「Gamma 数据 N/A」退回纯技术位，不造假数字。
 
 ### 小盘股 / 低流动性 GEX 降级（用户框架·关键）
 **GEX 仅在 OI 密集、机构主导、行权价贴近现价时才是可靠的 dealer 对冲信号。** 小盘/低流动性标的常出现：OI 稀散、行权价间距大、远端虚值（call 堆在 1.5–3 倍现价处）投机集中 → 这些"墙/flip"多为散户彩票仓 artifacts，dealer 在该档几乎不对冲（深度虚值 gamma≈0），**GEX 是噪声、不可作核心依据**。
@@ -102,7 +112,7 @@ description: 美股/A股个股的"多维度分析 + 作战计划"一体化工作
 > 验证清单：交付前自问——读者不看正文，只看作战计划卡，能否一句话答出"我在什么价卖、卖多少、止损在哪"？答不出则模块不完整。
 
 ## 作战计划结构（输出必备）
-0. **123 法则门控（前置硬规则）**：研报须先输出「123 趋势法则判定」卡。不符合 → verdict 直接定为"不推荐/观察"，下方入场/止损/目标仅作"若未来符合后的预案"，不当前置推荐；符合 → 才进入下列细化。
+0. **123 法则门控（前置硬规则）**：研报须先输出「123 趋势法则判定」卡。不符合 → verdict 直接定为"不推荐/观察"，下方入场/止损/目标仅作"若未来符合后的预案"，不当前置推荐；符合 → 才进入下列细化。**判定强制调用本仓库 `rule123.py`**（见「数据获取与脚本调用」节）。
 1. **入场（美股先定 Gamma 环境）**：美股须先判 Gamma 正负——**正 gamma → 买区优先落在支撑（put wall / 零 gamma 下方 / VWAP 浅回撤 三者重合），明确标注"支撑位入市胜率更高"**；**负 gamma → 买区改为突破收盘确认（Breakout），禁止在支撑盲目接刀**。分买区 A（首选）/ B / C，**强股首选买区锚定 VWAP / 0.382 浅回撤**，深调 MA20 仅作极端情景；写明与哪条均线/结构/VWAP 重合；确认方式（尾盘+量比>1）。
 2. **分仓路径**：试错仓 10–20% → 确认仓 +20–30% → 加仓仓 +20–30% → 极强势 >70%。不一把梭。
 3. **止损（三维，用户框架硬约束）**：
@@ -116,9 +126,38 @@ description: 美股/A股个股的"多维度分析 + 作战计划"一体化工作
 6. **高β集中度检查（用户框架关键）**：汇总本票 β 与账户现有持仓 β，**禁止高β票双持叠加**；建议小仓战术或与现有高β票做轮动；环境不支持（大盘/板块/纳指转弱）则直说"不执行/降仓观望"。
 7. **执行前环境适配**：大盘支持/中性/不支持、板块主线/跟风/退潮、资金进攻/防守/观望。
 
-## 输出规范
-- 主交付：HTML 文件（`Write` 落盘 `output/<标的>-<YYYYMMDD>.html`），浅底深字研报风，首屏结论先行，含 ECharts 价格图（关键位 markLine：买区/突破位/MA20/止损/目标/52w 高低）。**HTML 必须含独立的「目标价 / 退出条件」卡片**（T1/T2 价+依据+减仓节奏+移动止损），与「入场」「止损」卡并列、首屏可见。**美股研报须额外含「Gamma 期权流」卡片**：标明正/负 gamma、零 gamma(flip)位、put wall(支撑)/call wall(阻力)、最大痛点；正 gamma 时标注"推荐买入·支撑位入场胜率高"。**研报必须含「123 趋势法则判定」卡片**（置于 Gamma 卡之后、六维之前或并列首屏可见）：逐项 ✅/❌ 勾选三条件，标 P0/P1/R1 价位与日期，结论=符合/不符合/部分符合；不符合时 verdict 同步写"不推荐/观察"。**交付前 `node --check` 校验内联 JS**（若预览环境屏蔽外链 CDN 导致整页空白，生成 `*_standalone.html` 去外链版保底）。
-- 对话正文附 200–300 字摘要 + 文件路径。
+## 数据获取与脚本调用（环境自适应·强制）
+**通用环境（无 wb-finance-skill）必须按此取数**，WorkBuddy 环境可选（已有更好数据源时优先用 wb-finance-skill，但仍可用本仓库脚本做结构判定）：
+
+### 1. 行情取数 → `fetch_market.py`（仓库根目录）
+```bash
+# A 股自动识别（6位数字：60/68 开头=沪，其余=深；也支持 .SS/.SZ/.BJ 后缀）
+python fetch_market.py 601233 --out data/601233.json
+python fetch_market.py 688002
+# 美股走 Yahoo
+python fetch_market.py CF --out data/cf.json
+```
+输出统一 JSON：ticker / market / name / spot / prev_close / open / high / low / volume / turnover / change_pct / pe_ttm / pb / market_cap / float_cap / bars[{d,o,h,l,c,v}] / source。
+
+### 2. 123 结构判定 → `rule123.py`（自动识别市场）
+```bash
+python rule123.py 601233                 # A股
+python rule123.py CF LLY MU              # 美股批量
+python rule123.py CF --data data/cf.json # 直接消费 fetch_market.py 产出（推荐）
+```
+输出各标的三条件勾选 + verdict（符合/部分符合/不符合），并写入 `rule123_out.json`。
+
+### 3. 美股 Gamma → `gamma-gex/gamma_gex.py`（见上文「数据来源」节）
+```bash
+python gamma-gex/gamma_gex.py CF --text
+```
+
+> **环境探测技巧**：若不确定当前是否 WorkBuddy，先跑 `python fetch_market.py CF`——返回正常 JSON 即本地取数可用；若报错（无网络/无 Python）则退回 WebSearch + WebFetch 手工检索，并在研报标注"数据来源：公开检索"。
+
+## 输出规范（环境自适应）
+- **优先 HTML（环境支持文件写入+预览时）**：落盘 `output/<标的>-<YYYYMMDD>.html`，浅底深字研报风，首屏结论先行，含价格图（关键位 markLine：买区/突破位/MA20/止损/目标/52w 高低）。**HTML 必须含独立的「目标价 / 退出条件」卡片**（T1/T2 价+依据+减仓节奏+移动止损），与「入场」「止损」卡并列、首屏可见。**美股研报须额外含「Gamma 期权流」卡片**：标明正/负 gamma、零 gamma(flip)位、put wall(支撑)/call wall(阻力)、最大痛点；正 gamma 时标注"推荐买入·支撑位入场胜率高"。**研报必须含「123 趋势法则判定」卡片**：逐项 ✅/❌ 勾选三条件，标 P0/P1/R1 价位与日期，结论=符合/不符合/部分符合；不符合时 verdict 同步写"不推荐/观察"。**预览环境屏蔽外链 CDN 导致整页空白时，生成 `*_standalone.html` 去外链版保底**（内联 JS，不引用 echarts CDN）。
+- **无文件写入环境（通用 Agent）**：直接输出 **markdown 研报**到对话，结构同上（结论先行 → 123 判定 → 六维 → 作战计划卡含入场/止损/目标价退出条件，美股附 Gamma 卡）。图表以文字/关键价位列表替代。
+- 对话正文附 200–300 字摘要 + 文件路径（或 markdown 结论）。
 - 含具体操作价位/买卖判断的，末尾必须附固定免责声明：
   > 免责声明：以上内容基于公开数据和量化分析，仅供参考，不构成投资建议。市场有风险，投资需谨慎。任何投资决策应结合个人风险承受能力、资金状况和投资目标独立判断，必要时咨询持牌专业机构。过往表现不预示未来收益。
 - 所有关键数据附近标注来源 + 时点（YYYY-MM-DD）；非一手来源标"需核实原文"。

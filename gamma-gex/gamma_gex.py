@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gamma Exposure (GEX) 估算器 v2 —— 数据源: CBOE 延迟期权行情 API (免费, 无需密钥)
+Gamma Exposure (GEX) 估算器 v3 —— 数据源: CBOE 延迟期权行情 API (免费, 无需密钥)
 解析合约代码得 行权价/类型/到期, 取每档 IV+OI, 用 Black-Scholes 重算 gamma, 聚合 net dealer GEX。
-输出: 零 gamma(flip)位 / Put Wall(支撑) / Call Wall(阻力) / 最大痛点 / 正/负 gamma 环境 / 关键档表
-用法: python _gamma_gex.py <TICKER> [--r 0.043]
+输出: 零 gamma(flip)位 / Put Wall(支撑) / Call Wall(阻力) / 最大痛点 / 正/负 gamma 环境 / 数据质量
+支持: 多标的批量; 默认输出 JSON (每行一个标的) 便于 Agent 消费; --text 切换人类可读。
+
+用法:
+  python gamma-gex/gamma_gex.py CF
+  python gamma-gex/gamma_gex.py TEM RVMD
+  python gamma-gex/gamma_gex.py CF --r 0.043
+  python gamma-gex/gamma_gex.py CF --text
 """
 import sys, json, math, re, time, urllib.request
 from collections import defaultdict
@@ -13,10 +19,17 @@ HEADERS = {"User-Agent": "Mozilla/5.0"}
 SYM_RE = re.compile(r"^([A-Z]+)(\d{6})([CP])(\d{8})$")
 
 
-def fetch_json(url):
-    req = urllib.request.Request(url, headers=HEADERS)
-    with urllib.request.urlopen(req, timeout=25) as r:
-        return json.loads(r.read().decode("utf-8"))
+def fetch_json(url, timeout=25, retries=3):
+    last = None
+    for n in range(retries):
+        try:
+            req = urllib.request.Request(url, headers=HEADERS)
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except Exception as e:
+            last = e
+            time.sleep(1.0 * (n + 1))
+    raise last
 
 
 def bs_gamma(S, K, T, r, sigma):
@@ -26,28 +39,21 @@ def bs_gamma(S, K, T, r, sigma):
     return math.exp(-0.5 * d1 * d1) / (S * sigma * math.sqrt(2 * math.pi) * math.sqrt(T))
 
 
-def main():
-    if len(sys.argv) < 2:
-        print("usage: _gamma_gex.py <TICKER> [--r 0.043]"); return
-    symbol = sys.argv[1].upper()
-    r = 0.043
-    for i in range(2, len(sys.argv)):
-        if sys.argv[i] == "--r":
-            r = float(sys.argv[i + 1])
+def analyze(symbol, r=0.043):
     try:
         d = fetch_json(f"https://cdn.cboe.com/api/global/delayed_quotes/options/{symbol}.json")
     except Exception as e:
-        print("ERROR 抓取失败:", e); return
+        return {"symbol": symbol, "error": f"抓取失败: {e}"}
     data = d.get("data", {})
     spot = data.get("current_price")
     if not spot:
-        print("ERROR 无现价"); return
+        return {"symbol": symbol, "error": "无现价"}
     opts = data.get("options", [])
     if not opts:
-        print("ERROR 无期权数据"); return
+        return {"symbol": symbol, "error": "无期权数据"}
 
     now = time.time()
-    rows = []  # (strike, type, oi, iv, T_years, exp_epoch)
+    rows = []
     for o in opts:
         m = SYM_RE.match(o.get("option", ""))
         if not m:
@@ -63,27 +69,25 @@ def main():
         rows.append((strike, m.group(3), oi, iv, T))
 
     if not rows:
-        print("ERROR 无有效 OI 档"); return
+        return {"symbol": symbol, "error": "无有效 OI 档"}
 
-    # 权重: 近月(<=30d)权重1, 远月线性衰减至0.2
     def w(T):
         return 1.0 if T <= 30 / 365 else max(0.2, 1 - (T - 30 / 365))
 
     def gex_of(S, strike, typ, oi, iv, T):
         g = bs_gamma(S, strike, T, r, iv)
         base = g * oi * S * S * 0.01 * 100 * w(T)
-        return -base if typ == "P" else base  # net dealer gamma = Σcalls(Γ·OI) − Σputs(Γ·OI); 价在 flip 上方 = 正 gamma（机构 SpotGamma 约定）
+        return -base if typ == "P" else base  # net dealer gamma = Σcalls(Γ·OI) − Σputs(Γ·OI); 价在 flip 上方 = 正 gamma
 
-    # 聚合每档 OI (用于 wall)
-    call_oi = defaultdict(float); put_oi = defaultdict(float)
+    call_oi = defaultdict(float)
+    put_oi = defaultdict(float)
     for s, t, oi, iv, T in rows:
         (call_oi if t == "C" else put_oi)[s] += oi
 
-    # 当前净 GEX
     net_now = sum(gex_of(spot, *rw) for rw in rows)
-    # 零 gamma / flip 位: 扫描 S
     lo, hi = spot * 0.6, spot * 1.4
-    flip = None; prev = sum(gex_of(lo, *rw) for rw in rows)
+    flip = None
+    prev = sum(gex_of(lo, *rw) for rw in rows)
     for step in range(1, 401):
         S = lo + (hi - lo) * step / 400
         cur = sum(gex_of(S, *rw) for rw in rows)
@@ -96,7 +100,6 @@ def main():
     put_wall = max(put_oi, key=put_oi.get) if put_oi else None
     call_wall = max(call_oi, key=call_oi.get) if call_oi else None
 
-    # 最大痛点
     strikes = sorted(set(call_oi) | set(put_oi))
     best_pain, best_strike = 1e18, None
     for K in strikes:
@@ -104,9 +107,8 @@ def main():
         if pain < best_pain:
             best_pain, best_strike = pain, K
 
-    # 数据质量评估 (小盘/投机降级): GEX 仅当 OI 密集贴价、机构主导才可信
-    tot_call = sum(call_oi.values()); tot_put = sum(put_oi.values())
-    far_call = sum(v for s, v in call_oi.items() if s > spot * 1.5)   # 远端虚值 call (>1.5x 现价)
+    tot_call = sum(call_oi.values())
+    far_call = sum(v for s, v in call_oi.items() if s > spot * 1.5)
     far_otm_ratio = (far_call / tot_call) if tot_call else 0
     near_call = sum(v for s, v in call_oi.items() if spot * 0.8 <= s <= spot * 1.2)
     near_ratio = (near_call / tot_call) if tot_call else 0
@@ -117,24 +119,77 @@ def main():
     else:
         qual = "高（密集机构OI/贴价 → GEX 可信，可作核心）"
 
-    env = "正 gamma（稳定区·价在 flip 上方 → 推荐在支撑买入，均值回归胜率高）" if net_now > 0 else "负 gamma（放大区·价在 flip 下方 → 下行支撑易破、上行可冲 Call Wall，禁接刀，硬止损贴 flip 上方）"
-    print(f"=== {symbol} Gamma Exposure 估算 (CBOE) ===")
-    print(f"现价 S = {spot:.2f} | 无风险利率 r = {r} | 有效档数 = {len(rows)}")
-    print(f"净 dealer gamma(当前) = {net_now:,.0f}  →  环境: {env}")
-    print(f"零 gamma / Flip 位 = {flip:.2f}" if flip else "零 gamma 位 = 未找到过零点（全正或全负）")
-    if put_wall is not None:
-        print(f"Put Wall  (支撑) = {put_wall:.2f}  (OI {put_oi[put_wall]:,.0f})")
-    if call_wall is not None:
-        print(f"Call Wall (阻力) = {call_wall:.2f}  (OI {call_oi[call_wall]:,.0f})")
-    if best_strike is not None:
-        print(f"最大痛点 Max Pain = {best_strike:.2f}")
-    print(f"数据质量 = {qual}  （远端虚值call占比 {far_otm_ratio*100:.0f}% / 贴价±20%call占比 {near_ratio*100:.0f}%）")
-    print("\n关键档（按 |净GEX| 前8）:")
-    print(f"{'Strike':>10} {'CallOI':>10} {'PutOI':>10} {'净GEX':>14}")
-    def net_at_strike(s):
-        return sum(gex_of(s, *rw) for rw in rows if rw[0] == s)
-    for s in sorted(set(put_oi) | set(call_oi), key=lambda x: abs(net_at_strike(x)), reverse=True)[:8]:
-        print(f"{s:>10.2f} {call_oi.get(s,0):>10,.0f} {put_oi.get(s,0):>10,.0f} {net_at_strike(s):>14,.0f}")
+    return {
+        "symbol": symbol,
+        "spot": round(spot, 2),
+        "net_gamma": round(net_now, 0),
+        "env": "正 gamma（稳定区·价在 flip 上方 → 推荐在支撑买入，均值回归胜率高）" if net_now > 0
+                else "负 gamma（放大区·价在 flip 下方 → 下行支撑易破、上行可冲 Call Wall，禁接刀，硬止损贴 flip 上方）",
+        "env_code": "positive" if net_now > 0 else "negative",
+        "flip": round(flip, 2) if flip else None,
+        "put_wall": round(put_wall, 2) if put_wall is not None else None,
+        "call_wall": round(call_wall, 2) if call_wall is not None else None,
+        "max_pain": round(best_strike, 2) if best_strike is not None else None,
+        "data_quality": qual,
+        "far_otm_call_ratio": round(far_otm_ratio, 2),
+        "near_call_ratio": round(near_ratio, 2),
+        "valid_contracts": len(rows),
+    }
+
+
+def main():
+    args = sys.argv[1:]
+    if not args:
+        print("usage: gamma_gex.py <TICKER...> [--r 0.043] [--text]", file=sys.stderr)
+        sys.exit(1)
+    r = 0.043
+    text = False
+    syms = []
+    for i, a in enumerate(args):
+        if a == "--r":
+            continue
+        if a == "--text":
+            text = True
+            continue
+        if a.startswith("--r="):
+            try:
+                r = float(a.split("=", 1)[1])
+            except ValueError:
+                pass
+            continue
+        syms.append(a.upper())
+    # 重新解析 r (--r <val> 形式)
+    for i, a in enumerate(args):
+        if a == "--r" and i + 1 < len(args):
+            try:
+                r = float(args[i + 1])
+            except ValueError:
+                pass
+
+    results = [analyze(s, r) for s in syms]
+    if text:
+        for res in results:
+            _print_text(res)
+    else:
+        for res in results:
+            print(json.dumps(res, ensure_ascii=False))
+
+
+def _print_text(res):
+    if "error" in res:
+        print(f"=== {res['symbol']} ERROR: {res['error']} ===")
+        return
+    print(f"=== {res['symbol']} Gamma Exposure 估算 (CBOE) ===")
+    print(f"现价 S = {res['spot']} | 净 dealer gamma = {res['net_gamma']:,} → {res['env']}")
+    if res["flip"] is not None:
+        print(f"零 gamma / Flip 位 = {res['flip']:.2f}")
+    if res["put_wall"] is not None:
+        print(f"Put Wall (支撑) = {res['put_wall']:.2f}")
+    if res["call_wall"] is not None:
+        print(f"Call Wall (阻力) = {res['call_wall']:.2f}")
+    if res["max_pain"] is not None:
+        print(f"最大痛点 Max Pain = {res['max_pain']:.2f}")
+    print(f"数据质量 = {res['data_quality']}")
 
 
 if __name__ == "__main__":

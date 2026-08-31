@@ -1,0 +1,4 @@
+rule123_out.json
+data/
+__pycache__/
+*.pyc

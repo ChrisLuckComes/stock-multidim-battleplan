@@ -1,14 +1,16 @@
 # stock-multidim-battleplan
 
-> 个股「多维度分析 + 作战计划」一体化工作流 · 一个给 AI 交易 Agent 用的 WorkBuddy Skill
+> 个股「多维度分析 + 作战计划」一体化工作流 · 一个给 AI 交易 Agent 用的跨平台 Skill
 
 把"研究"和"下单计划"合成一套可复用的流程：对任意 A 股 / 美股个股，先跑卖方级六维研究，再套用一套实战交易纪律框架，最终输出一份**带具体入场价、止损位、目标价与减仓节奏**的作战计划，而不是"逢低布局、注意风险"式的模糊建议。
+
+**跨平台**：原生支持 WorkBuddy、Cursor，以及任何能加载 SKILL.md 的通用 AI Agent。无外部付费数据源、零密钥依赖——A 股走东方财富、美股走 Yahoo/CBOE，本仓库自带全部取数与判定脚本。
 
 ---
 
 ## 这是什么
 
-`stock-multidim-battleplan` 是一个技能（Skill），原本运行在 [WorkBuddy](https://www.workbuddy.cn) 这类 AI Agent 里。当你对 Agent 说"分析一下某某股票、该不该买、怎么买、止损止盈怎么定"，Agent 就会加载本 skill，按固定流程产出一份 HTML 研报 + 对话摘要。
+`stock-multidim-battleplan` 是一个技能（Skill）。当你对 Agent 说"分析一下某某股票、该不该买、怎么买、止损止盈怎么定"，Agent 就会加载本 skill，按固定流程产出一份研报（HTML 或 markdown）+ 对话摘要。
 
 它解决的核心痛点是：**研究做得再漂亮，如果给不出"在什么价买、在什么价卖、卖多少、止损在哪"，就等于没法执行。** 本 skill 把"买卖前置条件"和"退出条件"做成强制一级模块。
 
@@ -49,93 +51,108 @@ stock-multidim-battleplan/
 ├── LICENSE              # MIT
 ├── README.md            # 本文件
 ├── SKILL.md             # 主技能定义（Agent 加载的核心指令）
-├── rule123.py           # 123 趋势法则自动判定脚本（Yahoo 6mo 日线）
+├── fetch_market.py      # 通用行情取数（零外部 skill：A股东方财富 / 美股 Yahoo）
+├── rule123.py           # 123 趋势法则自动判定（自动识别 A股/美股）
 └── gamma-gex/           # 配套子技能：美股 Gamma 期权流数据源
     ├── SKILL.md         # gamma-gex 技能定义
     └── gamma_gex.py     # GEX 估算器（CBOE 延迟期权 API，零密钥）
 ```
 
 - **SKILL.md**：主技能的"大脑"，定义了全部分析维度、纪律框架与输出规范。Agent 通过它理解如何工作。
-- **rule123.py**：命令行工具，抓取标的 6 个月日线，自动判定 1-2-3 三条件并输出 verdict（符合 / 部分符合 / 不符合）。
-- **gamma-gex/**：美股 Gamma 期权流分析的数据源子技能。`gamma_gex.py` 抓取 CBOE 延迟期权行情，用 Black-Scholes 重算并聚合 net dealer GEX，输出零 gamma(flip)位、Put/Call Wall、最大痛点与正/负 gamma 环境；`SKILL.md` 说明其与主技能的衔接规则。
+- **fetch_market.py**：通用取数兜底。当运行环境**没有** wb-finance-skill 时使用（如 Cursor / 通用 Agent）；有 wb-finance-skill 的 WorkBuddy 环境可优先用前者，仍可用本脚本做结构判定。
+- **rule123.py**：命令行工具，自动识别市场取日线，判定 1-2-3 三条件并输出 verdict（符合 / 部分符合 / 不符合）。
+- **gamma-gex/**：美股 Gamma 期权流分析的数据源子技能。`gamma_gex.py` 抓取 CBOE 延迟期权行情，用 Black-Scholes 重算并聚合 net dealer GEX，输出零 gamma(flip)位、Put/Call Wall、最大痛点与正/负 gamma 环境。
 
 ---
 
-## 安装到 WorkBuddy
+## 安装（多平台）
 
-把本仓库克隆到 WorkBuddy 的用户级技能目录即可（仓库内含主技能 + `gamma-gex` 子技能，两个文件夹都要到位）：
+### A. WorkBuddy
+克隆到用户级技能目录（仓库含主技能 + `gamma-gex` 子技能，两个都要到位）：
 
 ```bash
-# 用户级技能目录（跨项目可用）
 git clone https://github.com/ChrisLuckComes/stock-multidim-battleplan.git \
   ~/.workbuddy/skills/stock-multidim-battleplan
 
-# 把仓库内的 gamma-gex 子目录也放到技能目录（美股 Gamma 分析依赖它）
+# 把 gamma-gex 子目录也放到技能目录（美股 Gamma 分析依赖它）
 cp -r ~/.workbuddy/skills/stock-multidim-battleplan/gamma-gex \
       ~/.workbuddy/skills/gamma-gex
-
-# Windows 用户：
-git clone https://github.com/ChrisLuckComes/stock-multidim-battleplan.git `
-  "$env:USERPROFILE\.workbuddy\skills\stock-multidim-battleplan"
-Copy-Item "$env:USERPROFILE\.workbuddy\skills\stock-multidim-battleplan\gamma-gex" `
-  "$env:USERPROFILE\.workbuddy\skills\gamma-gex" -Recurse
 ```
 
-目录结构需满足：
-- `~/.workbuddy/skills/stock-multidim-battleplan/SKILL.md` 存在（主技能）
-- `~/.workbuddy/skills/gamma-gex/SKILL.md` 与 `gamma_gex.py` 存在（配套 Gamma 数据源）
+重启 / 刷新 WorkBuddy 后，在对话中输入 `/stock-multidim-battleplan 贵州茅台`。
+> WorkBuddy 环境已装 `wb-finance-skill` 时，金融数据优先走 `agentic_search`（SKILL.md 已声明）；本仓库脚本作为结构判定兜底，两者皆可。
 
-重启 / 刷新 WorkBuddy 后，在对话中输入：
+### B. Cursor
+Cursor 的 skills 目录为 `~/.cursor/skills/`。把整个仓库放进去即可（Cursor 通过 `disable-model-invocation: true` 字段确保仅显式 `/stock-multidim-battleplan` 触发，不自动误触发）：
 
+```bash
+git clone https://github.com/ChrisLuckComes/stock-multidim-battleplan.git \
+  ~/.cursor/skills/stock-multidim-battleplan
+
+# Cursor 中 gamma-gex 作为子技能在主技能内被调用，无需单独复制
 ```
-/stock-multidim-battleplan 贵州茅台
-```
 
-或直接用自然语言："多维度分析一下赛轮轮胎，给个作战计划"。美股标的会自动调用 `gamma-gex` 生成 Gamma 期权流卡片。
+在 Cursor 聊天中：`/stock-multidim-battleplan 赛轮轮胎`。无 wb-finance-skill 时，Agent 会自动改用 `fetch_market.py` 取数。
+
+### C. 通用 AI Agent / 手动
+任何能读取 `SKILL.md` 的 Agent（含你自己手动按 SKILL.md 流程跑）：直接 clone 后即可。脚本只依赖 Python 3.8+：
+
+```bash
+git clone https://github.com/ChrisLuckComes/stock-multidim-battleplan.git
+cd stock-multidim-battleplan
+python --version   # 需 3.8+
+```
 
 ---
 
-## 使用 rule123.py（独立运行）
+## 依赖
 
-不依赖 Agent，纯 Python 即可跑 123 判定：
+- **Python 3.8+**（运行 `fetch_market.py` / `rule123.py` / `gamma_gex.py`）。
+- **联网**（脚本实时抓取东方财富 / Yahoo / CBOE 公开行情，零密钥、零付费）。
+- **可选 · wb-finance-skill**：仅在 WorkBuddy 且已安装该技能时优先用于取数；**未安装不影响本仓库任何功能**——`fetch_market.py` 会自动接管。
+- **Node.js**：非必需。本仓库全部脚本为 Python；若你的 Agent 生态更偏 Node，可把 `fetch_market.py` 的逻辑等价为 `fetch_market.js`（SKILL.md 调用处保持一致即可）。
 
+---
+
+## 独立运行脚本（不依赖 Agent）
+
+### 1. 取行情 `fetch_market.py`
 ```bash
-python rule123.py CF LLY MU TEM RVMD
-# 默认标的：CF LLY MU TEM RVMD
-# 输出各标的三条件勾选 + verdict，并写入 rule123_out.json
+python fetch_market.py 601233 --out data/601233.json   # A股（自动识别沪/深）
+python fetch_market.py 688002                          # A股科创板
+python fetch_market.py CF --out data/cf.json           # 美股
 ```
+输出统一 JSON（见上文目录结构说明），供 `rule123.py` 或 `gamma_gex.py` 消费。
 
-脚本逻辑（源自道氏理论）：
+### 2. 123 判定 `rule123.py`
+```bash
+python rule123.py 601233                 # A股
+python rule123.py CF LLY MU              # 美股批量
+python rule123.py CF --data data/cf.json # 直接消费 fetch_market.py 产出（推荐）
+```
+输出各标的三条件勾选 + verdict，并写入 `rule123_out.json`。
+
+### 3. Gamma 期权流 `gamma-gex/gamma_gex.py`
+```bash
+python gamma-gex/gamma_gex.py CF            # 单标的
+python gamma-gex/gamma_gex.py TEM RVMD      # 多标的
+python gamma-gex/gamma_gex.py CF --r 0.043  # 指定无风险利率
+python gamma-gex/gamma_gex.py CF --text      # 人类可读格式
+```
+默认输出 JSON（每行一个标的，便于管道消费）；`--text` 切换人类可读。输出：净 dealer gamma（正/负环境）、零 gamma(flip)位、Put/Call Wall、最大痛点、数据质量评级。
+
+> 数据来自 CBOE 延迟期权 API（免费、零密钥）。flip 绝对价位与机构源（SpotGamma/富途）可能 ±5-10% 偏差，价位分歧时以机构源定止损。小盘股 GEX 噪声大（脚本会标"数据质量=低"），仅作确认信号、不可作核心依据。
+
+---
+
+## 123 趋势法则是什么
+
+源自道氏理论（Victor Sperandeo《专业投机原理》）：
 1. **① 趋势线被突破**：下跌（或回调）段的下降趋势连线被收盘价站上；
 2. **② 不再创新低**：最近摆动低点 P1 高于前一个摆动低点 P0（更高低点）；
 3. **③ 穿越前期高点**：最新收盘价 > P0~P1 之间的前期反应高点 R1。
 
 三项全过 = **符合**（推荐）；过 2 项 = **部分符合**（不推荐）；过 ≤1 项 = **不符合**。
-
-> 数据来自 Yahoo v8 chart（6mo 日线，零密钥）。A 股标的需改用东方财富等数据源，脚本默认面向美股。
-
----
-
-## 依赖说明
-
-- **美股 Gamma 分析**依赖本仓库内的 `gamma-gex/` 子技能（已随仓库一并提供，安装时按上文复制到 `~/.workbuddy/skills/gamma-gex/` 即可）。`gamma_gex.py` 抓取 CBOE 延迟期权行情聚合 net dealer GEX，主技能的美股研报会直接调用它填充 Gamma 卡片。
-- 金融数据取数路由遵循上游 `wb-finance-skill` 的红线，分析前应先加载其 references（stock-deep-research / valuation-pricing / trade-plan / stop-discipline）。
-
-## 使用 gamma_gex.py（独立运行，美股期权流）
-
-```bash
-python gamma-gex/gamma_gex.py CF            # 单标的
-python gamma-gex/gamma_gex.py TEM RVMD      # 多标的
-python gamma-gex/gamma_gex.py CF --r 0.043  # 指定无风险利率（默认 0.043）
-```
-
-输出（接入 CBOE 延迟期权 API，零密钥）：
-- **净 dealer gamma（当前）**：>0 = 正 gamma（波动被压制，均值回归有效，**支撑位买胜率高，推荐买入**）；<0 = 负 gamma（波动放大，**谨慎，支撑易破，改突破收盘确认**）。
-- **零 gamma / Flip 位**：gamma 环境切换边界，价在 flip 上方 = 正 gamma 稳定区。
-- **Put Wall（支撑）/ Call Wall（阻力）**：最大 put/call OI 行权价；与技术前高/前低重合 = 高置信关键位。
-- **最大痛点 Max Pain**：到期日 magnet / 震荡中枢参考。
-- **数据质量评级**：小盘/低流动性标的值得警惕——远端虚值 call OI 占比 >25% 或贴价 call 占比 <15% 时标「低（仅确认）」，GEX 噪声大，仅作确认信号、不可作核心依据。
-- 金融数据取数路由遵循上游 `wb-finance-skill` 的红线，分析前应先加载其 references（stock-deep-research / valuation-pricing / trade-plan / stop-discipline）。
 
 ---
 
