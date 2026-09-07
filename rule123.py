@@ -4,7 +4,8 @@
 方向感知结构判定（延续 vs 反转）
 ================================
 四种买法（当日只给一种，由 plan_entry 输出 mode）：
-  1. platform_break 平台突破（优先T1）：近 3 根内收盘站上 R1 且放量，买突破位
+  1. platform_break 平台突破（优先T1）：近 3 根内收盘站上活平台沿且放量，买突破位
+     （活沿见 living_platform；123 的 R1 仍是 P0–P1 反应高，二者不是同一个东西）
   2. line_pullback 沿线回踩（优先T1）：沿着肉眼可见的线上升，回踩该线买；默认 P0→P1 上升趋势线，仅明显贴均线才改用该均线
   3. downtrend_tl_break 下降趋势线突破（次优先T2）：近 3 根内站上下降高点连线，买该线；仓位试错，过前高升级为平台突破
   4. impulse_pause 大阳后缩量回踩（次优先T2）：大阳线之后回踩缩量找买点
@@ -243,6 +244,54 @@ def days_above_level(bars, level):
         else:
             break
     return n
+
+
+def living_platform(bars, Hs, atr_v, lookback=60, press_atr=2.5):
+    """活平台沿：正在顶的、或刚被收盘打穿的那条阻力，不是突破阳的最高价。
+
+    经典 R1 只取 P0–P1 之间最高，会漏 P1 之后的新沿、P0 之前仍压着的前高。
+    但也不能把刚突破那根的高点（睿创 185）当成新 R1：近 3 根窗口里沿仍是被破的那条（179）。
+
+    规则：只用已确认摆动高点（不含近端未走完枢轴、不含当日上影）。
+    该高点之后有过收盘站上，就不再当未破沿。
+    若近 3 根刚破了一条更低的沿，突破窗口内的新高全部丢掉（那是冲高，不是平台）。
+    有更高的未破沿（闰土 14.22 vs 内沿 13.34）仍用未破沿。
+    否则近 3 根刚破的沿就是活沿。远处 ATH 用 press_atr 滤掉。
+    """
+    n = len(bars)
+    if n < 5 or not atr_v or atr_v <= 0:
+        return None
+    last_c = bars[-1]["c"]
+    start = max(0, n - lookback)
+    cands = [(i, h) for i, h in Hs if i >= start]
+    if not cands:
+        return None
+
+    pressing = []
+    fresh = []
+    for i, h in cands:
+        n_ab = days_above_level(bars, h)
+        closed_after = any(bars[j]["c"] > h for j in range(i + 1, n))
+        if (not closed_after) and h >= last_c and (h - last_c) <= press_atr * atr_v:
+            pressing.append((i, h, n_ab))
+        elif last_c > h and 1 <= n_ab <= 3:
+            fresh.append((i, h, n_ab))
+
+    if fresh:
+        top_h = max(h for _, h, _ in fresh)
+        win_start = n - days_above_level(bars, top_h)
+        pressing = [(i, h, n_ab) for i, h, n_ab in pressing if i < win_start]
+
+    if pressing:
+        first = min(h for _, h, _ in pressing)
+        shelf = [(i, h, n_ab) for i, h, n_ab in pressing if h <= first + 0.35 * atr_v]
+        i, h, n_ab = max(shelf, key=lambda x: x[1])
+        return {"i": i, "price": h, "days_above": n_ab, "kind": "pressing"}
+
+    if fresh:
+        i, h, n_ab = max(fresh, key=lambda x: x[1])
+        return {"i": i, "price": h, "days_above": n_ab, "kind": "fresh_break"}
+    return None
 
 
 def count_tags(bars, level_at, atr_v, lookback=12, k=0.5):
@@ -636,13 +685,17 @@ def plan_entry(bars, ev):
     vol_ok = rvol is None or rvol > 1.5
     vol_shrink = rvol is None or rvol <= 1.2
     r1p = _px(ev.get("R1"))[1]
-    n_above = days_above_level(bars, r1p)
+    plat = ev.get("platform") or ev.get("R1")
+    plat_p = _px(plat)[1]
+    n_above = days_above_level(bars, plat_p)
+    n_above_r1 = days_above_level(bars, r1p)
     c2 = bool(ev.get("c2") if ev.get("c2") is not None else ev.get("cond2_no_new_low"))
     p1p = _px(ev.get("P1"))[1]
     structure_ok = p1p is not None and c2 and last_c is not None and last_c > p1p
     demand = living_demand(bars, ev)
     bz_line = zone_from_demand(demand, bars, ev)
-    bz_line["days_above_r1"] = n_above
+    bz_line["days_above_r1"] = n_above_r1
+    bz_line["days_above_platform"] = n_above
     uptrend = still_uptrend(bars, ev, last_c, c2, p1p)
     imp = find_impulse_pause(bars, atr_v)
 
@@ -671,7 +724,8 @@ def plan_entry(bars, ev):
         z["path"] = path
         z["mode"] = mode
         z["priority"] = priority
-        z["days_above_r1"] = n_above
+        z["days_above_r1"] = n_above_r1
+        z["days_above_platform"] = n_above
         return {
             "path": path,
             "mode": mode,
@@ -681,21 +735,26 @@ def plan_entry(bars, ev):
             "recommend": recommend,
             "note": note,
             "buy_zone": z,
-            "days_above_r1": n_above,
+            "days_above_r1": n_above_r1,
+            "days_above_platform": n_above,
         }
 
-    # T1 平台突破：近 3 根才站上 R1
-    fresh_plat = r1p is not None and last_c is not None and last_c > r1p and n_above <= 3
+    # T1 平台突破：近 3 根才站上活平台沿（不是已死的 P0–P1 R1）
+    plat_txt = f"{round(plat_p, 2)}" if plat_p is not None else "N/A"
+    fresh_plat = plat_p is not None and last_c is not None and last_c > plat_p and n_above <= 3
     if fresh_plat and vol_ok:
-        note = "过 R1 但无量能数据，突破确认打折" if rvol is None else ""
+        note = "过平台沿但无量能数据，突破确认打折" if rvol is None else ""
         if declining and days_above_tl <= 3:
             note = (note + "；" if note else "") + "下降趋势线同步突破，按平台突破（优先T1）执行"
-        z = zone_at_level(r1p, atr_v, last_c, "平台突破(优先T1)", ev, bars)
+        if r1p is not None and abs(plat_p - r1p) > 0.01:
+            extra = f"活平台沿 {plat_txt}（123 R1={round(r1p, 2)} 已不作突破位）"
+            note = (note + "；" if note else "") + extra
+        z = zone_at_level(plat_p, atr_v, last_c, "平台突破(优先T1)", ev, bars)
         return pack("platform_break", 1, "breakout", "平台突破(优先T1)", True, note, z)
     if fresh_plat and not vol_ok:
         return pack(
             "wait", None, "wait", "平台突破·量能不足", False,
-            f"近{n_above}根站上R1但 RVOL={round(rvol, 2)}≤1.5，不买假突破",
+            f"近{n_above}根站上活平台沿 {plat_txt} 但 RVOL={round(rvol, 2)}≤1.5，不买假突破",
         )
 
     # T1 沿线回踩：只在贴线（≤1×ATR）时占用当日；未到位/延伸则让给 T2
@@ -803,7 +862,8 @@ def plan_entry(bars, ev):
     if fresh_dtl and vol_ok:
         z = zone_at_level(tl_now, atr_v, last_c, "下降趋势线突破(次优先T2)", ev, bars)
         z["anchor"] = "down_tl"
-        tgt = f"目标1先看平台沿/R1 {round(r1p, 2)}" if r1p else "目标1看最近前高"
+        tgt_lv = plat_p if plat_p is not None else r1p
+        tgt = f"目标1先看平台沿 {round(tgt_lv, 2)}" if tgt_lv else "目标1看最近前高"
         note = f"次优先T2，试错仓。未过前高则{tgt}；过前高升级为平台突破"
         if rvol is None:
             note += "；无量能数据，确认打折"
@@ -898,6 +958,15 @@ def evaluate(sym, data_file=None):
 
     regime = classify_regime(last_c, ema10, sma20, sma50, sma20_up, hh, hl, c2, p1_px)
     passed = sum([c1, c2, c3])
+    atr_v = atr14(bars)
+    plat = living_platform(bars, Hs, atr_v)
+    if plat is None and R1 is not None:
+        plat = {
+            "i": R1[0],
+            "price": R1[1],
+            "days_above": days_above_level(bars, R1[1]),
+            "kind": "r1_fallback",
+        }
     plan = plan_entry(bars, {
         "regime": regime,
         "passed": passed,
@@ -908,6 +977,7 @@ def evaluate(sym, data_file=None):
         "P0": {"i": P0[0], "price": P0[1]},
         "P1": {"i": P1[0], "price": P1[1]},
         "R1": {"i": R1[0], "price": R1[1]} if R1 else None,
+        "platform": plat,
         "down_tl": {
             "b": {"i": h_b[0], "price": h_b[1]},
             "a": {"i": h_a[0], "price": h_a[1]},
@@ -917,6 +987,14 @@ def evaluate(sym, data_file=None):
     recommend = plan["recommend"]
     note = plan["note"]
     verdict = plan["verdict"]
+    if (
+        plat and plat.get("kind") == "pressing"
+        and last_c is not None and last_c <= plat["price"]
+        and plan["mode"] == "wait"
+    ):
+        prefix = f"活平台沿 {round(plat['price'], 2)} 未破"
+        if prefix not in (note or ""):
+            note = f"{prefix}。{note}" if note else prefix
 
     def rnd(v):
         if v is None:
@@ -943,6 +1021,7 @@ def evaluate(sym, data_file=None):
         "rvol20": rnd(rvol20),
         "atr14": rnd(atr14(bars)),
         "days_above_r1": plan["days_above_r1"],
+        "days_above_platform": plan["days_above_platform"],
         "cond1_trendline_break": c1,
         "cond1_note": tl_note,
         "cond2_no_new_low": c2,
@@ -954,6 +1033,14 @@ def evaluate(sym, data_file=None):
     }
     if R1:
         out["R1"] = {"i": R1[0], "d": bars[R1[0]]["d"], "price": rnd(R1[1])}
+    if plat:
+        out["platform"] = {
+            "i": plat["i"],
+            "d": bars[plat["i"]]["d"],
+            "price": rnd(plat["price"]),
+            "kind": plat.get("kind"),
+            "days_above": plat.get("days_above"),
+        }
     if h_a and h_b:
         out["trendline_at_last"] = rnd(line_val(h_b, h_a, last_i))
     out["buy_zone"] = plan["buy_zone"]
@@ -993,8 +1080,8 @@ if __name__ == "__main__":
         print(f"=== {r['sym']} ===")
         for k in ["regime", "mode", "priority", "setup", "path", "verdict", "recommend", "note",
                   "last", "last_date", "ema10", "sma20", "sma50", "sma20_up",
-                  "hh", "hl", "rvol20", "atr14", "days_above_r1",
-                  "P0", "P1", "R1", "buy_zone",
+                  "hh", "hl", "rvol20", "atr14", "days_above_r1", "days_above_platform",
+                  "P0", "P1", "R1", "platform", "buy_zone",
                   "cond1_trendline_break", "cond1_note", "cond2_no_new_low",
                   "cond3_break_prior_high", "passed", "reason"]:
             if k in r:
