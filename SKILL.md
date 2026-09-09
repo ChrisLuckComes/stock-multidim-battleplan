@@ -176,6 +176,10 @@ python rule123.py TEM --data data/TEM.json
 会让 rule123 把今天当零振幅假 K 线，ATR 与摆动低点全失真）。
 输出看 `mode` / `priority` / `buy_zone` / `recommend`。
 
+**westock 是可选依赖，不是每台机器都有。** 可执行文件查找顺序：`WESTOCK_BIN` 环境变量 → `PATH` →
+`~/.local/bin/westock(.exe)`（Windows 带 `.exe`，类 Unix 无后缀）。三者都找不到时脚本**以退出码 2 退出并打印安装提示**——
+这表示「本环境没有这个工具」，**不等于「该股没有数据」**，此时直接继续降级到网页检索，不要停在这里。
+
 取数优先级：wb-finance-skill（含 westock CLI）→ `fetch_market.py` → `fetch_westock.py` → 网页检索（并标注来源）。
 
 ---

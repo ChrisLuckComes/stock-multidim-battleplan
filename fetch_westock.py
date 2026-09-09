@@ -6,8 +6,8 @@ fetch_westock.py —— 用 westock CLI 取行情，转成 rule123.py 需要的 
 背景：fetch_market.py 依赖 Yahoo / stooq，在部分网络环境（国内直连、公司代理）
 会 ETIMEDOUT 或被 JS 校验页拦住，导致美股完全取不到数。此时改用 westock CLI。
 
-前置：安装 westock（wb-finance-skill 的 westock-data skill 提供 scripts/setup.cjs）
-  node <westock-data>/scripts/setup.cjs      # 装到 C:\\Users\\<用户名>\\.local\\bin\\westock.exe
+前置（可选依赖）：安装 westock（wb-finance-skill 的 westock-data skill 提供 scripts/setup.cjs）
+  node <westock-data>/scripts/setup.cjs      # Windows 装到 C:\\Users\\<用户名>\\.local\\bin\\westock.exe
 
 用法：
   python fetch_westock.py TEM --out data/TEM.json
@@ -16,25 +16,48 @@ fetch_westock.py —— 用 westock CLI 取行情，转成 rule123.py 需要的 
 美股代码直接给 ticker（TEM），A 股给带前缀代码（sh601233）。
 输出格式与 fetch_market.py 一致：{ticker,name,market,bars:[{d,o,c,h,l,v}],spot}
 之后照常跑：python rule123.py TEM --data data/TEM.json
+
+可执行文件的查找顺序：环境变量 WESTOCK_BIN → PATH → ~/.local/bin/westock(.exe)。
+三者都找不到就报错退出（退出码 2），调用方应据此继续降级到网页检索，
+而不是把「westock 缺失」当成「该股没有数据」。
 """
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 
-WESTOCK = os.environ.get(
-    "WESTOCK_BIN",
-    os.path.join(os.path.expanduser("~"), ".local", "bin", "westock.exe"),
+INSTALL_HINT = (
+    "找不到 westock。它是可选依赖，装法：node <westock-data技能目录>/scripts/setup.cjs\n"
+    "或设置环境变量 WESTOCK_BIN 指向可执行文件（也可以直接把 westock 放进 PATH）。\n"
+    "没有 westock 不影响其它取数方式 —— 请按 SKILL.md 的取数优先级继续降级到网页检索。"
 )
 
 
-def run(args):
+def find_westock():
+    """WESTOCK_BIN → PATH → ~/.local/bin/westock(.exe)。Windows 用 .exe，类 Unix 无后缀。"""
+    env = os.environ.get("WESTOCK_BIN")
+    if env:
+        return env
+    for name in ("westock", "westock.exe"):
+        p = shutil.which(name)
+        if p:
+            return p
+    local = os.path.join(os.path.expanduser("~"), ".local", "bin")
+    for name in ("westock.exe", "westock"):
+        p = os.path.join(local, name)
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def run(binary, args):
     try:
-        p = subprocess.run([WESTOCK] + args, capture_output=True, timeout=90)
+        p = subprocess.run([binary] + args, capture_output=True, timeout=90)
     except FileNotFoundError:
-        sys.exit("找不到 westock：%s\n请先安装（node <westock-data>/scripts/setup.cjs）"
-                 "或设置环境变量 WESTOCK_BIN 指向可执行文件。" % WESTOCK)
+        print(INSTALL_HINT, file=sys.stderr)
+        sys.exit(2)
     if p.returncode != 0:
         sys.exit("westock 调用失败：%s\n%s" % (" ".join(args), p.stderr.decode("utf-8", "ignore")))
     return p.stdout.decode("utf-8", "ignore")
@@ -70,12 +93,18 @@ def main():
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
 
-    code = a.symbol if a.symbol[:2] in ("sh", "sz", "bj", "hk", "us", "fu", "fx") else "us" + a.symbol
+    prefix = a.symbol[:2]
+    code = a.symbol if prefix in ("sh", "sz", "bj", "hk", "us", "fu", "fx") else "us" + a.symbol
+
+    binary = find_westock()
+    if not binary:
+        print(INSTALL_HINT, file=sys.stderr)
+        sys.exit(2)
 
     args = ["kline", code, "--period", a.period, "--limit", str(a.limit)]
     if a.start and a.end:
         args += ["--start", a.start, "--end", a.end]
-    rows = parse_md_table(run(args))
+    rows = parse_md_table(run(binary, args))
 
     bars = []
     for r in rows:
@@ -104,10 +133,11 @@ def main():
     if not bars:
         sys.exit("未解析到任何 K 线，检查代码或日期范围：%s" % code)
 
+    market = {"us": "US", "hk": "HK"}.get(prefix, "ASH")  # 与 fetch_market.py 的取值保持一致
     data = {
         "ticker": a.symbol.upper(),
         "name": code,
-        "market": "US" if code.startswith("us") else "OTHER",
+        "market": market,
         "bars": bars,
         "spot": bars[-1]["c"],
     }
