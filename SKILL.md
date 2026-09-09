@@ -154,7 +154,7 @@ disable-model-invocation: true
 
 执行时用 skill 安装目录的**绝对路径**：
 - WorkBuddy：`~/.workbuddy/skills/stock-multidim-battleplan/`
-- Cursor：`C:\Users\luoyu\.cursor\skills\stock-multidim-battleplan\`
+- Cursor：`C:\Users\<用户名>\.cursor\skills\stock-multidim-battleplan\`
 
 ```bash
 python fetch_market.py 601233 --out data/601233.json
@@ -162,15 +162,27 @@ python fetch_market.py CF --out data/cf.json
 python rule123.py CF --data data/cf.json
 ```
 
-美股 Yahoo 失败时改跑 `scripts/fetch_market.js`。输出看 `mode` / `priority` / `buy_zone` / `recommend`。
+美股 Yahoo 失败时（国内网络常见 `ETIMEDOUT`，或 stooq 返回 JS 校验页），**改跑 `fetch_westock.py`**（走 westock CLI，A/港/美股通用）：
 
-取数优先级：wb-finance-skill → `fetch_market.py` → 网页检索（并标注来源）。
+```bash
+# 一次性安装 westock（wb-finance-skill 的 westock-data skill 提供安装脚本）
+node <westock-data技能目录>/scripts/setup.cjs     # 装到 C:\Users\<用户名>\.local\bin\westock.exe
+
+python fetch_westock.py TEM --start 2025-08-01 --end 2026-09-09 --out data/TEM.json
+python rule123.py TEM --data data/TEM.json
+```
+
+`fetch_westock.py` 会自动剔除 westock 对「未开盘当日」复制出来的重复 K 线（OHLCV 完全相同，
+会让 rule123 把今天当零振幅假 K 线，ATR 与摆动低点全失真）。
+输出看 `mode` / `priority` / `buy_zone` / `recommend`。
+
+取数优先级：wb-finance-skill（含 westock CLI）→ `fetch_market.py` → `fetch_westock.py` → 网页检索（并标注来源）。
 
 ---
 
 ## 输出规范
 
-- HTML 落盘 `C:\Users\luoyu\stock-reports\<TICKER>-YYYYMMDD.html`（不要写入代码仓库）。首屏结论 + 模式卡 + 入场/止损/目标1-目标2。不输出 Gamma 卡。CDN 被挡时再写 `*_standalone.html`。
+- HTML 落盘 `%USERPROFILE%\stock-reports\<TICKER>-YYYYMMDD.html`（即 `C:\Users\<当前用户名>\stock-reports\`，不要写入代码仓库，路径里的用户名按当前环境替换）。首屏结论 + 模式卡 + 入场/止损/目标1-目标2。不输出 Gamma 卡。CDN 被挡时再写 `*_standalone.html`（把 echarts.min.js 内联进去）。
 - 无文件环境：markdown 同等结构。
 - 对话附 200–300 字摘要。关键数据标来源+日期。
 - 含买卖价位时附：
