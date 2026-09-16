@@ -17,7 +17,7 @@ HH 两两比较不作门控。cond2 = 自 P1 未再创新低。不用 MA60。
 
 数据：A 股东财 / 美股 Yahoo / --data 喂 fetch_market.py JSON。
 """
-import urllib.request, json, sys, datetime, re, time
+import urllib.request, json, sys, datetime, re, time, os
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 NASDAQ_HEADERS = {
@@ -273,6 +273,88 @@ def bars_from_em_us(sym, klt=101, lmt=130):
         bars.append({"d": p[0], "o": float(p[1]), "c": float(p[2]),
                      "h": float(p[3]), "l": float(p[4]), "v": float(p[5])})
     return bars, None, {"session": "", "as_of": None, "prev_close": None}
+
+
+def _proxy_list():
+    """美股分钟线的代理候选。Yahoo 直连 403，实测需走本地代理。
+
+    不读 HTTP_PROXY/HTTPS_PROXY —— 沙箱会注入一个假代理（实测 57189 返回 502），
+    用显式的 WB_US_PROXY 覆盖，否则按常见客户端端口逐个探。
+    """
+    out = []
+    env = os.environ.get("WB_US_PROXY")
+    if env:
+        out.append(env)
+    for p in (7897, 7890, 7891, 10809, 1080):
+        out.append(f"http://127.0.0.1:{p}")
+    return out
+
+
+def fetch_json_proxy(url, proxy=None, timeout=20):
+    """经代理（或直连）取 JSON。"""
+    if proxy:
+        op = urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+    else:
+        op = urllib.request.build_opener()
+    req = urllib.request.Request(url, headers=NASDAQ_HEADERS)
+    with op.open(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8", "ignore"))
+
+
+def bars_from_yahoo_min(sym, interval="5m", range_="1d"):
+    """Yahoo 美股分钟线（带量）——美股盘中的**第二源**。
+
+    实测（2026-09-16）：直连 query1.finance.yahoo.com 返回 403；
+    经本地代理（Clash 类 7897）可通，返回带量 OHLC（5 分钟 78/79 根带量）。
+    东财美股分钟线是唯一另一源，一旦被限流（批量取数后实测整站拒连）就没得用，
+    故此处保留降级链。
+
+    时间戳统一转成**北京时间**字符串 "YYYY-MM-DD HH:MM"，与东财口径一致，
+    以便 us_trade_date / us_offset_min 通用。
+    """
+    url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{sym.upper()}"
+           f"?interval={interval}&range={range_}&includePrePost=false")
+    errs = []
+    for proxy in _proxy_list():
+        try:
+            j = fetch_json_proxy(url, proxy if proxy else None)
+        except Exception as e:
+            errs.append(f"{proxy or 'direct'}={type(e).__name__}")
+            continue
+        res = ((j.get("chart") or {}).get("result") or [])
+        if not res:
+            errs.append(f"{proxy}=empty")
+            continue
+        r0 = res[0]
+        ts = r0.get("timestamp") or []
+        if not ts:
+            errs.append(f"{proxy}=no_ts")
+            continue
+        q = ((r0.get("indicators") or {}).get("quote") or [{}])[0]
+        o_, h_, l_, c_, v_ = (q.get("open") or [], q.get("high") or [],
+                              q.get("low") or [], q.get("close") or [],
+                              q.get("volume") or [])
+        bars = []
+        for i, t in enumerate(ts):
+            if i >= len(c_):
+                break
+            oo, hh, ll, cc = (o_[i] if i < len(o_) else None,
+                              h_[i] if i < len(h_) else None,
+                              l_[i] if i < len(l_) else None, c_[i])
+            if None in (oo, hh, ll, cc):
+                continue
+            bars.append({
+                "d": datetime.datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M"),
+                "o": float(oo), "h": float(hh), "l": float(ll), "c": float(cc),
+                "v": float(v_[i] if i < len(v_) and v_[i] else 0),
+            })
+        if not bars:
+            errs.append(f"{proxy}=no_bars")
+            continue
+        return bars, None, {"session": "", "as_of": None, "prev_close": None,
+                            "source": "yahoo_min", "proxy": proxy}
+    raise RuntimeError(f"Yahoo 分钟线 {sym} 全部失败 → " + " | ".join(errs))
 
 
 def bars_from_us(sym):
@@ -647,6 +729,47 @@ def still_uptrend(bars, ev, last_c, c2, p1p):
     return True
 
 
+def reversal_yang_ok(bars, imp, p1p, last_c, atr_v):
+    """反转态下仍允许「大阳后缩量回踩」的放宽门控（2026-09-16 决定松绑）。
+
+    背景：原门控 still_uptrend 要求 c2（自 P1 以来未创新低）。但强势票最常见的
+    启动形态恰恰是「先破位洗盘 → 一根放量大阳收复 P1」——此时 c2=False 却已站上
+    P1，结果整套大阳回踩分支被跳过，真信号整段丢弃（ILMN 9/15：+6.76%、量 1.70 倍、
+    收 222.29 站上 P1 206.82，却只得到 wait 且买区为空）。
+
+    放宽必须带防护，四条同时成立才认（任一不满足就退回原门控，宁缺勿滥）：
+      1. 基准日收盘站上 P1 —— 结构与 structure_ok 同口径，破位尚未修复的不认；
+      2. 大阳当日放量 —— 量 ≥ 1.5× 其前 20 日均量，无量的阳线不认；
+      3. 大阳实体足够强 —— body ≥ 1.2×ATR 或 涨幅 ≥ 4%（弱阳不足以扭转破位）；
+      4. 未回吐到大阳体下半部 —— 守住「反转仍有效」，跌破中点即视为失败。
+    """
+    if p1p is None or last_c is None or last_c <= p1p:
+        return False
+    yi = imp.get("yang_i")
+    if yi is None or yi < 0 or yi >= len(bars):
+        return False
+    y = bars[yi]
+    # 2) 放量：相对大阳前的 20 日均量
+    pre = [float(b.get("v") or 0) for b in bars[max(0, yi - 20):yi]]
+    pre = [v for v in pre if v > 0]
+    if not pre:
+        return False
+    avg = sum(pre) / len(pre)
+    y_vol = float(y.get("v") or 0)
+    if y_vol <= 0 or avg <= 0 or y_vol < 1.5 * avg:
+        return False
+    # 3) 实体强度
+    body = y["c"] - y["o"]
+    pct = body / y["o"] if y["o"] else 0.0
+    if (not atr_v or body < 1.2 * atr_v) and pct < 0.04:
+        return False
+    # 4) 未回吐到大阳体下半部
+    mid = (y["l"] + y["h"]) / 2.0
+    if last_c < mid:
+        return False
+    return True
+
+
 def is_yang_bar(bar, atr_v, prev=None):
     body = bar["c"] - bar["o"]
     rng = bar["h"] - bar["l"]
@@ -782,6 +905,7 @@ def find_impulse_pause(bars, atr_v):
         return zz
 
     extra = {
+        "yang_i": yang_i,
         "yang_d": y["d"],
         "yang_low": y_lo,
         "yang_high": y_hi,
@@ -1319,6 +1443,12 @@ def plan_entry(bars, ev):
     bz_line["days_above_platform"] = n_above
     uptrend = still_uptrend(bars, ev, last_c, c2, p1p)
     imp = find_impulse_pause(bars, atr_v)
+    # 大阳回踩门控（2026-09-16 松绑）：原只认 uptrend，导致「反转态中放量大阳收复 P1」
+    # 这一典型启动形态被整段丢弃。放宽为 uptrend 或 reversal_yang_ok（后者自带四条防护）。
+    gate_imp, gate_src = uptrend, ("uptrend" if uptrend else None)
+    if not gate_imp and imp.get("state") != "no_yang":
+        if reversal_yang_ok(bars, imp, p1p, last_c, atr_v):
+            gate_imp, gate_src = True, "reversal_yang"
     Hs_all, Ls_all = pivots(bars, w=3)
 
     dtl = ev.get("down_tl")
@@ -1340,6 +1470,9 @@ def plan_entry(bars, ev):
 
     def pack(mode, priority, setup, verdict, recommend, note, buy_zone=None, path=None):
         z = buy_zone if buy_zone is not None else bz_line
+        # 标注放宽来源，避免「反转态买点」被误当成常规升势回踩
+        if gate_src == "reversal_yang" and "大阳" in str(note):
+            note = "【反转态·放量大阳·已放宽】" + note
         if path is None:
             if mode in ("line_pullback", "impulse_pause"):
                 path = "A"
@@ -1513,7 +1646,7 @@ def plan_entry(bars, ev):
                 f"{bz_line.get('primary_lo')}-{bz_line.get('primary_hi')}"
             )
 
-    if uptrend and imp.get("state") != "no_yang":
+    if gate_imp and imp.get("state") != "no_yang":
         st = imp.get("state")
         y_lo = imp.get("yang_low")
         y_hi = imp.get("yang_high")
@@ -1521,6 +1654,15 @@ def plan_entry(bars, ev):
         floor = imp.get("floor") if imp.get("floor") is not None else y_lo
         yi_zi = bool(imp.get("yi_zi"))
         z = imp.get("zone") or _empty_zone()
+        z["gate"] = gate_src
+        z["state"] = st
+        z["yang_i"] = imp.get("yang_i")
+        if gate_src == "reversal_yang":
+            z["relaxed"] = True
+            z["relaxed_reason"] = (
+                f"反转态（自 P1 曾创新低、c2=False）中 {y_d} 放量大阳收复 P1，"
+                f"已按放宽门控放行"
+            )
         # 不允许回退到大阳体：那会把「未走坏的有效性边界」印成买区，
         # 宽度可达 2.5×ATR，人无从下单。无买区就如实写 N/A。
         if z.get("primary_lo") is not None and z.get("primary_hi") is not None:

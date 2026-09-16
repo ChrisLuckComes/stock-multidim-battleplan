@@ -417,6 +417,75 @@ def test_yang_today_plan_keeps_single_zone():
     assert f"{z['body_lo']}-{z['body_hi']}" not in plan["note"], plan["note"]
 
 
+def _reversal_bars(yang_vol=1.9e7, tail=None):
+    """反转态：缓降通道（自 P1 曾创新低 → c2=False），末根放量大阳收复 P1。
+
+    末根：O19.70 H20.97 L19.09 C20.97（body 1.27 ≈ 2×ATR，涨幅 6.4%）。
+    """
+    bars = []
+    px = 24.0
+    for i in range(60):
+        px -= 0.08
+        d = f"2026-{i // 28 + 1:02d}-{i % 28 + 1:02d}"
+        bars.append(_bar(d, px + 0.10, px + 0.35, px - 0.30, px, 7e5))
+    bars.append(_bar("2026-08-25", 19.70, 20.97, 19.09, 20.97, yang_vol))
+    for j, (c, v) in enumerate(tail or []):
+        bars.append(_bar(f"2026-08-{26 + j}", c + 0.05, c + 0.12, c - 0.10, c, v))
+    return bars
+
+
+def _reversal_ev():
+    """反转态 ev：P1=20.50（低于大阳收盘 → 结构已修复），c2=False。"""
+    return {
+        "rvol20": 2.0,
+        "P0": {"i": 10, "price": 23.00},
+        "P1": {"i": 40, "price": 20.50},
+        "c2": False,
+        "R1": None,
+        "platform": None,
+        "w_bottom": {"neckline": 100.0},
+        "bull_flag": {"tl_now": 100.0, "days_above_tl": 0},
+        "down_tl": None,
+    }
+
+
+def test_reversal_yang_gate_relaxes():
+    """反转态 + 放量大阳收复 P1 → 放宽门控放行，且必须给出买区。
+
+    守护「ILMN 型信号被整段丢弃」：c2=False 但已站上 P1 的放量大阳，
+    原 uptrend 门控会把整套大阳回踩分支跳过，产出 wait 且买区为空。
+    """
+    bars = _reversal_bars()
+    plan = plan_entry(bars, _reversal_ev())
+    z = plan["buy_zone"]
+    assert z.get("gate") == "reversal_yang", (z.get("gate"), plan["verdict"])
+    assert z.get("relaxed") is True, z
+    assert z.get("relaxed_reason"), z
+    assert z["primary_lo"] is not None and z["primary_hi"] is not None, z
+    assert z["state"] == "yang_today", z
+    # 买区宽度仍须是贴防守位 1.0×ATR 的下单带（松绑不得复辟「整条大阳体当买区」）
+    band = z["primary_hi"] - z["primary_lo"]
+    assert abs(band - 1.0 * atr14(bars)) < 0.05, (band, z)
+    assert "【反转态·放量大阳·已放宽】" in plan["note"], plan["note"]
+
+
+def test_reversal_yang_requires_volume():
+    """反转态 + 缩量大阳 → 不放宽（缺放量确认的破位修复不认）。"""
+    bars = _reversal_bars(yang_vol=7e5)          # 与大阳前均量持平 → 无放量
+    plan = plan_entry(bars, _reversal_ev())
+    assert plan["buy_zone"].get("gate") != "reversal_yang", plan["buy_zone"]
+    assert plan["verdict"] == "等待", plan["verdict"]
+
+
+def test_reversal_yang_rejects_pullback_below_mid():
+    """反转态大阳后回吐到大阳体下半部 → 不放宽（反转已失效）。"""
+    bars = _reversal_bars(tail=[(19.50, 3e5), (19.45, 2.8e5), (19.50, 2.7e5)])
+    plan = plan_entry(bars, _reversal_ev())
+    z = plan["buy_zone"]
+    assert z.get("gate") != "reversal_yang", (z.get("gate"), plan["note"])
+    assert plan["verdict"] == "等待", (plan["verdict"], plan["note"])
+
+
 if __name__ == "__main__":
     test_yizi_not_gap_yang()
     test_true_yizi_uses_prev_close()
@@ -439,4 +508,7 @@ if __name__ == "__main__":
     test_impulse_pause_zone_is_tight_band()
     test_impulse_pause_body_mid_is_not_in_zone()
     test_yang_today_plan_keeps_single_zone()
+    test_reversal_yang_gate_relaxes()
+    test_reversal_yang_requires_volume()
+    test_reversal_yang_rejects_pullback_below_mid()
     print("ok")
