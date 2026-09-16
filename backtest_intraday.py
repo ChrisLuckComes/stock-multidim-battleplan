@@ -456,6 +456,23 @@ def stats(rows):
     }
 
 
+def _band_pos(px, bars_upto):
+    """成交价在「**截至信号那一刻**已走出的区间」里的位置（0=最低 1=最高）。
+
+    为什么必须要有这个、而不是只用全日区间：全日高低点含未来信息。
+    买完之后跌下去的票，事后看**必然**落在全日高位桶 —— 那是「跌」的
+    机械结果，不是「买贵了」的原因。用这个不含未来信息的版本才能回答
+    「分位是不是个真变量」。None = 区间未展开（高低同价）。
+    """
+    if not bars_upto:
+        return None
+    hi = max(b["h"] for b in bars_upto)
+    lo = min(b["l"] for b in bars_upto)
+    if hi <= lo:
+        return None
+    return round((px - lo) / (hi - lo), 4)
+
+
 def collect(code, daily, mins, days, detail=False):
     """单只标的：返回 ({策略: [结果行]}, 参与评估的「标的×交易日」数)。"""
     byd = group_by_day(mins)
@@ -474,6 +491,13 @@ def collect(code, daily, mins, days, detail=False):
             continue
         nsd += 1
         nd = daily[idx + 1] if idx + 1 < len(daily) else None
+        # 切分诊断用（--diagnose）：当日的开盘 / 全日区间 / 基准日收盘。
+        # 注意：**全日高低点含未来信息**，只用于事后统计切分（描述性），
+        # 不作为任何交易判定条件 —— 见 diagnose() 的说明。
+        d_hi = max(b["h"] for b in ctx.mins)
+        d_lo = min(b["l"] for b in ctx.mins)
+        d_op = ctx.mins[0]["o"]
+        d_gap = round((d_op - ctx.prev_c) / ctx.prev_c * 100, 2)
         sb = run_B_break(ctx)
         found = run_baseline_preorder(ctx) + run_A_burst(ctx) + sb \
             + run_C_pullback(ctx, sb) + run_BO_preorder(ctx)
@@ -502,7 +526,10 @@ def collect(code, daily, mins, days, detail=False):
                          lots=lots,
                          pos_pct=round(lots * entry / ACCOUNT * 100, 3),
                          acc_risk=round(lots * (entry - s["stop"]) / ACCOUNT * 100, 3),
-                         acc_pnl=round(lots * (r["exit_px"] - entry) / ACCOUNT * 100, 3))
+                         acc_pnl=round(lots * (r["exit_px"] - entry) / ACCOUNT * 100, 3),
+                         op=round(d_op, 2), dh=round(d_hi, 2), dl=round(d_lo, 2),
+                         tm=ctx.mins[s["j"]]["d"][11:16], gap=d_gap,
+                         bpu=_band_pos(entry, ctx.mins[:s["j"] + 1]))
                 out[s["strategy"]].append(r)
                 if tag == "T0_sig":
                     # T+1 口径（老罗 2026-09-17 的 2.a）：**日线结构止损（D 日最低价）
@@ -762,6 +789,231 @@ def sweep(pool_data, days, refresh):
     return "\n".join(lines)
 
 
+def _net(rows, cost=COST_RT):
+    """给定成本下的净账户%（可交易样本）。"""
+    if not rows:
+        return None
+    n = len(rows)
+    return (sum(r["acc_pnl"] for r in rows) / n
+            - sum(r["pos_pct"] for r in rows) / n * cost)
+
+
+def _bucket_line(label, rows, cost=COST_RT, w=22):
+    """一个切分桶的汇总行：N / 净账户% / 胜率 / 平均R。"""
+    tr = [r for r in rows if r["lots"]]
+    if not tr:
+        return f"{label:<{w}}{0:>6}{'—':>11}{'—':>9}{'—':>9}"
+    net = _net(tr, cost)
+    win = 100 * sum(1 for r in tr if r["R"] > 0) / len(tr)
+    avgR = sum(r["R"] for r in tr) / len(tr)
+    return f"{label:<{w}}{len(tr):>6}{net:>11.3f}{win:>9.1f}{avgR:>9.2f}"
+
+
+def _cut_table(lines, title, note, rows_by_strategy, keyfn, order):
+    lines.append("")
+    lines.append(title)
+    if note:
+        lines.append("  " + note)
+    hdr = f"{'切分':<22}{'N':>6}{'净账户%':>11}{'胜率%':>9}{'平均R':>9}"
+    for s in order:
+        lines.append("  " + "· " + LABEL[s])
+        lines.append("  " + hdr)
+        for lab, sub in keyfn(rows_by_strategy.get(s, [])):
+            lines.append("  " + _bucket_line("    " + lab, sub))
+
+
+def _time_band(tm):
+    if tm < "11:00":
+        return "10:00-11:00 早盘"
+    if tm < "13:30":
+        return "11:00-13:30 午前"
+    if tm < "14:00":
+        return "13:30-14:00 午后"
+    return "14:00-15:00 尾盘"
+
+
+def diagnose(agg):
+    """三问：边际在哪（切分） / 成本吃掉多少（敏感性） / 样本外还剩多少。
+
+    ⚠ 方法论声明：本节所有切分都用到了**当日全日高低点**（day_hi/day_lo），
+    它含未来信息，因此只作**事后描述**，不是可交易的判定条件。
+    它的用途是回答「如果 edge 存在，它长什么样」，而不是「明天怎么下单」。
+    要落地成规则，必须先把它换成「信号时刻已知」的代理量（如开盘价、前收、
+    当时已走出的区间），再用样本外验证 —— 那一步没做就不许当策略用。
+    """
+    L = ["=" * 100,
+         " 诊断：净账户≈0 的背后 —— 边际在哪 / 成本吃掉多少 / 样本外还剩多少",
+         "=" * 100]
+    t0 = {s: [r for r in agg.get(s, []) if r["entry_kind"] == "T0_sig"] for s in ORDER}
+    t1 = {s: agg.get(s + "|T1", []) for s in ORDER}
+
+    # ── 1 成本敏感性 ──────────────────────────────────────────────
+    L.append("")
+    L.append("【1】成本敏感性（净账户%/笔）—— 成本 = 买卖合计，含佣金+印花税+过户费")
+    L.append("    0.12% = 纯手续费（当前口径）；0.20~0.30% ≈ 再加 1~2 个价位滑点")
+    L.append(f"    {'成本':<8}" + "".join(f"{LABEL[s][:10]:>11}" for s in ORDER)
+             + "  |" + "".join(f"{LABEL[s][:10]:>11}" for s in ORDER))
+    L.append(f"    {'':<8}" + "".join(f"{'T+0':>11}" for s in ORDER)
+             + "  |" + "".join(f"{'T+1':>11}" for s in ORDER))
+    for c in (0.0012, 0.0020, 0.0030, 0.0040):
+        row = f"    {c * 100:<7.2f}%"
+        for s in ORDER:
+            v = _net([r for r in t0[s] if r["lots"]], c)
+            row += f"{v:>11.3f}" if v is not None else f"{'—':>11}"
+        row += "  |"
+        for s in ORDER:
+            v = _net([r for r in t1[s] if r["lots"]], c)
+            row += f"{v:>11.3f}" if v is not None else f"{'—':>11}"
+        L.append(row)
+
+    # ── 2 边际在哪：切分 ──────────────────────────────────────────
+    _cut_table(
+        L, "【2】按时段切分（T+0 · 账户口径 · 成本 0.12%）",
+        "信号落在哪段 —— 若某段显著更好，说明它是个「时段过滤器」而不是通道问题",
+        t0, lambda rows: [(b, [r for r in rows if _time_band(r["tm"]) == b])
+                          for b in ("10:00-11:00 早盘", "11:00-13:30 午前",
+                                    "13:30-14:00 午后", "14:00-15:00 尾盘")], ORDER)
+
+    def _band(r):
+        lo, hi = r["dl"], r["dh"]
+        if hi <= lo:
+            return "—"
+        q = (r["entry"] - lo) / (hi - lo)
+        return ("0-33%  贴当日低位" if q < 1 / 3 else
+                "33-67% 当日中位" if q < 2 / 3 else
+                "67-100% 当日高位")
+
+    def _band2(r):
+        q = r.get("bpu")
+        if q is None:
+            return "—"
+        return ("0-33%  低位" if q < 1 / 3 else
+                "33-67% 中位" if q < 2 / 3 else
+                "67-100% 高位")
+
+    _cut_table(
+        L, "【3a】按「成交价在**截至信号那一刻**区间的位置」切分（T+0）",
+        "★ 不含未来信息的分位 —— 这个才是能落地成规则的那个（老罗的核心命题）",
+        t0, lambda rows: [(b, [r for r in rows if _band2(r) == b])
+                          for b in ("0-33%  低位", "33-67% 中位",
+                                    "67-100% 高位", "—")], ORDER)
+
+    _cut_table(
+        L, "【3b】按「成交价在**全日**区间的位置」切分（T+0）· 仅供对照",
+        "⚠ 全日高低点含未来信息 → 此表有**机械偏差**（买完就跌的票必然落进高位桶）。"
+        "列在这里是为了量化「偏差有多大」：与 3a 的差值就是未来函数的贡献",
+        t0, lambda rows: [(b, [r for r in rows if _band(r) == b])
+                          for b in ("0-33%  贴当日低位", "33-67% 当日中位",
+                                    "67-100% 当日高位", "—")], ORDER)
+
+    def _gapb(r):
+        g = r["gap"]
+        return ("低开 <-1%" if g < -1 else "低开 -1~0%" if g < 0 else
+                "高开 0~1%" if g < 1 else "高开 >1%")
+
+    _cut_table(
+        L, "【4】按缺口切分（T+0）",
+        "低开 = 前一日大阳被砸，高开 = 情绪延续；两类信号完全不同的生意",
+        t0, lambda rows: [(b, [r for r in rows if _gapb(r) == b])
+                          for b in ("低开 <-1%", "低开 -1~0%", "高开 0~1%", "高开 >1%")],
+        ORDER)
+
+    # ── 3 样本外 ──────────────────────────────────────────────────
+    days = sorted({r["D"] for s in ORDER for r in t0[s]})
+    half = len(days) // 2
+    obs, ver = set(days[:half]), set(days[half:])
+    L.append("")
+    L.append(f"【5】样本外切分：观察期 {days[0]}~{days[half - 1]}（{len(obs)} 日）"
+             f" → 验证期 {days[half]}~{days[-1]}（{len(ver)} 日）")
+    L.append("    切点按交易日一刀切（非按结果挑），观察期/验证期信号分布独立")
+    L.append(f"    {'策略':<22}{'N观察':>7}{'净%观察':>10}{'N验证':>7}{'净%验证':>10}"
+             f"{'漂移':>9}   {'结论':<12}")
+    L.append("    " + "-" * 88)
+    for s in ORDER:
+        o = [r for r in t0[s] if r["lots"] and r["D"] in obs]
+        v = [r for r in t0[s] if r["lots"] and r["D"] in ver]
+        no, nv = _net(o), _net(v)
+        if no is None or nv is None:
+            L.append(f"    {LABEL[s][:20]:<22}{len(o):>7}{'—':>10}{len(v):>7}{'—':>10}"
+                     f"{'—':>9}   {'样本不足':<12}")
+            continue
+        drift = nv - no
+        verdict = ("双双为负" if no < 0 and nv < 0 else
+                   "观察正/验证负" if no >= 0 > nv else
+                   "观察负/验证正" if no < 0 <= nv else "双双为正")
+        L.append(f"    {LABEL[s][:20]:<22}{len(o):>7}{no:>10.3f}{len(v):>7}{nv:>10.3f}"
+                 f"{drift:>9.3f}   {verdict:<12}")
+    L.append("    ⚠ 突破预案单的门槛是在 9/15–9/16 少数样本上调的 → 本表对它最关键")
+
+    # ── 4 交叉确认 ────────────────────────────────────────────────
+    L.append("")
+    L.append("【6】交叉确认：通道A（量能突变）当日触发 vs 未触发，其他通道的表现")
+    L.append("    用途：判断通道A 该留作「确认器」还是停用 —— 看它有没有信息量")
+    aset = {(r["code"], r["D"]) for r in t0["通道A(量能突变)"]}
+    L.append(f"    当日有通道A信号的「标的×日」：{len(aset)} 个")
+    L.append(f"    {'策略':<22}{'有A·N':>7}{'净%有A':>10}{'无A·N':>7}{'净%无A':>10}"
+             f"{'差值':>9}   {'结论':<14}")
+    L.append("    " + "-" * 90)
+    for s in ORDER:
+        if s == "通道A(量能突变)":
+            continue
+        y = [r for r in t0[s] if r["lots"] and (r["code"], r["D"]) in aset]
+        n = [r for r in t0[s] if r["lots"] and (r["code"], r["D"]) not in aset]
+        ny, nn = _net(y), _net(n)
+        if ny is None or nn is None:
+            L.append(f"    {LABEL[s][:20]:<22}{len(y):>7}{'—':>10}{len(n):>7}{'—':>10}"
+                     f"{'—':>9}   {'样本不足':<14}")
+            continue
+        d = ny - nn
+        verdict = ("A 是正过滤器" if d > 0.01 else
+                   "A 是负过滤器" if d < -0.01 else "A 无差别")
+        L.append(f"    {LABEL[s][:20]:<22}{len(y):>7}{ny:>10.3f}{len(n):>7}{nn:>10.3f}"
+                 f"{d:>9.3f}   {verdict:<14}")
+    L.append("    （差值 = 有A − 无A，单位 净账户%/笔；|差值|<0.01% 视为无差别）")
+
+    # ── 5 组合过滤器 + 样本外复检 ────────────────────────────────
+    # 每条过滤器都只取「信号时刻已知」的量（分位用 bpu、缺口、时段），可落地。
+    # 诚实声明：过滤器本身是按上面几张表挑的 → 挑选过程在样本内。
+    # 所以最后一列必须看「过滤后样本外」：观察期定下的过滤器，验证期还成立吗。
+    FILT = {
+        "预案单(回踩)": lambda r: (r.get("bpu") is None or r["bpu"] <= 2 / 3)
+        and r["gap"] < 1,
+        "通道A(量能突变)": lambda r: r["tm"] < "11:00",
+        "通道B(关键位突破)": lambda r: r["gap"] < 1,
+        "通道C(回踩确认)": lambda r: r["gap"] < 1,
+        "突破预案单": lambda r: r["gap"] < 1,
+    }
+    FN = {"预案单(回踩)": "分位≤2/3 且 缺口<+1%",
+          "通道A(量能突变)": "只取 11:00 前",
+          "通道B(关键位突破)": "缺口<+1%", "通道C(回踩确认)": "缺口<+1%",
+          "突破预案单": "缺口<+1%"}
+    L.append("")
+    L.append("【7】组合过滤器（全部只用信号时刻已知的量）+ 过滤后样本外复检")
+    L.append("    ⚠ 过滤器是按本样本挑的（in-sample 挑选）；唯一诚实的检验是最后一列")
+    L.append(f"    {'策略':<22}{'过滤器':<18}{'N前':>6}{'N后':>6}{'净%前':>9}{'净%后':>9}"
+             f"{'观察期':>9}{'验证期':>9}")
+    L.append("    " + "-" * 94)
+    tot_b = tot_a = 0
+    for s in ORDER:
+        tr = [r for r in t0[s] if r["lots"]]
+        f = [r for r in tr if FILT[s](r)]
+        fo = [r for r in f if r["D"] in obs]
+        fv = [r for r in f if r["D"] in ver]
+        nb, na = _net(tr), _net(f)
+        no, nv = _net(fo), _net(fv)
+        tot_b += sum(r["acc_pnl"] for r in tr) - sum(r["pos_pct"] for r in tr) * COST_RT
+        tot_a += sum(r["acc_pnl"] for r in f) - sum(r["pos_pct"] for r in f) * COST_RT
+        L.append(f"    {LABEL[s][:20]:<22}{FN[s]:<18}{len(tr):>6}{len(f):>6}"
+                 f"{nb if nb is not None else 0:>9.3f}{na if na is not None else 0:>9.3f}"
+                 f"{(no if no is not None else 0):>9.3f}{(nv if nv is not None else 0):>9.3f}")
+    L.append("    " + "-" * 94)
+    L.append(f"    合计（账户元口径，5 万账户 · 21 日累计）：过滤前 {tot_b:+,.0f} 元"
+             f" → 过滤后 {tot_a:+,.0f} 元")
+    L.append("    读法：净%后 > 净%前 只说明过滤器「排除了烂单」；")
+    L.append("    要判断它是不是真 edge，看观察期与验证期是否同号 —— 同号才算数。")
+    return "\n".join(L)
+
+
 def portfolio(agg):
     """组合层模拟（A 股 T+1 真实约束）—— 老罗 2026-09-17 第 4 条。
 
@@ -888,6 +1140,8 @@ def main():
     ap.add_argument("--days", type=int, default=21, help="回测最近 N 个交易日")
     ap.add_argument("--sweep", action="store_true", help="参数敏感性扫描")
     ap.add_argument("--portfolio", action="store_true", help="组合层模拟（主力5万+备用5万）")
+    ap.add_argument("--diagnose", action="store_true",
+                    help="诊断切分：成本敏感性 / 时段·分位·缺口切分 / 样本外 / 通道A 交叉确认")
     ap.add_argument("--detail", default=None, help="打印单只标的的信号明细")
     ap.add_argument("--no-cache", action="store_true", help="强制刷新行情")
     ap.add_argument("--pool", default=None, help="逗号分隔的自定义池")
@@ -925,6 +1179,8 @@ def main():
         txt += "\n" + "\n".join(detail_rows(agg, s) for s in ORDER if agg.get(s))
         if a.portfolio:
             txt += "\n\n" + portfolio(agg)
+        if a.diagnose:
+            txt += "\n\n" + diagnose(agg)
         if a.sweep:
             txt += "\n\n" + sweep(pool_data, a.days, a.no_cache)
     if failed:

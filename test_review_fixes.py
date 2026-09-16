@@ -825,6 +825,28 @@ def test_backtest_uses_probe_constants():
             f"回测复制了 {name}；应改成直接用 P.{name}，否则会与线上漂移")
 
 
+def test_band_pos_is_signal_time_not_full_day():
+    """诊断用的分位必须是「截至信号那一刻」的口径，不得用全日高低点。
+
+    全日高低点含未来信息：买完就跌的票事后必然落进「高位桶」——那是「跌」的
+    机械结果，不是「买贵了」的原因。用它切分会把结果当原因（实测：预案单
+    高位桶胜率 0% 是假的，换成信号时刻口径后是 9.3%，梯度仍在但不再夸张）。
+    全日口径只允许出现在标注了「仅供对照」的对照表里。
+    """
+    import backtest_intraday as BT
+    bars = [{"h": 11.0, "l": 10.0}, {"h": 10.8, "l": 10.2}]
+    assert BT._band_pos(10.0, bars) == 0.0       # 最低
+    assert BT._band_pos(10.5, bars) == 0.5       # 中位
+    assert BT._band_pos(11.0, bars) == 1.0       # 最高
+    assert BT._band_pos(10.5, [{"h": 10.5, "l": 10.5}]) is None   # 区间未展开
+    assert BT._band_pos(10.5, []) is None
+    # 诊断函数必须把全日口径标成对照、信号时刻口径标成主口径
+    src = (Path(__file__).resolve().parent / "backtest_intraday.py").read_text(
+        encoding="utf-8")
+    assert "【3a】" in src and "仅供对照" in src
+    assert "含未来信息" in src
+
+
 def test_ash_limit_anchor_is_basis_not_snap_prev():
     """涨停锚必须用 basis[-1] 收盘，不能用 snap["prev"]。
 
@@ -972,4 +994,5 @@ if __name__ == "__main__":
     test_ash_portfolio_gate()
     test_ash_t1_struct_stop()
     test_breakout_preorder_has_no_strong_tier()
+    test_band_pos_is_signal_time_not_full_day()
     print("ok")
