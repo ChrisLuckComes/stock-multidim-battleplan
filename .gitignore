@@ -9,3 +9,5 @@ scan_all/codes.json
 scan_all/results.jsonl
 data_n/
 cache/
+bt_early.txt
+run.log

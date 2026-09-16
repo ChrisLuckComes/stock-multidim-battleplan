@@ -313,6 +313,37 @@ def run_BO_preorder(ctx):
                 entry_next=entry)]
 
 
+def run_BO_early(ctx):
+    """突破预案单·早进：setup 成立就开盘进场，不等站上触发价（老罗 2026-09-17 问）。
+
+    机制账：R:R = (目标−入场)/(入场−止损)，对入场价求导恒为负 → **入场越早
+    R:R 越高**，这点两边市场都成立。差别全在「错了能不能当场改」：
+      美股 T+0：假突破当天就砍，早进的代价 = 多挨几次小止损，每次有界；
+      A股 T+1：假突破当天卖不掉，止损变次日跳空；利润端同样锁到次日。
+    且 1.5% 风险预算法会按更宽的止损自动缩股 → 单笔亏损仍恒 ≈1.5%，
+    早进的真实收益只剩「赢单的 R 更大」，真实成本 = 胜率下降 + 跳空穿损。
+    哪边划算让数据判：同一批 setup 日，早进（开盘价）vs 触发进，同台对打。
+    """
+    bo = P.breakout_preorder(ctx.b2, ctx.atr, ctx.prev_c, profile="ash")
+    if not bo or bo["grade"] != "normal":
+        return []
+    room = (ctx.lim - bo["trigger"]) / ctx.lim * 100
+    if room < P.ASH_LIMIT_BUFFER * 100:
+        return []
+    if ctx.op >= ctx.lim:
+        return []
+    if P.bo_gap_cancel(ctx.op, bo, ctx.atr):
+        return []
+    entry = round(ctx.op, 2)
+    stop, tgt = bo["stop"], bo["target"]
+    if stop >= entry or not tgt or tgt <= entry:
+        return []
+    return [sig("突破预案单·早进", 0, entry, stop, tgt,
+                {"early": entry < bo["trigger"], "gap_pct":
+                    round((ctx.op - ctx.prev_c) / ctx.prev_c * 100, 2),
+                 "K": bo["K"], "trigger": bo["trigger"]})]
+
+
 # ------------------------------------------------------------------
 # 出场评估
 # ------------------------------------------------------------------
@@ -500,7 +531,7 @@ def collect(code, daily, mins, days, detail=False):
         d_gap = round((d_op - ctx.prev_c) / ctx.prev_c * 100, 2)
         sb = run_B_break(ctx)
         found = run_baseline_preorder(ctx) + run_A_burst(ctx) + sb \
-            + run_C_pullback(ctx, sb) + run_BO_preorder(ctx)
+            + run_C_pullback(ctx, sb) + run_BO_preorder(ctx) + run_BO_early(ctx)
         for s in found:
             # 次根开盘成交价：信号根收盘之后的第一笔可成交价。
             # 信号落在最后一根 → 用次日开盘（收盘信号的真实成交价）。
@@ -574,15 +605,16 @@ def collect(code, daily, mins, days, detail=False):
 # 报告
 # ------------------------------------------------------------------
 ORDER = ["预案单(回踩)", "通道A(量能突变)", "通道B(关键位突破)",
-         "通道C(回踩确认)", "突破预案单"]
+         "通道C(回踩确认)", "突破预案单", "突破预案单·早进"]
 LABEL = {"预案单(回踩)": "预案单（回踩大阳·旧基线）",
          "通道A(量能突变)": "通道A 量能突变",
          "通道B(关键位突破)": "通道B 关键位突破",
          "通道C(回踩确认)": "通道C 回踩确认",
-         "突破预案单": "突破预案单（盘前条件单）"}
+         "突破预案单": "突破预案单（盘前条件单）",
+         "突破预案单·早进": "突破预案单·早进（开盘价）"}
 # 同一天、同一只票有多个信号时，先花掉额度的顺序（老罗口径：C > A > B；
 # 盘前条件单最靠前，它先挂上就先占额度；旧预案单最后）。
-PRIORITY = ["突破预案单", "通道C(回踩确认)", "通道A(量能突变)",
+PRIORITY = ["突破预案单", "突破预案单·早进", "通道C(回踩确认)", "通道A(量能突变)",
             "通道B(关键位突破)", "预案单(回踩)"]
 
 
