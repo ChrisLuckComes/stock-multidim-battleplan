@@ -84,6 +84,50 @@ def lots_for(qty, account, price):
     return n
 
 
+def room_and_cap(bars, z, mode, atr_v, rr=1.5):
+    """上方空间闸门：确定「第一目标位」和「买入上限价」。
+
+    买区贴防守位（floor+1.0×ATR）的意义是压低单股风险，代价是要求深回踩、
+    成交率低。想靠抬高挂价换成交率，就必须同时看上方还有多少空间——
+    否则会出现「风险 1.56 元/股，空间 0.90 元/股」这种负期望的单子。
+
+    cap = 使 (target1 − P) / (P − hard) ≥ rr 的最高挂价，解出
+        P ≤ (target1 + rr × hard) / (1 + rr)
+    """
+    c = bars[-1]["c"]
+    hard = None
+    try:
+        sp = stop_plan(bars, mode, dict(z), atr_v)
+        if sp:
+            hard = sp.get("hard")
+    except Exception:
+        pass
+    if hard is None and z.get("level") is not None:
+        hard = round(z["level"] - 0.10 * atr_v, 2)
+
+    t1 = None
+    try:
+        Hs, _Ls = pivots(bars, 3)
+        resist = sorted({h for _, h in Hs if h > c + 0.05 * atr_v})
+        t1 = resist[0] if resist else None
+    except Exception:
+        pass
+    if t1 is None:
+        hi60 = max(x["h"] for x in bars[-60:])
+        t1 = hi60 if hi60 > c + 0.05 * atr_v else None
+
+    cap = None
+    if t1 and hard and t1 > c:
+        cap = round((t1 + rr * hard) / (1.0 + rr), 2)
+    return {
+        "target1": round(t1, 2) if t1 else None,
+        "room_pct": round((t1 - c) / c * 100, 2) if t1 else None,
+        "hard": round(hard, 2) if hard else None,
+        "cap": cap,
+        "rr": rr,
+    }
+
+
 def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False, until=None):
     if not (code.isdigit() and len(code) == 6):
         print(f"[{code}] 本脚本当前只覆盖 A 股（6 位代码）。")
@@ -139,22 +183,38 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False, u
     invalid = bool(z.get("invalid")) or "作废" in note_txt
     has_zone = z.get("primary_hi") is not None and z.get("primary_lo") is not None
     if has_zone and not invalid:
-        hi = z["primary_hi"]
+        lo, hi = z.get("primary_lo"), z["primary_hi"]
         defend = z.get("invalidation")
+        rc = room_and_cap(b2, z, plan["mode"], atr_v)
+        hard, cap, t1 = rc["hard"], rc["cap"], rc["target1"]
+        capped = cap is not None and hi > cap
+        limit = round(cap, 2) if capped else hi
         cut = round(hi + CHASE_ATR * atr_v, 2)
-        n = lots_for(qty, account, hi)
+        n = lots_for(qty, account, limit)
         kind = "突破跟单" if plan["recommend"] else "回踩单（未到位，等回落）"
         print(f"  类型    : {kind}     模式 {plan['mode']}")
-        print(f"  挂单    : 限价买 {hi}（买区 {z.get('primary_lo')}-{hi} 的上沿）")
+        print(f"  挂单    : 限价买 {limit:.2f}（买区 {lo}-{hi} 上沿）"
+              f"{'  ⚠ 已被盈亏比闸门下压' if capped else ''}")
+        if cap is not None:
+            print(f"  买入上限: {cap:.2f}   ← 高于此价，盈亏比跌破 {rc['rr']:.1f}:1，不挂")
         print(f"  数量    : {n} 股（计划 {qty} 股的 1/3）" if n else "  数量    : 计划仓 1/3")
         if n:
-            print(f"  金额    : {n * hi:,.0f} 元"
-                  f"（账户 {account:,} 的 {n * hi / account * 100:.1f}%，上限 30%）")
-        print(f"  止损    : 结构={defend}（收盘破） / 硬="
-              f"{round(defend - 0.10 * atr_v, 2) if defend else 'N/A'}（盘中破即走）")
+            print(f"  金额    : {n * limit:,.0f} 元"
+                  f"（账户 {account:,} 的 {n * limit / account * 100:.1f}%，上限 30%）")
+        print(f"  止损    : 结构={defend}（收盘破） / 硬={hard}（盘中破即走）")
+        if t1 and isinstance(hard, (int, float)):
+            risk, rew = limit - hard, t1 - limit
+            rr_txt = f"{rew / risk:.2f}:1" if risk > 0 else "N/A"
+            print(f"  目标    : {t1}（现价上方 {rc['room_pct']}%）"
+                  f"  → 挂 {limit:.2f}：风险 {risk:.2f} / 收益 {rew:.2f} = {rr_txt}")
         print(f"  撤单    : 开盘跳空 > {cut}（买区上沿 +1.0×ATR）")
-        out["pre_order"] = {"kind": kind, "limit": hi, "qty": n, "stop_struct": defend,
-                            "cancel_above": cut}
+        c0 = basis[-1]["c"]
+        print(f"  高开处置: 开盘 ≤ {c0 * 1.01:.2f}（+1%）→ 挂单原样有效"
+              f" ｜ {c0 * 1.01:.2f}~{c0 * 1.03:.2f}（+1~3%）→ 只挂不追，不得高于买入上限"
+              f" ｜ > {c0 * 1.03:.2f}（+3%）→ 回踩单作废，只留盘中量能突变")
+        out["pre_order"] = {"kind": kind, "limit": limit, "cap": cap, "qty": n,
+                            "stop_struct": defend, "stop_hard": hard,
+                            "target1": t1, "cancel_above": cut}
     elif invalid:
         print(f"  无预案单：买区已作废 —— {note_txt}")
     else:
