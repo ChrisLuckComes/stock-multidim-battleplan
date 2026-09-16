@@ -56,14 +56,15 @@ stock-multidim-battleplan/
 ├── SKILL.md             # 主技能定义（Agent 加载的核心指令）
 ├── fetch_market.py      # 通用行情取数（零外部 skill：A股东方财富 / 美股 Yahoo）
 ├── rule123.py           # 方向感知结构判定（延续回踩/突破 vs 反转 123）
-├── report-template.html # 研报 HTML 模板
-└── scripts/
-    └── fetch_market.js  # 美股 Yahoo 失败时的东财公开 JSON 兜底
+├── test_breakout_modes.py
+├── test_living_platform.py
+├── test_review_fixes.py
+└── scan_all/            # 全市场扫描（买区走 rule123.build_ev）
 ```
 
 - **SKILL.md**：主技能的"大脑"，定义了全部分析维度、纪律框架与输出规范。Agent 通过它理解如何工作。
 - **fetch_market.py**：通用取数兜底。当运行环境**没有** wb-finance-skill 时使用（如 Cursor / 通用 Agent）；有 wb-finance-skill 的 WorkBuddy 环境可优先用前者，仍可用本脚本做结构判定。
-- **rule123.py**：输出 `mode`（platform_break / w_bottom_break / flag_tl_break / line_pullback / downtrend_tl_break / impulse_pause / wait）和 `priority`（1=优先T1，2=次优先T2）。
+- **rule123.py**：输出 `mode`（platform_break / w_bottom_break / flag_tl_break / line_pullback / downtrend_tl_break / impulse_pause / wait）和 `priority`（1=优先T1，2=次优先T2），以及 `stop_plan` / `targets`。
 
 ---
 

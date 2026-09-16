@@ -1,78 +1,75 @@
 # -*- coding: utf-8 -*-
-"""活平台沿回归：P0–P1 的 R1 不是今天的突破位；突破阳高点也不是新沿。"""
-import json
+"""活平台沿 / 买区闸门回归（合成 K 线，不依赖 data/）。"""
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rule123 import atr14, evaluate, living_platform, pivots
-
-DATA = Path(__file__).resolve().parent / "data"
+from rule123 import atr14, living_platform, pivots, plan_entry, zone_at_level
 
 
-def _run(code):
-    return evaluate(code, str(DATA / f"{code}.json"))
+def _bar(d, o, h, l, c, v=1e6):
+    return {"d": d, "o": o, "h": h, "l": l, "c": c, "v": v}
 
 
-def _platform_of(bars):
-    Hs, _ = pivots(bars)
-    return living_platform(bars, Hs, atr14(bars))
+def test_zone_at_level_not_hardcoded_in_zone():
+    bars = [_bar("2026-01-01", 100, 101, 99, 100)]
+    z = zone_at_level(100, 2.0, 112.0, "平台突破(优先T1)", {}, bars)
+    assert z["in_zone"] is False
+    assert z["dist_atr"] is not None and z["dist_atr"] > 2
+    assert z["extended"] is True
+    assert z["anchor"] == "platform_lip"
 
 
-def test_shandong_gold_not_stale_r1():
-    r = _run("600547")
-    plat = r["platform"]["price"]
-    r1 = r["R1"]["price"]
-    assert r1 == 32.55, r1
-    assert abs(plat - 38.14) < 0.05, plat
-    assert r["last"] < plat
-    assert r["mode"] != "platform_break"
-    assert r["verdict"] != "平台突破·量能不足"
+def test_platform_break_too_far_becomes_wait():
+    bars = []
+    for i in range(40):
+        px = 100.0
+        bars.append(_bar(f"2026-01-{i + 1:02d}", px, px + 1, px - 1, px, 8e5))
+    bars.append(_bar("2026-03-11", 101, 105, 100.8, 104, 4e6))
+    bars.append(_bar("2026-03-12", 104, 110, 103, 109, 4e6))
+    bars.append(_bar("2026-03-13", 109, 113, 108, 112, 4e6))
+    ev = {
+        "rvol20": 3.0,
+        "platform": {"price": 101.0, "i": 35, "kind": "fresh_break", "days_above": 3},
+        "P0": {"i": 10, "price": 95},
+        "P1": {"i": 20, "price": 96},
+        "R1": {"i": 15, "price": 100},
+        "c2": True,
+        "w_bottom": None,
+        "bull_flag": None,
+        "down_tl": None,
+    }
+    plan = plan_entry(bars, ev)
+    assert plan["recommend"] is False
+    assert "延伸" in (plan["verdict"] or "") or "不追" in (plan["note"] or "")
 
 
-def test_runtu_not_inner_shelf():
-    r = _run("002440")
-    plat = r["platform"]["price"]
-    r1 = r["R1"]["price"]
-    assert r1 == 13.34, r1
-    assert abs(plat - 14.22) < 0.05, plat
-    assert r["last"] < plat
-    assert r["mode"] != "platform_break"
-    assert r["verdict"] != "平台突破·量能不足"
-
-
-def test_unigroup_not_far_ath():
-    r = _run("000938")
-    plat = r["platform"]["price"]
-    r1 = r["R1"]["price"]
-    assert r1 == 41.68, r1
-    assert abs(plat - 41.68) < 0.05, plat
-    assert plat < 45.0
-
-
-def test_raytron_breakout_stays_on_179():
-    bars = json.loads((DATA / "688002.json").read_text(encoding="utf-8"))["bars"]
-    r = _run("688002")
-    assert abs(r["platform"]["price"] - 179.0) < 0.05, r["platform"]
-    extra = [
-        {"d": "2026-09-01", "o": 183, "h": 186.5, "l": 178, "c": 181, "v": 15e6},
-        {"d": "2026-09-02", "o": 180, "h": 184, "l": 177, "c": 180, "v": 12e6},
-        {"d": "2026-09-03", "o": 179.5, "h": 183, "l": 176, "c": 179.8, "v": 11e6},
-    ]
-    acc = list(bars)
-    for i, x in enumerate(extra, 1):
-        acc = acc + [x]
-        plat = _platform_of(acc)
-        if i <= 2:
-            assert plat is not None, i
-            assert abs(plat["price"] - 179.0) < 0.05, (i, plat)
-        if plat is not None:
-            assert plat["price"] < 185, (i, plat)
+def test_living_platform_fresh_break_ignores_spike_ath():
+    """突破窗口内冲高不改写被破的活沿。"""
+    bars = []
+    # 缓慢抬高再在 50 留下确认高点 120
+    for i in range(40):
+        px = 100 + i * 0.2
+        bars.append(_bar(f"2026-01-{i + 1:02d}", px, px + 1.5, px - 1, px, 1e6))
+    # 明确摆动高 120，前后留足 w=3
+    bars.append(_bar("2026-02-01", 110, 112, 109, 111, 1e6))
+    bars.append(_bar("2026-02-02", 111, 113, 110, 112, 1e6))
+    bars.append(_bar("2026-02-03", 112, 120, 111, 118, 2e6))  # 沿
+    bars.append(_bar("2026-02-04", 117, 119, 115, 116, 1e6))
+    bars.append(_bar("2026-02-05", 116, 117, 114, 115, 1e6))
+    bars.append(_bar("2026-02-06", 115, 116, 113, 114, 1e6))
+    # 突破并冲高到 130，收在沿上
+    bars.append(_bar("2026-02-07", 115, 130, 114, 122, 5e6))
+    bars.append(_bar("2026-02-08", 121, 125, 120, 123, 3e6))
+    Hs, _ = pivots(bars, w=3)
+    plat = living_platform(bars, Hs, atr14(bars))
+    assert plat is not None, Hs[-5:]
+    assert plat["price"] < 128, plat
+    assert plat["kind"] in ("fresh_break", "pressing")
 
 
 if __name__ == "__main__":
-    test_shandong_gold_not_stale_r1()
-    test_runtu_not_inner_shelf()
-    test_unigroup_not_far_ath()
-    test_raytron_breakout_stays_on_179()
+    test_zone_at_level_not_hardcoded_in_zone()
+    test_platform_break_too_far_becomes_wait()
+    test_living_platform_fresh_break_ignores_spike_ath()
     print("ok")

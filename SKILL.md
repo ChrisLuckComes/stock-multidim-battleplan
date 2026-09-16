@@ -47,7 +47,7 @@ disable-model-invocation: true
 | 平台突破 | 优先 T1 | `platform_break` | 收盘站上平台沿 / 前高 R1 | 突破位（缺口下沿）下 |
 | W底颈线突破 | 优先 T1 | `w_bottom_break` | 收盘站上双底颈线 | 颈线下 |
 | 旗形下降趋势线突破 | 优先 T1 | `flag_tl_break` | 主升旗杆后，收盘站上旗面下降趋势线 | 该旗面趋势线下 |
-| 沿线回踩 | 优先 T1 | `line_pullback` | 回踩那条肉眼可见的上升线（默认摆动低点趋势线） | 收盘跌破该线 |
+| 沿线回踩 | 优先 T1 | `line_pullback` | 回踩那条肉眼可见的上升线（默认摆动低点趋势线） | 结构止损=收盘破 **MA5**（贴轨例外用已选均线）；硬止损=同锚 −0.10×ATR |
 | 大阳后缩量回踩 | 次优先 T2 | `impulse_pause` | 缩到近期最低量 + 近3根不创新低（一字板则回踩缺口） | 普通=大阳低点；一字=缺口下沿（前收） |
 | 下降趋势线突破 | 次优先 T2 | `downtrend_tl_break` | 收盘站上下降趋势线（无旗杆的泛化反转） | 该趋势线下 |
 | 等待 | — | `wait` | 不买 | — |
@@ -251,9 +251,18 @@ disable-model-invocation: true
 python fetch_market.py 601233 --out data/601233.json
 python fetch_market.py CF --out data/cf.json
 python rule123.py CF --data data/cf.json
+python rule123.py 300207 --data data/300207.json --eod --out out.json
 ```
 
-美股 Yahoo 失败时改跑 `scripts/fetch_market.js`。输出看 `mode` / `priority` / `buy_zone` / `recommend`。
+`--eod`：丢弃今日未收盘末根。`--out`：写出 JSON（默认不写 CWD）。
+
+`rule123` 除 `mode` / `buy_zone` 外必须带：
+- `stop_plan`：`struct` + `hard` + 锚名 + `trigger`（两档止损，禁止合成一个价）
+- `targets`：`target1` / `target2` / `rr_target1`
+- 平台突破 `anchor=platform_lip`（活平台沿，不是死 R1）
+- 突破类高出买区上沿 >2×ATR → `recommend=False`
+
+ATR：Wilder ATR14。美股 Yahoo 失败时脚本内 stooq 兜底。
 
 取数优先级：wb-finance-skill → `fetch_market.py` → 网页检索（并标注来源）。
 

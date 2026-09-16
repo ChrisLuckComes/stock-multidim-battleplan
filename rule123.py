@@ -136,6 +136,7 @@ def get_bars(sym, data_file=None):
 
 
 def pivots(bars, w=3):
+    """摆动高低点。允许并列（<=/>=），同簇内只保留更极端的一根，避免一字连板导致 R1 空。"""
     Hs, Ls = [], []
     n = len(bars)
     for i in range(w, n - w):
@@ -144,7 +145,19 @@ def pivots(bars, w=3):
             Hs.append((i, hh))
         if all(bars[j]["l"] >= ll for j in range(i - w, i + w + 1) if j != i):
             Ls.append((i, ll))
-    return Hs, Ls
+
+    def _dedup(ps, higher_is_better):
+        out = []
+        for i, p in ps:
+            if out and i - out[-1][0] < w:
+                better = p > out[-1][1] if higher_is_better else p < out[-1][1]
+                if better:
+                    out[-1] = (i, p)
+                continue
+            out.append((i, p))
+        return out
+
+    return _dedup(Hs, True), _dedup(Ls, False)
 
 
 def line_val(p_b, p_a, idx):
@@ -204,14 +217,19 @@ def ema_series(closes, n):
 
 
 def atr14(bars, n=14):
+    """Wilder ATR（与通达信/东财口径一致）。首值用前 n 根 TR 简单均值，其后递推。"""
     if len(bars) < 2:
         return None
     trs = []
     for i in range(1, len(bars)):
         h, l, pc = bars[i]["h"], bars[i]["l"], bars[i - 1]["c"]
         trs.append(max(h - l, abs(h - pc), abs(l - pc)))
-    w = min(n, len(trs))
-    return sum(trs[-w:]) / w
+    if len(trs) < n:
+        return sum(trs) / len(trs) if trs else None
+    atr = sum(trs[:n]) / n
+    for tr in trs[n:]:
+        atr = (atr * (n - 1) + tr) / n
+    return atr
 
 
 def avwap_from(bars, start_i):
@@ -322,13 +340,51 @@ ANCHOR_LABEL = {
     "sma20": "SMA20",
     "ma5": "MA5",
     "avwap_p1": "锚定VWAP",
-    "r1": "突破位R1",
+    "platform_lip": "活平台沿",
+    "r1": "突破位R1",  # 兼容旧字段；平台突破请用 platform_lip
     "w_neckline": "W底颈线",
     "flag_tl": "旗形下降趋势线",
     "yang_digest": "大阳调整区",
     "yang_gap": "缺口下沿",
     "down_tl": "下降趋势线",
 }
+
+_ASH_SESSIONS = ((9 * 60 + 30, 11 * 60 + 30), (13 * 60, 15 * 60))
+
+
+def is_live_bar(bars, market="ASH", now=None):
+    """末根是否为今日未收盘 K 线（盘中量能/RVOL 不可信）。"""
+    if not bars:
+        return False
+    now = now or datetime.datetime.now()
+    if str(bars[-1]["d"])[:10] != now.strftime("%Y-%m-%d"):
+        return False
+    if market != "ASH":
+        # 美股：简单按本地日历日未过 16:00 ET 近似；无时区库时只标当日末根
+        return True
+    t = now.hour * 60 + now.minute
+    return any(a <= t < b for a, b in _ASH_SESSIONS)
+
+
+def is_yizi(bar, prev_c, atr_v):
+    """真一字/振幅极小跳空：有缺口 + 振幅 tiny + 实体≈0。光脚大阳天然排除。"""
+    if prev_c is None:
+        return False
+    has_gap = bar["o"] > prev_c * 1.01
+    y_range = bar["h"] - bar["l"]
+    body = abs(bar["c"] - bar["o"])
+    tiny = y_range <= max(bar["c"] * 0.003, 0.15 * (atr_v or bar["c"] * 0.01))
+    return bool(has_gap and tiny and body <= 0.03 * bar["c"])
+
+
+def too_far_from_zone(z, atr_v, last_c, limit=2.0):
+    """现价高出买区上沿 >limit×ATR → 不追。"""
+    if not atr_v or last_c is None or not z:
+        return False
+    hi = z.get("primary_hi")
+    if hi is None:
+        return False
+    return (last_c - hi) / atr_v > limit
 
 
 def living_demand(bars, ev):
@@ -455,30 +511,25 @@ def vol_at_recent_low(bars, yang_i):
 
 
 def held_lows_3d(bars, yang_i, atr_v):
-    """最近 3 根都不下破此前回调低点（允许 0.1×ATR 噪声）。未满 3 根不算。
-    要的是横盘控盘，不是天天阴跌再走 N 字。
+    """最近 3 根收盘都不下破「窗口之前」的回调最低收盘（允许 0.1×ATR）。未满 3 根不算。
+    基准固定在 n-3 之外，禁止棘轮把阴跌误判成控盘。用收盘而非最低价。
     """
     n = len(bars)
     if n - 1 - yang_i < 3:
         return False
     pad = 0.1 * atr_v if atr_v else bars[-1]["c"] * 0.002
-    for i in range(n - 3, n):
-        prior = [bars[j]["l"] for j in range(yang_i + 1, i)]
-        if not prior:
-            continue
-        if bars[i]["l"] < min(prior) - pad:
-            return False
-    return True
+    prior = [bars[j]["c"] for j in range(yang_i + 1, n - 3)]
+    ref = min(prior) if prior else bars[yang_i]["c"]
+    return min(bars[j]["c"] for j in range(n - 3, n)) >= ref - pad
 
 
 def yang_floor(bars, yang_i, atr_v):
-    """防守位：普通大阳=当日低点；一字/振幅极小的跳空=缺口下沿（前收）。"""
+    """防守位：普通大阳=当日低点；真一字/振幅极小跳空=缺口下沿（前收）。"""
     y = bars[yang_i]
     y_lo, y_hi = y["l"], y["h"]
     prev_c = bars[yang_i - 1]["c"] if yang_i > 0 else None
     has_gap = prev_c is not None and y["o"] > prev_c * 1.01
-    y_range = y_hi - y_lo
-    yi_zi = bool(has_gap and atr_v and y_range < 0.35 * atr_v)
+    yi_zi = is_yizi(y, prev_c, atr_v)
     if yi_zi:
         return {
             "yi_zi": True,
@@ -527,7 +578,7 @@ def find_impulse_pause(bars, atr_v):
             "floor": floor,
             "yi_zi": fl["yi_zi"],
         }
-    lows_after = [bars[j]["l"] for j in range(yang_i + 1, n)]
+    lows_after = [bars[j]["c"] for j in range(yang_i + 1, n)]
     min_after = min(lows_after)
     pad = 0.15 * atr_v if atr_v else floor * 0.005
     if min_after < floor - pad:
@@ -604,6 +655,7 @@ def _empty_zone():
 
 
 def zone_from_demand(demand, bars, ev):
+    """沿线回踩买区：半宽与 in_zone 门槛统一为 1.0×ATR（与 SKILL 贴线触发一致）。"""
     closes = [b["c"] for b in bars]
     last_c = closes[-1]
     ma5 = sma(closes, 5)
@@ -617,7 +669,7 @@ def zone_from_demand(demand, bars, ev):
         return out
     atr_v = demand.get("atr") or atr14(bars)
     level = demand["level"]
-    pad = 0.35 * atr_v if atr_v else level * 0.005
+    pad = 1.0 * atr_v if atr_v else level * 0.01
     lo = min(demand.get("cluster_lo", level), level) - pad
     hi = max(demand.get("cluster_hi", level), level) + pad
     if last_c and hi - lo < last_c * 0.002:
@@ -638,7 +690,8 @@ def zone_from_demand(demand, bars, ev):
         "dist_atr": round(demand["dist_atr"], 2),
         "hits": demand["hits"],
         "extended": extended,
-        "invalidation": round(level - pad, 2),
+        # invalidation 兼容旧字段：结构位=该线本身（收盘破）；硬止损见 stop_plan
+        "invalidation": round(level, 2),
     })
     if ev.get("cond3_break_prior_high") and r1:
         out["fail_lo"] = round(r1 * 0.99, 2)
@@ -779,6 +832,13 @@ def detect_bull_flag(bars, Hs, atr_v, lookback=45):
             break
     if pb is None or pa is None:
         return None
+    # 旗面通常 3–20 根；更长是通道不是旗。回撤不超过旗杆 2/3。
+    flag_len = n - 1 - pe
+    if flag_len > 20:
+        return None
+    flag_low = min(x["l"] for x in bars[pe + 1:])
+    if best_pole["hi"] - flag_low > 0.66 * (best_pole["hi"] - best_pole["lo"]):
+        return None
     tl_now = line_val(pb, pa, n - 1)
     if tl_now is None:
         return None
@@ -805,14 +865,18 @@ def detect_bull_flag(bars, Hs, atr_v, lookback=45):
         "tl_now": tl_now,
         "days_above_tl": days_above_line(bars, pb, pa),
         "mid_pole": mid_pole,
+        "flag_len": flag_len,
     }
 
 
 def zone_at_level(level, atr_v, last_c, kind, ev, bars):
+    """突破类买区：半宽 0.35×ATR；in_zone/dist_atr/extended 按现价真算。"""
     z = _empty_zone()
     closes = [b["c"] for b in bars]
-    z["vwap5"] = round(typical_vwap(bars, 5) or 0, 2) if typical_vwap(bars, 5) else None
-    z["ma5"] = round(sma(closes, 5), 2) if sma(closes, 5) else None
+    v5 = typical_vwap(bars, 5)
+    z["vwap5"] = round(v5, 2) if v5 is not None else None
+    ma5 = sma(closes, 5)
+    z["ma5"] = round(ma5, 2) if ma5 is not None else None
     if level is None:
         return z
     pad = 0.35 * atr_v if atr_v else level * 0.005
@@ -825,21 +889,159 @@ def zone_at_level(level, atr_v, last_c, kind, ev, bars):
     elif "旗形" in kind:
         anchor = "flag_tl"
     elif "平台" in kind:
-        anchor = "r1"
+        anchor = "platform_lip"
     else:
         anchor = "down_tl"
+    dist = None
+    if last_c is not None and atr_v:
+        dist = (last_c - level) / atr_v
     z.update({
         "type": kind,
         "anchor": anchor,
         "level": round(level, 2),
         "primary_lo": round(lo, 2),
         "primary_hi": round(hi, 2),
-        "in_zone": True,
-        "dist_atr": 0.0,
-        "extended": False,
-        "invalidation": round(level - pad, 2),
+        "dist_atr": round(dist, 2) if dist is not None else None,
+        "in_zone": bool(dist is not None and -0.35 <= dist <= 1.0),
+        "extended": bool(dist is not None and dist > 2.0),
+        # 结构位=突破位本身；硬止损由 stop_plan 另给
+        "invalidation": round(level, 2),
     })
     return z
+
+
+HARD_STOP_TRIGGER = (
+    "开盘已在硬止损下→开盘走；盘中破后3分钟仍在下或分钟线新低→市价走；"
+    "1–2分钟收回且非放量加速阴→当毛刺"
+)
+
+
+def stop_plan(bars, mode, z, atr_v):
+    """两档止损：结构（收盘破）+ 硬止损（锚三选一 − 0.10×ATR）。硬止损必须低于买区下沿。"""
+    if not bars or not atr_v or not z or z.get("level") is None:
+        return None
+    y = bars[-1]
+    body, rng = abs(y["c"] - y["o"]), y["h"] - y["l"]
+    long_yang = (
+        y["c"] > y["o"]
+        and (body >= 0.8 * atr_v or rng >= 1.0 * atr_v or (y["o"] and body / y["o"] >= 0.03))
+    )
+    level = z["level"]
+    buy_lo = z.get("primary_lo") if z.get("primary_lo") is not None else level
+    gap = 0.10 * atr_v
+
+    def _ensure_below_buy(hard, hard_anchor, fallback_anchor_px, fallback_name):
+        if hard >= buy_lo:
+            return round(fallback_anchor_px - gap, 2), fallback_name
+        return round(hard, 2), hard_anchor
+
+    if mode == "line_pullback":
+        # 结构锚默认 MA5；贴轨例外用已选均线 level
+        if z.get("anchor") in ("hl_trendline", None):
+            anchor_px = z.get("ma5") if z.get("ma5") is not None else level
+            struct_name, hard_name = "MA5(收盘破)", "MA5"
+        else:
+            anchor_px = level
+            struct_name = f"{ANCHOR_LABEL.get(z.get('anchor'), z.get('anchor'))}(收盘破)"
+            hard_name = ANCHOR_LABEL.get(z.get("anchor"), z.get("anchor"))
+        hard = anchor_px - gap
+        hard, hard_name = _ensure_below_buy(hard, hard_name, y["l"], "阳线下沿")
+        return {
+            "struct_anchor": struct_name,
+            "struct": round(anchor_px, 2),
+            "hard_anchor": hard_name,
+            "hard": hard,
+            "trigger": HARD_STOP_TRIGGER,
+        }
+
+    if mode == "impulse_pause":
+        floor = level
+        if z.get("yi_zi"):
+            return {
+                "struct_anchor": "缺口下沿/前收(收盘破)",
+                "struct": round(floor, 2),
+                "hard_anchor": "缺口下沿",
+                "hard": round(floor - gap, 2),
+                "trigger": HARD_STOP_TRIGGER,
+            }
+        hard = floor - gap
+        return {
+            "struct_anchor": "大阳低点(收盘破)",
+            "struct": round(floor, 2),
+            "hard_anchor": "阳线下沿",
+            "hard": round(hard, 2),
+            "trigger": HARD_STOP_TRIGGER,
+        }
+
+    # 平台 / W底 / 旗形 / 下降趋势线突破
+    struct = round(level, 2)
+    struct_name = f"{ANCHOR_LABEL.get(z.get('anchor'), z.get('anchor') or '突破位')}@{struct}(收盘破)"
+    if long_yang:
+        mid = (y["h"] + y["l"]) / 2.0
+        hard, hard_name = _ensure_below_buy(mid - gap, "大阳中点", y["l"], "阳线下沿")
+    else:
+        hard, hard_name = _ensure_below_buy(y["l"] - gap, "突破阳下沿", y["l"], "阳线下沿")
+    return {
+        "struct_anchor": struct_name,
+        "struct": struct,
+        "hard_anchor": hard_name,
+        "hard": hard,
+        "trigger": HARD_STOP_TRIGGER,
+    }
+
+
+def targets(bars, mode, z, atr_v, entry, Hs):
+    """目标1=最近未破摆动高/测量涨幅；目标2=区间更高阻力。附 rr_target1。"""
+    if entry is None or not atr_v:
+        return None
+    resist = sorted({h for i, h in Hs if h > entry + 0.05 * atr_v})
+    t1 = resist[0] if resist else round(entry + 2.0 * atr_v, 2)
+    # 测量涨幅：平台/颈线突破用买区半高近似
+    if mode in ("platform_break", "w_bottom_break") and z and z.get("level") is not None:
+        measured = round(z["level"] + max(atr_v * 2.0, (z.get("primary_hi") or z["level"]) - (z.get("primary_lo") or z["level"])), 2)
+        if measured > entry:
+            t1 = min(t1, measured) if resist else measured
+    hi_all = max(b["h"] for b in bars)
+    t2 = hi_all if hi_all > t1 + 0.2 * atr_v else round(t1 + 2.0 * atr_v, 2)
+    if abs(t2 - t1) < 0.15 * atr_v:
+        t2 = round(t1 + 2.0 * atr_v, 2)
+    hard = (z or {}).get("hard_stop") or (z or {}).get("hard")
+    if isinstance(hard, dict):
+        hard = hard.get("hard")
+    risk = (entry - hard) if hard is not None else None
+    rr = round((t1 - entry) / risk, 2) if risk and risk > 0 else None
+    return {
+        "target1": round(t1, 2),
+        "target2": round(t2, 2),
+        "rr_target1": rr,
+    }
+
+
+def attach_stops_targets(plan, bars, atr_v, Hs):
+    """给 plan / buy_zone 挂上两档止损与目标。"""
+    z = plan.get("buy_zone") or {}
+    mode = plan.get("mode") or "wait"
+    last_c = bars[-1]["c"] if bars else None
+    sp = stop_plan(bars, mode, z, atr_v) if mode != "wait" and plan.get("recommend") else None
+    if sp is None and mode != "wait" and z.get("level") is not None:
+        sp = stop_plan(bars, mode, z, atr_v)
+    if sp:
+        z["struct_stop"] = sp["struct"]
+        z["struct_anchor"] = sp["struct_anchor"]
+        z["hard_stop"] = sp["hard"]
+        z["hard_anchor"] = sp["hard_anchor"]
+        z["hard_trigger"] = sp["trigger"]
+        z["invalidation"] = sp["struct"]  # 兼容：结构止损
+        z["hard"] = sp["hard"]
+    tg = targets(bars, mode, z, atr_v, last_c, Hs or []) if mode != "wait" else None
+    if tg:
+        z["target1"] = tg["target1"]
+        z["target2"] = tg["target2"]
+        z["rr_target1"] = tg["rr_target1"]
+    plan["buy_zone"] = z
+    plan["stop_plan"] = sp
+    plan["targets"] = tg
+    return plan
 
 
 def plan_entry(bars, ev):
@@ -863,6 +1065,7 @@ def plan_entry(bars, ev):
     bz_line["days_above_platform"] = n_above
     uptrend = still_uptrend(bars, ev, last_c, c2, p1p)
     imp = find_impulse_pause(bars, atr_v)
+    Hs_all, Ls_all = pivots(bars, w=3)
 
     dtl = ev.get("down_tl")
     tl_now = None
@@ -877,23 +1080,36 @@ def plan_entry(bars, ev):
             tl_now = line_val(pb, pa, len(bars) - 1)
             days_above_tl = days_above_line(bars, pb, pa)
 
+    breakout_modes = (
+        "platform_break", "w_bottom_break", "flag_tl_break", "downtrend_tl_break",
+    )
+
     def pack(mode, priority, setup, verdict, recommend, note, buy_zone=None, path=None):
         z = buy_zone if buy_zone is not None else bz_line
         if path is None:
             if mode in ("line_pullback", "impulse_pause"):
                 path = "A"
-            elif mode in (
-                "platform_break", "w_bottom_break", "flag_tl_break", "downtrend_tl_break",
-            ):
+            elif mode in breakout_modes:
                 path = "B"
             else:
                 path = "wait"
+        if recommend and mode in breakout_modes and too_far_from_zone(z, atr_v, last_c):
+            lv = z.get("level")
+            hi = z.get("primary_hi")
+            d = (last_c - lv) / atr_v if (atr_v and lv is not None and last_c is not None) else None
+            note = (
+                f"收盘 {last_c:.2f} 高出突破位 {lv} 已 {d:.1f}×ATR（买区上沿 {hi}），"
+                f"不追；等回踩 {hi} 一带或等新一轮缩量再站上"
+            )
+            mode, priority, setup, verdict, recommend, path = (
+                "wait", None, "wait", "突破已延伸·等回踩", False, "wait",
+            )
         z["path"] = path
         z["mode"] = mode
         z["priority"] = priority
         z["days_above_r1"] = n_above_r1
         z["days_above_platform"] = n_above
-        return {
+        result = {
             "path": path,
             "mode": mode,
             "priority": priority,
@@ -905,8 +1121,8 @@ def plan_entry(bars, ev):
             "days_above_r1": n_above_r1,
             "days_above_platform": n_above,
         }
+        return attach_stops_targets(result, bars, atr_v, Hs_all)
 
-    # T1 平台突破：近 3 根才站上活平台沿（不是已死的 P0–P1 R1）
     plat_txt = f"{round(plat_p, 2)}" if plat_p is not None else "N/A"
     fresh_plat = plat_p is not None and last_c is not None and last_c > plat_p and n_above <= 3
     if fresh_plat and vol_ok:
@@ -924,16 +1140,13 @@ def plan_entry(bars, ev):
             f"近{n_above}根站上活平台沿 {plat_txt} 但 RVOL={round(rvol, 2)}≤1.5，不买假突破",
         )
 
-    # T1 W底颈线突破
-    Hs_loc, Ls_loc = pivots(bars, w=3)
     wpat = ev.get("w_bottom")
     if wpat is None:
-        wpat = detect_w_bottom(bars, Hs_loc, Ls_loc, atr_v)
+        wpat = detect_w_bottom(bars, Hs_all, Ls_all, atr_v)
     if wpat and last_c is not None:
         neck = wpat["neckline"]
         n_neck = days_above_level(bars, neck)
         fresh_w = last_c > neck and 1 <= n_neck <= 3
-        # 突破须发生在右底之后
         if fresh_w and wpat["l2"]["i"] < len(bars) - 1:
             neck_txt = round(neck, 2)
             if vol_ok:
@@ -955,10 +1168,9 @@ def plan_entry(bars, ev):
                 f"近{n_neck}根站上颈线 {neck_txt} 但 RVOL={round(rvol, 2)}≤1.5，不买假突破",
             )
 
-    # T1 旗形下降趋势线突破（主升旗杆后的整理旗面）
     flag = ev.get("bull_flag")
     if flag is None:
-        flag = detect_bull_flag(bars, Hs_loc, atr_v)
+        flag = detect_bull_flag(bars, Hs_all, atr_v)
     if flag and last_c is not None:
         f_tl = flag["tl_now"]
         f_days = flag["days_above_tl"]
@@ -983,7 +1195,6 @@ def plan_entry(bars, ev):
                 f"近{f_days}根站上旗面趋势线 {tl_txt} 但 RVOL={round(rvol, 2)}≤1.5，不买假突破",
             )
 
-    # T1 沿线回踩：只在贴线（≤1×ATR）时占用当日；未到位/延伸则让给 T2
     line_wait_verdict = None
     line_wait_note = None
     if structure_ok and demand is not None:
@@ -1014,7 +1225,6 @@ def plan_entry(bars, ev):
                 f"{bz_line.get('primary_lo')}-{bz_line.get('primary_hi')}"
             )
 
-    # T2 大阳后缩量回踩（升势过滤；T1 未贴线时才轮到）
     if uptrend:
         st = imp.get("state")
         y_lo = imp.get("yang_low")
@@ -1029,6 +1239,12 @@ def plan_entry(bars, ev):
             return pack(
                 "wait", None, "wait", "大阳当日不追", False,
                 f"{y_d} 大阳，等缩到近期最低量、回踩进 {zone_txt} 再买，防守看{floor_txt}",
+            )
+        if st == "broke_yang_low":
+            return pack(
+                "wait", None, "wait", "大阳低点已破·作废", False,
+                f"{y_d} 大阳后收盘跌破防守位 {round(floor, 2)}，本笔大阳设置作废",
+                z,
             )
         if st == "extended":
             return pack(
@@ -1078,9 +1294,7 @@ def plan_entry(bars, ev):
             return pack(
                 "impulse_pause", 2, "pullback", "大阳后缩量回踩(次优先T2)", True, note, z,
             )
-        # broke_yang_low / no_yang：这笔大阳作废或没有大阳，不占用当日
 
-    # T2 下降趋势线突破（已识别旗形则走 flag_tl_break，不重复）
     if flag is None:
         fresh_dtl = (
             declining and tl_now is not None and last_c is not None
@@ -1126,13 +1340,14 @@ def buy_zone(ev, bars):
 
 
 def classify_regime(last_c, ema10, sma20, sma50, sma20_up, hh, hl, c2, p1_px):
+    # hh/hl 保留参数兼容扫描器旧调用，不参与门控
+    _ = (hh, hl)
     above20 = sma20 is not None and last_c > sma20
     bull_stack = (
         ema10 is not None and sma20 is not None and sma50 is not None
         and ema10 > sma20 > sma50
     )
     up_ma = bull_stack or bool(sma20_up)
-    # 结构完好：站在底部 P1 之上 且 自底部以来未再创新低（替代脆弱的两两 hl）
     structure_ok = (p1_px is not None and last_c > p1_px) and c2
     if above20 and up_ma and structure_ok:
         return "continuation"
@@ -1141,13 +1356,23 @@ def classify_regime(last_c, ema10, sma20, sma50, sma20_up, hh, hl, c2, p1_px):
     return "mixed"
 
 
-def evaluate(sym, data_file=None):
-    bars, last_q = get_bars(sym, data_file)
+def build_ev(bars, drop_live=False):
+    """从日线构造 plan_entry 所需 ev（扫描器与 evaluate 共用）。
+
+    drop_live=True 时丢弃今日未收盘末根。
+    无有效活平台沿时不回落旧 R1（避坑）。
+    """
+    if drop_live and bars and is_live_bar(bars):
+        bars = bars[:-1]
+    if not bars or len(bars) < 30:
+        return None, bars, {"reason": "K线不足"}
     Hs, Ls = pivots(bars, w=3)
     if len(Ls) < 2 or len(Hs) < 2:
-        return {"sym": sym, "verdict": "N/A", "reason": "枢轴点不足，无法判定", "last": last_q}
+        return None, bars, {"reason": "枢轴点不足，无法判定"}
     P1 = Ls[-1]
-    P0 = Ls[-2]
+    P0 = next((p for p in reversed(Ls[:-1]) if P1[0] - p[0] >= 3), None)
+    if P0 is None:
+        return None, bars, {"reason": "摆动低点过于密集，结构不可判"}
     R1_cands = [h for h in Hs if P0[0] < h[0] < P1[0]]
     R1 = max(R1_cands, key=lambda x: x[1]) if R1_cands else None
     Hs_before = [h for h in Hs if h[0] < P1[0]]
@@ -1157,6 +1382,7 @@ def evaluate(sym, data_file=None):
     last_c = bars[-1]["c"]
     closes = [b["c"] for b in bars]
     vols = [float(b.get("v") or 0) for b in bars]
+    atr_v = atr14(bars)
     ema10 = ema(closes, 10)
     sma20 = sma(closes, 20)
     sma50 = sma(closes, 50)
@@ -1167,8 +1393,6 @@ def evaluate(sym, data_file=None):
     vol_base = sma(vols[:-1], 20) if len(vols) > 20 else None
     last_v = vols[-1] if vols else 0
     rvol20 = (last_v / vol_base) if vol_base else None
-
-    # cond2 (Vic 123 原意): 自底部 P1 以来未再创新低（非两两 hl 比较）
     p1_px = P1[1]
     lows_since_p1 = [b["l"] for b in bars[P1[0]:]]
     c2 = min(lows_since_p1) >= p1_px - 1e-9
@@ -1182,21 +1406,12 @@ def evaluate(sym, data_file=None):
             f"下跌段趋势线@末根≈{round(tl_at_last, 2)}"
             f"（连 {bars[h_b[0]]['d']}高{bars[h_b[0]]['h']:.2f}→{bars[h_a[0]]['d']}高{h_a[1]:.2f}）"
         )
-
     regime = classify_regime(last_c, ema10, sma20, sma50, sma20_up, hh, hl, c2, p1_px)
     passed = sum([c1, c2, c3])
-    atr_v = atr14(bars)
     plat = living_platform(bars, Hs, atr_v)
-    if plat is None and R1 is not None:
-        plat = {
-            "i": R1[0],
-            "price": R1[1],
-            "days_above": days_above_level(bars, R1[1]),
-            "kind": "r1_fallback",
-        }
     w_bottom = detect_w_bottom(bars, Hs, Ls, atr_v)
     bull_flag = detect_bull_flag(bars, Hs, atr_v)
-    plan = plan_entry(bars, {
+    ev = {
         "regime": regime,
         "passed": passed,
         "rvol20": rvol20,
@@ -1213,11 +1428,63 @@ def evaluate(sym, data_file=None):
             "b": {"i": h_b[0], "price": h_b[1]},
             "a": {"i": h_a[0], "price": h_a[1]},
         } if (h_a and h_b) else None,
-    })
+    }
+    meta = {
+        "Hs": Hs, "Ls": Ls, "P0": P0, "P1": P1, "R1": R1,
+        "h_a": h_a, "h_b": h_b, "last_c": last_c, "last_i": last_i,
+        "ema10": ema10, "sma20": sma20, "sma50": sma50, "sma20_up": sma20_up,
+        "hh": hh, "hl": hl, "rvol20": rvol20, "atr_v": atr_v,
+        "c1": c1, "c2": c2, "c3": c3, "tl_note": tl_note,
+        "regime": regime, "passed": passed,
+        "plat": plat, "w_bottom": w_bottom, "bull_flag": bull_flag,
+    }
+    return ev, bars, meta
+
+
+def evaluate(sym, data_file=None, eod=False):
+    bars, last_q = get_bars(sym, data_file)
+    market = "ASH" if is_ash(str(sym).split(".")[0] if sym else "") or (
+        data_file and str(sym).isdigit()
+    ) else "ASH"
+    # 盘中未收盘：默认禁止 recommend（量能不可判）；--eod 丢弃末根
+    live = is_live_bar(bars, market=market)
+    drop_live = bool(eod or False)
+    ev, bars, meta = build_ev(bars, drop_live=drop_live)
+    if ev is None:
+        return {"sym": sym, "verdict": "N/A", "reason": meta.get("reason", "无法判定"), "last": last_q}
+
+    if live and not drop_live:
+        # 仍算出结构，但强制不买
+        plan = plan_entry(bars, ev)
+        plan["recommend"] = False
+        plan["verdict"] = "盘中数据未收盘，量能不可判"
+        plan["note"] = (
+            "末根为未走完的当日 K 线：缩量/RVOL 全部不可信。"
+            "请在 14:57 后重跑，或加 --eod 只吃到昨日收盘。"
+        )
+        out_live = {
+            "sym": sym,
+            "last": round(bars[-1]["c"], 2),
+            "last_date": bars[-1]["d"],
+            "intraday": True,
+            "mode": plan["mode"],
+            "verdict": plan["verdict"],
+            "recommend": False,
+            "note": plan["note"],
+            "buy_zone": plan["buy_zone"],
+            "stop_plan": plan.get("stop_plan"),
+            "targets": plan.get("targets"),
+            "spot_quote": last_q,
+        }
+        return out_live
+
+    plan = plan_entry(bars, ev)
     setup = plan["setup"]
     recommend = plan["recommend"]
     note = plan["note"]
     verdict = plan["verdict"]
+    plat = meta["plat"]
+    last_c = meta["last_c"]
     if (
         plat and plat.get("kind") == "pressing"
         and last_c is not None and last_c <= plat["price"]
@@ -1226,41 +1493,52 @@ def evaluate(sym, data_file=None):
         prefix = f"活平台沿 {round(plat['price'], 2)} 未破"
         if prefix not in (note or ""):
             note = f"{prefix}。{note}" if note else prefix
+    if plat is None:
+        extra = "无有效活平台沿（不回落旧 R1 作突破位）"
+        if extra not in (note or ""):
+            note = f"{extra}。{note}" if note else extra
 
     def rnd(v):
         if v is None:
             return None
         return round(v, 2)
 
+    P0, P1, R1 = meta["P0"], meta["P1"], meta["R1"]
+    h_a, h_b = meta["h_a"], meta["h_b"]
+    w_bottom, bull_flag = meta["w_bottom"], meta["bull_flag"]
     out = {
         "sym": sym,
         "last": rnd(last_c),
         "last_date": bars[-1]["d"],
+        "spot_quote": last_q,
         "P0": {"i": P0[0], "d": bars[P0[0]]["d"], "price": rnd(P0[1])},
         "P1": {"i": P1[0], "d": bars[P1[0]]["d"], "price": rnd(P1[1])},
-        "regime": regime,
+        "regime": meta["regime"],
         "setup": setup,
         "path": plan["path"],
         "mode": plan["mode"],
         "priority": plan["priority"],
-        "hh": hh,
-        "hl": hl,
-        "ema10": rnd(ema10),
-        "sma20": rnd(sma20),
-        "sma50": rnd(sma50),
-        "sma20_up": sma20_up,
-        "rvol20": rnd(rvol20),
-        "atr14": rnd(atr14(bars)),
+        "hh": meta["hh"],
+        "hl": meta["hl"],
+        "ema10": rnd(meta["ema10"]),
+        "sma20": rnd(meta["sma20"]),
+        "sma50": rnd(meta["sma50"]),
+        "sma20_up": meta["sma20_up"],
+        "rvol20": rnd(meta["rvol20"]),
+        "atr14": rnd(meta["atr_v"]),
         "days_above_r1": plan["days_above_r1"],
         "days_above_platform": plan["days_above_platform"],
-        "cond1_trendline_break": c1,
-        "cond1_note": tl_note,
-        "cond2_no_new_low": c2,
-        "cond3_break_prior_high": c3,
-        "passed": passed,
+        "cond1_trendline_break": meta["c1"],
+        "cond1_note": meta["tl_note"],
+        "cond2_no_new_low": meta["c2"],
+        "cond3_break_prior_high": meta["c3"],
+        "passed": meta["passed"],
         "verdict": verdict,
         "recommend": recommend,
         "note": note,
+        "intraday": False,
+        "stop_plan": plan.get("stop_plan"),
+        "targets": plan.get("targets"),
     }
     if R1:
         out["R1"] = {"i": R1[0], "d": bars[R1[0]]["d"], "price": rnd(R1[1])}
@@ -1292,7 +1570,7 @@ def evaluate(sym, data_file=None):
             "pa": bull_flag.get("pa"),
         }
     if h_a and h_b:
-        out["trendline_at_last"] = rnd(line_val(h_b, h_a, last_i))
+        out["trendline_at_last"] = rnd(line_val(h_b, h_a, meta["last_i"]))
     out["buy_zone"] = plan["buy_zone"]
     return out
 
@@ -1300,11 +1578,12 @@ def evaluate(sym, data_file=None):
 if __name__ == "__main__":
     args = sys.argv[1:]
     syms, data_map = [], {}
+    eod = False
+    out_path = None
     i = 0
     while i < len(args):
         a = args[i]
         if a == "--data":
-            # --data sym=path.json 或 --data path.json（对最后一个 sym 生效）
             spec = args[i + 1]
             i += 2
             if "=" in spec:
@@ -1313,6 +1592,14 @@ if __name__ == "__main__":
             else:
                 if syms:
                     data_map[syms[-1].upper()] = spec
+            continue
+        if a == "--eod":
+            eod = True
+            i += 1
+            continue
+        if a == "--out":
+            out_path = args[i + 1]
+            i += 2
             continue
         syms.append(a)
         i += 1
@@ -1323,20 +1610,21 @@ if __name__ == "__main__":
     for s in syms:
         df = data_map.get(s.upper())
         try:
-            r = evaluate(s, df)
+            r = evaluate(s, df, eod=eod)
         except Exception as e:
             r = {"sym": s, "verdict": "ERR", "reason": f"{type(e).__name__}: {e}"}
         res.append(r)
-        print(f"=== {r['sym']} ===")
-        for k in ["regime", "mode", "priority", "setup", "path", "verdict", "recommend", "note",
-                  "last", "last_date", "ema10", "sma20", "sma50", "sma20_up",
-                  "hh", "hl", "rvol20", "atr14", "days_above_r1", "days_above_platform",
-                  "P0", "P1", "R1", "platform", "buy_zone",
-                  "cond1_trendline_break", "cond1_note", "cond2_no_new_low",
-                  "cond3_break_prior_high", "passed", "reason"]:
-            if k in r:
-                print(f"  {k}: {r[k]}")
+        print(f"=== {s} ===")
+        for k, v in r.items():
+            if k in ("buy_zone", "stop_plan", "targets", "w_bottom", "bull_flag", "P0", "P1", "R1", "platform"):
+                print(f"  {k}: {v}")
+            elif k not in ("note",) and not isinstance(v, (dict, list)):
+                print(f"  {k}: {v}")
+        if r.get("note"):
+            print(f"  note: {r['note']}")
+        print(f"  verdict: {r.get('verdict')}")
 
-    with open("rule123_out.json", "w", encoding="utf-8") as f:
-        json.dump(res, f, ensure_ascii=False, indent=2)
-    print("\n-> rule123_out.json written")
+    if out_path:
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(res if len(res) > 1 else res[0], f, ensure_ascii=False, indent=2, default=str)
+        print(f"-> {out_path} written")

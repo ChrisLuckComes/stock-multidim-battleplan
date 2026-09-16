@@ -26,14 +26,19 @@ def svg_chart(r, bars, title):
     n = len(C)
     W, Hh = 660, 280; m_l, m_r, m_t, m_b = 44, 12, 16, 24
     x0, x1, y0, y1 = m_l, W - m_r, m_t, Hh - m_b
-    win = 90
+    win = min(90, n)
+    if win < 2:
+        return "<svg></svg>"
     lo = min(L[-win:]); hi = max(H[-win:])
-    r1 = r.get("R1"); slo = r.get("support_lo"); shi = r.get("support_hi")
-    if r1: hi = max(hi, r1 * 1.03)
-    if shi: lo = min(lo, slo * 0.98)
-    hi = max(hi, r.get("T2", hi) * 1.02)
+    plat = r.get("platform") or r.get("R1")
+    slo = r.get("support_lo"); shi = r.get("support_hi")
+    if plat: hi = max(hi, plat * 1.03)
+    if shi and slo: lo = min(lo, slo * 0.98)
+    t2 = r.get("T2")
+    if isinstance(t2, (int, float)):
+        hi = max(hi, t2 * 1.02)
     def X(i): return x0 + (x1 - x0) * i / (win - 1)
-    def Y(p): return y1 - (y1 - y0) * (p - lo) / (hi - lo)
+    def Y(p): return y1 - (y1 - y0) * (p - lo) / (hi - lo) if hi > lo else y1
     s = [f'<svg viewBox="0 0 {W} {Hh}" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,Arial" font-size="10">']
     s.append(f'<rect x="0" y="0" width="{W}" height="{Hh}" fill="#fff"/>')
     for g in range(5):
@@ -53,11 +58,12 @@ def svg_chart(r, bars, title):
     if slo and shi:
         s.append(f'<rect x="{x0}" y="{Y(shi):.1f}" width="{x1-x0}" height="{max(1,Y(slo)-Y(shi)):.1f}" fill="#1E8E3E" opacity="0.12"/>')
         s.append(f'<text x="{x1-4}" y="{Y(shi)-3:.1f}" fill="#1E8E3E" text-anchor="end">买区 {slo:.1f}-{shi:.1f}</text>')
-    if r1:
-        s.append(f'<line x1="{x0}" y1="{Y(r1):.1f}" x2="{x1}" y2="{Y(r1):.1f}" stroke="#A32D2D" stroke-dasharray="4 3"/>')
-        s.append(f'<text x="{x0+4}" y="{Y(r1)-3:.1f}" fill="#A32D2D">R1 {r1:.1f}</text>')
+    if plat:
+        s.append(f'<line x1="{x0}" y1="{Y(plat):.1f}" x2="{x1}" y2="{Y(plat):.1f}" stroke="#A32D2D" stroke-dasharray="4 3"/>')
+        label = "活平台沿" if r.get("platform") else "R1"
+        s.append(f'<text x="{x0+4}" y="{Y(plat)-3:.1f}" fill="#A32D2D">{label} {plat:.1f}</text>')
     s.append(f'<circle cx="{X(win-1)}" cy="{Y(C[-1]):.1f}" r="3" fill="#222"/>')
-    s.append(f'<text x="{x0+4}" y="{y1+16}" fill="#888">近90交易日 · {title}</text>')
+    s.append(f'<text x="{x0+4}" y="{y1+16}" fill="#888">近{win}交易日 · {title}</text>')
     s.append('</svg>')
     return "".join(s)
 
@@ -82,10 +88,11 @@ def main():
     for r in cands:
         cls = "t1" if r["tier"] == "tier1" else "t2"
         bz = f"{r['support_lo']:.1f}-{r['support_hi']:.1f}" if r.get("support_lo") else "-"
+        stop_txt = f2(r.get("hard_stop") or r.get("stop"))
         tbl += (f'<tr class="{cls}"><td>{r["code"]}</td><td class="l">{r["name"]}</td>'
                 f'<td>{r["market"]}</td><td>{r["regime"]}</td><td>{r["tier"]}</td>'
-                f'<td>{f2(r["spot"])}</td><td>{f2(r["R1"])}</td><td>{bz}</td>'
-                f'<td class="red">{f2(r["stop"])}</td><td>{f2(r["T1"])}</td><td>{f2(r["T2"])}</td>'
+                f'<td>{f2(r["spot"])}</td><td>{f2(r.get("platform") or r.get("R1"))}</td><td>{bz}</td>'
+                f'<td class="red">{stop_txt}</td><td>{f2(r["T1"])}</td><td>{f2(r["T2"])}</td>'
                 f'<td>{z(r["rvol"])}</td><td>{r.get("dd_from_high")}%</td>'
                 f'<td>{r.get("buy_type","-")}</td></tr>')
 
@@ -96,13 +103,14 @@ def main():
         try:
             bars = sina_kline(r["market"], r["code"])
             charts += (f'<div class="card"><div class="kv"><span><b>{r["code"]} {r["name"]}</b></span>'
-                       f'<span>现价 {f2(r["spot"])}</span><span>R1 {f2(r["R1"])}</span>'
-                       f'<span>买区 {r["support_lo"]:.1f}-{r["support_hi"]:.1f}</span>'
-                       f'<span>止损 {f2(r["stop"])}</span><span>T1 {f2(r["T1"])} / T2 {f2(r["T2"])}</span>'
+                       f'<span>现价 {f2(r["spot"])}</span><span>活平台/R1 {f2(r.get("platform") or r.get("R1"))}</span>'
+                       f'<span>买区 {f2(r.get("support_lo"))}-{f2(r.get("support_hi"))}</span>'
+                       f'<span>结构 {f2(r.get("struct_stop"))} / 硬止损 {f2(r.get("hard_stop") or r.get("stop"))}</span>'
+                       f'<span>T1 {f2(r["T1"])} / T2 {f2(r["T2"])}</span>'
                        f'<span>RVOL {z(r["rvol"])}</span><span>{r["tier"]}</span></div>')
             charts += svg_chart(r, bars, f'{r["code"]} {r["name"]}') + '</div>'
         except Exception as e:
-            charts += f'<div class="card"><b>{r["code"]} {r["name"]}</b> 图抓取失败：{e}</div>'
+            charts += f'<div class="card"><b>{r["code"]} {r["name"]}</b> 图抓取失败：{type(e).__name__}: {e!r}</div>'
 
     HTML = f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -125,7 +133,7 @@ tr.t1 td{{background:#eaf7ee}} tr.t2 td{{background:#fff8e8}}
 svg{{width:100%;height:auto;display:block;border:1px solid #eee;border-radius:6px;margin-top:6px}}
 </style></head><body><div class="wrap">
 <h1>全市场 A 股 · 方向感知 123 技术扫描</h1>
-<p class="sub">生成 {today} · 数据源：A股日线取自新浪行情。短线只做四种模式：<b>平台突破（优先T1）</b>、<b>沿线回踩（优先T1）</b>、<b>下降趋势线突破（次优先T2）</b>、<b>大阳后缩量回踩（次优先T2）</b>。</p>
+<p class="sub">生成 {today} · 数据源：A股日线取自新浪行情。短线六种模式：平台突破 / W底颈线 / 旗形下降趋势线 / 沿线回踩（优先T1）；大阳后缩量回踩 / 下降趋势线突破（次优先T2）。买区禁止默认 VWAP。</p>
 
 <div class="badges">
 <div class="b"><b>{total}</b><span>扫描总数</span></div>
@@ -136,11 +144,9 @@ svg{{width:100%;height:auto;display:block;border:1px solid #eee;border-radius:6p
 
 <div class="card">
 <p><b>判定口径：</b><br>
-• <b>tier1（突破确认）</b> = 收盘站上 R1（前高）+ 自底部未创新低 + 价在 MA20 上。这是底座突破/反转确认信号，可直接纳入观察买点（不卡下跌趋势线 cond1，避免跳空突破股被误杀）。<br>
-• <b>tier2（上升延续）</b> = MA20&gt;MA60&gt;MA120 多头 + 价在 MA20 上 + HH/HL → 趋势回踩买点，等回踩买区缩量企稳尾盘买。<br>
-• 其余（下跌趋势 123 未完成 / 筑底未触发）= 非候选，按纪律不买。<br>
-<b>买区说明：</b>优先 T1 = 平台突破（近3根站上R1放量，买突破位）或沿线回踩（回踩上升趋势线/明显贴轨均线）。次优先 T2 = 下降趋势线突破，或大阳后缩量回踩（量缩到近期最低且近3根不创新低；普通大阳防守看低点，一字板防守看缺口下沿）。大阳当日不追。止损=对应结构位下。<br>
-<b>中报过滤：</b>本次为纯技术扫描（沙箱拿不到可靠基本面），<b>中报预增超预期请你在候选上自行叠加</b>——优先挑 tier1 + 中报超预期的票做完整作战计划。</p>
+• <b>tier1</b> = recommend 且优先T1，或收盘站上前高/活平台 + 未创新低 + 价在 MA20 上。<br>
+• <b>tier2</b> = recommend 的 T2，或上升延续回踩观察。<br>
+• <b>买区</b>走 rule123.plan_entry（活平台沿，不是死 R1）。止损列优先硬止损；另有结构止损（收盘破）。禁止用 VWAP 当默认买区。</p>
 </div>
 
 <h2>一、候选总表（{len(cands)} 只 · tier1 优先，按距52w高降序）</h2>
