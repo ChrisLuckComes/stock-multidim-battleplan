@@ -68,8 +68,34 @@ def test_living_platform_fresh_break_ignores_spike_ath():
     assert plat["kind"] in ("fresh_break", "pressing")
 
 
+def test_strong_on_strong_platform_plus_line_hug_not_blocked():
+    """强上加强（老罗 2026-09-17）：平台破位量能不足，但同时沿线主升
+    （贴轨 ≥4 次、收盘在线上 ≤1×ATR）→ 不被「平台突破·量能不足」拦截，
+    按沿线回踩放行并标注【强上加强】。"""
+    bars = []
+    for i in range(41):
+        c = 108.0 + i * 0.2          # 匀速慢涨：MA5/趋势线贴轨
+        bars.append(_bar(f"2026-01-{i + 1:02d}", c - 0.2, c + 0.5, c - 0.8, c, 1e6))
+    ev = {
+        "rvol20": 0.8,               # 平台破位但量能不足（触发旧拦截）
+        "platform": {"price": 115.5, "i": 37, "kind": "fresh_break", "days_above": 3},
+        "P0": {"i": 10, "price": 109.5},
+        "P1": {"i": 30, "price": 113.5},
+        "R1": None,
+        "c2": True,
+        "w_bottom": None,
+        "bull_flag": None,
+        "down_tl": None,
+    }
+    plan = plan_entry(bars, ev)
+    assert plan["verdict"] != "平台突破·量能不足", plan
+    assert plan["mode"] == "line_pullback", plan
+    assert "强上加强" in (plan["verdict"] or "") + (plan["note"] or ""), plan
+
+
 if __name__ == "__main__":
     test_zone_at_level_not_hardcoded_in_zone()
     test_platform_break_too_far_becomes_wait()
     test_living_platform_fresh_break_ignores_spike_ath()
+    test_strong_on_strong_platform_plus_line_hug_not_blocked()
     print("ok")

@@ -1595,6 +1595,29 @@ def plan_entry(bars, ev):
         z = zone_at_level(plat_p, atr_v, last_c, "平台突破(优先T1)", ev, bars)
         return pack("platform_break", 1, "breakout", "平台突破(优先T1)", True, note, z)
     if fresh_plat and not vol_ok:
+        # 平台量能不足 = 疑似假突破。但老罗 2026-09-17 定「强上加强」：
+        # 若同时明显沿线主升（贴轨 ≥4 次、收盘仍在线上 ≤1×ATR），平台破位与
+        # 沿线主升两结构互证 —— 优先级高于单独任何一路，不被「量能不足」拦截，
+        # 直接按沿线回踩给出买点。收盘已跌破该线（dist_atr<0）则不豁免，仍 wait。
+        boost = (
+            structure_ok
+            and demand is not None
+            and demand["hits"] >= 4
+            and 0.0 <= demand["dist_atr"] <= 1.0
+        )
+        if boost:
+            label = ANCHOR_LABEL.get(demand["anchor"], demand["anchor"])
+            lv = round(demand["level"], 2)
+            rec = bool(vol_shrink)
+            note = (
+                f"【强上加强】近{n_above}根站上活平台沿 {plat_txt} 但 RVOL="
+                f"{round(rvol, 2)}≤1.5；同时沿{label}@{lv}主升（触及{demand['hits']}次、"
+                f"距线 {demand['dist_atr']:.2f}×ATR）→ 两结构互证，按沿线回踩买"
+            )
+            if not vol_shrink:
+                note += f"；量能偏大 RVOL={round(rvol, 2)}，等缩量尾盘"
+            bz_line["type"] = f"强上加强·沿线回踩·{label}"
+            return pack("line_pullback", 1, "pullback", "强上加强(平台+沿线主升)", rec, note, bz_line)
         # 量能不足 = 假突破，明确「不买」。不给买区：原先不传 buy_zone，
         # pack() 回退到 bz_line，打印出一个 2×ATR 宽的区间，看起来像可挂单价位。
         # 活平台沿的信息 report 已有独立列，不靠 buy_zone 承载。
