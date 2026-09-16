@@ -105,6 +105,33 @@ def ash_lots(account, entry, stop, code,
     return n
 
 
+def ash_price_ceiling(code, account, max_pct=ASH_MAX_POS):
+    """闸门下的「最高可交易价」：超过它，第一手就超上限 → 结构性不可交易。
+
+    0100 单位换算：门槛 = 账户 × 上限% ÷ 最小申报单位。
+    5 万账户 / 30% 闸门 → 主板·创业板 150 元，科创板 75 元。
+    比这个价高的票，问题不在图形、不在时机，在「最小申报单位 × 股价」——
+    给买区也没用，所以要在**下单前**就筛掉，而不是等点位到了才说买不了。
+    """
+    if not account or not max_pct:
+        return None
+    return account * max_pct / first_lot_of(code)
+
+
+def no_ash_reason(code, account, entry, max_pct=ASH_MAX_POS):
+    """「1 手即超闸门」的统一说明（含门槛价，点明是否属结构性不可交易）。"""
+    lot = first_lot_of(code)
+    amt = lot * entry
+    s = (f"最小 1 手 {lot} 股 = {amt:,.0f} 元 = 账户 {amt / account * 100:.0f}%，"
+         f"超 {max_pct * 100:.0f}% 上限（硬约束，不是拍脑袋的软规则）")
+    ceiling = ash_price_ceiling(code, account, max_pct)
+    if ceiling and entry > ceiling:
+        s += (f"\n              ↑ 该闸门下 {code[:3]} 最高可交易价 "
+              f"{ceiling:,.0f} 元 —— {entry:,.0f} 元属**结构性不可交易**，"
+              f"换标的，别等点位")
+    return s
+
+
 def room_and_cap(bars, z, mode, atr_v, rr=1.5, last_c=None):
     """上方空间闸门：确定「第一目标位」和「买入上限价」。
 
@@ -319,9 +346,7 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
                   f"上限 {ASH_MAX_POS * 100:.0f}%）")
         else:
             lot = first_lot_of(code)
-            print(f"  数量    : 不做 —— 最小 1 手 {lot} 股 = {lot * limit:,.0f} 元"
-                  f" = 账户 {lot * limit / account * 100:.0f}%，超"
-                  f" {ASH_MAX_POS * 100:.0f}% 上限（硬约束，不是拍脑袋的软规则）")
+            print(f"  数量    : 不做 —— {no_ash_reason(code, account, limit)}")
         if n:
             print(f"  金额    : {n * limit:,.0f} 元"
                   f"（账户 {account:,} 的 {n * limit / account * 100:.1f}%，"
@@ -396,11 +421,7 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
                           f"（账户 {risk_amt / account * 100:.2f}%）")
                 else:
                     lot = first_lot_of(code)
-                    print(f"  数量    : 不做 —— 最小 1 手 {lot} 股 = "
-                          f"{lot * bo['trigger']:,.0f} 元 = 账户 "
-                          f"{lot * bo['trigger'] / account * 100:.0f}%，"
-                          f"超 {ASH_MAX_POS * 100:.0f}% 仓位上限"
-                          f"（这是硬约束，不是拍脑袋的软规则）")
+                    print(f"  数量    : 不做 —— {no_ash_reason(code, account, bo['trigger'])}")
                 rr = (bo["target"] - bo["trigger"]) / max(bo["trigger"] - bo["stop"], 1e-9)
                 print(f"  目标    : {bo['target']:.2f}   盈亏比 {rr:.2f}:1")
                 print(f"  依据    : 基准日实体 {bo['body_atr']}×ATR、"
@@ -466,9 +487,7 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
                           f"距买入 {risk_pct:.1f}%），最大亏 {n * (trigger - stop):,.0f} 元")
                 else:
                     lot = first_lot_of(code)
-                    print(f"     不做 —— 最小 1 手 {lot} 股 = {lot * trigger:,.0f} 元"
-                          f" = 账户 {lot * trigger / account * 100:.0f}%，超"
-                          f" {ASH_MAX_POS * 100:.0f}% 上限（硬约束）")
+                    print(f"     不做 —— {no_ash_reason(code, account, trigger)}")
             out["intraday"] = {"burst_at": mins[i]["d"][11:16], "ratio": round(ratio, 1),
                                "trigger": trigger, "fresh": bool(fresh), "allow": bool(ok)}
         else:
@@ -569,9 +588,7 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
                               f"（账户 {n * risk / account * 100:.2f}%）")
                     else:
                         lot = first_lot_of(code)
-                        print(f"     不做 —— 最小 1 手 {lot} 股 = {lot * entry:,.0f} 元"
-                              f" = 账户 {lot * entry / account * 100:.0f}%，超"
-                              f" {ASH_MAX_POS * 100:.0f}% 上限（硬约束）")
+                        print(f"     不做 —— {no_ash_reason(code, account, entry)}")
                     print(f"     ⚠ T+1：今天买入今天卖不掉 —— 上面的止损是**明天**用的：")
                     print(f"        明日开盘破 {stop_k:.2f} → 直接走；未破 → 持有，"
                           f"收盘失守 {stop_k:.2f} 仍走")
@@ -658,9 +675,7 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
                           f"（账户 {n * risk / account * 100:.2f}%）")
                 else:
                     lot = first_lot_of(code)
-                    print(f"     不做 —— 最小 1 手 {lot} 股 = {lot * entry:,.0f} 元"
-                          f" = 账户 {lot * entry / account * 100:.0f}%，超"
-                          f" {ASH_MAX_POS * 100:.0f}% 上限（硬约束）")
+                    print(f"     不做 —— {no_ash_reason(code, account, entry)}")
                 print(f"     ⚠ T+1：止损是**明天**用的 —— 明日开盘破 {stop_c:.2f} "
                       f"直接走；未破持有，收盘失守 {stop_c:.2f} 仍走")
                 out["ash_pullback"] = {"state": "ok", "at": pc["at"], "S": S,

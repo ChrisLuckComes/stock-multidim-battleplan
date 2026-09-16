@@ -686,6 +686,33 @@ def test_bo_gap_cancel():
     assert bo_gap_cancel(None, bo, atr) is None           # 无开盘价 → 不误判
 
 
+def test_ash_structural_ceiling():
+    """闸门下的「最高可交易价」：5 万账户 / 30% → 主板 150 元、科创 75 元。
+
+    这是「点位到了也买不到」的唯一正当来源（物理约束：最小申报单位 × 股价），
+    必须在**下单前**就筛掉，不能给了买区再告诉人买不了。
+    """
+    from probe_intraday import ash_price_ceiling, no_ash_reason, ash_lots
+    assert ash_price_ceiling("002961", 50000) == 150.0   # 100 股单位
+    assert ash_price_ceiling("688002", 50000) == 75.0    # 200 股单位
+    assert ash_price_ceiling("002961", 0) is None        # 未给账户 → 不猜
+    # 门槛之上：1 手即超闸门 → 必须 None（不悄悄超标）
+    assert ash_lots(50000, 160.0, 150.0, "002961") is None
+    assert ash_lots(50000, 76.0, 70.0, "688002") is None
+    # 门槛之下：正常给股数
+    assert ash_lots(50000, 140.0, 130.0, "002961") == 100
+    assert ash_lots(50000, 74.0, 70.0, "688002") == 200
+    # 说明里要出现「结构性不可交易」与门槛价
+    s = no_ash_reason("688002", 50000, 200.0)
+    assert "结构性不可交易" in s and "75" in s
+    s2 = no_ash_reason("002961", 50000, 160.0)
+    assert "结构性不可交易" in s2 and "150" in s2
+    # 1 手在额度内 → 不冤枉成「结构性不可交易」，只报金额占比
+    # （2000 账户 / 30% → 主板门槛仅 6 元，取 5 元才是门槛内）
+    s3 = no_ash_reason("002961", 2000, 5.0)
+    assert "结构性不可交易" not in s3 and "硬约束" in s3
+
+
 def test_ash_lots_is_risk_based():
     """A 股仓位改用风险预算法（与美股 us_lots 同构）。
 
@@ -792,6 +819,7 @@ if __name__ == "__main__":
     test_bo_gap_cancel()
     test_ash_lots_is_risk_based()
     test_ash_lots_min_lot_by_board()
+    test_ash_structural_ceiling()
     test_ash_late_is_not_a_ban()
     test_ash_limit_anchor_is_basis_not_snap_prev()
     print("ok")
