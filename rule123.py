@@ -1556,9 +1556,13 @@ def plan_entry(bars, ev):
         z = zone_at_level(plat_p, atr_v, last_c, "平台突破(优先T1)", ev, bars)
         return pack("platform_break", 1, "breakout", "平台突破(优先T1)", True, note, z)
     if fresh_plat and not vol_ok:
+        # 量能不足 = 假突破，明确「不买」。不给买区：原先不传 buy_zone，
+        # pack() 回退到 bz_line，打印出一个 2×ATR 宽的区间，看起来像可挂单价位。
+        # 活平台沿的信息 report 已有独立列，不靠 buy_zone 承载。
         return pack(
             "wait", None, "wait", "平台突破·量能不足", False,
             f"近{n_above}根站上活平台沿 {plat_txt} 但 RVOL={round(rvol, 2)}≤1.5，不买假突破",
+            _empty_zone(),
         )
 
     wpat = ev.get("w_bottom")
@@ -1587,6 +1591,7 @@ def plan_entry(bars, ev):
             return pack(
                 "wait", None, "wait", "W底颈线突破·量能不足", False,
                 f"近{n_neck}根站上颈线 {neck_txt} 但 RVOL={round(rvol, 2)}≤1.5，不买假突破",
+                _empty_zone(),
             )
 
     flag = ev.get("bull_flag")
@@ -1614,6 +1619,7 @@ def plan_entry(bars, ev):
             return pack(
                 "wait", None, "wait", "旗形突破·量能不足", False,
                 f"近{f_days}根站上旗面趋势线 {tl_txt} 但 RVOL={round(rvol, 2)}≤1.5，不买假突破",
+                _empty_zone(),
             )
 
     line_wait_verdict = None
@@ -1679,6 +1685,13 @@ def plan_entry(bars, ev):
         if st == "broke_yang_low":
             z["invalid"] = True
             z["invalid_reason"] = f"{y_d} 大阳后收盘跌破防守位 {round(floor, 2)}"
+            # 作废态必须清空下单带：留着 primary_lo/primary_hi 会让消费方
+            # （probe 打印、扫描表「买区」列）原样显示一个区间，看上去像挂单价位，
+            # 而 verdict 其实是「作废」—— 这正是「看到买区、实际没有买点」的误判源。
+            # invalidation（防守位）保留：次级观察位/复盘仍需知道防线在哪。
+            z["primary_lo"] = None
+            z["primary_hi"] = None
+            z["in_zone"] = False
             return pack(
                 "wait", None, "wait", "大阳低点已破·作废", False,
                 f"{y_d} 大阳后收盘跌破防守位 {round(floor, 2)}，本笔大阳设置作废",
@@ -1753,6 +1766,7 @@ def plan_entry(bars, ev):
             return pack(
                 "wait", None, "wait", "下降趋势线突破·量能不足", False,
                 f"RVOL={round(rvol, 2)}≤1.5，T2 也不买假突破",
+                _empty_zone(),
             )
 
     if line_wait_note:
@@ -1760,9 +1774,15 @@ def plan_entry(bars, ev):
             "wait", None, "wait", line_wait_verdict, False, line_wait_note, bz_line,
         )
     if not structure_ok:
+        # 结构不成立（未站上 P1，或自 P1 曾创新低）→ 没有任何买法。
+        # 此处原先不传 buy_zone，pack() 便回退到 bz_line（活平台沿线位），
+        # 于是「等待」的票照样打印出一个可挂单区间 —— 与 note「未形成任何买法」
+        # 自相矛盾，也是「看到买区、其实没有买点」的误判源。
+        # 与下方「近端找不到线」分支保持同口径：无买法就给空区。
         return pack(
             "wait", None, "wait", "等待", False,
             "未形成平台/W底/旗形突破、沿线回踩、大阳后缩量回踩或下降趋势线突破",
+            _empty_zone(),
         )
     return pack(
         "wait", None, "wait", "等待", False,

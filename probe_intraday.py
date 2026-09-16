@@ -174,8 +174,12 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
           f"   {'【盘中】' if live else '【已收盘】'}")
     print("=" * 66)
     print(f" 基准日结构 : {basis_d} 收 {basis[-1]['c']:.2f}   ATR14 = {atr_v:.3f}")
-    print(f" 模式       : {plan['mode']}   recommend={plan['recommend']}")
-    print(f" 买区       : {z.get('primary_lo')} ~ {z.get('primary_hi')}"
+    print(f" 模式       : {plan['mode']}   recommend={plan['recommend']}"
+          f"{'   ⚠ 买区已作废' if z.get('invalid') else ''}")
+    # 作废态下单带已清空（rule123 置 None）；此处显式写「作废」，避免打印成 None ~ None
+    _zt = ("（已作废 · 勿挂单）" if z.get("invalid")
+           else f"{z.get('primary_lo')} ~ {z.get('primary_hi')}")
+    print(f" 买区       : {_zt}"
           f"   防守位 {z.get('invalidation')}")
     if plan.get("note"):
         print(f" note       : {plan['note']}")
@@ -410,8 +414,11 @@ def probe_us(sym, account=5000, min_scale=5, until=None):
         print(f" 实时/盘前  : {spot:.2f}   昨收 {prev_close:.2f}（{dev:+.2f}%）"
               f"{'   ⚠ 等于昨收 = 该时段暂无成交，不是「平静」' if flat else ''}")
     print(f" ATR14      : {atr_v:.2f}  （{atr_v / last['c'] * 100:.2f}% 波动率）")
-    print(f" 模式       : {plan['mode']}   recommend={plan['recommend']}")
-    print(f" 买区       : {z.get('primary_lo')} ~ {z.get('primary_hi')}"
+    print(f" 模式       : {plan['mode']}   recommend={plan['recommend']}"
+          f"{'   ⚠ 买区已作废' if z.get('invalid') else ''}")
+    _zt = ("（已作废 · 勿挂单）" if z.get("invalid")
+           else f"{z.get('primary_lo')} ~ {z.get('primary_hi')}")
+    print(f" 买区       : {_zt}"
           f"   防守位 {z.get('invalidation')}")
     if z.get("relaxed"):
         print(f" 门控       : ⚠ 已放宽 —— {z.get('relaxed_reason')}")

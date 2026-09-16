@@ -486,6 +486,30 @@ def test_reversal_yang_rejects_pullback_below_mid():
     assert plan["verdict"] == "等待", (plan["verdict"], plan["note"])
 
 
+def test_no_setup_branch_has_empty_buy_zone():
+    """「未形成任何买法」的兜底分支不得给出买区。
+
+    原先该分支不传 buy_zone，pack() 便回退到 bz_line（活平台沿线位），
+    于是 verdict=等待 的票照样打印出一个可挂单区间 —— 与 note
+    「未形成平台/W底/…」自相矛盾，也是「看到买区、其实没有买点」的误判源。
+    不变式：buy_zone 带下单带 ⇔ 该 verdict 确实给出了可挂单价位。
+    """
+    from rule123 import build_ev
+    bars = _yang_today_bars()
+    # 大阳之后深度破位：结构不成立 → 落到「未形成任何买法」兜底分支
+    bars.append(_bar("2026-08-26", 18.85, 18.95, 18.40, 18.50, 8e6))
+    ev, bars2, _meta = build_ev(bars, drop_live=False)
+    plan = plan_entry(bars2, ev)
+    z = plan.get("buy_zone") or {}
+    assert plan["recommend"] is False, plan
+    assert "未形成" in (plan.get("note") or ""), plan
+    assert z.get("primary_lo") is None, z
+    assert z.get("primary_hi") is None, z
+    # 空区仍须保留完整 schema，消费方按 key 取值不应 KeyError
+    for k in ("invalid", "invalid_reason", "invalidation", "in_zone", "chase_only"):
+        assert k in z, (k, z)
+
+
 if __name__ == "__main__":
     test_yizi_not_gap_yang()
     test_true_yizi_uses_prev_close()
@@ -511,4 +535,5 @@ if __name__ == "__main__":
     test_reversal_yang_gate_relaxes()
     test_reversal_yang_requires_volume()
     test_reversal_yang_rejects_pullback_below_mid()
+    test_no_setup_branch_has_empty_buy_zone()
     print("ok")
