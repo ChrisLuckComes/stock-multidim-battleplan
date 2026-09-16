@@ -107,7 +107,7 @@ python --version   # 需 3.8+
 - **Python 3.8+**（运行 `fetch_market.py` / `rule123.py`）。
 - **联网**（脚本实时抓取东方财富 / Yahoo 公开行情，零密钥、零付费）。
 - **可选 · wb-finance-skill**：仅在 WorkBuddy 且已安装该技能时优先用于取数；**未安装不影响本仓库任何功能**——`fetch_market.py` 会自动接管。
-- **Node.js**：非必需。本仓库全部脚本为 Python；若你的 Agent 生态更偏 Node，可把 `fetch_market.py` 的逻辑等价为 `fetch_market.js`（SKILL.md 调用处保持一致即可）。
+- **Node.js**：非必需。本仓库不提供、也不需要 Node 脚本；行情一律用 `fetch_market.py`。
 
 ---
 

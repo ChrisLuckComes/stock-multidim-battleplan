@@ -11,7 +11,7 @@ from collections import Counter
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
-from rule123 import build_ev, plan_entry, atr14
+from rule123 import build_ev, plan_entry, atr14, is_live_bar
 
 UA = "Mozilla/5.0"
 REF = "https://finance.sina.com.cn/"
@@ -41,6 +41,9 @@ def sina_kline(prefix, code, n=140, tries=3):
 def analyze(code, name, prefix):
     bars = sina_kline(prefix, code)
     if not bars or len(bars) < 60:
+        return None
+    # 盘中未收盘：不出票，避免半日量污染全市场表
+    if is_live_bar(bars, market="ASH"):
         return None
     ev, bars, meta = build_ev(bars, drop_live=False)
     if ev is None:

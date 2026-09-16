@@ -77,7 +77,7 @@ def main():
     cands = [r for r in rows if r.get("candidate")]
     tier1 = [r for r in cands if r["tier"] == "tier1"]
     tier2 = [r for r in cands if r["tier"] == "tier2"]
-    # 排序：tier1 在前，按 距52w高 降序（越近/破高越强）
+    # 排序：tier1 在前，按距取数窗口高点降序（越近/破高越强；非严格 52 周）
     def key(r): return (0 if r["tier"] == "tier1" else 1, -r.get("dd_from_high", -99))
     cands.sort(key=key)
     today = datetime.date.today().strftime("%Y%m%d")
@@ -149,12 +149,12 @@ svg{{width:100%;height:auto;display:block;border:1px solid #eee;border-radius:6p
 • <b>买区</b>走 rule123.plan_entry（活平台沿，不是死 R1）。止损列优先硬止损；另有结构止损（收盘破）。禁止用 VWAP 当默认买区。</p>
 </div>
 
-<h2>一、候选总表（{len(cands)} 只 · tier1 优先，按距52w高降序）</h2>
+<h2>一、候选总表（{len(cands)} 只 · tier1 优先，按距区间高降序）</h2>
 <div class="card"><table>
-<tr><th>代码</th><th>名称</th><th>市场</th><th>regime</th><th>tier</th><th>现价</th><th>R1</th><th>买区</th><th>止损</th><th>T1</th><th>T2</th><th>RVOL</th><th>距52w高</th><th>买点类型</th></tr>
+<tr><th>代码</th><th>名称</th><th>市场</th><th>regime</th><th>tier</th><th>现价</th><th>R1</th><th>买区</th><th>止损</th><th>T1</th><th>T2</th><th>RVOL</th><th>距区间高</th><th>买点类型</th></tr>
 {tbl}
 </table>
-<p class="note">绿=tier1(123完整)；黄=tier2(上升延续回踩)。距52w高为负=低于年内高点；为正=已破新高。RVOL 为末根量/20日均量。</p>
+<p class="note">绿=tier1(123完整)；黄=tier2(上升延续回踩)。距区间高=相对取数窗口最高价（约 130 根，非严格 52 周）；负=低于窗口高，正=已破新高。RVOL 为末根量/20日均量。</p>
 </div>
 
 <h2>二、重点候选价格结构图（前 {len(top)}）</h2>

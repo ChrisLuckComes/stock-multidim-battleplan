@@ -349,7 +349,8 @@ ANCHOR_LABEL = {
     "down_tl": "下降趋势线",
 }
 
-_ASH_SESSIONS = ((9 * 60 + 30, 11 * 60 + 30), (13 * 60, 15 * 60))
+# A股开盘至收盘（含午休）：当日 K 线未走完，量能不可信
+_ASH_LIVE = (9 * 60 + 30, 15 * 60)
 
 
 def is_live_bar(bars, market="ASH", now=None):
@@ -360,10 +361,10 @@ def is_live_bar(bars, market="ASH", now=None):
     if str(bars[-1]["d"])[:10] != now.strftime("%Y-%m-%d"):
         return False
     if market != "ASH":
-        # 美股：简单按本地日历日未过 16:00 ET 近似；无时区库时只标当日末根
+        # 美股：当日末根即视为 live（无时区库时保守拦截）
         return True
     t = now.hour * 60 + now.minute
-    return any(a <= t < b for a, b in _ASH_SESSIONS)
+    return _ASH_LIVE[0] <= t < _ASH_LIVE[1]
 
 
 def is_yizi(bar, prev_c, atr_v):
@@ -478,13 +479,22 @@ def still_uptrend(bars, ev, last_c, c2, p1p):
 def is_yang_bar(bar, atr_v, prev=None):
     body = bar["c"] - bar["o"]
     rng = bar["h"] - bar["l"]
-    # 一字涨停：实体为 0，但相对前收跳空，必须算大阳
+    # 一字涨停：实体≈0。跳空一字要相对前收大涨；平开一字（开=最低、无缺口）也算。
     if body <= 0:
         if prev is None or not prev.get("c"):
             return False
-        up = bar["c"] >= prev["c"] * 1.03
         tiny = rng <= max(bar["c"] * 0.003, 0.15 * (atr_v or bar["c"] * 0.01))
-        return bool(up and tiny)
+        if not tiny:
+            return False
+        up_gap = bar["c"] >= prev["c"] * 1.03
+        # 平开一字：开≈最低、收贴最高、相对前收持平/微涨
+        eps = max(bar["c"] * 0.001, 0.02)
+        flat_board = (
+            bar["o"] <= bar["l"] + eps
+            and bar["c"] >= bar["h"] - eps
+            and bar["c"] >= prev["c"] * 0.995
+        )
+        return bool(up_gap or flat_board)
     pct = body / bar["o"] if bar["o"] else 0
     strong = pct >= 0.03 or (atr_v and (body >= 0.8 * atr_v or rng >= 1.0 * atr_v))
     if not strong:
@@ -870,7 +880,7 @@ def detect_bull_flag(bars, Hs, atr_v, lookback=45):
 
 
 def zone_at_level(level, atr_v, last_c, kind, ev, bars):
-    """突破类买区：半宽 0.35×ATR；in_zone/dist_atr/extended 按现价真算。"""
+    """突破类买区：半宽与 in_zone 门槛统一为 1.0×ATR；dist/extended 按现价真算。"""
     z = _empty_zone()
     closes = [b["c"] for b in bars]
     v5 = typical_vwap(bars, 5)
@@ -879,7 +889,7 @@ def zone_at_level(level, atr_v, last_c, kind, ev, bars):
     z["ma5"] = round(ma5, 2) if ma5 is not None else None
     if level is None:
         return z
-    pad = 0.35 * atr_v if atr_v else level * 0.005
+    pad = 1.0 * atr_v if atr_v else level * 0.01
     lo, hi = level - pad, level + pad
     if last_c and hi - lo < last_c * 0.002:
         mid = (lo + hi) / 2.0
@@ -902,7 +912,7 @@ def zone_at_level(level, atr_v, last_c, kind, ev, bars):
         "primary_lo": round(lo, 2),
         "primary_hi": round(hi, 2),
         "dist_atr": round(dist, 2) if dist is not None else None,
-        "in_zone": bool(dist is not None and -0.35 <= dist <= 1.0),
+        "in_zone": bool(dist is not None and -1.0 <= dist <= 1.0),
         "extended": bool(dist is not None and dist > 2.0),
         # 结构位=突破位本身；硬止损由 stop_plan 另给
         "invalidation": round(level, 2),
@@ -931,9 +941,13 @@ def stop_plan(bars, mode, z, atr_v):
     gap = 0.10 * atr_v
 
     def _ensure_below_buy(hard, hard_anchor, fallback_anchor_px, fallback_name):
-        if hard >= buy_lo:
-            return round(fallback_anchor_px - gap, 2), fallback_name
-        return round(hard, 2), hard_anchor
+        if hard < buy_lo:
+            return round(hard, 2), hard_anchor
+        # 回退锚不得高于结构位；仍不够低则钉在买区下沿 − gap
+        cand = min(fallback_anchor_px, level) - gap
+        if cand >= buy_lo:
+            return round(buy_lo - gap, 2), "买区下沿"
+        return round(cand, 2), fallback_name
 
     if mode == "line_pullback":
         # 结构锚默认 MA5；贴轨例外用已选均线 level
@@ -957,14 +971,19 @@ def stop_plan(bars, mode, z, atr_v):
     if mode == "impulse_pause":
         floor = level
         if z.get("yi_zi"):
+            hard = floor - gap
+            if hard >= buy_lo:
+                hard = buy_lo - gap
             return {
                 "struct_anchor": "缺口下沿/前收(收盘破)",
                 "struct": round(floor, 2),
                 "hard_anchor": "缺口下沿",
-                "hard": round(floor - gap, 2),
+                "hard": round(hard, 2),
                 "trigger": HARD_STOP_TRIGGER,
             }
         hard = floor - gap
+        if hard >= buy_lo:
+            hard = buy_lo - gap
         return {
             "struct_anchor": "大阳低点(收盘破)",
             "struct": round(floor, 2),
@@ -991,7 +1010,7 @@ def stop_plan(bars, mode, z, atr_v):
 
 
 def targets(bars, mode, z, atr_v, entry, Hs):
-    """目标1=最近未破摆动高/测量涨幅；目标2=区间更高阻力。附 rr_target1。"""
+    """目标1=最近未破摆动高/测量涨幅；目标2=当前取数窗口内更高阻力（非强制 52 周）。附 rr_target1。"""
     if entry is None or not atr_v:
         return None
     resist = sorted({h for i, h in Hs if h > entry + 0.05 * atr_v})
@@ -1001,6 +1020,7 @@ def targets(bars, mode, z, atr_v, entry, Hs):
         measured = round(z["level"] + max(atr_v * 2.0, (z.get("primary_hi") or z["level"]) - (z.get("primary_lo") or z["level"])), 2)
         if measured > entry:
             t1 = min(t1, measured) if resist else measured
+    # 区间高 = 传入 bars 窗口内最高（常见约 130 根），不是严格 250 日/52 周高
     hi_all = max(b["h"] for b in bars)
     t2 = hi_all if hi_all > t1 + 0.2 * atr_v else round(t1 + 2.0 * atr_v, 2)
     if abs(t2 - t1) < 0.15 * atr_v:
@@ -1052,7 +1072,7 @@ def plan_entry(bars, ev):
     vol_ok = rvol is None or rvol > 1.5
     vol_shrink = rvol is None or rvol <= 1.2
     r1p = _px(ev.get("R1"))[1]
-    plat = ev.get("platform") or ev.get("R1")
+    plat = ev.get("platform")  # 不回落旧 R1；无活平台沿则不做平台突破
     plat_p = _px(plat)[1]
     n_above = days_above_level(bars, plat_p)
     n_above_r1 = days_above_level(bars, r1p)
@@ -1225,7 +1245,7 @@ def plan_entry(bars, ev):
                 f"{bz_line.get('primary_lo')}-{bz_line.get('primary_hi')}"
             )
 
-    if uptrend:
+    if uptrend and imp.get("state") != "no_yang":
         st = imp.get("state")
         y_lo = imp.get("yang_low")
         y_hi = imp.get("yang_high")
@@ -1443,9 +1463,8 @@ def build_ev(bars, drop_live=False):
 
 def evaluate(sym, data_file=None, eod=False):
     bars, last_q = get_bars(sym, data_file)
-    market = "ASH" if is_ash(str(sym).split(".")[0] if sym else "") or (
-        data_file and str(sym).isdigit()
-    ) else "ASH"
+    sym_code = str(sym).split(".")[0] if sym else ""
+    market = "ASH" if (is_ash(sym_code) or (data_file and sym_code.isdigit())) else "US"
     # 盘中未收盘：默认禁止 recommend（量能不可判）；--eod 丢弃末根
     live = is_live_bar(bars, market=market)
     drop_live = bool(eod or False)
