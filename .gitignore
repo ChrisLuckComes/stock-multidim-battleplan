@@ -8,3 +8,4 @@ _gen_*.py
 scan_all/codes.json
 scan_all/results.jsonl
 data_n/
+cache/

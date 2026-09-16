@@ -767,6 +767,56 @@ def test_ash_late_is_not_a_ban():
     assert "14:30 后不再新开仓" not in src, "14:30 禁令文案又回来了"
 
 
+def test_room_and_cap_propagates_stop_conflict():
+    """room_and_cap 必须把 stop_plan 的「铁律二」修正回写到调用方的 z。
+
+    历史缺陷（601233 2026-09-01 实证，mode=wait）：room_and_cap 只把
+    `dict(z)` 副本交给 stop_plan，于是「上抬买区下沿」和 stop_warning
+    全被丢弃 —— 报告上买区仍是 25.52~26.89，而硬止损算成 26.84，
+    **落在买区之内**，挂单价 26.89 距硬止损仅 0.05（0.19%）：
+        工具自己打出「风险 0.05 / 收益 1.21 = 24.20:1」
+    仓位闸门与盈亏比闸门全部建在这个假风险上。
+    修好后：买区下沿必须被抬到硬止损之上，并落 stop_warning。
+    """
+    from probe_intraday import room_and_cap
+    y = _bar("2026-09-01", 27.40, 27.60, 26.98, 27.17, 6e7)   # 收阴 → 只取阳线下沿
+    bars = [_bar("2026-08-%02d" % d, 26, 27, 25.8, 26.2, 2e6)
+            for d in (10, 11, 12, 13, 14)] + [y]
+    atr_v = 1.375
+    z = zone_at_level(26.98, atr_v, 27.17, "平台突破(优先T1)", {}, bars)
+    z["primary_lo"], z["primary_hi"] = 25.52, 26.89
+    z["anchor"] = "platform_lip"
+    z["invalidation"] = 25.52
+    rc = room_and_cap(bars, z, "wait", atr_v)
+    assert rc["hard"] == 26.84, rc
+    assert z["primary_lo"] > rc["hard"], (z["primary_lo"], rc["hard"])
+    assert z["primary_lo"] == 26.91, z["primary_lo"]      # hard + 0.05×ATR
+    assert z.get("stop_warning"), "冲突必须落 stop_warning"
+    assert z.get("buy_lo_adjusted") is True
+    # 冲突解决后，挂单价到硬止损的距离不再是 0.19% 的假风险
+    assert round((z["primary_lo"] - rc["hard"]) / z["primary_lo"] * 100, 2) > 0.2
+
+
+def test_backtest_uses_probe_constants():
+    """回测不得复制阈值 —— 必须直接引用 probe_intraday 的模块常量。
+
+    否则「线上改一处、回测改一处」，参数敏感性扫描会慢慢变成在扫描一份
+    已经和线上无关的影子参数。这里挡住的是复制，不是数值本身。
+    """
+    import backtest_intraday as BT
+    import probe_intraday as PI
+    assert BT.P is PI, "回测必须 import probe_intraday 本体"
+    for name in ("BREAK_DMAX_ASH", "BREAK_DMAX_US", "BREAK_STOP_ATR",
+                 "BREAK_BUF_ATR", "BREAK_GAP_ATR", "ASH_BREAK_MIN_OFF",
+                 "ASH_LIMIT_BUFFER", "ASH_MAX_POS", "ASH_RISK_PCT",
+                 "PULLBACK_VOL_MULT", "PULLBACK_BAND_ATR", "PULLBACK_STOP_ATR",
+                 "PULLBACK_FRESH", "BURST_MULT", "BURST_AFTER", "PRE_AMP_MAX",
+                 "CHASE_ATR", "BO_NEAR_STRONG", "BO_NEAR_NORMAL", "BO_BODY_ATR",
+                 "BO_VOL_REL", "BO_TGT_ATR", "RES_WINDOW"):
+        assert not hasattr(BT, name), (
+            f"回测复制了 {name}；应改成直接用 P.{name}，否则会与线上漂移")
+
+
 def test_ash_limit_anchor_is_basis_not_snap_prev():
     """涨停锚必须用 basis[-1] 收盘，不能用 snap["prev"]。
 
@@ -822,4 +872,6 @@ if __name__ == "__main__":
     test_ash_structural_ceiling()
     test_ash_late_is_not_a_ban()
     test_ash_limit_anchor_is_basis_not_snap_prev()
+    test_room_and_cap_propagates_stop_conflict()
+    test_backtest_uses_probe_constants()
     print("ok")

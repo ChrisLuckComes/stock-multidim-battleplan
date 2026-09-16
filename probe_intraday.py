@@ -147,9 +147,22 @@ def room_and_cap(bars, z, mode, atr_v, rr=1.5, last_c=None):
     c = last_c if last_c is not None else bars[-1]["c"]
     hard = None
     try:
-        sp = stop_plan(bars, mode, dict(z), atr_v)
+        tmp = dict(z)
+        sp = stop_plan(bars, mode, tmp, atr_v)
         if sp:
             hard = sp.get("hard")
+        # 铁律二回写：stop_plan 会把「硬止损落在买区下沿之上」的冲突修好
+        # （上抬买区下沿 + stop_warning）。以前这里只传副本、改完就扔，
+        # 于是报告既不上抬买区、也不提示冲突，直接把虚高的盈亏比打出来。
+        # 实证（601233 2026-09-01，mode=wait）：硬 26.84 落在买区
+        # 25.52–26.89 **之内**，挂单 26.89 → 报告打成「风险 0.05 / 收益
+        # 1.21 = 24.20:1」，仓位闸门和盈亏比闸门全部建在 0.19% 的假风险上。
+        if tmp.get("stop_warning"):
+            z["stop_warning"] = tmp["stop_warning"]
+            z["buy_lo_adjusted"] = True
+            for k in ("primary_lo", "primary_hi", "in_zone"):
+                if k in tmp:
+                    z[k] = tmp[k]
     except Exception:
         pass
     if hard is None and z.get("level") is not None:
@@ -294,6 +307,9 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
     plan = plan_entry(b2, ev)
     z = plan.get("buy_zone") or {}
     atr_v = atr14(b2)
+    # 必须在这里先算：room_and_cap 会执行 stop_plan 的「铁律二」并回写买区
+    # （硬止损与买区冲突时上抬买区下沿）。放在打印之前，报告才和实际挂单价一致。
+    rc = room_and_cap(b2, z, plan["mode"], atr_v)
 
     out = {
         "code": code, "name": snap["name"], "sym": sym,
@@ -317,6 +333,8 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
            else f"{z.get('primary_lo')} ~ {z.get('primary_hi')}")
     print(f" 买区       : {_zt}"
           f"   防守位 {z.get('invalidation')}")
+    if z.get("stop_warning"):
+        print(f" ⚠ 止损冲突 : {z['stop_warning']}")
     if plan.get("note"):
         print(f" note       : {plan['note']}")
 
@@ -329,7 +347,6 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
     if has_zone and not invalid:
         lo, hi = z.get("primary_lo"), z["primary_hi"]
         defend = z.get("invalidation")
-        rc = room_and_cap(b2, z, plan["mode"], atr_v)
         hard, cap, t1 = rc["hard"], rc["cap"], rc["target1"]
         capped = cap is not None and hi > cap
         limit = round(cap, 2) if capped else hi
@@ -920,6 +937,8 @@ def probe_us(sym, account=5000, min_scale=5, until=None, date=None):
     last = bars[-1]
     atr_v = atr14(bars)
     prev_close = meta.get("prev_close") or last["c"]
+    # 同 A 股：先跑 room_and_cap，让 stop_plan 的「铁律二」修正落进 z 再打印
+    rc_us = room_and_cap(bars, z, plan["mode"], atr_v, last_c=last["c"])
     # Nasdaq 自带 marketStatus（Pre-Market/Open/Closed），夏令时不必自算
     sess = meta.get("session") or ""
     if sess:
@@ -951,6 +970,8 @@ def probe_us(sym, account=5000, min_scale=5, until=None, date=None):
           f"   防守位 {z.get('invalidation')}")
     if z.get("relaxed"):
         print(f" 门控       : ⚠ 已放宽 —— {z.get('relaxed_reason')}")
+    if z.get("stop_warning"):
+        print(f" ⚠ 止损冲突 : {z['stop_warning']}")
     if plan.get("note"):
         print(f" note       : {plan['note']}")
     print(f" 口径       : T+0 可当日进出 ｜ 无涨跌停（硬止损兜底）｜ 单笔风险预算"
@@ -971,7 +992,7 @@ def probe_us(sym, account=5000, min_scale=5, until=None, date=None):
     if has_zone and not invalid:
         lo, hi = z["primary_lo"], z["primary_hi"]
         defend = z.get("invalidation")
-        rc = room_and_cap(b2, z, plan["mode"], atr_v, last_c=last["c"])
+        rc = rc_us
         hard, cap, t1 = rc["hard"], rc["cap"], rc["target1"]
         capped = cap is not None and hi > cap
         limit = round(cap, 2) if capped else hi
