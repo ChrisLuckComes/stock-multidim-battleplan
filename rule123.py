@@ -379,13 +379,13 @@ def is_yizi(bar, prev_c, atr_v):
 
 
 def too_far_from_zone(z, atr_v, last_c, limit=2.0):
-    """现价高出买区上沿 >limit×ATR → 不追。"""
+    """现价高出买位（level/突破位）>limit×ATR → 不追。与 SKILL「离买位 >2×ATR」对齐，不随买区带宽漂移。"""
     if not atr_v or last_c is None or not z:
         return False
-    hi = z.get("primary_hi")
-    if hi is None:
+    lv = z.get("level")
+    if lv is None:
         return False
-    return (last_c - hi) / atr_v > limit
+    return (last_c - lv) / atr_v > limit
 
 
 def living_demand(bars, ev):
@@ -487,12 +487,12 @@ def is_yang_bar(bar, atr_v, prev=None):
         if not tiny:
             return False
         up_gap = bar["c"] >= prev["c"] * 1.03
-        # 平开一字：开≈最低、收贴最高、相对前收持平/微涨
+        # 平开微涨一字：开≈最低、收贴最高、相对前收必须上涨（收平/微跌不算大阳）
         eps = max(bar["c"] * 0.001, 0.02)
         flat_board = (
             bar["o"] <= bar["l"] + eps
             and bar["c"] >= bar["h"] - eps
-            and bar["c"] >= prev["c"] * 0.995
+            and bar["c"] > prev["c"]
         )
         return bool(up_gap or flat_board)
     pct = body / bar["o"] if bar["o"] else 0
@@ -880,7 +880,7 @@ def detect_bull_flag(bars, Hs, atr_v, lookback=45):
 
 
 def zone_at_level(level, atr_v, last_c, kind, ev, bars):
-    """突破类买区：半宽与 in_zone 门槛统一为 1.0×ATR；dist/extended 按现价真算。"""
+    """突破类买区：半宽与 in_zone 门槛统一为 0.5×ATR（紧贴突破位）；dist/extended 按现价真算。"""
     z = _empty_zone()
     closes = [b["c"] for b in bars]
     v5 = typical_vwap(bars, 5)
@@ -889,7 +889,7 @@ def zone_at_level(level, atr_v, last_c, kind, ev, bars):
     z["ma5"] = round(ma5, 2) if ma5 is not None else None
     if level is None:
         return z
-    pad = 1.0 * atr_v if atr_v else level * 0.01
+    pad = 0.5 * atr_v if atr_v else level * 0.005
     lo, hi = level - pad, level + pad
     if last_c and hi - lo < last_c * 0.002:
         mid = (lo + hi) / 2.0
@@ -912,7 +912,7 @@ def zone_at_level(level, atr_v, last_c, kind, ev, bars):
         "primary_lo": round(lo, 2),
         "primary_hi": round(hi, 2),
         "dist_atr": round(dist, 2) if dist is not None else None,
-        "in_zone": bool(dist is not None and -1.0 <= dist <= 1.0),
+        "in_zone": bool(dist is not None and -0.5 <= dist <= 0.5),
         "extended": bool(dist is not None and dist > 2.0),
         # 结构位=突破位本身；硬止损由 stop_plan 另给
         "invalidation": round(level, 2),
@@ -1118,7 +1118,7 @@ def plan_entry(bars, ev):
             hi = z.get("primary_hi")
             d = (last_c - lv) / atr_v if (atr_v and lv is not None and last_c is not None) else None
             note = (
-                f"收盘 {last_c:.2f} 高出突破位 {lv} 已 {d:.1f}×ATR（买区上沿 {hi}），"
+                f"收盘 {last_c:.2f} 高出买位 {lv} 已 {d:.1f}×ATR（>2），"
                 f"不追；等回踩 {hi} 一带或等新一轮缩量再站上"
             )
             mode, priority, setup, verdict, recommend, path = (

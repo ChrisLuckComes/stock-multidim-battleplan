@@ -49,16 +49,20 @@ def test_true_yizi_uses_prev_close():
 
 
 def test_flat_open_yizi_is_yang_bar():
-    """平开一字（开=最低、无缺口）也要被识别为大阳，否则 impulse 漏掉整理板。"""
+    """合法 K 线：收平一字不算大阳；微涨一字才算；跳空一字仍算。"""
     from rule123 import is_yang_bar
     prev = _bar("2026-01-01", 100, 110, 100, 110)
-    yi = _bar("2026-01-02", 110, 110.05, 110, 110, 1e5)
+    flat = _bar("2026-01-02", 110, 110.05, 110, 110, 1e5)
+    # 实体≈0、相对前收微涨的一字（走 body<=0 分支）
+    up_tick = _bar("2026-01-03", 110.1, 110.15, 110.1, 110.1, 1e5)
+    gap_yi = _bar("2026-01-04", 113.5, 113.55, 113.5, 113.5, 1e5)
     atr_v = 2.0
-    assert is_yizi(yi, 110, atr_v) is False
-    assert is_yang_bar(yi, atr_v, prev) is True
-    fl = yang_floor([prev, yi], 1, atr_v)
-    assert fl["yi_zi"] is False
-    assert fl["floor"] == 110
+    assert is_yang_bar(flat, atr_v, prev) is False
+    assert is_yang_bar(up_tick, atr_v, prev) is True
+    assert is_yizi(gap_yi, 110, atr_v) is True
+    assert is_yang_bar(gap_yi, atr_v, prev) is True
+    doji = _bar("2026-01-05", 100, 100.06, 99.94, 100.0)
+    assert is_yang_bar(doji, atr_v, _bar("2026-01-04", 99, 101, 99, 100)) is False
 
 
 def test_held_lows_no_ratchet_on_lower_lows():
@@ -112,18 +116,27 @@ def test_stop_plan_narrow_break_hard_below_buy_lo():
 
 
 def test_too_far_gate():
-    z = zone_at_level(100, 2.75, 112, "平台突破(优先T1)", {}, [_bar("2026-01-01", 100, 101, 99, 100)])
-    assert too_far_from_zone(z, 2.75, 112, limit=2.0) is True
+    """闸门按买位 level，不按买区上沿；距 level 2.1×ATR 应拦，1.9×ATR 不拦。"""
+    atr_v = 2.75
+    z = zone_at_level(100, atr_v, 112, "平台突破(优先T1)", {}, [_bar("2026-01-01", 100, 101, 99, 100)])
+    assert z["level"] == 100
+    assert too_far_from_zone(z, atr_v, 100 + 2.1 * atr_v, limit=2.0) is True
+    assert too_far_from_zone(z, atr_v, 100 + 1.9 * atr_v, limit=2.0) is False
+    # 距 level=2.2ATR 应拦；相对买区上沿仅 1.7ATR（旧闸门会漏）
+    px = 100 + 2.2 * atr_v
+    assert (px - z["primary_hi"]) / atr_v < 2.0
+    assert too_far_from_zone(z, atr_v, px, limit=2.0) is True
 
 
 def test_breakout_in_zone_matches_band():
-    """突破买区半宽 1.0×ATR，in_zone 上限同步为 1.0。"""
+    """突破买区半宽 0.5×ATR，in_zone 同步为 ±0.5。"""
     bars = [_bar("2026-01-01", 100, 101, 99, 100)]
     atr_v = 4.0
-    z_in = zone_at_level(100, atr_v, 101.3, "平台突破(优先T1)", {}, bars)
-    assert z_in["primary_hi"] == 104.0
+    z_in = zone_at_level(100, atr_v, 101.5, "平台突破(优先T1)", {}, bars)
+    assert z_in["primary_lo"] == 98.0
+    assert z_in["primary_hi"] == 102.0
     assert z_in["in_zone"] is True
-    z_out = zone_at_level(100, atr_v, 104.1, "平台突破(优先T1)", {}, bars)
+    z_out = zone_at_level(100, atr_v, 102.1, "平台突破(优先T1)", {}, bars)
     assert z_out["in_zone"] is False
 
 

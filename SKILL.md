@@ -260,7 +260,7 @@ python rule123.py 300207 --data data/300207.json --eod --out out.json
 - `stop_plan`：`struct` + `hard` + 锚名 + `trigger`（两档止损，禁止合成一个价）
 - `targets`：`target1` / `target2` / `rr_target1`
 - 平台突破 `anchor=platform_lip`（活平台沿，不是死 R1）
-- 突破类高出买区上沿 >2×ATR → `recommend=False`
+- 突破类离买位（level）>2×ATR → `recommend=False`
 
 ATR：Wilder ATR14。美股 Yahoo 失败时脚本内 stooq 兜底。
 
