@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from rule123 import (
     SKILL_HARD_ANCHORS,
     atr14,
+    find_impulse_pause,
     held_lows_3d,
     is_live_bar,
     is_yizi,
@@ -337,6 +338,85 @@ def test_plan_entry_no_yang_in_uptrend_does_not_crash():
     assert plan.get("reason") is None or "TypeError" not in str(plan.get("reason"))
 
 
+def _yang_today_bars():
+    """上升趋势（锯齿，有摆动高低点）+ 一根大阳（低 19.09 / 高 20.97，约 2.4×ATR）。"""
+    bars = []
+    px = 17.5
+    for i in range(78):
+        px += 0.06 if (i % 6 < 3) else -0.02
+        d = f"2026-{i // 28 + 1:02d}-{i % 28 + 1:02d}"
+        bars.append(_bar(d, px - 0.30, px + 0.42, px - 0.36, px, 8e5))
+    bars.append(_bar("2026-08-25", 19.12, 20.97, 19.09, 20.97, 1.9e7))
+    return bars
+
+
+def test_impulse_pause_zone_is_tight_band():
+    """大阳后缩量回踩：买区必须是「贴大阳低点 1.0×ATR」的下单带。
+
+    守护「把大阳体（低点~高点）当买区」——大阳体常宽达 2~2.5×ATR，
+    落在这样的区间里等于没有价位（挂下沿和挂上沿是两笔不同的交易）。
+    """
+    bars = _yang_today_bars()
+    atr_v = atr14(bars)
+    imp = find_impulse_pause(bars, atr_v)
+    assert imp["state"] == "yang_today", imp
+    z = imp.get("zone")
+    assert z is not None, "yang_today 必须带 zone，否则调用方回退到别的买区、同屏两个买区"
+    band = z["primary_hi"] - z["primary_lo"]
+    assert abs(band - 1.0 * atr_v) < 0.02, (band, atr_v, z)
+    assert abs(z["primary_lo"] - 19.09) < 0.02, z
+    # 上沿不得落在大阳上半部（大阳 19.09~20.97，中点 20.03）
+    assert z["primary_hi"] <= 20.03, z
+    # 大阳体另存，供「是否仍在调整区」判定
+    assert z["body_lo"] == 19.09 and z["body_hi"] == 20.97, z
+
+
+def test_impulse_pause_body_mid_is_not_in_zone():
+    """回踩到大阳中部不算到位：买区贴大阳低点，in_zone 必须为 False。"""
+    bars = _yang_today_bars()
+    for j, c in enumerate((20.30, 20.20, 20.10, 20.05), start=1):
+        bars.append(_bar(f"2026-08-{25 + j}", c + 0.05, c + 0.12, c - 0.10, c, 3e5))
+    atr_v = atr14(bars)
+    imp = find_impulse_pause(bars, atr_v)
+    z = imp.get("zone")
+    assert z is not None, imp
+    assert z["primary_hi"] < 20.05, z
+    assert z["in_zone"] is False, (z, imp["state"])
+    assert imp["state"] != "digest", imp
+    assert imp["state"] in ("waiting_back", "no_shrink", "extended"), imp
+
+
+def test_yang_today_plan_keeps_single_zone():
+    """大阳当日：buy_zone 必须来自 impulse_pause，且与 note 里的区间一致。
+
+    守护「yang_today 漏传 zone → buy_zone 回退成沿线回踩的 EMA10 买区」，
+    那会让同一张计划卡上出现两个互相矛盾的买区。
+    """
+    bars = _yang_today_bars()
+    n = len(bars)
+    ev = {
+        "rvol20": 2.0,
+        "platform": None,                        # 无活平台沿 → 不做平台突破
+        "P0": {"i": 10, "price": min(b["l"] for b in bars[8:14])},
+        "P1": {"i": n - 25, "price": min(b["l"] for b in bars[n - 28:n - 20])},
+        "R1": {"i": 5, "price": max(b["h"] for b in bars[:10])},
+        "c2": True,
+        # 把 W底 / 旗形判死，隔离出 impulse_pause 这条路径
+        "w_bottom": {"neckline": 100.0},
+        "bull_flag": {"tl_now": 100.0, "days_above_tl": 0},
+        "down_tl": None,
+    }
+    plan = plan_entry(bars, ev)
+    z = plan["buy_zone"]
+    assert z["type"] == "大阳后缩量回踩(次优先T2)", (plan["mode"], plan["verdict"], z)
+    assert z["anchor"] in ("yang_digest", "yang_gap"), z
+    lo, hi = z["primary_lo"], z["primary_hi"]
+    assert lo is not None and hi is not None, z
+    assert f"{lo}-{hi}" in plan["note"], (plan["note"], lo, hi)
+    # note 里不得再把整条大阳体当买区印出来
+    assert f"{z['body_lo']}-{z['body_hi']}" not in plan["note"], plan["note"]
+
+
 if __name__ == "__main__":
     test_yizi_not_gap_yang()
     test_true_yizi_uses_prev_close()
@@ -356,4 +436,7 @@ if __name__ == "__main__":
     test_is_live_bar_session()
     test_no_platform_does_not_fallback_to_r1()
     test_plan_entry_no_yang_in_uptrend_does_not_crash()
+    test_impulse_pause_zone_is_tight_band()
+    test_impulse_pause_body_mid_is_not_in_zone()
+    test_yang_today_plan_keeps_single_zone()
     print("ok")

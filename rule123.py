@@ -571,51 +571,45 @@ def find_impulse_pause(bars, atr_v):
     y_lo, y_hi = y["l"], y["h"]
     fl = yang_floor(bars, yang_i, atr_v)
     floor, zone_lo, zone_hi = fl["floor"], fl["zone_lo"], fl["zone_hi"]
-    if yang_i == n - 1:
-        return {
-            "state": "yang_today",
-            "yang_d": y["d"],
-            "yang_low": y_lo,
-            "yang_high": y_hi,
-            "floor": floor,
-            "yi_zi": fl["yi_zi"],
-        }
-    lows_after = [bars[j]["c"] for j in range(yang_i + 1, n)]
-    min_after = min(lows_after)
+    # 两件事必须分开：
+    #   大阳体 [zone_lo, zone_hi]（普通大阳=低点~高点）是「未走坏的有效性边界」——
+    #     用来判断现价是否还在调整区、是否已延伸；
+    #   买区/下单带 [buy_lo, buy_hi] 是「贴防守位 floor 单边向上 1.0×ATR」，
+    #     与突破类买区同构。大阳体常宽达 2~2.5×ATR，把它当买区等于没有买区
+    #     （挂在 19.09 和挂在 20.90 是两笔完全不同的交易），无法执行。
+    body_lo, body_hi = zone_lo, zone_hi
+    band = 1.0 * atr_v if atr_v else (body_hi - body_lo)
+    buy_lo = floor
+    buy_hi = min(body_hi, floor + band) if band > 0 else body_hi
+    if buy_hi < buy_lo:
+        buy_hi = buy_lo
     pad = 0.15 * atr_v if atr_v else floor * 0.005
-    if min_after < floor - pad:
-        return {
-            "state": "broke_yang_low",
+
+    def _z(extra=None):
+        zz = _empty_zone()
+        zz.update({
+            "type": "大阳后缩量回踩(次优先T2)",
+            "anchor": "yang_gap" if fl["yi_zi"] else "yang_digest",
+            "level": round(floor, 2),
+            "primary_lo": round(buy_lo, 2),
+            "primary_hi": round(buy_hi, 2),
+            "in_zone": bool((buy_lo - pad) <= last_c <= (buy_hi + pad)),
+            "dist_atr": round((last_c - buy_hi) / atr_v, 2) if atr_v else None,
+            "extended": bool(last_c > body_hi + (0.5 * atr_v if atr_v else 0)),
+            "invalidation": round(floor - pad, 2),
             "yang_d": y["d"],
-            "yang_low": y_lo,
-            "yang_high": y_hi,
-            "floor": floor,
+            "hits": n - 1 - yang_i,
             "yi_zi": fl["yi_zi"],
-        }
-    shrink = vol_at_recent_low(bars, yang_i)
-    held = held_lows_3d(bars, yang_i, atr_v)
-    days_after = n - 1 - yang_i
-    in_range = zone_lo <= last_c <= (zone_hi + pad)
-    above = last_c > zone_hi + (0.5 * atr_v if atr_v else 0)
-    z = _empty_zone()
-    z.update({
-        "type": "大阳后缩量回踩(次优先T2)",
-        "anchor": "yang_gap" if fl["yi_zi"] else "yang_digest",
-        "level": round(floor, 2),
-        "primary_lo": round(zone_lo, 2),
-        "primary_hi": round(zone_hi, 2),
-        "in_zone": bool(in_range),
-        "dist_atr": round((last_c - zone_hi) / atr_v, 2) if atr_v else None,
-        "extended": bool(above),
-        "invalidation": round(floor - pad, 2),
-        "yang_d": y["d"],
-        "hits": n - 1 - yang_i,
-        "yi_zi": fl["yi_zi"],
-        "has_gap": fl["has_gap"],
-        "gap_lo": round(fl["gap_lo"], 2) if fl["gap_lo"] is not None else None,
-        "gap_hi": round(fl["gap_hi"], 2) if fl["gap_hi"] is not None else None,
-        "held_3d": held,
-    })
+            "has_gap": fl["has_gap"],
+            "gap_lo": round(fl["gap_lo"], 2) if fl["gap_lo"] is not None else None,
+            "gap_hi": round(fl["gap_hi"], 2) if fl["gap_hi"] is not None else None,
+            "body_lo": round(body_lo, 2),
+            "body_hi": round(body_hi, 2),
+        })
+        if extra:
+            zz.update(extra)
+        return zz
+
     extra = {
         "yang_d": y["d"],
         "yang_low": y_lo,
@@ -623,11 +617,25 @@ def find_impulse_pause(bars, atr_v):
         "floor": floor,
         "yi_zi": fl["yi_zi"],
     }
-    if above:
+    if yang_i == n - 1:
+        # 大阳当日也要带 zone：否则调用方只能回退到别的买区/大阳体，
+        # 计划卡上会出现两个互相矛盾的买区。
+        return {"state": "yang_today", "zone": _z(), **extra}
+    lows_after = [bars[j]["c"] for j in range(yang_i + 1, n)]
+    min_after = min(lows_after)
+    if min_after < floor - pad:
+        return {"state": "broke_yang_low", "zone": _z(), **extra}
+    shrink = vol_at_recent_low(bars, yang_i)
+    held = held_lows_3d(bars, yang_i, atr_v)
+    days_after = n - 1 - yang_i
+    z = _z({"held_3d": held})
+    if z["extended"]:
         return {"state": "extended", "zone": z, **extra}
     if not shrink:
         return {"state": "no_shrink", "zone": z, **extra}
-    if in_range:
+    # 进买区只看下单带（贴防守位 1.0×ATR），不再用大阳体 —— 否则回踩到大阳中部
+    # 就算「到位」，等于在大阳体内任意价位都能买。
+    if z["in_zone"]:
         if days_after < 3:
             return {"state": "need_3d", "zone": z, **extra}
         if not held:
@@ -646,6 +654,8 @@ def _empty_zone():
         "gap_hi": None,
         "primary_lo": None,
         "primary_hi": None,
+        "body_lo": None,
+        "body_hi": None,
         "in_zone": False,
         "dist_atr": None,
         "hits": 0,
@@ -1338,12 +1348,18 @@ def plan_entry(bars, ev):
         floor = imp.get("floor") if imp.get("floor") is not None else y_lo
         yi_zi = bool(imp.get("yi_zi"))
         z = imp.get("zone") or _empty_zone()
-        zone_txt = f"{round(z.get('primary_lo') or y_lo, 2)}-{round(z.get('primary_hi') or y_hi, 2)}"
+        # 不允许回退到大阳体：那会把「未走坏的有效性边界」印成买区，
+        # 宽度可达 2.5×ATR，人无从下单。无买区就如实写 N/A。
+        if z.get("primary_lo") is not None and z.get("primary_hi") is not None:
+            zone_txt = f"{round(z['primary_lo'], 2)}-{round(z['primary_hi'], 2)}"
+        else:
+            zone_txt = "N/A"
         floor_txt = f"一字缺口下沿 {round(floor, 2)}" if yi_zi else f"大阳低点 {round(floor, 2)}"
         if st == "yang_today":
             return pack(
                 "wait", None, "wait", "大阳当日不追", False,
                 f"{y_d} 大阳，等缩到近期最低量、回踩进 {zone_txt} 再买，防守看{floor_txt}",
+                z,
             )
         if st == "broke_yang_low":
             return pack(
@@ -1391,8 +1407,8 @@ def plan_entry(bars, ev):
             elif yi_zi:
                 gap_note = f"；一字板，买回踩缺口，防守缺口下沿 {round(floor, 2)}"
             note = (
-                f"大阳后缩量回踩：{y_d} 阳线 {round(y_lo, 2)}-{round(y_hi, 2)}，"
-                f"现价在区内、量已到近期最低，且近 3 根不再创新低。防守{floor_txt}。"
+                f"大阳后缩量回踩：{y_d} 阳线 {round(y_lo, 2)}-{round(y_hi, 2)}（大阳体），"
+                f"现价在买区 {zone_txt} 内、量已到近期最低，且近 3 根不再创新低。防守{floor_txt}。"
                 f"次优先T2，试错仓"
                 f"{gap_note}"
             )
