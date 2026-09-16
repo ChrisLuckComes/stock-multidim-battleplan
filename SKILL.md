@@ -340,7 +340,18 @@ python probe_intraday.py 002961 --asof 2026-09-16 --replay --until 10:25   # 盘
 - 平台突破 `anchor=platform_lip`（活平台沿，不是死 R1）
 - 突破类可执行三档：买区内（≤1.0×ATR）`recommend=True`；出上沿但 ≤2×ATR `recommend=True` 且 `chase_only=True`（只挂回踩单、禁市价追）；>2×ATR `recommend=False`
 
-ATR：Wilder ATR14。美股 Yahoo 失败时脚本内 stooq 兜底。
+ATR：Wilder ATR14。
+
+**数据源与降级链**（实测口径，2026-09-16）：
+
+| 市场 | 主源 | 降级 | 备注 |
+|---|---|---|---|
+| A 股 | 东方财富 | — | HTTPS 被中间设备阻断时自动降级 HTTP（`fetch_json_fallback`） |
+| 美股 | Nasdaq 官方 API | 东财 http → Yahoo → stooq | Nasdaq 独有**盘前价/盘前量/市场状态**；东财 http 独有**分钟级带量 K 线** |
+
+- 美股 `session` 字段由 Nasdaq 直接给出（`Pre-Market` / `Open` / `Closed` / `After-Hours`），**不要自行判断夏令时/冬令时**。
+- 美股 `bars` 只含已收盘交易日；`spot_quote` 才是盘前/盘中实时价 —— 两者不同属正常，`as_of` 标明时点。
+- 美股盘中时段 = 北京时间 21:30–04:00（夏令时）。
 
 取数优先级：wb-finance-skill → `fetch_market.py` → 网页检索（并标注来源）。
 

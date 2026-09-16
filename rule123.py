@@ -20,6 +20,40 @@ HH 两两比较不作门控。cond2 = 自 P1 未再创新低。不用 MA60。
 import urllib.request, json, sys, datetime, re, time
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
+NASDAQ_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"),
+    "Accept": "application/json, text/plain, */*",
+    "Referer": "https://www.nasdaq.com/",
+}
+
+
+def fetch_json_nasdaq(url, timeout=20, retries=3):
+    """Nasdaq 官方 API 需要完整浏览器头 + Referer，否则 403。"""
+    last = None
+    for n in range(retries):
+        try:
+            req = urllib.request.Request(url, headers=NASDAQ_HEADERS)
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read().decode("utf-8", "ignore"))
+        except Exception as e:
+            last = e
+            time.sleep(0.6 * (n + 1))
+    raise last
+
+
+def _num_q(s):
+    """'$377.67' / '1,014,540' / '+0.43' / '-1.21%' → float；NA/空 → None。"""
+    if s is None:
+        return None
+    t = (str(s).strip().replace("$", "").replace(",", "")
+         .replace("%", "").replace("+", ""))
+    if t in ("", "--", "-", "NA", "N/A", "null", "None"):
+        return None
+    try:
+        return float(t)
+    except ValueError:
+        return None
 
 
 def is_ash(ticker: str) -> bool:
@@ -37,6 +71,20 @@ def fetch_json(url, timeout=20, retries=3):
             last = e
             time.sleep(1.0 * (n + 1))
     raise last
+
+
+def fetch_json_fallback(url, timeout=20, retries=3):
+    """https 握手被中间设备中断时自动降级 http 重试（东财实测：https 拒连、http 通）。"""
+    try:
+        return fetch_json(url, timeout=timeout, retries=retries)
+    except Exception as e1:
+        if not url.startswith("https://"):
+            raise
+        try:
+            return fetch_json("http://" + url[8:], timeout=timeout, retries=retries)
+        except Exception as e2:
+            raise RuntimeError(
+                f"https={type(e1).__name__}:{str(e1)[:50]} | http={type(e2).__name__}:{str(e2)[:50]}")
 
 
 def fetch_stooq_bars(sym):
@@ -94,7 +142,7 @@ def bars_from_em(secid, lmt=130):
         "&fields1=f1,f2,f3,f4,f5,f6"
         "&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
     )
-    kd = fetch_json(url).get("data", {})
+    kd = fetch_json_fallback(url).get("data", {})
     bars = []
     for line in kd.get("klines", []):
         p = line.split(",")
@@ -107,7 +155,7 @@ def bars_from_em(secid, lmt=130):
     # 最新价取末根
     last_q = None
     try:
-        q = fetch_json(
+        q = fetch_json_fallback(
             "https://push2.eastmoney.com/api/qt/stock/get"
             f"?secid={secid}&ut=fa5fd1943c7b386f172d6893dbfba10b&invt=2&fltt=2"
             "&fields=f43,f57,f58"
@@ -125,14 +173,137 @@ def secid_of(ticker: str):
     return f"0.{ticker}"
 
 
+def bars_from_nasdaq(sym, days=400):
+    """Nasdaq 官方 API：历史日线 + 实时/盘前快照 → (bars, spot)。
+
+    实测要点（2026-09-16）：
+      · historical 只含「已收盘交易日」，盘中不会出现当日 bar；
+        故 spot 必须来自 /info 的 primaryData（盘前/盘中实时），不能取 bars[-1].c。
+      · marketStatus 由 Nasdaq 直接给出（Pre-Market/Open/Closed/After-Hours），
+        免去自行判断夏令时/冬令时。
+      · 不要用 /chart 的 previousClose 当昨收——它会滞后一整天（实测停在 9/14）。
+    """
+    s = sym.upper()
+    today = datetime.date.today()
+    frm = today - datetime.timedelta(days=days)
+    j = fetch_json_nasdaq(
+        f"https://api.nasdaq.com/api/quote/{s}/historical"
+        f"?assetclass=stocks&fromdate={frm:%Y-%m-%d}&todate={today:%Y-%m-%d}&limit=300"
+    )
+    rows = ((j.get("data") or {}).get("tradesTable") or {}).get("rows") or []
+    bars = []
+    for r in rows:
+        try:
+            mm, dd, yy = str(r.get("date", "")).split("/")
+        except ValueError:
+            continue
+        o, h, l, c = (_num_q(r.get("open")), _num_q(r.get("high")),
+                      _num_q(r.get("low")), _num_q(r.get("close")))
+        if None in (o, h, l, c):
+            continue
+        bars.append({"d": f"{yy}-{mm}-{dd}", "o": o, "h": h, "l": l, "c": c,
+                     "v": _num_q(r.get("volume")) or 0.0})
+    bars.sort(key=lambda b: b["d"])                      # 旧 → 新
+    if not bars:
+        raise RuntimeError(f"Nasdaq 未返回 {sym} 日线")
+
+    spot, meta = None, {"session": "", "as_of": None, "prev_close": None}
+    try:
+        info = (fetch_json_nasdaq(
+            f"https://api.nasdaq.com/api/quote/{s}/info?assetclass=stocks"
+        ).get("data") or {})
+        pdat = info.get("primaryData") or {}
+        sdat = info.get("secondaryData") or {}
+        spot = _num_q(pdat.get("lastSalePrice"))
+        meta = {
+            "session": info.get("marketStatus") or "",
+            "as_of": pdat.get("lastTradeTimestamp"),
+            "prev_close": _num_q(sdat.get("lastSalePrice")),
+        }
+    except Exception:
+        pass
+    return bars, (spot if spot is not None else bars[-1]["c"]), meta
+
+
+_EM_US_CACHE = {}
+
+
+def em_us_secid(sym):
+    """东财美股 secid 前缀探测：105=纳斯达克、106=纽交所（结果缓存）。"""
+    s = sym.upper()
+    if s in _EM_US_CACHE:
+        return _EM_US_CACHE[s]
+    for pre in ("105", "106"):
+        try:
+            j = fetch_json_fallback(
+                f"http://push2his.eastmoney.com/api/qt/stock/kline/get"
+                f"?secid={pre}.{s}&klt=101&fqt=1&end=20500101&lmt=2"
+                f"&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56")
+            if ((j.get("data") or {}).get("klines") or []):
+                _EM_US_CACHE[s] = f"{pre}.{s}"
+                return _EM_US_CACHE[s]
+        except Exception:
+            continue
+    raise RuntimeError(f"东财未识别美股 {sym} 的交易所前缀（105/106 均无数据）")
+
+
+def bars_from_em_us(sym, klt=101, lmt=130):
+    """东财美股 K 线（走 http 通道，见 fetch_json_fallback）。
+
+    实测（2026-09-16）：东财 HTTPS 被中间设备阻断、HTTP 明文可通；
+    且这是目前唯一提供「美股分钟级带量 K 线」的可用源——
+    Nasdaq /chart 只有稀疏价格点（无量），新浪/腾讯美股分钟线均已失效。
+      · klt=101 日线（d 形如 2026-09-15）
+      · klt=5   五分钟（d 形如 2026-09-16 04:00，**北京时间**）
+    """
+    secid = em_us_secid(sym)
+    url = (f"http://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}"
+           f"&klt={klt}&fqt=1&end=20500101&lmt={lmt}"
+           f"&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58")
+    d = (fetch_json_fallback(url).get("data") or {})
+    kl = d.get("klines") or []
+    if not kl:
+        raise RuntimeError(f"东财美股未返回 {sym} klt={klt} 数据")
+    bars = []
+    for line in kl:
+        p = line.split(",")
+        if len(p) < 6:
+            continue
+        # f51 时间 / f52 开 / f53 收 / f54 高 / f55 低 / f56 量
+        bars.append({"d": p[0], "o": float(p[1]), "c": float(p[2]),
+                     "h": float(p[3]), "l": float(p[4]), "v": float(p[5])})
+    return bars, None, {"session": "", "as_of": None, "prev_close": None}
+
+
+def bars_from_us(sym):
+    """美股取数：Nasdaq（带盘前/市场状态）→ 东财 http → Yahoo（含 stooq 兜底）。
+    统一返回 (bars, spot, meta)。"""
+    errs = []
+    for name, fn in (("nasdaq", bars_from_nasdaq),
+                     ("eastmoney", bars_from_em_us),
+                     ("yahoo", bars_from_yahoo)):
+        try:
+            out = fn(sym)
+        except Exception as e:
+            errs.append(f"{name}={type(e).__name__}:{str(e)[:60]}")
+            continue
+        if len(out) == 2:                       # yahoo 返回 (bars, spot)
+            bars, spot = out
+            return bars, spot, None
+        return out
+    raise RuntimeError(f"美股 {sym} 全部数据源失败 → " + " | ".join(errs))
+
+
 def get_bars(sym, data_file=None):
+    """→ (bars, spot, meta)。meta 目前只有美股会填（session/as_of/prev_close）。"""
     if data_file:
         with open(data_file, encoding="utf-8") as f:
             d = json.load(f)
-        return d.get("bars", []), d.get("spot")
+        return d.get("bars", []), d.get("spot"), None
     if is_ash(sym):
-        return bars_from_em(secid_of(sym))
-    return bars_from_yahoo(sym)
+        bars, last_q = bars_from_em(secid_of(sym))
+        return bars, last_q, None
+    return bars_from_us(sym)
 
 
 def pivots(bars, w=3):
@@ -1567,7 +1738,8 @@ def build_ev(bars, drop_live=False):
 
 
 def evaluate(sym, data_file=None, eod=False):
-    bars, last_q = get_bars(sym, data_file)
+    bars, last_q, qmeta = get_bars(sym, data_file)
+    _us = qmeta or {}                       # 美股：session/as_of/prev_close
     sym_code = str(sym).split(".")[0] if sym else ""
     market = "ASH" if (is_ash(sym_code) or (data_file and sym_code.isdigit())) else "US"
     # 盘中未收盘：默认禁止 recommend（量能不可判）；--eod 丢弃末根
@@ -1599,6 +1771,8 @@ def evaluate(sym, data_file=None, eod=False):
             "stop_plan": plan.get("stop_plan"),
             "targets": plan.get("targets"),
             "spot_quote": last_q,
+            "session": _us.get("session") or None,
+            "as_of": _us.get("as_of"),
         }
         return out_live
 
@@ -1635,6 +1809,8 @@ def evaluate(sym, data_file=None, eod=False):
         "last": rnd(last_c),
         "last_date": bars[-1]["d"],
         "spot_quote": last_q,
+        "session": _us.get("session") or None,
+        "as_of": _us.get("as_of"),
         "P0": {"i": P0[0], "d": bars[P0[0]]["d"], "price": rnd(P0[1])},
         "P1": {"i": P1[0], "d": bars[P1[0]]["d"], "price": rnd(P1[1])},
         "regime": meta["regime"],

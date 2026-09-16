@@ -85,6 +85,11 @@ def lots_for(qty, account, price):
 
 
 def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False, until=None):
+    if not (code.isdigit() and len(code) == 6):
+        print(f"[{code}] 本脚本当前只覆盖 A 股（6 位代码）。")
+        print("  美股：日线/实时/盘前走 rule123.py（Nasdaq→东财http→Yahoo），")
+        print("        分钟级带量 K 线用 rule123.bars_from_em_us(sym, klt=5)。")
+        return None
     sym = prefix_of(code) + code
     daily = kline(sym, 240, 140)
     snap = snapshot(sym)

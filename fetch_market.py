@@ -39,6 +39,20 @@ def fetch_json(url, timeout=20, retries=3):
     raise last
 
 
+def fetch_json_fallback(url, timeout=20, retries=3):
+    """https 握手被中间设备中断时自动降级 http 重试（东财实测：https 拒连、http 通）。"""
+    try:
+        return fetch_json(url, timeout=timeout, retries=retries)
+    except Exception as e1:
+        if not url.startswith("https://"):
+            raise
+        try:
+            return fetch_json("http://" + url[8:], timeout=timeout, retries=retries)
+        except Exception as e2:
+            raise RuntimeError(
+                f"https={type(e1).__name__}:{str(e1)[:50]} | http={type(e2).__name__}:{str(e2)[:50]}")
+
+
 def detect_market(ticker: str):
     """判断标的所属市场并返回 secid / symbol。"""
     ticker = ticker.strip().upper()
@@ -72,7 +86,7 @@ def fetch_ash(secid):
         f"?secid={secid}&ut=fa5fd1943c7b386f172d6893dbfba10b&invt=2&fltt=2"
         "&fields=f43,f44,f45,f46,f47,f48,f50,f57,f58,f60,f116,f117,f162,f167,f168,f184,f189,f190"
     )
-    q = fetch_json(quote_url).get("data", {})
+    q = fetch_json_fallback(quote_url).get("data", {})
     if not q:
         raise RuntimeError(f"东方财富未返回 {secid} 行情")
 
@@ -111,7 +125,7 @@ def fetch_ash(secid):
         "&fields1=f1,f2,f3,f4,f5,f6"
         "&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
     )
-    kd = fetch_json(kline_url).get("data", {})
+    kd = fetch_json_fallback(kline_url).get("data", {})
     bars = []
     for line in kd.get("klines", []):
         parts = line.split(",")
@@ -153,81 +167,232 @@ def fetch_stooq_bars(sym):
     return bars
 
 
-def fetch_us(symbol):
+# ---------------------------------------------------------------------------
+# 美股三源：Nasdaq 官方 API（主）→ Yahoo v8 → stooq CSV
+# ---------------------------------------------------------------------------
+NASDAQ_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"),
+    "Accept": "application/json, text/plain, */*",
+    "Referer": "https://www.nasdaq.com/",
+}
+
+
+def _nasdaq_json(url):
+    req = urllib.request.Request(url, headers=NASDAQ_HEADERS)
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return json.loads(r.read().decode("utf-8", "ignore"))
+
+
+def _num(s):
+    """'$377.67' / '1,014,540' / '+0.43' / '-1.21%' → float；NA/空 → None。"""
+    if s is None:
+        return None
+    t = (str(s).strip().replace("$", "").replace(",", "")
+         .replace("%", "").replace("+", ""))
+    if t in ("", "--", "-", "NA", "N/A", "null", "None"):
+        return None
     try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=6mo&interval=1d"
-        j = fetch_json(url)
-        result = j.get("chart", {}).get("result", [None])[0]
-        if not result:
-            raise RuntimeError(f"Yahoo 未返回 {symbol} 数据")
-        meta = result.get("meta", {})
-        ts = result.get("timestamp", [])
-        q = result.get("indicators", {}).get("quote", [{}])[0]
-        prev_close = meta.get("chartPreviousClose") or meta.get("previousClose")
-        spot = meta.get("regularMarketPrice")
+        return float(t)
+    except ValueError:
+        return None
 
-        bars = []
-        opens, highs, lows, closes, vols = (
-            q.get("open", []), q.get("high", []), q.get("low", []), q.get("close", []), q.get("volume", []),
-        )
-        for i, t in enumerate(ts):
-            o, h, l, c, v = opens[i], highs[i], lows[i], closes[i], vols[i]
-            if None in (o, h, l, c):
-                continue
-            bars.append({
-                "d": datetime.datetime.fromtimestamp(t, tz=datetime.timezone.utc).strftime("%Y-%m-%d"),
-                "o": float(o), "h": float(h), "l": float(l), "c": float(c),
-                "v": float(v or 0),
-            })
-        if bars:
-            last = bars[-1]
-            spot = spot if spot is not None else last["c"]
-            # Yahoo meta 的 chartPreviousClose 偶尔 stale（如返回数月前的价），优先用 bars[-2] 的收盘
-            bars_prev_close = bars[-2]["c"] if len(bars) > 1 else last["o"]
-            if prev_close is None or (prev_close > 0 and abs(prev_close - bars_prev_close) / prev_close > 0.05):
-                prev_close = bars_prev_close
-        change_pct = round((spot - prev_close) / prev_close * 100, 2) if prev_close else None
 
-        return {
-            "ticker": symbol,
-            "market": "US",
-            "name": meta.get("shortName", meta.get("longName", symbol)),
-            "spot": spot,
-            "prev_close": prev_close,
-            "open": bars[-1]["o"] if bars else None,
-            "high": bars[-1]["h"] if bars else None,
-            "low": bars[-1]["l"] if bars else None,
-            "volume": bars[-1]["v"] if bars else None,
-            "turnover": None,
-            "change_pct": change_pct,
-            "pe_ttm": None,
-            "pb": None,
-            "market_cap": None,
-            "float_cap": None,
-            "bars": bars,
-            "source": "yahoo",
-        }
+def nasdaq_bars(sym, days=400):
+    """Nasdaq 官方历史日线（只含已收盘交易日）→ [{d,o,h,l,c,v}] 旧→新。"""
+    today = datetime.date.today()
+    frm = today - datetime.timedelta(days=days)
+    j = _nasdaq_json(f"https://api.nasdaq.com/api/quote/{sym}/historical"
+                     f"?assetclass=stocks&fromdate={frm:%Y-%m-%d}"
+                     f"&todate={today:%Y-%m-%d}&limit=300")
+    rows = ((j.get("data") or {}).get("tradesTable") or {}).get("rows") or []
+    bars = []
+    for r in rows:
+        try:
+            mm, dd, yy = str(r.get("date", "")).split("/")
+        except ValueError:
+            continue
+        o, h, l, c = (_num(r.get("open")), _num(r.get("high")),
+                      _num(r.get("low")), _num(r.get("close")))
+        if None in (o, h, l, c):
+            continue
+        bars.append({"d": f"{yy}-{mm}-{dd}", "o": o, "h": h, "l": l, "c": c,
+                     "v": _num(r.get("volume")) or 0.0})
+    bars.sort(key=lambda b: b["d"])                      # 旧 → 新
+    if not bars:
+        raise RuntimeError(f"Nasdaq 未返回 {sym} 历史日线")
+    return bars
+
+
+def fetch_us_nasdaq(symbol):
+    """Nasdaq 官方 API 主源：历史日线 + 实时/盘前快照。
+
+    坑位（实测 2026-09-16）：
+      · /chart 的 previousClose 会滞后一整天（本例停在 9/14 的 382.29），
+        昨收必须取 secondaryData.lastSalePrice（= 上一完整交易日收盘）。
+      · historical 只含已收盘交易日，盘中不会出现当日 bar；
+        故 open/high/low/volume 是「最近一个已收盘交易日」的口径，
+        盘中真实价以 spot + session + as_of 三个字段表达。
+      · marketStatus 由 Nasdaq 直接给出（Pre-Market/Open/Closed/After-Hours），
+        免去自己判断夏令时/冬令时。
+    """
+    sym = symbol.upper()
+    bars = nasdaq_bars(sym)
+
+    info = {}
+    try:
+        info = (_nasdaq_json(
+            f"https://api.nasdaq.com/api/quote/{sym}/info?assetclass=stocks"
+        ).get("data") or {})
     except Exception:
-        # Yahoo 不可达 → stooq 兜底（仅有日线，spot 取末根收盘）
-        bars = fetch_stooq_bars(symbol)
-        if not bars:
-            raise RuntimeError(f"Yahoo 与 stooq 均未返回 {symbol} 数据")
-        last = bars[-1]
-        prev_close = bars[-2]["c"] if len(bars) > 1 else last["o"]
-        change_pct = round((last["c"] - prev_close) / prev_close * 100, 2)
-        return {
-            "ticker": symbol,
-            "market": "US",
-            "name": symbol,
-            "spot": last["c"],
-            "prev_close": prev_close,
-            "open": last["o"], "high": last["h"], "low": last["l"], "volume": last["v"],
-            "turnover": None,
-            "change_pct": change_pct,
-            "pe_ttm": None, "pb": None, "market_cap": None, "float_cap": None,
-            "bars": bars,
-            "source": "stooq",
-        }
+        info = {}
+    pdat = info.get("primaryData") or {}
+    sdat = info.get("secondaryData") or {}
+    mstatus = info.get("marketStatus") or ""
+
+    spot = _num(pdat.get("lastSalePrice"))
+    prev_close = _num(sdat.get("lastSalePrice"))          # ← 唯一可靠昨收
+    if prev_close is None:
+        prev_close = bars[-2]["c"] if len(bars) > 1 else bars[-1]["o"]
+    if spot is None:                                      # 接口降级 → 退化为末根收盘
+        spot = bars[-1]["c"]
+        mstatus = mstatus or "Closed"
+
+    change_pct = _num(pdat.get("percentageChange"))
+    if change_pct is None and prev_close:
+        change_pct = round((spot - prev_close) / prev_close * 100, 2)
+
+    last = bars[-1]                                       # 最近一个已收盘交易日
+    quote = {
+        "ticker": sym,
+        "market": "US",
+        "name": info.get("companyName") or sym,
+        "exchange": info.get("exchange"),
+        "session": mstatus,                               # Pre-Market/Open/Closed/After-Hours
+        "as_of": pdat.get("lastTradeTimestamp") or f"Closed at {last['d']}",
+        "is_realtime": bool(pdat.get("isRealTime")),
+        "spot": spot,
+        "prev_close": prev_close,
+        "bid": _num(pdat.get("bidPrice")),
+        "ask": _num(pdat.get("askPrice")),
+        "open": last["o"], "high": last["h"], "low": last["l"], "volume": last["v"],
+        "turnover": None,
+        "change_pct": change_pct,
+        "pe_ttm": None, "pb": None, "market_cap": None, "float_cap": None,
+        "bars": bars,
+        "source": "nasdaq",
+    }
+
+    # 盘前/盘后明细：盘前量对判断「开盘会不会跳空」最有用
+    mt = {"Pre-Market": "pre", "After-Hours": "after"}.get(mstatus)
+    if mt:
+        try:
+            et = (_nasdaq_json(f"https://api.nasdaq.com/api/quote/{sym}/extended-trading"
+                               f"?assetclass=stocks&markettype={mt}").get("data") or {})
+            rows = ((et.get("infoTable") or {}).get("rows") or [])
+            if rows:
+                r0 = rows[0]
+                quote["extended"] = {
+                    "session": mstatus,
+                    "last": _num(str(r0.get("consolidated", "")).split()[0]),
+                    "volume": _num(r0.get("volume")),
+                    "high": _num(str(r0.get("highPrice", "")).split()[0]),
+                    "low": _num(str(r0.get("lowPrice", "")).split()[0]),
+                }
+        except Exception:
+            pass
+    return quote
+
+
+def fetch_us_yahoo(symbol):
+    """Yahoo v8 chart（备用源）。"""
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=6mo&interval=1d"
+    j = fetch_json(url)
+    result = j.get("chart", {}).get("result", [None])[0]
+    if not result:
+        raise RuntimeError(f"Yahoo 未返回 {symbol} 数据")
+    meta = result.get("meta", {})
+    ts = result.get("timestamp", [])
+    q = result.get("indicators", {}).get("quote", [{}])[0]
+    prev_close = meta.get("chartPreviousClose") or meta.get("previousClose")
+    spot = meta.get("regularMarketPrice")
+
+    bars = []
+    opens, highs, lows, closes, vols = (
+        q.get("open", []), q.get("high", []), q.get("low", []), q.get("close", []), q.get("volume", []),
+    )
+    for i, t in enumerate(ts):
+        o, h, l, c, v = opens[i], highs[i], lows[i], closes[i], vols[i]
+        if None in (o, h, l, c):
+            continue
+        bars.append({
+            "d": datetime.datetime.fromtimestamp(t, tz=datetime.timezone.utc).strftime("%Y-%m-%d"),
+            "o": float(o), "h": float(h), "l": float(l), "c": float(c),
+            "v": float(v or 0),
+        })
+    if not bars:
+        raise RuntimeError(f"Yahoo 返回空 bars：{symbol}")
+    last = bars[-1]
+    spot = spot if spot is not None else last["c"]
+    # Yahoo meta 的 chartPreviousClose 偶尔 stale（如返回数月前的价），优先用 bars[-2] 的收盘
+    bars_prev_close = bars[-2]["c"] if len(bars) > 1 else last["o"]
+    if prev_close is None or (prev_close > 0 and abs(prev_close - bars_prev_close) / prev_close > 0.05):
+        prev_close = bars_prev_close
+    change_pct = round((spot - prev_close) / prev_close * 100, 2) if prev_close else None
+
+    return {
+        "ticker": symbol,
+        "market": "US",
+        "name": meta.get("shortName", meta.get("longName", symbol)),
+        "session": "Closed",
+        "as_of": None,
+        "spot": spot,
+        "prev_close": prev_close,
+        "open": last["o"], "high": last["h"], "low": last["l"], "volume": last["v"],
+        "turnover": None,
+        "change_pct": change_pct,
+        "pe_ttm": None, "pb": None, "market_cap": None, "float_cap": None,
+        "bars": bars,
+        "source": "yahoo",
+    }
+
+
+def fetch_us_stooq(symbol):
+    """stooq 日线兜底（仅日线，spot 取末根收盘）。"""
+    bars = fetch_stooq_bars(symbol)
+    if not bars:
+        raise RuntimeError(f"stooq 未返回 {symbol} 日线")
+    last = bars[-1]
+    prev_close = bars[-2]["c"] if len(bars) > 1 else last["o"]
+    change_pct = round((last["c"] - prev_close) / prev_close * 100, 2)
+    return {
+        "ticker": symbol,
+        "market": "US",
+        "name": symbol,
+        "session": "Closed",
+        "as_of": None,
+        "spot": last["c"],
+        "prev_close": prev_close,
+        "open": last["o"], "high": last["h"], "low": last["l"], "volume": last["v"],
+        "turnover": None,
+        "change_pct": change_pct,
+        "pe_ttm": None, "pb": None, "market_cap": None, "float_cap": None,
+        "bars": bars,
+        "source": "stooq",
+    }
+
+
+def fetch_us(symbol):
+    """美股取数：Nasdaq → Yahoo → stooq，逐源降级并汇总失败原因。"""
+    errs = []
+    for name, fn in (("nasdaq", fetch_us_nasdaq),
+                     ("yahoo", fetch_us_yahoo),
+                     ("stooq", fetch_us_stooq)):
+        try:
+            return fn(symbol)
+        except Exception as e:
+            errs.append(f"{name}={type(e).__name__}:{str(e)[:70]}")
+    raise RuntimeError(f"美股 {symbol} 三源全失败 → " + " | ".join(errs))
 
 
 def main():
