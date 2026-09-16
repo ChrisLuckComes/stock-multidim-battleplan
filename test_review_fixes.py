@@ -604,6 +604,159 @@ def test_pullback_requires_launch():
     assert "pb_ctx = None                     # 通道 C 的前置状态" in src
 
 
+def test_breakout_preorder_grades():
+    """突破预案单三档分级（老罗 2026-09-16 SDGR 案例驱动）。
+
+    setup：上方有明确突破位 K，且价格贴着它收 —— 此时盘前就该给出
+    「站上 K 买入」的条件单，而不是只给一个永不成交的回踩价。
+    """
+    from probe_intraday import breakout_preorder
+
+    def bar(d, o, h, l, c, v):
+        return {"d": d, "o": o, "h": h, "l": l, "c": c, "v": v}
+
+    # 12 根：idx5 的 21.40 是唯一的摆动高点（左右各 3 根都更低）
+    pre = [bar(f"2026-08-{10 + i:02d}", 19.4, h, 19.2, 19.5, 900) for i, h in
+           enumerate([19.6, 19.5, 19.4, 19.3, 19.5, 21.40, 19.8, 19.9,
+                      19.7, 19.6, 19.5])]
+    atr_v = 1.0
+
+    # ① strong：距 0.65×ATR + 放量大阳（实体 1.72、量 2.11×）
+    strong = pre + [bar("2026-08-24", 19.03, 21.40, 18.84, 20.75, 1900)]
+    r = breakout_preorder(strong, atr_v, 20.75, profile="us")
+    assert r["grade"] == "strong", r
+    assert r["K"] == 21.40 and r["trigger"] == 21.50, r
+    assert r["stop"] == 21.10 and r["risk"] == 0.4, r
+    # 近窗口内无更高阻力 → 目标退回 K + 2.0×ATR
+    assert r["target"] == 23.40, r
+    assert r["cap"] == 22.60, r                  # K + 1.20×ATR（美股档）
+
+    # ② 同一形态换 A 股档：追高上限收到 0.60×ATR
+    r2 = breakout_preorder(strong, atr_v, 20.75, profile="ash")
+    assert r2["cap"] == 22.00, r2
+
+    # ③ normal：距 0.45×ATR，即便不是大阳也放行（贴得够近，开盘即可触及）
+    normal = pre + [bar("2026-08-24", 20.50, 21.00, 20.40, 20.95, 900)]
+    r3 = breakout_preorder(normal, atr_v, 20.95, profile="us")
+    assert r3["grade"] == "normal", r3
+    assert r3["trigger"] == 21.50, r3
+
+    # ④ far：距 0.90×ATR 且非大阳 → 只报位置，不给可挂价
+    far = pre + [bar("2026-08-24", 20.20, 20.60, 20.10, 20.50, 900)]
+    r4 = breakout_preorder(far, atr_v, 20.50, profile="us")
+    assert r4["grade"] == "far", r4
+    assert "trigger" not in r4, r4
+
+
+def test_near_resistance_window():
+    """目标位必须取自**近期**阻力。
+
+    bug 回归：pivots 在全历史上找摆动高点，会把一年前的价位当目标。
+    SDGR 2026-09-15 实测 —— 目标被算成 22.03（来自 2025-10-02），
+    盈亏比显示 1.30:1 而搁置；当日实际冲到 23.71。
+    """
+    from probe_intraday import near_resistance
+
+    def bar(d, o, h, l, c, v=900):
+        return {"d": d, "o": o, "h": h, "l": l, "c": c, "v": v}
+
+    # 前 10 根：深处有一年高点 22.034（idx3，左右各 3 根更低 → 合法 pivot）
+    old = [bar(f"s{i:03d}", 21.0, h, 20.9, 21.0) for i, h in
+           enumerate([21.0, 21.1, 21.2, 22.034, 21.5, 21.4, 21.3, 21.2,
+                      21.1, 21.0])]
+    # 后 60 根：全部 19.5 附近（无任何 > 21.60 的高点）
+    recent = [bar(f"r{i:03d}", 19.4, 19.5, 19.2, 19.45) for i in range(60)]
+    bars = old + recent
+    # 窗口 60：只看得到 recent → 找不到阻力（正确行为）
+    assert near_resistance(bars, 21.40, 1.0, window=60) is None
+    # 放到全历史，才会把一年前的价位翻出来（这就是被修掉的行为）
+    got = near_resistance(bars, 21.40, 1.0, window=999)
+    assert got is not None and abs(got - 22.034) < 1e-9, got
+
+
+def test_bo_gap_cancel():
+    """突破单的开盘跳空保护。"""
+    from probe_intraday import bo_gap_cancel
+    bo = {"K": 21.40, "trigger": 21.50, "stop": 21.10, "cap": 22.60}
+    atr = 1.0
+    assert bo_gap_cancel(20.78, bo, atr) is None          # SDGR 实况：有效
+    assert bo_gap_cancel(21.60, bo, atr) is None          # 略高，仍 < 触发+0.6
+    assert "跳空" in bo_gap_cancel(22.20, bo, atr)         # ≥22.10 → 取消
+    assert "结构" in bo_gap_cancel(20.30, bo, atr)         # ≤20.40 → 取消
+    assert bo_gap_cancel(None, bo, atr) is None           # 无开盘价 → 不误判
+
+
+def test_ash_lots_is_risk_based():
+    """A 股仓位改用风险预算法（与美股 us_lots 同构）。
+
+    旧口径是「计划仓 1/3」—— 一个拍脑袋的比例，与风险无关；也不能没有
+    --qty 就不给股数。新口径 = min(账户 × 1.5% / 每股风险, 账户 × 30% / 价格)。
+    """
+    from probe_intraday import ash_lots
+    # 风险 1.0/股 → 750 股；仓位闸 50000×30%/20 = 750 股 → 取 700（向下整手）
+    assert ash_lots(50000, 20.0, 19.0, "002961") == 700
+    # 止损很近（0.10）→ 风险预算法给 7500 股，被仓位闸 150 夹住 → 100 股
+    assert ash_lots(50000, 100.0, 99.9, "002961") == 100
+    # 止损很宽（5.0）→ 150 股，未被闸门干预
+    assert ash_lots(50000, 20.0, 15.0, "002961") == 100
+    # 结构止损可能是文字 → None，不得崩
+    assert ash_lots(50000, 20.0, "收盘破19", "002961") is None
+    assert ash_lots(50000, 20.0, None, "002961") is None
+    assert ash_lots(50000, 20.0, 21.0, "002961") is None   # 止损在入场之上
+
+
+def test_ash_lots_min_lot_by_board():
+    """最小申报单位：科创板 688/689 = 200 股，主板 / 创业板 = 100 股。
+
+    创业板 300/301 是 100 股 —— 旧代码把 300/301 也当成 200，已修。
+    """
+    from probe_intraday import first_lot_of, ash_lots
+    assert first_lot_of("688002") == 200
+    assert first_lot_of("689009") == 200
+    assert first_lot_of("300723") == 100
+    assert first_lot_of("301000") == 100
+    assert first_lot_of("002961") == 100
+    assert first_lot_of("601233") == 100
+    # 同一笔单，科创板取整到 200 的倍数
+    assert ash_lots(50000, 20.0, 19.0, "688002") == 600
+    assert ash_lots(50000, 20.0, 19.0, "002961") == 700
+    # 1 手即超仓位上限 → None（明确不做，不悄悄超标）
+    assert ash_lots(5000, 200.0, 190.0, "688002") is None
+    assert ash_lots(2000, 10.0, 9.0, "002961") is None     # 1 手 1000 元 = 50%
+    # 但 1 手在额度内仍要给 —— 否则钱少就永远建不了仓
+    assert ash_lots(5000, 10.0, 9.0, "002961") == 100
+
+
+def test_ash_late_is_not_a_ban():
+    """14:30 不得再作为禁买线（老罗 2026-09-16 明确否掉）。
+
+    旧规则「14:30 后不再新开仓」会让「点位到了却买不到」。挂单式的通道
+    （突破单 / 回踩确认）只看价不看钟 —— 时间不是否决理由，风险提示即可。
+    """
+    src = (Path(__file__).resolve().parent / "probe_intraday.py").read_text(
+        encoding="utf-8")
+    assert '"state": "late"' not in src, "14:30 拦截的分支又回来了"
+    assert "已过 14:30" not in src, "14:30 否决文案又回来了"
+    assert "14:30 后不再新开仓" not in src, "14:30 禁令文案又回来了"
+
+
+def test_ash_limit_anchor_is_basis_not_snap_prev():
+    """涨停锚必须用 basis[-1] 收盘，不能用 snap["prev"]。
+
+    收盘后跑的是「次日预案」，snap["prev"] 是昨天的价 —— 涨停价会退回
+    今天已封住的那个价，次日略高开就被误判「涨停买不到」而撤单。
+    002961：9/16 涨停收 20.97 → 次日涨停价应是 23.07，不是 20.97。
+    """
+    from probe_intraday import ash_limit_price
+    assert ash_limit_price("002961", 20.97) == 23.07     # 次日口径（正确）
+    assert ash_limit_price("002961", 19.06) == 20.97     # 昨日口径（今天已封住）
+    src = (Path(__file__).resolve().parent / "probe_intraday.py").read_text(
+        encoding="utf-8")
+    assert 'ash_limit_price(code, basis[-1]["c"])' in src
+    assert 'ash_limit_price(code, snap' not in src, \
+        "涨停锚又用了 snap —— 回放时它是「此刻」的快照，与回放日期无关"
+
+
 if __name__ == "__main__":
     test_yizi_not_gap_yang()
     test_true_yizi_uses_prev_close()
@@ -634,4 +787,11 @@ if __name__ == "__main__":
     test_ash_limit_price_board_pct()
     test_pullback_confirm_states()
     test_pullback_requires_launch()
+    test_breakout_preorder_grades()
+    test_near_resistance_window()
+    test_bo_gap_cancel()
+    test_ash_lots_is_risk_based()
+    test_ash_lots_min_lot_by_board()
+    test_ash_late_is_not_a_ban()
+    test_ash_limit_anchor_is_basis_not_snap_prev()
     print("ok")

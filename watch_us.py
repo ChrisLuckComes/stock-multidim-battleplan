@@ -133,6 +133,8 @@ def line_of(out):
     st.append("突变✓" if it.get("allow") else "突变✗")
     pb = out.get("pullback") or {}
     st.append({"ok": "回踩✓"}.get(pb.get("state"), "回踩…"))
+    bo = out.get("breakout_preorder") or {}
+    st.append("可挂✓" if bo.get("grade") in ("strong", "normal") else "可挂✗")
     return (f"[{now_str()}] {sess:<8} {sym:<6} {spot if spot else 'n/a':>9} "
             f"({dev})  " + "  ".join(st))
 
@@ -199,6 +201,20 @@ def mode_pre(cfg, codes):
                   f"止损 {po.get('stop_hard')}  目标 {po.get('target1')}")
         else:
             print("  预案单  无（非可买状态）")
+        bo = out.get("breakout_preorder") or {}
+        if bo:
+            if bo.get("grade") == "far":
+                print(f"  突破单  上方 K={bo.get('K')}"
+                      f"（距今 {bo.get('dist_atr')}×ATR）太远 → 不给挂单价")
+            elif bo.get("grade") == "limit_near":
+                print(f"  突破单  K={bo.get('K')} 触发 {bo.get('trigger')}"
+                      f" → 距涨停 <1.5%，放弃")
+            else:
+                print(f"  突破单  "
+                      f"{'★强' if bo.get('grade') == 'strong' else '○近'}"
+                      f"  K={bo.get('K')}  站上 {bo.get('trigger')} 买入"
+                      f"  止损 {bo.get('stop')}  {bo.get('qty')}股"
+                      f"  目标 {bo.get('target')}  追高上限 {bo.get('cap')}")
         lb = out.get("level_break") or {}
         print(f"  关键位  K={lb.get('anchor')}  "
               f"{'允许' if lb.get('allow') else '不开（' + str(lb.get('reason')) + '）'}")
