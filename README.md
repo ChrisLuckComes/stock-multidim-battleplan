@@ -115,6 +115,52 @@ python --version   # 需 3.8+
 
 ---
 
+## Windows 本机已知坑（实测，别重复踩）
+
+### 1. `refs/remotes/origin/` 写不进去 → 本地追踪引用不可用
+
+本仓库在 Windows 上有个顽固问题：**`git push` / `git fetch` 之后 `origin/main` 会消失**，
+`git status` 显示 `[gone]`，或无端显示 `ahead N`。
+
+实测结论（2026-09-16）：
+
+| 操作 | 结果 |
+|---|---|
+| `git push` | 推送**成功**，远程 SHA 正确；但本地 `refs/remotes/origin/main` 被删 |
+| `git fetch origin` | 打印 `* [new branch] main -> origin/main`，**文件却没落盘** |
+| `git update-ref refs/remotes/origin/main HEAD` | 返回 `exit=0`，文件仍不存在 |
+| 手动 `Set-Content` 写该文件 | **能写、能读**（说明不是 ACL） |
+| `refs/heads/main` | **完全正常**（commit / push 不受影响） |
+
+**结论：只有 `refs/remotes` 子树异常，`refs/heads` 正常 → 数据安全，别慌。**
+git 更新 ref 走「删旧 + 原子改名」，写不进时只剩「删」的效果，随后空目录被清掉。
+
+**正确做法 —— 判断「推没推上去」不要看 `git status`，直接问远程：**
+
+```bash
+git ls-remote origin -h refs/heads/main   # 远程真实 SHA
+git rev-parse HEAD                        # 本地 SHA，两者相等即已同步
+```
+
+（`git log origin/main..HEAD`、`git status -sb` 的 ahead/behind 在本机**都不可信**。）
+若就是想让 `status` 好看，手动补一次即可（下次 push 后还会丢）：
+
+```bash
+mkdir -p .git/refs/remotes/origin && git rev-parse HEAD > .git/refs/remotes/origin/main
+```
+
+### 2. PATH 里缺 coreutils
+
+本机 bash 环境下 `ls` / `grep` / `head` 可能 `command not found`。
+调 git 用绝对路径 `"/c/Program Files/Git/cmd/git.exe"`；批量文件操作走 PowerShell 更稳。
+
+### 3. 代理
+
+访问 GitHub / Yahoo 需本地代理 `http://127.0.0.1:7897`（`.git/config` 已配 `http.proxy`）；
+push 前显式导出 `HTTPS_PROXY` / `HTTP_PROXY` 更稳。
+
+---
+
 ## 独立运行脚本（不依赖 Agent）
 
 ### 1. 取行情 `fetch_market.py`
