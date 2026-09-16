@@ -479,22 +479,14 @@ def still_uptrend(bars, ev, last_c, c2, p1p):
 def is_yang_bar(bar, atr_v, prev=None):
     body = bar["c"] - bar["o"]
     rng = bar["h"] - bar["l"]
-    # 一字涨停：实体≈0。跳空一字要相对前收大涨；平开一字（开=最低、无缺口）也算。
+    # 一字涨停：实体≈0，且须相对前收跳空（SKILL.md）；无缺口的一字/准一字不算大阳
     if body <= 0:
         if prev is None or not prev.get("c"):
             return False
         tiny = rng <= max(bar["c"] * 0.003, 0.15 * (atr_v or bar["c"] * 0.01))
         if not tiny:
             return False
-        up_gap = bar["c"] >= prev["c"] * 1.03
-        # 平开微涨一字：开≈最低、收贴最高、相对前收必须上涨（收平/微跌不算大阳）
-        eps = max(bar["c"] * 0.001, 0.02)
-        flat_board = (
-            bar["o"] <= bar["l"] + eps
-            and bar["c"] >= bar["h"] - eps
-            and bar["c"] > prev["c"]
-        )
-        return bool(up_gap or flat_board)
+        return bool(bar["c"] >= prev["c"] * 1.03)
     pct = body / bar["o"] if bar["o"] else 0
     strong = pct >= 0.03 or (atr_v and (body >= 0.8 * atr_v or rng >= 1.0 * atr_v))
     if not strong:
@@ -925,11 +917,15 @@ HARD_STOP_TRIGGER = (
     "1–2分钟收回且非放量加速阴→当毛刺"
 )
 
+# SKILL 硬止损锚名；禁止静默改写成「买区下沿」
+SKILL_HARD_ANCHORS = ("阳线下沿", "大阳中点", "MA5", "缺口下沿")
+
 
 def stop_plan(bars, mode, z, atr_v):
     """两档止损：结构（收盘破）+ 硬止损（锚三选一 − 0.10×ATR）。硬止损必须低于买区下沿。"""
     if not bars or not atr_v or not z or z.get("level") is None:
         return None
+    z.pop("stop_warning", None)
     y = bars[-1]
     body, rng = abs(y["c"] - y["o"]), y["h"] - y["l"]
     long_yang = (
@@ -940,14 +936,34 @@ def stop_plan(bars, mode, z, atr_v):
     buy_lo = z.get("primary_lo") if z.get("primary_lo") is not None else level
     gap = 0.10 * atr_v
 
+    def _warn_clamp(hard_anchor, intended, hard):
+        z["stop_warning"] = (
+            f"锚({hard_anchor})−gap={round(intended, 2)} 落在买区内或之上"
+            f"（买区下沿 {round(buy_lo, 2)}），已下移到 {round(hard, 2)}；"
+            f"建议收窄买区或改用更低结构锚，勿靠下移止损兜底"
+        )
+
     def _ensure_below_buy(hard, hard_anchor, fallback_anchor_px, fallback_name):
+        """保留 SKILL 锚名；数值必要时压到买区下沿之下并挂 stop_warning。"""
         if hard < buy_lo:
             return round(hard, 2), hard_anchor
-        # 回退锚不得高于结构位；仍不够低则钉在买区下沿 − gap
+        intended = hard
         cand = min(fallback_anchor_px, level) - gap
-        if cand >= buy_lo:
-            return round(buy_lo - gap, 2), "买区下沿"
-        return round(cand, 2), fallback_name
+        hard = min(cand, buy_lo - gap)
+        _warn_clamp(hard_anchor, intended, hard)
+        return round(hard, 2), hard_anchor
+
+    def _pack(struct_name, struct, hard_name, hard):
+        out = {
+            "struct_anchor": struct_name,
+            "struct": round(struct, 2),
+            "hard_anchor": hard_name,
+            "hard": round(hard, 2),
+            "trigger": HARD_STOP_TRIGGER,
+        }
+        if z.get("stop_warning"):
+            out["warning"] = z["stop_warning"]
+        return out
 
     if mode == "line_pullback":
         # 结构锚默认 MA5；贴轨例外用已选均线 level
@@ -958,39 +974,27 @@ def stop_plan(bars, mode, z, atr_v):
             anchor_px = level
             struct_name = f"{ANCHOR_LABEL.get(z.get('anchor'), z.get('anchor'))}(收盘破)"
             hard_name = ANCHOR_LABEL.get(z.get("anchor"), z.get("anchor"))
+            if hard_name not in SKILL_HARD_ANCHORS:
+                hard_name = "MA5"
         hard = anchor_px - gap
         hard, hard_name = _ensure_below_buy(hard, hard_name, y["l"], "阳线下沿")
-        return {
-            "struct_anchor": struct_name,
-            "struct": round(anchor_px, 2),
-            "hard_anchor": hard_name,
-            "hard": hard,
-            "trigger": HARD_STOP_TRIGGER,
-        }
+        return _pack(struct_name, anchor_px, hard_name, hard)
 
     if mode == "impulse_pause":
         floor = level
         if z.get("yi_zi"):
-            hard = floor - gap
+            intended = floor - gap
+            hard = intended
             if hard >= buy_lo:
                 hard = buy_lo - gap
-            return {
-                "struct_anchor": "缺口下沿/前收(收盘破)",
-                "struct": round(floor, 2),
-                "hard_anchor": "缺口下沿",
-                "hard": round(hard, 2),
-                "trigger": HARD_STOP_TRIGGER,
-            }
-        hard = floor - gap
+                _warn_clamp("缺口下沿", intended, hard)
+            return _pack("缺口下沿/前收(收盘破)", floor, "缺口下沿", hard)
+        intended = floor - gap
+        hard = intended
         if hard >= buy_lo:
             hard = buy_lo - gap
-        return {
-            "struct_anchor": "大阳低点(收盘破)",
-            "struct": round(floor, 2),
-            "hard_anchor": "阳线下沿",
-            "hard": round(hard, 2),
-            "trigger": HARD_STOP_TRIGGER,
-        }
+            _warn_clamp("阳线下沿", intended, hard)
+        return _pack("大阳低点(收盘破)", floor, "阳线下沿", hard)
 
     # 平台 / W底 / 旗形 / 下降趋势线突破
     struct = round(level, 2)
@@ -999,14 +1003,8 @@ def stop_plan(bars, mode, z, atr_v):
         mid = (y["h"] + y["l"]) / 2.0
         hard, hard_name = _ensure_below_buy(mid - gap, "大阳中点", y["l"], "阳线下沿")
     else:
-        hard, hard_name = _ensure_below_buy(y["l"] - gap, "突破阳下沿", y["l"], "阳线下沿")
-    return {
-        "struct_anchor": struct_name,
-        "struct": struct,
-        "hard_anchor": hard_name,
-        "hard": hard,
-        "trigger": HARD_STOP_TRIGGER,
-    }
+        hard, hard_name = _ensure_below_buy(y["l"] - gap, "阳线下沿", y["l"], "阳线下沿")
+    return _pack(struct_name, struct, hard_name, hard)
 
 
 def targets(bars, mode, z, atr_v, entry, Hs):
@@ -1053,11 +1051,21 @@ def attach_stops_targets(plan, bars, atr_v, Hs):
         z["hard_trigger"] = sp["trigger"]
         z["invalidation"] = sp["struct"]  # 兼容：结构止损
         z["hard"] = sp["hard"]
+        if sp.get("warning"):
+            z["stop_warning"] = sp["warning"]
+            plan["stop_warning"] = sp["warning"]
     tg = targets(bars, mode, z, atr_v, last_c, Hs or []) if mode != "wait" else None
     if tg:
         z["target1"] = tg["target1"]
         z["target2"] = tg["target2"]
         z["rr_target1"] = tg["rr_target1"]
+        if tg.get("rr_target1") is not None and tg["rr_target1"] < 1.0:
+            rr_note = f"盈亏比 rr_target1={tg['rr_target1']}<1.0，结构有效但赔率差"
+            prev = plan.get("note") or ""
+            plan["note"] = f"{prev}；{rr_note}" if prev else rr_note
+            v = plan.get("verdict") or ""
+            if v and "赔率" not in v:
+                plan["verdict"] = f"{v}·赔率偏弱"
     plan["buy_zone"] = z
     plan["stop_plan"] = sp
     plan["targets"] = tg
@@ -1124,6 +1132,24 @@ def plan_entry(bars, ev):
             mode, priority, setup, verdict, recommend, path = (
                 "wait", None, "wait", "突破已延伸·等回踩", False, "wait",
             )
+        elif (
+            recommend
+            and mode in breakout_modes
+            and atr_v
+            and last_c is not None
+            and z.get("level") is not None
+            and z.get("in_zone") is False
+        ):
+            # 已出买区半宽但仍 ≤2×ATR：可挂单回踩，禁止市价追
+            lv = z["level"]
+            hi = z.get("primary_hi")
+            d = (last_c - lv) / atr_v
+            note = (
+                f"现价 {last_c:.2f} 高出买位 {lv} 已 {d:.1f}×ATR，已出买区上沿 {hi}；"
+                f"不要市价追，在 {hi} 一带挂单"
+            )
+            verdict = f"突破已延伸·只做回踩 {hi}"
+            recommend = False
         z["path"] = path
         z["mode"] = mode
         z["priority"] = priority

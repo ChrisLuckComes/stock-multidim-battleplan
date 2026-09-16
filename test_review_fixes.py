@@ -49,16 +49,15 @@ def test_true_yizi_uses_prev_close():
 
 
 def test_flat_open_yizi_is_yang_bar():
-    """合法 K 线：收平一字不算大阳；微涨一字才算；跳空一字仍算。"""
+    """只认跳空一字为大阳（SKILL.md）；无缺口微涨一字/收平一字/十字星均否。"""
     from rule123 import is_yang_bar
     prev = _bar("2026-01-01", 100, 110, 100, 110)
     flat = _bar("2026-01-02", 110, 110.05, 110, 110, 1e5)
-    # 实体≈0、相对前收微涨的一字（走 body<=0 分支）
     up_tick = _bar("2026-01-03", 110.1, 110.15, 110.1, 110.1, 1e5)
     gap_yi = _bar("2026-01-04", 113.5, 113.55, 113.5, 113.5, 1e5)
     atr_v = 2.0
     assert is_yang_bar(flat, atr_v, prev) is False
-    assert is_yang_bar(up_tick, atr_v, prev) is True
+    assert is_yang_bar(up_tick, atr_v, prev) is False
     assert is_yizi(gap_yi, 110, atr_v) is True
     assert is_yang_bar(gap_yi, atr_v, prev) is True
     doji = _bar("2026-01-05", 100, 100.06, 99.94, 100.0)
@@ -103,16 +102,31 @@ def test_stop_plan_two_layers_and_hard_below_buy():
     sp = stop_plan(bars, "platform_break", z, atr_v)
     assert sp["struct"] == 19.33
     assert sp["hard"] < z["primary_lo"]
-    assert sp["hard_anchor"] in ("大阳中点", "阳线下沿", "买区下沿")
+    assert sp["hard_anchor"] in ("大阳中点", "阳线下沿", "MA5", "缺口下沿")
+    assert sp["hard_anchor"] != "买区下沿"
 
 
 def test_stop_plan_narrow_break_hard_below_buy_lo():
-    """贴沿窄幅突破：阳线下沿 − gap 仍可能 ≥ 买区下沿，必须兜底。"""
+    """贴沿窄幅突破：阳线下沿 − gap 仍可能 ≥ 买区下沿，必须兜底，但锚名不改。"""
     bars = [_bar("2026-01-01", 101.4, 102.0, 101.2, 101.5, 2e6)]
     atr_v = 1.785
     z = zone_at_level(101.0, atr_v, 101.5, "平台突破(优先T1)", {}, bars)
     sp = stop_plan(bars, "platform_break", z, atr_v)
     assert sp["hard"] < z["primary_lo"], (sp, z)
+    assert sp["hard_anchor"] in ("大阳中点", "阳线下沿")
+    assert sp["hard_anchor"] != "买区下沿"
+    assert sp.get("warning") or z.get("stop_warning")
+
+
+def test_stop_plan_long_yang_keeps_mid_anchor_name():
+    """长阳突破：即便数值被压到买区下，hard_anchor 仍为「大阳中点」并挂警告。"""
+    bars = [_bar("2026-01-01", 100.5, 106.0, 100.4, 105.5, 3e6)]
+    atr_v = 2.0
+    z = zone_at_level(100.0, atr_v, 105.5, "平台突破(优先T1)", {}, bars)
+    sp = stop_plan(bars, "platform_break", z, atr_v)
+    assert sp["hard_anchor"] == "大阳中点"
+    assert sp["hard"] < z["primary_lo"]
+    assert sp.get("warning") or z.get("stop_warning")
 
 
 def test_too_far_gate():
@@ -217,6 +231,7 @@ if __name__ == "__main__":
     test_pivots_dedup_limit_up_cluster()
     test_stop_plan_two_layers_and_hard_below_buy()
     test_stop_plan_narrow_break_hard_below_buy_lo()
+    test_stop_plan_long_yang_keeps_mid_anchor_name()
     test_too_far_gate()
     test_breakout_in_zone_matches_band()
     test_line_zone_pad_matches_in_zone()
