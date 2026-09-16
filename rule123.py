@@ -3,12 +3,14 @@
 """
 方向感知结构判定（延续 vs 反转）
 ================================
-四种买法（当日只给一种，由 plan_entry 输出 mode）：
+六种买法（当日只给一种，由 plan_entry 输出 mode）：
   1. platform_break 平台突破（优先T1）：近 3 根内收盘站上活平台沿且放量，买突破位
      （活沿见 living_platform；123 的 R1 仍是 P0–P1 反应高，二者不是同一个东西）
-  2. line_pullback 沿线回踩（优先T1）：沿着肉眼可见的线上升，回踩该线买；默认 P0→P1 上升趋势线，仅明显贴均线才改用该均线
-  3. downtrend_tl_break 下降趋势线突破（次优先T2）：近 3 根内站上下降高点连线，买该线；仓位试错，过前高升级为平台突破
-  4. impulse_pause 大阳后缩量回踩（次优先T2）：大阳线之后回踩缩量找买点
+  2. w_bottom_break W底颈线突破（优先T1）：双底后收盘站上颈线且放量，买颈线
+  3. flag_tl_break 旗形下降趋势线突破（优先T1）：主升旗杆后的下降整理旗面，收盘站上旗面下降趋势线且放量
+  4. line_pullback 沿线回踩（优先T1）：沿着肉眼可见的线上升，回踩该线买；默认 P0→P1 上升趋势线，仅明显贴均线才改用该均线
+  5. impulse_pause 大阳后缩量回踩（次优先T2）：大阳线之后回踩缩量找买点
+  6. downtrend_tl_break 下降趋势线突破（次优先T2）：下跌段反转，近 3 根内站上下降高点连线；与旗形区分，无旗杆则才用本模式
   wait = 没有可执行模式，或距买位 >2×ATR
 
 HH 两两比较不作门控。cond2 = 自 P1 未再创新低。不用 MA60。
@@ -321,8 +323,11 @@ ANCHOR_LABEL = {
     "ma5": "MA5",
     "avwap_p1": "锚定VWAP",
     "r1": "突破位R1",
+    "w_neckline": "W底颈线",
+    "flag_tl": "旗形下降趋势线",
     "yang_digest": "大阳调整区",
     "yang_gap": "缺口下沿",
+    "down_tl": "下降趋势线",
 }
 
 
@@ -651,6 +656,158 @@ def days_above_line(bars, p_b, p_a):
     return n
 
 
+def detect_w_bottom(bars, Hs, Ls, atr_v, lookback=55):
+    """W 底：近端两个近似等深的摆动低点 + 中间反弹高作颈线。
+
+    返回 {l1, l2, neckline, neck_i, span} 或 None。不负责判定是否已突破。
+    """
+    n = len(bars)
+    if n < 15 or not atr_v or atr_v <= 0 or len(Ls) < 2:
+        return None
+    start = max(0, n - lookback)
+    lows = [(i, p) for i, p in Ls if i >= start]
+    if len(lows) < 2:
+        return None
+    best = None
+    for a in range(len(lows) - 1):
+        for b in range(a + 1, len(lows)):
+            i1, p1 = lows[a]
+            i2, p2 = lows[b]
+            span = i2 - i1
+            if span < 5 or span > 40:
+                continue
+            depth = abs(p2 - p1)
+            if depth > max(0.5 * atr_v, p1 * 0.03):
+                continue
+            # 右底不低于左底太多（允许略低，但不能破成单边下跌）
+            if p2 < p1 - 0.35 * atr_v:
+                continue
+            neck_i, neck = None, None
+            for j in range(i1 + 1, i2):
+                if neck is None or bars[j]["h"] > neck:
+                    neck, neck_i = bars[j]["h"], j
+            # 也允许用两底之间已确认摆动高
+            mid_hs = [(i, h) for i, h in Hs if i1 < i < i2]
+            if mid_hs:
+                hi = max(mid_hs, key=lambda x: x[1])
+                if neck is None or hi[1] >= neck:
+                    neck_i, neck = hi[0], hi[1]
+            if neck is None or neck_i is None:
+                continue
+            rise = neck - max(p1, p2)
+            if rise < max(0.8 * atr_v, max(p1, p2) * 0.03):
+                continue
+            # 右底之后、突破前，价格应主要在颈线之下活动
+            after = bars[i2 + 1: n]
+            if not after:
+                continue
+            closed_above = sum(1 for x in after if x["c"] > neck)
+            if closed_above > 3:
+                continue
+            score = rise / atr_v - depth / atr_v + min(span, 20) / 20.0
+            cand = {
+                "l1": {"i": i1, "price": p1, "d": bars[i1]["d"]},
+                "l2": {"i": i2, "price": p2, "d": bars[i2]["d"]},
+                "neckline": neck,
+                "neck_i": neck_i,
+                "neck_d": bars[neck_i]["d"],
+                "span": span,
+                "score": score,
+            }
+            if best is None or score > best["score"]:
+                best = cand
+    return best
+
+
+def detect_bull_flag(bars, Hs, atr_v, lookback=45):
+    """上升旗形：先有旗杆（短促大涨），再有下降高点连成的旗面。
+
+    返回 {pole_start, pole_end, pb, pa, tl_now, days_above_tl} 或 None。
+    """
+    n = len(bars)
+    if n < 20 or not atr_v or atr_v <= 0:
+        return None
+    start = max(1, n - lookback)
+    best_pole = None
+    # 旗杆：3–12 根内净涨幅够大，终点是局部高点
+    for end in range(start + 2, n - 3):
+        for length in range(3, 13):
+            s = end - length + 1
+            if s < start:
+                break
+            lo = min(bars[j]["l"] for j in range(s, end + 1))
+            hi = bars[end]["h"]
+            # 终点应接近区间最高
+            if hi < max(bars[j]["h"] for j in range(s, end + 1)) * 0.985:
+                continue
+            gain = hi - lo
+            pct = gain / lo if lo else 0
+            if gain < 2.0 * atr_v and pct < 0.08:
+                continue
+            # 旗杆后至少还剩 4 根做旗面
+            if n - 1 - end < 4:
+                continue
+            score = gain / atr_v + pct * 10
+            if best_pole is None or score > best_pole["score"]:
+                best_pole = {
+                    "start": s, "end": end, "lo": lo, "hi": hi,
+                    "score": score, "d0": bars[s]["d"], "d1": bars[end]["d"],
+                }
+    if best_pole is None:
+        return None
+    pe = best_pole["end"]
+    # 旗面高点：旗杆结束后的下降摆动高（至少两个，后高低于前高）
+    flag_hs = [(i, h) for i, h in Hs if i > pe]
+    if len(flag_hs) < 2:
+        # 枢轴不够时，用旗杆后分段最高点近似
+        seg = bars[pe + 1:]
+        if len(seg) < 4:
+            return None
+        mid = pe + 1 + len(seg) // 2
+        h1 = max(range(pe + 1, mid + 1), key=lambda i: bars[i]["h"])
+        h2 = max(range(mid, n), key=lambda i: bars[i]["h"])
+        if h2 <= h1 or bars[h2]["h"] >= bars[h1]["h"]:
+            return None
+        flag_hs = [(h1, bars[h1]["h"]), (h2, bars[h2]["h"])]
+    # 取最近两个下降高点
+    pb = pa = None
+    for k in range(len(flag_hs) - 1, 0, -1):
+        i2, p2 = flag_hs[k]
+        i1, p1 = flag_hs[k - 1]
+        if p2 < p1 and i2 > i1:
+            pb, pa = (i1, p1), (i2, p2)
+            break
+    if pb is None or pa is None:
+        return None
+    tl_now = line_val(pb, pa, n - 1)
+    if tl_now is None:
+        return None
+    # 旗面期间多数收盘应在旗杆高点之下、旗杆中点之上（未彻底破位）
+    mid_pole = (best_pole["lo"] + best_pole["hi"]) / 2.0
+    flag_bars = bars[pe + 1:]
+    if not flag_bars:
+        return None
+    below_pole_hi = sum(1 for x in flag_bars if x["c"] < best_pole["hi"]) / len(flag_bars)
+    above_mid = sum(1 for x in flag_bars if x["l"] > mid_pole * 0.98) / len(flag_bars)
+    if below_pole_hi < 0.6:
+        return None
+    if above_mid < 0.35:
+        return None
+    return {
+        "pole_start": best_pole["start"],
+        "pole_end": pe,
+        "pole_lo": best_pole["lo"],
+        "pole_hi": best_pole["hi"],
+        "pole_d0": best_pole["d0"],
+        "pole_d1": best_pole["d1"],
+        "pb": {"i": pb[0], "price": pb[1], "d": bars[pb[0]]["d"]},
+        "pa": {"i": pa[0], "price": pa[1], "d": bars[pa[0]]["d"]},
+        "tl_now": tl_now,
+        "days_above_tl": days_above_line(bars, pb, pa),
+        "mid_pole": mid_pole,
+    }
+
+
 def zone_at_level(level, atr_v, last_c, kind, ev, bars):
     z = _empty_zone()
     closes = [b["c"] for b in bars]
@@ -663,9 +820,17 @@ def zone_at_level(level, atr_v, last_c, kind, ev, bars):
     if last_c and hi - lo < last_c * 0.002:
         mid = (lo + hi) / 2.0
         lo, hi = mid * 0.997, mid * 1.003
+    if "W底" in kind or "颈线" in kind:
+        anchor = "w_neckline"
+    elif "旗形" in kind:
+        anchor = "flag_tl"
+    elif "平台" in kind:
+        anchor = "r1"
+    else:
+        anchor = "down_tl"
     z.update({
         "type": kind,
-        "anchor": "r1" if "平台" in kind else "down_tl",
+        "anchor": anchor,
         "level": round(level, 2),
         "primary_lo": round(lo, 2),
         "primary_hi": round(hi, 2),
@@ -678,7 +843,7 @@ def zone_at_level(level, atr_v, last_c, kind, ev, bars):
 
 
 def plan_entry(bars, ev):
-    """当日只给一种：platform_break / line_pullback / impulse_pause / downtrend_tl_break / wait。"""
+    """当日只给一种 mode（含 W底/旗形突破）。"""
     last_c = bars[-1]["c"] if bars else None
     atr_v = atr14(bars)
     rvol = ev.get("rvol20")
@@ -717,7 +882,9 @@ def plan_entry(bars, ev):
         if path is None:
             if mode in ("line_pullback", "impulse_pause"):
                 path = "A"
-            elif mode in ("platform_break", "downtrend_tl_break"):
+            elif mode in (
+                "platform_break", "w_bottom_break", "flag_tl_break", "downtrend_tl_break",
+            ):
                 path = "B"
             else:
                 path = "wait"
@@ -756,6 +923,65 @@ def plan_entry(bars, ev):
             "wait", None, "wait", "平台突破·量能不足", False,
             f"近{n_above}根站上活平台沿 {plat_txt} 但 RVOL={round(rvol, 2)}≤1.5，不买假突破",
         )
+
+    # T1 W底颈线突破
+    Hs_loc, Ls_loc = pivots(bars, w=3)
+    wpat = ev.get("w_bottom")
+    if wpat is None:
+        wpat = detect_w_bottom(bars, Hs_loc, Ls_loc, atr_v)
+    if wpat and last_c is not None:
+        neck = wpat["neckline"]
+        n_neck = days_above_level(bars, neck)
+        fresh_w = last_c > neck and 1 <= n_neck <= 3
+        # 突破须发生在右底之后
+        if fresh_w and wpat["l2"]["i"] < len(bars) - 1:
+            neck_txt = round(neck, 2)
+            if vol_ok:
+                z = zone_at_level(neck, atr_v, last_c, "W底颈线突破(优先T1)", ev, bars)
+                z["anchor"] = "w_neckline"
+                note = (
+                    f"W底颈线 {neck_txt}："
+                    f"左底 {wpat['l1']['d']}@{round(wpat['l1']['price'], 2)} / "
+                    f"右底 {wpat['l2']['d']}@{round(wpat['l2']['price'], 2)}；"
+                    f"结构止损看颈线下"
+                )
+                if rvol is None:
+                    note += "；无量能数据，确认打折"
+                return pack(
+                    "w_bottom_break", 1, "breakout", "W底颈线突破(优先T1)", True, note, z,
+                )
+            return pack(
+                "wait", None, "wait", "W底颈线突破·量能不足", False,
+                f"近{n_neck}根站上颈线 {neck_txt} 但 RVOL={round(rvol, 2)}≤1.5，不买假突破",
+            )
+
+    # T1 旗形下降趋势线突破（主升旗杆后的整理旗面）
+    flag = ev.get("bull_flag")
+    if flag is None:
+        flag = detect_bull_flag(bars, Hs_loc, atr_v)
+    if flag and last_c is not None:
+        f_tl = flag["tl_now"]
+        f_days = flag["days_above_tl"]
+        fresh_flag = last_c > f_tl and 1 <= f_days <= 3
+        if fresh_flag:
+            tl_txt = round(f_tl, 2)
+            if vol_ok:
+                z = zone_at_level(f_tl, atr_v, last_c, "旗形下降趋势线突破(优先T1)", ev, bars)
+                z["anchor"] = "flag_tl"
+                note = (
+                    f"旗形突破：旗杆 {flag['pole_d0']}→{flag['pole_d1']} "
+                    f"({round(flag['pole_lo'], 2)}→{round(flag['pole_hi'], 2)})，"
+                    f"旗面下降趋势线 @{tl_txt}；结构止损看该线下"
+                )
+                if rvol is None:
+                    note += "；无量能数据，确认打折"
+                return pack(
+                    "flag_tl_break", 1, "breakout", "旗形下降趋势线突破(优先T1)", True, note, z,
+                )
+            return pack(
+                "wait", None, "wait", "旗形突破·量能不足", False,
+                f"近{f_days}根站上旗面趋势线 {tl_txt} 但 RVOL={round(rvol, 2)}≤1.5，不买假突破",
+            )
 
     # T1 沿线回踩：只在贴线（≤1×ATR）时占用当日；未到位/延伸则让给 T2
     line_wait_verdict = None
@@ -854,27 +1080,28 @@ def plan_entry(bars, ev):
             )
         # broke_yang_low / no_yang：这笔大阳作废或没有大阳，不占用当日
 
-    # T2 下降趋势线突破
-    fresh_dtl = (
-        declining and tl_now is not None and last_c is not None
-        and last_c > tl_now and days_above_tl <= 3
-    )
-    if fresh_dtl and vol_ok:
-        z = zone_at_level(tl_now, atr_v, last_c, "下降趋势线突破(次优先T2)", ev, bars)
-        z["anchor"] = "down_tl"
-        tgt_lv = plat_p if plat_p is not None else r1p
-        tgt = f"目标1先看平台沿 {round(tgt_lv, 2)}" if tgt_lv else "目标1看最近前高"
-        note = f"次优先T2，试错仓。未过前高则{tgt}；过前高升级为平台突破"
-        if rvol is None:
-            note += "；无量能数据，确认打折"
-        return pack(
-            "downtrend_tl_break", 2, "breakout", "下降趋势线突破(次优先T2)", True, note, z,
+    # T2 下降趋势线突破（已识别旗形则走 flag_tl_break，不重复）
+    if flag is None:
+        fresh_dtl = (
+            declining and tl_now is not None and last_c is not None
+            and last_c > tl_now and days_above_tl <= 3
         )
-    if fresh_dtl and not vol_ok:
-        return pack(
-            "wait", None, "wait", "下降趋势线突破·量能不足", False,
-            f"RVOL={round(rvol, 2)}≤1.5，T2 也不买假突破",
-        )
+        if fresh_dtl and vol_ok:
+            z = zone_at_level(tl_now, atr_v, last_c, "下降趋势线突破(次优先T2)", ev, bars)
+            z["anchor"] = "down_tl"
+            tgt_lv = plat_p if plat_p is not None else r1p
+            tgt = f"目标1先看平台沿 {round(tgt_lv, 2)}" if tgt_lv else "目标1看最近前高"
+            note = f"次优先T2，试错仓。未过前高则{tgt}；过前高升级为平台突破"
+            if rvol is None:
+                note += "；无量能数据，确认打折"
+            return pack(
+                "downtrend_tl_break", 2, "breakout", "下降趋势线突破(次优先T2)", True, note, z,
+            )
+        if fresh_dtl and not vol_ok:
+            return pack(
+                "wait", None, "wait", "下降趋势线突破·量能不足", False,
+                f"RVOL={round(rvol, 2)}≤1.5，T2 也不买假突破",
+            )
 
     if line_wait_note:
         return pack(
@@ -883,7 +1110,7 @@ def plan_entry(bars, ev):
     if not structure_ok:
         return pack(
             "wait", None, "wait", "等待", False,
-            "未形成平台突破、沿线回踩、大阳后缩量回踩或下降趋势线突破",
+            "未形成平台/W底/旗形突破、沿线回踩、大阳后缩量回踩或下降趋势线突破",
         )
     return pack(
         "wait", None, "wait", "等待", False,
@@ -967,6 +1194,8 @@ def evaluate(sym, data_file=None):
             "days_above": days_above_level(bars, R1[1]),
             "kind": "r1_fallback",
         }
+    w_bottom = detect_w_bottom(bars, Hs, Ls, atr_v)
+    bull_flag = detect_bull_flag(bars, Hs, atr_v)
     plan = plan_entry(bars, {
         "regime": regime,
         "passed": passed,
@@ -978,6 +1207,8 @@ def evaluate(sym, data_file=None):
         "P1": {"i": P1[0], "price": P1[1]},
         "R1": {"i": R1[0], "price": R1[1]} if R1 else None,
         "platform": plat,
+        "w_bottom": w_bottom,
+        "bull_flag": bull_flag,
         "down_tl": {
             "b": {"i": h_b[0], "price": h_b[1]},
             "a": {"i": h_a[0], "price": h_a[1]},
@@ -1040,6 +1271,25 @@ def evaluate(sym, data_file=None):
             "price": rnd(plat["price"]),
             "kind": plat.get("kind"),
             "days_above": plat.get("days_above"),
+        }
+    if w_bottom:
+        out["w_bottom"] = {
+            "l1": {**w_bottom["l1"], "price": rnd(w_bottom["l1"]["price"])},
+            "l2": {**w_bottom["l2"], "price": rnd(w_bottom["l2"]["price"])},
+            "neckline": rnd(w_bottom["neckline"]),
+            "neck_d": w_bottom.get("neck_d"),
+            "span": w_bottom.get("span"),
+        }
+    if bull_flag:
+        out["bull_flag"] = {
+            "pole_d0": bull_flag.get("pole_d0"),
+            "pole_d1": bull_flag.get("pole_d1"),
+            "pole_lo": rnd(bull_flag.get("pole_lo")),
+            "pole_hi": rnd(bull_flag.get("pole_hi")),
+            "tl_now": rnd(bull_flag.get("tl_now")),
+            "days_above_tl": bull_flag.get("days_above_tl"),
+            "pb": bull_flag.get("pb"),
+            "pa": bull_flag.get("pa"),
         }
     if h_a and h_b:
         out["trendline_at_last"] = rnd(line_val(h_b, h_a, last_i))
