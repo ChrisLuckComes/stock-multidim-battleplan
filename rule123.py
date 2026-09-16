@@ -661,6 +661,8 @@ def _empty_zone():
         "hits": 0,
         "extended": False,
         "chase_only": False,
+        "invalid": False,
+        "invalid_reason": None,
         "invalidation": None,
         "vwap5": None,
         "ma5": None,
@@ -1362,6 +1364,8 @@ def plan_entry(bars, ev):
                 z,
             )
         if st == "broke_yang_low":
+            z["invalid"] = True
+            z["invalid_reason"] = f"{y_d} 大阳后收盘跌破防守位 {round(floor, 2)}"
             return pack(
                 "wait", None, "wait", "大阳低点已破·作废", False,
                 f"{y_d} 大阳后收盘跌破防守位 {round(floor, 2)}，本笔大阳设置作废",
