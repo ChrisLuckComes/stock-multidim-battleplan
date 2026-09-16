@@ -107,6 +107,8 @@ def analyze(code, name, prefix):
         struct_stop=struct_stop,
         hard_stop=hard_stop,
         hard_anchor=sp.get("hard_anchor") or z.get("hard_anchor"),
+        stop_warning=sp.get("warning") or z.get("stop_warning"),
+        buy_lo_adjusted=bool(z.get("buy_lo_adjusted")),
         path=plan.get("path"), mode=plan.get("mode"), priority=plan.get("priority"),
         recommend=plan.get("recommend"),
         anchor=z.get("anchor"),

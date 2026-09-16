@@ -642,6 +642,8 @@ def _empty_zone():
         "path": "wait",
         "anchor": None,
         "level": None,
+        "base": None,
+        "gap_hi": None,
         "primary_lo": None,
         "primary_hi": None,
         "in_zone": False,
@@ -872,7 +874,15 @@ def detect_bull_flag(bars, Hs, atr_v, lookback=45):
 
 
 def zone_at_level(level, atr_v, last_c, kind, ev, bars):
-    """突破类买区：半宽与 in_zone 门槛统一为 0.5×ATR（紧贴突破位）；dist/extended 按现价真算。"""
+    """突破类买区：自突破位【单边向上】，带宽 1.0×ATR。
+
+    下沿不低于突破位——本模式的定义就是「收盘站上突破位」，在尚未突破的价位挂买单
+    自相矛盾；同时保证硬止损（锚 −0.10×ATR）恒落在买区下沿之下，不会出现
+    「按买区挂单成交，成交价却已在硬止损下方」。
+    跳空突破例外：突破根跳空越过突破位时，买区基准上移到缺口上沿（= 突破根低点），
+    买区不得落进缺口（SKILL「不买回补缺口」，石头科技 8/25 例）。
+    dist / extended / 不追高闸门的基准恒为突破位本身，不随买区基准漂移。
+    """
     z = _empty_zone()
     closes = [b["c"] for b in bars]
     v5 = typical_vwap(bars, 5)
@@ -881,8 +891,16 @@ def zone_at_level(level, atr_v, last_c, kind, ev, bars):
     z["ma5"] = round(ma5, 2) if ma5 is not None else None
     if level is None:
         return z
-    pad = 0.5 * atr_v if atr_v else level * 0.005
-    lo, hi = level - pad, level + pad
+    band = 1.0 * atr_v if atr_v else level * 0.01
+    base = level
+    gap_hi = None
+    if len(bars) >= 2 and atr_v:
+        y, prev_c = bars[-1], bars[-2]["c"]
+        # 跳空越过突破位：缺口上沿（= 突破根低点）才是实际买点
+        if y["o"] > prev_c + 0.2 * atr_v and y["l"] >= prev_c and y["l"] > level:
+            gap_hi = round(y["l"], 2)
+            base = y["l"]
+    lo, hi = base, base + band
     if last_c and hi - lo < last_c * 0.002:
         mid = (lo + hi) / 2.0
         lo, hi = mid * 0.997, mid * 1.003
@@ -901,10 +919,12 @@ def zone_at_level(level, atr_v, last_c, kind, ev, bars):
         "type": kind,
         "anchor": anchor,
         "level": round(level, 2),
+        "base": round(base, 2),
+        "gap_hi": gap_hi,
         "primary_lo": round(lo, 2),
         "primary_hi": round(hi, 2),
         "dist_atr": round(dist, 2) if dist is not None else None,
-        "in_zone": bool(dist is not None and -0.5 <= dist <= 0.5),
+        "in_zone": bool(last_c is not None and lo <= last_c <= hi),
         "extended": bool(dist is not None and dist > 2.0),
         # 结构位=突破位本身；硬止损由 stop_plan 另给
         "invalidation": round(level, 2),
@@ -922,10 +942,18 @@ SKILL_HARD_ANCHORS = ("阳线下沿", "大阳中点", "MA5", "缺口下沿")
 
 
 def stop_plan(bars, mode, z, atr_v):
-    """两档止损：结构（收盘破）+ 硬止损（锚三选一 − 0.10×ATR）。硬止损必须低于买区下沿。"""
+    """两档止损：结构（收盘破）+ 硬止损（SKILL 合法锚 − 0.10×ATR）。
+
+    铁律一：锚名与数值严格绑定 —— hard 恒等于「锚价 − gap」。禁止为迁就买区把数值
+            悄悄下移：那会让报告上「锚=大阳中点」配一个离中点好几个 ATR 的价。
+    铁律二：硬止损必须落在买区下沿之下。若 SKILL 的合法锚都做不到（买区与锚冲突），
+            如实挂 stop_warning，并把买区下沿抬到硬止损之上 —— 让路的是买区，
+            不是止损数值，也不是锚名。
+    """
     if not bars or not atr_v or not z or z.get("level") is None:
         return None
     z.pop("stop_warning", None)
+    z.pop("buy_lo_adjusted", None)
     y = bars[-1]
     body, rng = abs(y["c"] - y["o"]), y["h"] - y["l"]
     long_yang = (
@@ -936,24 +964,43 @@ def stop_plan(bars, mode, z, atr_v):
     buy_lo = z.get("primary_lo") if z.get("primary_lo") is not None else level
     gap = 0.10 * atr_v
 
-    def _warn_clamp(hard_anchor, intended, hard):
-        z["stop_warning"] = (
-            f"锚({hard_anchor})−gap={round(intended, 2)} 落在买区内或之上"
-            f"（买区下沿 {round(buy_lo, 2)}），已下移到 {round(hard, 2)}；"
-            f"建议收窄买区或改用更低结构锚，勿靠下移止损兜底"
+    def _resolve(cands):
+        """cands 已按 SKILL 优先级排序 [(锚名, 锚价)]。
+        取第一个「锚价 − gap < 买区下沿」的锚；数值恒 = 锚价 − gap。
+        返回 (锚名, 锚价, hard, warning)。
+        """
+        first = None
+        for name, px in cands:
+            if px is None:
+                continue
+            h = px - gap
+            if first is None:
+                first = (name, px, h)
+            if h < buy_lo:
+                return name, px, h, None
+        if first is None:
+            return None, None, None, None
+        name, px, h = first
+        return name, px, h, (
+            f"SKILL 合法锚（{' / '.join(str(c[0]) for c in cands)}）中最低的 "
+            f"{name}@{round(px, 2)} − gap = {round(h, 2)}，仍不低于买区下沿 "
+            f"{round(buy_lo, 2)}；买区与止损锚冲突 —— 已把买区下沿上抬到硬止损之上"
+            f"（可执行价位以 primary_lo 为准）"
         )
 
-    def _ensure_below_buy(hard, hard_anchor, fallback_anchor_px, fallback_name):
-        """保留 SKILL 锚名；数值必要时压到买区下沿之下并挂 stop_warning。"""
-        if hard < buy_lo:
-            return round(hard, 2), hard_anchor
-        intended = hard
-        cand = min(fallback_anchor_px, level) - gap
-        hard = min(cand, buy_lo - gap)
-        _warn_clamp(hard_anchor, intended, hard)
-        return round(hard, 2), hard_anchor
-
-    def _pack(struct_name, struct, hard_name, hard):
+    def _finish(struct_name, struct, hard_name, hard, warn):
+        if hard is None:
+            return None
+        if warn:
+            z["stop_warning"] = warn
+            last_c = bars[-1]["c"]
+            new_lo = round(hard + 0.05 * atr_v, 2)
+            hi = z.get("primary_hi")
+            if hi is None or hi <= new_lo:
+                hi = round(new_lo + 0.5 * atr_v, 2)
+            z["primary_lo"], z["primary_hi"] = new_lo, hi
+            z["buy_lo_adjusted"] = True
+            z["in_zone"] = bool(new_lo <= last_c <= hi)
         out = {
             "struct_anchor": struct_name,
             "struct": round(struct, 2),
@@ -975,36 +1022,31 @@ def stop_plan(bars, mode, z, atr_v):
             struct_name = f"{ANCHOR_LABEL.get(z.get('anchor'), z.get('anchor'))}(收盘破)"
             hard_name = ANCHOR_LABEL.get(z.get("anchor"), z.get("anchor"))
             if hard_name not in SKILL_HARD_ANCHORS:
+                # 锚名归一到 MA5 时，锚价必须同步换成 MA5，否则名值又对不上
                 hard_name = "MA5"
-        hard = anchor_px - gap
-        hard, hard_name = _ensure_below_buy(hard, hard_name, y["l"], "阳线下沿")
-        return _pack(struct_name, anchor_px, hard_name, hard)
+                anchor_px = z.get("ma5") if z.get("ma5") is not None else level
+        name, px, hard, warn = _resolve([(hard_name, anchor_px)])
+        return _finish(struct_name, px if px is not None else anchor_px,
+                       name or hard_name, hard, warn)
 
     if mode == "impulse_pause":
         floor = level
         if z.get("yi_zi"):
-            intended = floor - gap
-            hard = intended
-            if hard >= buy_lo:
-                hard = buy_lo - gap
-                _warn_clamp("缺口下沿", intended, hard)
-            return _pack("缺口下沿/前收(收盘破)", floor, "缺口下沿", hard)
-        intended = floor - gap
-        hard = intended
-        if hard >= buy_lo:
-            hard = buy_lo - gap
-            _warn_clamp("阳线下沿", intended, hard)
-        return _pack("大阳低点(收盘破)", floor, "阳线下沿", hard)
+            name, px, hard, warn = _resolve([("缺口下沿", floor)])
+            return _finish("缺口下沿/前收(收盘破)", floor, name or "缺口下沿", hard, warn)
+        name, px, hard, warn = _resolve([("阳线下沿", floor)])
+        return _finish("大阳低点(收盘破)", floor, name or "阳线下沿", hard, warn)
 
     # 平台 / W底 / 旗形 / 下降趋势线突破
     struct = round(level, 2)
     struct_name = f"{ANCHOR_LABEL.get(z.get('anchor'), z.get('anchor') or '突破位')}@{struct}(收盘破)"
     if long_yang:
-        mid = (y["h"] + y["l"]) / 2.0
-        hard, hard_name = _ensure_below_buy(mid - gap, "大阳中点", y["l"], "阳线下沿")
+        # SKILL:198 长阳用中点；若中点算出的止损落进买区，按同族合法锚降级到阳线下沿
+        cands = [("大阳中点", (y["h"] + y["l"]) / 2.0), ("阳线下沿", y["l"])]
     else:
-        hard, hard_name = _ensure_below_buy(y["l"] - gap, "阳线下沿", y["l"], "阳线下沿")
-    return _pack(struct_name, struct, hard_name, hard)
+        cands = [("阳线下沿", y["l"])]
+    name, px, hard, warn = _resolve(cands)
+    return _finish(struct_name, struct, name or cands[0][0], hard, warn)
 
 
 def targets(bars, mode, z, atr_v, entry, Hs):
@@ -1140,15 +1182,27 @@ def plan_entry(bars, ev):
             and z.get("level") is not None
             and z.get("in_zone") is False
         ):
-            # 已出买区半宽但仍 ≤2×ATR：可挂单回踩，禁止市价追
+            # 现价不在买区内（但仍 ≤2×ATR，未触发「不追高」闸门）：只挂单、不市价追。
+            # 买区已改为自突破位单边向上，故必须区分「在上沿之上」与「在下沿之下」。
             lv = z["level"]
+            lo = z.get("primary_lo")
             hi = z.get("primary_hi")
             d = (last_c - lv) / atr_v
-            note = (
-                f"现价 {last_c:.2f} 高出买位 {lv} 已 {d:.1f}×ATR，已出买区上沿 {hi}；"
-                f"不要市价追，在 {hi} 一带挂单"
-            )
-            verdict = f"突破已延伸·只做回踩 {hi}"
+            if hi is not None and last_c > hi:
+                note = (
+                    f"现价 {last_c:.2f} 高出买位 {lv} 已 {d:.1f}×ATR，已出买区上沿 {hi}；"
+                    f"不要市价追，在 {hi} 一带挂单"
+                )
+                verdict = f"突破已延伸·只做回踩 {hi}"
+            elif lo is not None and last_c < lo:
+                note = (
+                    f"现价 {last_c:.2f} 低于买位 {lv} {abs(d):.1f}×ATR，已跌破买区下沿 {lo}；"
+                    f"突破未成立，不接"
+                )
+                verdict = f"跌破买区下沿 {lo}·不接"
+            else:
+                note = f"现价 {last_c:.2f} 未落入买区 {lo}-{hi}（距买位 {d:+.1f}×ATR）"
+                verdict = "未进买区"
             recommend = False
         z["path"] = path
         z["mode"] = mode

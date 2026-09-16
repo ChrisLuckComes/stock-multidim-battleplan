@@ -6,6 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from rule123 import (
+    SKILL_HARD_ANCHORS,
     atr14,
     held_lows_3d,
     is_live_bar,
@@ -107,7 +108,8 @@ def test_stop_plan_two_layers_and_hard_below_buy():
 
 
 def test_stop_plan_narrow_break_hard_below_buy_lo():
-    """贴沿窄幅突破：阳线下沿 − gap 仍可能 ≥ 买区下沿，必须兜底，但锚名不改。"""
+    """贴沿窄幅突破：阳线下沿高于突破位时，锚价−gap 会落在买区内。
+    处理方式是抬买区下沿（硬止损让路给锚），不是改锚名、也不是偷偷下移数值。"""
     bars = [_bar("2026-01-01", 101.4, 102.0, 101.2, 101.5, 2e6)]
     atr_v = 1.785
     z = zone_at_level(101.0, atr_v, 101.5, "平台突破(优先T1)", {}, bars)
@@ -119,14 +121,67 @@ def test_stop_plan_narrow_break_hard_below_buy_lo():
 
 
 def test_stop_plan_long_yang_keeps_mid_anchor_name():
-    """长阳突破：即便数值被压到买区下，hard_anchor 仍为「大阳中点」并挂警告。"""
+    """长阳突破：锚名保持 SKILL 合法锚，且数值必须严格来自该锚（名值绑定）。"""
     bars = [_bar("2026-01-01", 100.5, 106.0, 100.4, 105.5, 3e6)]
     atr_v = 2.0
     z = zone_at_level(100.0, atr_v, 105.5, "平台突破(优先T1)", {}, bars)
     sp = stop_plan(bars, "platform_break", z, atr_v)
-    assert sp["hard_anchor"] == "大阳中点"
+    y = bars[-1]
+    px = {"大阳中点": (y["h"] + y["l"]) / 2.0, "阳线下沿": y["l"],
+          "MA5": z.get("ma5"), "缺口下沿": None}[sp["hard_anchor"]]
+    assert sp["hard_anchor"] in SKILL_HARD_ANCHORS
+    assert px is not None
+    assert abs(sp["hard"] - (px - 0.10 * atr_v)) < 0.011, (sp, px)
     assert sp["hard"] < z["primary_lo"]
     assert sp.get("warning") or z.get("stop_warning")
+
+
+def test_hard_stop_name_matches_value():
+    """不变量：hard 恒等于「锚价 − 0.10×ATR」，且锚价落在买区下沿之下。
+
+    守护第五轮那条「锚名写大阳中点、数值却差 7.5×ATR」的坑。
+    """
+    cases = [
+        ("跳空光脚大阳", _bar("2026-08-25", 125.0, 135.0, 125.0, 135.0, 8e6)),
+        ("无跳空长阳", _bar("2026-08-25", 103.0, 113.0, 102.5, 112.6, 8e6)),
+        ("普通阳线突破", _bar("2026-08-25", 111.0, 115.0, 110.5, 114.8, 5e6)),
+    ]
+    for label, k in cases:
+        bars = [_bar(f"2026-07-{i + 1:02d}", 112.5, 113.0, 112.0, 112.5, 1e6) for i in range(30)]
+        bars.append(k)
+        atr_v = atr14(bars)
+        y, prev_c = bars[-1], bars[-2]["c"]
+        z = zone_at_level(112.5, atr_v, y["c"], "平台突破(优先T1)", {}, bars)
+        sp = stop_plan(bars, "platform_break", z, atr_v)
+        assert sp["hard_anchor"] in SKILL_HARD_ANCHORS, (label, sp)
+        px = {"大阳中点": (y["h"] + y["l"]) / 2.0, "阳线下沿": y["l"],
+              "MA5": z.get("ma5"), "缺口下沿": prev_c}[sp["hard_anchor"]]
+        assert abs(sp["hard"] - (px - 0.10 * atr_v)) < 0.011, (label, sp, px, atr_v)
+        assert sp["hard"] < z["primary_lo"], (label, sp, z)
+
+
+def test_gap_breakout_zone_above_gap():
+    """跳空突破：买区基准上移到缺口上沿（= 突破根低点），不得落进缺口。"""
+    bars = [_bar(f"2026-07-{i + 1:02d}", 112.5, 113.0, 112.0, 112.5, 1e6) for i in range(30)]
+    bars.append(_bar("2026-08-25", 125.0, 135.0, 125.0, 135.0, 8e6))
+    atr_v = atr14(bars)
+    z = zone_at_level(112.5, atr_v, 135.0, "平台突破(优先T1)", {}, bars)
+    assert z["gap_hi"] == 125.0
+    assert z["primary_lo"] >= 125.0, z          # 缺口 112.5→125 内不得挂买单
+    sp = stop_plan(bars, "platform_break", z, atr_v)
+    assert sp["hard_anchor"] == "阳线下沿"        # SKILL:101「防守仍是大阳低点」
+    assert abs(sp["hard"] - (125.0 - 0.10 * atr_v)) < 0.011, sp
+    assert sp["hard"] < z["primary_lo"]
+
+
+def test_breakout_zone_not_below_level():
+    """突破买区不得落在「还没突破」的区域：下沿 ≥ 突破位。"""
+    bars = [_bar(f"2026-07-{i + 1:02d}", 100, 100.4, 99.6, 100.0, 1e6) for i in range(40)]
+    bars.append(_bar("2026-08-25", 100.2, 101.6, 100.1, 101.5, 3e6))
+    atr_v = atr14(bars)
+    z = zone_at_level(100.0, atr_v, 101.5, "平台突破(优先T1)", {}, bars)
+    assert z["primary_lo"] >= 100.0, z
+    assert z["primary_hi"] > z["primary_lo"]
 
 
 def test_too_far_gate():
@@ -142,16 +197,19 @@ def test_too_far_gate():
     assert too_far_from_zone(z, atr_v, px, limit=2.0) is True
 
 
-def test_breakout_in_zone_matches_band():
-    """突破买区半宽 0.5×ATR，in_zone 同步为 ±0.5。"""
+def test_breakout_zone_starts_at_level():
+    """突破买区自突破位【单边向上】1.0×ATR，in_zone 同步。"""
     bars = [_bar("2026-01-01", 100, 101, 99, 100)]
     atr_v = 4.0
     z_in = zone_at_level(100, atr_v, 101.5, "平台突破(优先T1)", {}, bars)
-    assert z_in["primary_lo"] == 98.0
-    assert z_in["primary_hi"] == 102.0
+    assert z_in["primary_lo"] == 100.0
+    assert z_in["primary_hi"] == 104.0
     assert z_in["in_zone"] is True
-    z_out = zone_at_level(100, atr_v, 102.1, "平台突破(优先T1)", {}, bars)
-    assert z_out["in_zone"] is False
+    # 上沿之内仍算在区内；越过上沿即出区
+    assert zone_at_level(100, atr_v, 104.0, "平台突破(优先T1)", {}, bars)["in_zone"] is True
+    assert zone_at_level(100, atr_v, 104.1, "平台突破(优先T1)", {}, bars)["in_zone"] is False
+    # 跌破突破位 = 没突破，不算在区内
+    assert zone_at_level(100, atr_v, 99.9, "平台突破(优先T1)", {}, bars)["in_zone"] is False
 
 
 def test_line_zone_pad_matches_in_zone():
@@ -232,8 +290,11 @@ if __name__ == "__main__":
     test_stop_plan_two_layers_and_hard_below_buy()
     test_stop_plan_narrow_break_hard_below_buy_lo()
     test_stop_plan_long_yang_keeps_mid_anchor_name()
+    test_hard_stop_name_matches_value()
+    test_gap_breakout_zone_above_gap()
+    test_breakout_zone_not_below_level()
     test_too_far_gate()
-    test_breakout_in_zone_matches_band()
+    test_breakout_zone_starts_at_level()
     test_line_zone_pad_matches_in_zone()
     test_is_live_bar_session()
     test_no_platform_does_not_fallback_to_r1()

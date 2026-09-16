@@ -89,10 +89,17 @@ def main():
         cls = "t1" if r["tier"] == "tier1" else "t2"
         bz = f"{r['support_lo']:.1f}-{r['support_hi']:.1f}" if r.get("support_lo") else "-"
         stop_txt = f2(r.get("hard_stop") or r.get("stop"))
+        # 止损价必须与锚名同格显示：只给一个价，看不出它是按哪个锚算的
+        ha = r.get("hard_anchor") or "-"
+        warn = r.get("stop_warning")
+        stop_cell = f'{stop_txt}<br><span class="muted">{ha}</span>'
+        if warn:
+            stop_cell += f'<br><span class="red" title="{warn}">⚠ 锚与买区冲突·买区已上抬</span>'
+            cls += " warn"
         tbl += (f'<tr class="{cls}"><td>{r["code"]}</td><td class="l">{r["name"]}</td>'
                 f'<td>{r["market"]}</td><td>{r["regime"]}</td><td>{r["tier"]}</td>'
                 f'<td>{f2(r["spot"])}</td><td>{f2(r.get("platform") or r.get("R1"))}</td><td>{bz}</td>'
-                f'<td class="red">{stop_txt}</td><td>{f2(r["T1"])}</td><td>{f2(r["T2"])}</td>'
+                f'<td class="red">{stop_cell}</td><td>{f2(r["T1"])}</td><td>{f2(r["T2"])}</td>'
                 f'<td>{z(r["rvol"])}</td><td>{r.get("dd_from_high")}%</td>'
                 f'<td>{r.get("buy_type","-")}</td></tr>')
 
@@ -102,12 +109,16 @@ def main():
     for r in top:
         try:
             bars = sina_kline(r["market"], r["code"])
+            ha = r.get("hard_anchor") or "-"
             charts += (f'<div class="card"><div class="kv"><span><b>{r["code"]} {r["name"]}</b></span>'
                        f'<span>现价 {f2(r["spot"])}</span><span>活平台/R1 {f2(r.get("platform") or r.get("R1"))}</span>'
                        f'<span>买区 {f2(r.get("support_lo"))}-{f2(r.get("support_hi"))}</span>'
-                       f'<span>结构 {f2(r.get("struct_stop"))} / 硬止损 {f2(r.get("hard_stop") or r.get("stop"))}</span>'
+                       f'<span>结构 {f2(r.get("struct_stop"))} / 硬止损 {f2(r.get("hard_stop") or r.get("stop"))}'
+                       f'（锚 {ha}）</span>'
                        f'<span>T1 {f2(r["T1"])} / T2 {f2(r["T2"])}</span>'
                        f'<span>RVOL {z(r["rvol"])}</span><span>{r["tier"]}</span></div>')
+            if r.get("stop_warning"):
+                charts += f'<p class="warnbox red">⚠ {r["stop_warning"]}</p>'
             charts += svg_chart(r, bars, f'{r["code"]} {r["name"]}') + '</div>'
         except Exception as e:
             charts += f'<div class="card"><b>{r["code"]} {r["name"]}</b> 图抓取失败：{type(e).__name__}: {e!r}</div>'
@@ -129,7 +140,9 @@ table{{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}}
 th,td{{border:1px solid #e6e8eb;padding:5px 6px;text-align:center;vertical-align:top}}
 th{{background:#f0f3f7;position:sticky;top:0}} td.l{{text-align:left}}
 tr.t1 td{{background:#eaf7ee}} tr.t2 td{{background:#fff8e8}}
+tr.warn td{{background:#fdecea}}
 .note{{color:#777;font-size:12px;margin-top:8px}} .muted{{color:#888}} .red{{color:#A32D2D}}
+.warnbox{{background:#fdecea;border:1px solid #f3c2bd;border-radius:6px;padding:8px 10px;font-size:12px;margin:8px 0}}
 svg{{width:100%;height:auto;display:block;border:1px solid #eee;border-radius:6px;margin-top:6px}}
 </style></head><body><div class="wrap">
 <h1>全市场 A 股 · 方向感知 123 技术扫描</h1>
@@ -146,15 +159,15 @@ svg{{width:100%;height:auto;display:block;border:1px solid #eee;border-radius:6p
 <p><b>判定口径：</b><br>
 • <b>tier1</b> = recommend 且优先T1，或收盘站上前高/活平台 + 未创新低 + 价在 MA20 上。<br>
 • <b>tier2</b> = recommend 的 T2，或上升延续回踩观察。<br>
-• <b>买区</b>走 rule123.plan_entry（活平台沿，不是死 R1）。止损列优先硬止损；另有结构止损（收盘破）。禁止用 VWAP 当默认买区。</p>
+• <b>买区</b>走 rule123.plan_entry（活平台沿，不是死 R1）。<b>突破类买区自突破位单边向上 1.0×ATR</b>（不在「尚未突破」的价位挂买单）；跳空突破时基准上移到缺口上沿（不买回补缺口）。止损列优先硬止损，锚名与计算价一并给出；另有结构止损（收盘破）。禁止用 VWAP 当默认买区。</p>
 </div>
 
 <h2>一、候选总表（{len(cands)} 只 · tier1 优先，按距区间高降序）</h2>
 <div class="card"><table>
-<tr><th>代码</th><th>名称</th><th>市场</th><th>regime</th><th>tier</th><th>现价</th><th>R1</th><th>买区</th><th>止损</th><th>T1</th><th>T2</th><th>RVOL</th><th>距区间高</th><th>买点类型</th></tr>
+<tr><th>代码</th><th>名称</th><th>市场</th><th>regime</th><th>tier</th><th>现价</th><th>R1</th><th>买区</th><th>止损<br><span style="font-weight:400;color:#888">硬止损 / 锚</span></th><th>T1</th><th>T2</th><th>RVOL</th><th>距区间高</th><th>买点类型</th></tr>
 {tbl}
 </table>
-<p class="note">绿=tier1(123完整)；黄=tier2(上升延续回踩)。距区间高=相对取数窗口最高价（约 130 根，非严格 52 周）；负=低于窗口高，正=已破新高。RVOL 为末根量/20日均量。</p>
+<p class="note">绿=tier1(123完整)；黄=tier2(上升延续回踩)；<b>浅红=锚与买区冲突</b>（硬止损锚价落在买区内，已把买区下沿抬到硬止损之上，可执行价位以买区列为准）。距区间高=相对取数窗口最高价（约 130 根，非严格 52 周）；负=低于窗口高，正=已破新高。RVOL 为末根量/20日均量。</p>
 </div>
 
 <h2>二、重点候选价格结构图（前 {len(top)}）</h2>
