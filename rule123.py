@@ -1181,6 +1181,45 @@ def detect_bull_flag(bars, Hs, atr_v, lookback=45):
     }
 
 
+def key_break_level(bars, atr_v, last_c, lo=0.20, hi=1.5):
+    """上方最近的可突破位 K（供盘中「关键位突破」通道使用）。
+
+    只回答「盘中站上哪个价算突破成立」，不回答「买区在哪」。
+
+    候选一 近期整理上沿 —— bars[-4:-1] 的最高价（天然 ≥2 根之前形成，
+           所以不会把「昨天刚创的高点」当成阻力，从而变成追加速段）。
+           必要性：ILMN 2026-09-15 突破的正是 9/9 高点 212.18，
+           而 9/9 左侧更高（9/8 的 219.45），进不了 pivots。
+    候选二 摆动前高     —— pivots 上方最近的高点。
+
+    过滤：距现价必须落在 [lo, hi]×ATR。太近（<0.2ATR）没有突破意义，
+    太远（>1.5ATR）当日不可及。取**较低**者——更近的阻力才是先要打的位。
+    """
+    if not atr_v or atr_v <= 0:
+        return None
+    n = len(bars)
+    out = []
+    if n >= 4:
+        seg = bars[-4:-1]
+        best = max(seg, key=lambda b: b["h"])
+        if best["h"] > last_c:
+            out.append({"kind": "近期整理上沿", "level": best["h"], "date": best["d"]})
+    try:
+        Hs, _ = pivots(bars[:-1], 3)
+        ups = sorted({h for _, h in Hs if h > last_c})
+        if ups:
+            out.append({"kind": "摆动前高", "level": ups[0], "date": None})
+    except Exception:
+        pass
+    valid = [c for c in out if lo * atr_v <= (c["level"] - last_c) <= hi * atr_v]
+    if not valid:
+        return None
+    k = min(valid, key=lambda x: x["level"])
+    k["level"] = round(k["level"], 2)
+    k["dist_atr"] = round((k["level"] - last_c) / atr_v, 2)
+    return k
+
+
 def zone_at_level(level, atr_v, last_c, kind, ev, bars):
     """突破类买区：自突破位【单边向上】，带宽 1.0×ATR。
 

@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from rule123 import (  # noqa: E402
     build_ev, plan_entry, atr14, is_live_bar,
     bars_from_us, bars_from_em_us, bars_from_yahoo_min, stop_plan, pivots,
+    key_break_level,
 )
 
 UA = {"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn/"}
@@ -133,11 +134,102 @@ def room_and_cap(bars, z, mode, atr_v, rr=1.5, last_c=None):
     }
 
 
+def key_break_cap(op, K, atr_v, market="US"):
+    """关键位突破的「追高上限」——以启动点 K 为锚，不用开盘价做锚。
+
+    旧口径 min(K+0.6ATR, 开盘+0.8ATR) 有个致命缺陷：当标的**跳空不足、
+    但要突破的位较远**（开盘 ≪ K）时，第二项会把上限压到 K **以下** ——
+    上限低于突破位本身，触发价必然越线，通道就永远不可能成交。
+    ILMN 2026-09-16 实测：K = 231.81、开盘 223.70，
+        cap = min(231.81+5.51, 223.70+7.34) = 231.05 < K = 231.81
+        → 09:40 收 234.94 被判「追高」，通道整段失效。
+    这是「策略永远抓不住大涨」的机械原因，跟判断力无关。
+
+    新口径：
+      开盘 ≤ K（尚未跳空越过）→ cap = K + D_max×ATR
+      开盘 > K（盘前已完成突破）→ cap = 开盘 + 0.6×ATR（此刻追风险最高）
+    D_max：A股 0.60（T+1，当天纠不了错）/ 美股 1.20（T+0，破位即走）。
+    """
+    d = BREAK_DMAX_US if market == "US" else BREAK_DMAX_ASH
+    if op and op > K:
+        return round(op + BREAK_GAP_ATR * atr_v, 2)
+    return round(K + d * atr_v, 2)
+
+
+def ash_limit_price(code, prev_close):
+    """A股涨停价：主板 ±10%，创业板 300/301、科创板 688/689 ±20%。"""
+    pct = 0.20 if code.startswith(("300", "301", "688", "689")) else 0.10
+    return round(prev_close * (1 + pct), 2)
+
+
+def pullback_confirm(mins, j_start, S, atr_v):
+    """通道 C：分钟级回踩确认 —— 「等回调」的正确版本（SKILL.md「通道 C」）。
+
+    强势股不给日线级回调，只给分钟级。所以正解不是放宽追高，而是换时钟：
+    已启动后，等它回踩 5 分钟结构。
+
+    前置：j_start = 通道 A/B 的触发根序号（没有启动，回踩就没有意义）。
+
+      条件 2 回踩不破：**相对前一根下跌**的 5 分钟根，收盘落回 S ± 0.30×ATR，
+                       且不破 S − 0.30×ATR。单纯上涨（收盘 > 前一根收盘）不算回踩。
+      条件 3 缩量    ：回踩段各根量 < 启动根量 × 50%（放量下跌 = 出货，不是回踩）
+      条件 4 企稳    ：回踩后出现一根收阳且低点高于前一根低点的根
+    入场 = 企稳根收盘；止损 = 回踩低点 − 0.10×ATR。
+
+    返回 dict，state ∈ {ok, pending, waiting, heavy, failed}：
+      ok      已确认，含 entry / stop / low / at / j
+      pending 启动后还没有新 K 线（触发就是最新一根）
+      waiting 已进回踩带但尚未出现企稳根（继续等）
+      heavy   回踩段放量 → 不是回踩，作废（state 不回到 pending）
+      failed  收盘跌破 S − 0.30×ATR → 突破失败
+    """
+    band = PULLBACK_BAND_ATR * atr_v
+    s_lo, s_hi = S - band, S + band
+    start_v = mins[j_start]["v"] or 0
+    pre = mins[:j_start + 1] or mins[:1]
+    base_v = max(start_v, sum(x["v"] for x in pre) / len(pre))
+    vmax = base_v * PULLBACK_VOL_MULT
+    seg = mins[j_start + 1:]
+    if not seg:
+        return {"state": "pending"}
+    entered = False
+    low = None
+    prev_c = mins[j_start]["c"]
+    for k, b in enumerate(seg):
+        if b["c"] < s_lo:
+            return {"state": "failed", "at": b["d"][11:16], "px": round(b["c"], 2),
+                    "edge": round(s_lo, 2)}
+        if not entered:
+            # 「回踩」必须是**相对前一根下跌**且收盘落回带内。
+            # 只判「收盘 ≤ S+0.30ATR」会把「继续上涨但仍在带内」的根误当回踩 ——
+            # 实测 ILMN 9/15 21:45 正是这种根（放量继续上攻），被判成
+            # 「回踩段放量 = 出货」，是假信号。
+            if b["c"] < prev_c and b["c"] <= s_hi:
+                entered, low = True, b["l"]
+                if vmax and b["v"] > vmax:
+                    return {"state": "heavy", "at": b["d"][11:16],
+                            "rel": round(b["v"] / base_v, 2) if base_v else None}
+            prev_c = b["c"]
+            continue
+        low = min(low, b["l"])
+        if b["c"] > b["o"] and b["l"] > seg[k - 1]["l"]:
+            return {"state": "ok", "j": j_start + 1 + k, "at": b["d"][11:16],
+                    "entry": round(b["c"], 2), "low": round(low, 2),
+                    "rel_vol": round(b["v"] / start_v, 2) if start_v else None}
+        if vmax and b["v"] > vmax:
+            return {"state": "heavy", "at": b["d"][11:16],
+                    "rel": round(b["v"] / base_v, 2) if base_v else None}
+        prev_c = b["c"]
+    return {"state": "waiting" if entered else "pending",
+            "at": mins[-1]["d"][11:16]}
+
+
 def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
-          until=None, us_account=5000):
+          until=None, us_account=5000, date=None):
     if not (code.isdigit() and len(code) == 6):
         # 非 6 位代码一律按美股处理（T+0 口径，账户口径独立）
-        return probe_us(code, account=us_account, min_scale=min_scale, until=until)
+        return probe_us(code, account=us_account, min_scale=min_scale, until=until,
+                        date=date)
     sym = prefix_of(code) + code
     daily = kline(sym, 240, 140)
     snap = snapshot(sym)
@@ -251,6 +343,8 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
             amp = (pre_h - pre_l) / pre_l if pre_l else 0
             trigger = mins[i - 1]["c"]
             cap = op + CHASE_ATR * atr_v
+            lim = ash_limit_price(code, snap["prev"])
+            c5 = (lim - trigger) / lim * 100 >= ASH_LIMIT_BUFFER * 100
             c2, c3, c4 = True, amp <= PRE_AMP_MAX, trigger <= cap
             print(f"  [2 量能突变] ✓ {mins[i]['d'][11:16]} 量 {mins[i]['v'] / 100:,.0f} 手"
                   f" = 此前最大 {pm / 100:,.0f} 手的 {ratio:.1f} 倍"
@@ -259,7 +353,11 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
                   f"{'≤' if c3 else '>'} {PRE_AMP_MAX * 100:.1f}%")
             print(f"  [4 未追高 ] {'✓' if c4 else '✗'} 可挂价 {trigger:.2f} "
                   f"{'≤' if c4 else '>'} 开盘+1.0ATR = {cap:.2f}")
-            ok = c1 and c2 and c3 and c4 and fresh
+            print(f"  [5 离涨停 ] {'✓' if c5 else '✗'} 涨停 {lim:.2f}，"
+                  f"距涨停 {(lim - trigger) / lim * 100:.2f}% "
+                  f"{'≥' if c5 else '<'} {ASH_LIMIT_BUFFER * 100:.1f}%"
+                  f"（A股专有：贴板买不到 / 买到即开板）")
+            ok = c1 and c2 and c3 and c4 and c5 and fresh
             print(f"  → {'✅ 允许先手 1/3 仓，挂 ' + format(trigger, '.2f') if ok else '❌ 不满足，只观察'}")
             if ok and qty:
                 n = lots_for(qty, account, trigger)
@@ -278,6 +376,189 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
     elif not live:
         print()
         print(f"── 二、盘中确认 ── 非交易时段，跳过（收盘后跑即为次日预案）")
+
+    # ---------- 2b) 关键位突破（A股口径 · T+1 → 比美股严一档） ----------
+    if live and mins:
+        print()
+        print(f"── 二·B、关键位突破（{min_scale} 分钟 · 盘前定 K，站上即触发） ──")
+        pb_ctx = None                     # 通道 C 的前置状态（须在分支外初始化）
+        kb = key_break_level(b2, atr_v, basis[-1]["c"])
+        lim = ash_limit_price(code, snap["prev"])
+        if not kb:
+            print("  上方 0.2–1.5×ATR 内无可突破位 → 本通道不出信号")
+            out["ash_break"] = {"anchor": None, "allow": False}
+        else:
+            K = kb["level"]
+            thr = K + BREAK_BUF_ATR * atr_v
+            op = mins[0]["o"]
+            cap_px = key_break_cap(op, K, atr_v, "ASH")
+            stop_k = round(K - BREAK_STOP_ATR * atr_v, 2)
+            print(f"  锚点 {kb['kind']}  K = {K:.2f}"
+                  f"{'（' + str(kb['date']) + '）' if kb.get('date') else ''}"
+                  f"   距基准收盘 {kb['dist_atr']:.2f}×ATR")
+            print(f"  触发 {thr:.2f}   上限 {cap_px:.2f}"
+                  f"（A股 D_max={BREAK_DMAX_ASH}×ATR，比美股 {BREAK_DMAX_US} 严）"
+                  f"   止损 {stop_k:.2f}")
+            print(f"  涨停 {lim:.2f}   触发价距涨停 {(lim - thr) / lim * 100:.2f}%"
+                  f"（<{ASH_LIMIT_BUFFER * 100:.1f}% 即弃）")
+            room_lim = (lim - thr) / lim * 100
+            hit = rej = None
+            cum_v = cum_n = 0
+            for j, b in enumerate(mins):
+                cum_v += b["v"]
+                cum_n += 1
+                if j * min_scale < ASH_BREAK_MIN_OFF:
+                    continue
+                if b["c"] > thr:
+                    if b["c"] > cap_px:
+                        rej = (b, j)
+                    else:
+                        hit = (b, j, b["v"] / (cum_v / cum_n) if cum_v else 0)
+                    break
+            if room_lim < ASH_LIMIT_BUFFER * 100:
+                print(f"  [涨停距离] ✗ 仅 {room_lim:.2f}% < {ASH_LIMIT_BUFFER * 100:.1f}%"
+                      f" → 买不到 / 买到即开板，本通道今天关闭")
+                out["ash_break"] = {"anchor": K, "allow": False, "reason": "贴近涨停"}
+            elif rej:
+                print(f"  [触发] ✗ {rej[0]['d'][11:16]} 收 {rej[0]['c']:.2f}"
+                      f" 已越过上限 {cap_px:.2f} → 属加速段，A股 T+1 不接")
+                out["ash_break"] = {"anchor": K, "allow": False, "reason": "越过上限"}
+            elif not hit:
+                print(f"  [触发] ✗ 至今未站上 {thr:.2f} → 未突破")
+                out["ash_break"] = {"anchor": K, "allow": False, "reason": "未触发"}
+            else:
+                b, j, rel = hit
+                entry = round(b["c"], 2)
+                risk = entry - stop_k
+                fresh_k = j >= len(mins) - 2
+                if (lim - entry) / lim * 100 >= ASH_LIMIT_BUFFER * 100:
+                    # 通道 C 的前置：只要「曾有效突破」（未越上限、未贴涨停）即可。
+                    # C 专为「错过了第一根」而设，故不要求通道 B 当前新鲜。
+                    pb_ctx = {"j": j, "S": entry, "K": K, "tgt": None,
+                              "at": b["d"][11:16]}
+                print(f"  [触发] {'✓' if fresh_k else '⚠ 已过去 ' + str(len(mins) - 1 - j) + ' 根'}"
+                      f"  {b['d'][11:16]} 收 {entry:.2f}"
+                      f"   量 = 当日均量 {rel:.1f} 倍"
+                      f"{'（达标）' if rel >= BREAK_VOL_REL else '（偏弱，确认打折）'}")
+                if not fresh_k:
+                    print("  → ❌ 信号已过期，不追")
+                    out["ash_break"] = {"anchor": K, "allow": False, "reason": "过期"}
+                elif (lim - entry) / lim * 100 < ASH_LIMIT_BUFFER * 100:
+                    print(f"  → ❌ 成交价距涨停仅 {(lim - entry) / lim * 100:.2f}%，"
+                          f"追进去大概率开板砸盘，放弃")
+                    out["ash_break"] = {"anchor": K, "allow": False, "reason": "贴近涨停"}
+                else:
+                    tgt = None
+                    try:
+                        Hs2, _ = pivots(b2, 3)
+                        ups2 = sorted({h for _, h in Hs2 if h > K + 0.20 * atr_v})
+                        tgt = ups2[0] if ups2 else None
+                    except Exception:
+                        pass
+                    if pb_ctx:
+                        pb_ctx["tgt"] = tgt
+                    print(f"  → ✅ 试仓 {entry:.2f}   结构止损 {stop_k:.2f}"
+                          f"（跌破 K − {BREAK_STOP_ATR}×ATR）"
+                          f"   风险 {risk:.2f}/股 = {risk / entry * 100:.2f}%")
+                    if tgt:
+                        print(f"     第一目标 {tgt:.2f}   收益 {tgt - entry:.2f}   "
+                              f"盈亏比 {(tgt - entry) / risk:.2f}:1"
+                              if risk > 0 else "")
+                    if qty:
+                        n = lots_for(qty, account, entry)
+                        n = min(n, FIRST_LOT * (2 if code.startswith(("300", "301", "688", "689")) else 1))
+                        print(f"     先手 {n} 股 = {n * entry:,.0f} 元"
+                              f"（账户 {account:,} 的 {n * entry / account * 100:.1f}%）"
+                              f"   最大亏 {n * risk:,.0f} 元"
+                              f"（账户 {n * risk / account * 100:.2f}%）")
+                    print(f"     ⚠ T+1：今天买入今天卖不掉 —— 上面的止损是**明天**用的：")
+                    print(f"        明日开盘破 {stop_k:.2f} → 直接走；未破 → 持有，"
+                          f"收盘失守 {stop_k:.2f} 仍走")
+                    out["ash_break"] = {"anchor": K, "kind": kb["kind"],
+                                        "at": b["d"][11:16], "entry": entry,
+                                        "stop": stop_k, "risk": round(risk, 2),
+                                        "target1": tgt, "allow": True,
+                                        "t1_note": "T+1 止损为次日口径"}
+
+    # ---------- 2c) 通道 C：分钟级回踩确认（需 2b 已触发） ----------
+    # 强势股不给日线级回调，只给分钟级 → 换时钟，而不是放宽追高。
+    if live and mins and pb_ctx:
+        band = PULLBACK_BAND_ATR * atr_v
+        K, S = pb_ctx["K"], pb_ctx["S"]
+        print()
+        print(f"── 二·C、回踩确认（{min_scale} 分钟 · 强势票唯一给得起的入场点） ──")
+        print(f"  启动点 S = {S:.2f}（二·B 触发根 {pb_ctx['at']} 收盘）"
+              f"   回踩带 {S - band:.2f} ~ {S + band:.2f}"
+              f"   下沿破位即作废")
+        pc = pullback_confirm(mins, pb_ctx["j"], S, atr_v)
+        st = pc["state"]
+        if st == "pending":
+            print("  → … 尚未出现「相对前一根下跌且落回带内」的根 —— "
+                  "启动后一路不回头。这条就不给信号，**那就不做**（机会成本，不是失误）")
+        elif st == "failed":
+            print(f"  ✗ {pc['at']} 收 {pc['px']:.2f} 跌破带下沿 {pc['edge']:.2f}"
+                  f" → 突破失败，通道 C 今日作废")
+            out["ash_pullback"] = {"state": "failed", "at": pc["at"]}
+        elif st == "heavy":
+            print(f"  ✗ {pc['at']} 回踩段爆量（{pc['rel']}× 基准量）"
+                  f" → 是出货不是回踩，作废")
+            out["ash_pullback"] = {"state": "heavy", "at": pc["at"]}
+        elif st == "waiting":
+            print(f"  → … 已进回踩带，但还没出现「收阳 + 低点抬高」的企稳根"
+                  f"（截至 {pc['at']}）→ 继续等")
+        else:
+            entry, low = pc["entry"], pc["low"]
+            stop_c = round(low - PULLBACK_STOP_ATR * atr_v, 2)
+            risk = entry - stop_c
+            fresh_c = pc["j"] >= len(mins) - PULLBACK_FRESH
+            late = mins[pc["j"]]["d"][11:16] >= "14:30"
+            near_lim = (lim - entry) / lim * 100 < ASH_LIMIT_BUFFER * 100
+            print(f"  [1 已启动 ] ✓ 二·B 于 {pb_ctx['at']} 触发")
+            print(f"  [2 回踩不破] ✓ 回踩低 {low:.2f}，全程未破 {S - band:.2f}")
+            print(f"  [3 未爆量 ] ✓ 回踩段各根量 < max(启动根量, 当日此前均量)"
+                  f" × {PULLBACK_VOL_MULT:.1f}")
+            print(f"  [4 企稳   ] {'✓' if fresh_c else '⚠'} {pc['at']} 收阳 "
+                  f"{entry:.2f} 且低点抬高")
+            if not fresh_c:
+                print(f"  → ❌ 企稳根已过去 {len(mins) - 1 - pc['j']} 根，"
+                      f"信号过期不追（新鲜度 ≤{PULLBACK_FRESH} 根）")
+                out["ash_pullback"] = {"state": "expired", "at": pc["at"]}
+            elif late:
+                print("  → ❌ 已过 14:30：A 股当天无法确认收盘形态，不开新仓")
+                out["ash_pullback"] = {"state": "late", "at": pc["at"]}
+            elif near_lim:
+                print(f"  → ❌ 入场价距涨停仅 {(lim - entry) / lim * 100:.2f}%"
+                      f"（<{ASH_LIMIT_BUFFER * 100:.1f}%）→ 贴板不接")
+                out["ash_pullback"] = {"state": "near_limit", "at": pc["at"]}
+            else:
+                risk_b = S - stop_k
+                print(f"  → ✅ 入场 {entry:.2f}（企稳根收盘）   止损 {stop_c:.2f}"
+                      f"（回踩低 {low:.2f} − {PULLBACK_STOP_ATR}×ATR）")
+                if risk_b > 0:
+                    print(f"     风险 {risk:.2f}/股 = {risk / entry * 100:.2f}%"
+                          f"｜二·B：入场 {S:.2f} → {entry:.2f}（{entry - S:+.2f}）"
+                          f"，风险 {risk_b:.2f} → {risk:.2f}/股"
+                          f"（{(1 - risk / risk_b) * 100:.0f}%）")
+                else:
+                    print(f"     风险 {risk:.2f}/股 = {risk / entry * 100:.2f}%")
+                if pb_ctx["tgt"] and risk > 0 and risk_b > 0:
+                    print(f"     第一目标 {pb_ctx['tgt']:.2f}"
+                          f"   盈亏比 {(pb_ctx['tgt'] - entry) / risk:.2f}:1"
+                          f"（二·B 同目标 {(pb_ctx['tgt'] - S) / risk_b:.2f}:1）")
+                if qty:
+                    n = lots_for(qty, account, entry)
+                    n = min(n, FIRST_LOT * (2 if code.startswith(("300", "301", "688", "689")) else 1))
+                    print(f"     先手 {n} 股 = {n * entry:,.0f} 元"
+                          f"（账户 {account:,} 的 {n * entry / account * 100:.1f}%）"
+                          f"   最大亏 {n * risk:,.0f} 元"
+                          f"（账户 {n * risk / account * 100:.2f}%）")
+                print(f"     ⚠ T+1：止损是**明天**用的 —— 明日开盘破 {stop_c:.2f} "
+                      f"直接走；未破持有，收盘失守 {stop_c:.2f} 仍走")
+                out["ash_pullback"] = {"state": "ok", "at": pc["at"], "S": S,
+                                       "entry": entry, "stop": stop_c,
+                                       "low": low, "risk": round(risk, 2),
+                                       "target1": pb_ctx["tgt"],
+                                       "cheaper_vs_B": round(S - entry, 2)}
 
     # ---------- 3) 次级观察位 ----------
     print()
@@ -320,6 +601,29 @@ US_OPEN_BJ = 21 * 60 + 30  # 北京 21:30 = 美东 09:30
 US_CLOSE_BJ = 4 * 60       # 北京 04:00 = 美东 16:00
 US_BURST_OFFSET = 30       # 开盘后 30 分钟内不试（区间未走完，分位会骗人）
 US_PRE_AMP_ATR = 1.0       # 蓄势门槛按 ATR 归一化：≤ max(2.5%, 1.0×ATR/H)
+
+# ── 关键位突破通道（通道四）──
+# 解决的问题：量能突变通道要求「≥当日此前最大量的 2.5 倍」，遇到开盘就爆量的票
+# 基准被顶到天上、永远不再触发；而预案单依赖收盘判定的门控，对反转态滞后一天。
+# 本通道改为「盘前定突破位 K，盘中站上即触发」，与量能基准无关。
+BREAK_BUF_ATR = 0.10       # 触发：5 分钟收盘 > K + 0.10×ATR
+BREAK_DMAX_ASH = 0.60      # A股追高上限：K + 0.60×ATR（T+1，当天纠不了错）
+BREAK_DMAX_US = 1.20       # 美股追高上限：K + 1.20×ATR（T+0，破位即走）
+BREAK_GAP_ATR = 0.60       # 跳空已越过 K 时，上限改用「开盘 + 0.60×ATR」
+BREAK_STOP_ATR = 0.30      # 止损：K − 0.30×ATR（结构锚，两轨共用）
+BREAK_MIN_OFF = 10         # 美股：开盘后 10 分钟内不触发（开盘噪音）
+ASH_BREAK_MIN_OFF = 15     # A股：开盘后 15 分钟内不触发（竞价+首波噪音更大）
+BREAK_VOL_REL = 1.5        # 该根量 ≥ 当日此前均量 × 1.5（相对当日）
+ASH_LIMIT_BUFFER = 0.015   # A股：触发价距涨停 <1.5% 不买（买不到 / 买到即开板）
+
+# ── 通道 C：分钟级回踩确认（需 A/B 已触发的前置状态）──
+PULLBACK_BAND_ATR = 0.30   # 回踩带：启动点 S ± 0.30×ATR（跌破下沿 = 突破失败）
+PULLBACK_VOL_MULT = 2.0    # 回踩各根量 < max(启动根量, 当日此前均量) × 2.0
+# 基数不能只用「启动根量」：通道 B 的启动根可能本身就是低量根（ILMN 9/15 为
+# 19,819 < 当日均量 23,396），拿它当分母，任何正常回踩都会「超标」。取两者
+# 较大者，阈值 2.0 与通道 A 的 2.5 倍爆量门槛同量级。
+PULLBACK_STOP_ATR = 0.10   # 止损：回踩低点 − 0.10×ATR
+PULLBACK_FRESH = 2         # 企稳根须在最近 2 根内（过期不追）
 # 为什么不能沿用 A 股的固定 2.5%：2.5% 是「绝对百分比」，而美股 ATR/H 普遍 3–5%
 # （ILMN 4.13%、MDB 5.7%），同一把尺子在高波动市场会系统性偏严 —— 实测 ILMN 9/15
 # 启动前振幅 3.41%（=0.83×ATR）被 2.5% 拦掉，但它相对自身波动率并不算大。
@@ -382,12 +686,19 @@ def us_lots(account, entry, stop, risk_pct=US_RISK_PCT, max_pct=US_MAX_POS):
     return max(min(n, cap), 1)
 
 
-def probe_us(sym, account=5000, min_scale=5, until=None):
+def probe_us(sym, account=5000, min_scale=5, until=None, date=None):
     """美股版：收盘后预案 + 盘前通道 + 盘中量能突变（T+0 口径）。"""
     sym = sym.upper().strip()
     phase, ref_date = us_phase()
     bars, spot, meta = bars_from_us(sym)
     meta = meta or {}
+    if date:
+        # 回放：只用 < date 的日线定结构，杜绝用到未来数据
+        bars = [b for b in bars if b["d"] < date]
+        spot, meta = None, {}
+        if not bars:
+            print(f"[{sym}] 无 {date} 之前的日线")
+            return None
     last = bars[-1]
     atr_v = atr14(bars)
     prev_close = meta.get("prev_close") or last["c"]
@@ -526,7 +837,7 @@ def probe_us(sym, account=5000, min_scale=5, until=None):
         print("  → 盘中通道不可用（东财限流时依赖本地代理；可用 WB_US_PROXY 指定端口）")
         return out
     print(f"  数据源 {src}")
-    td = us_trade_date(raw[-1]["d"])
+    td = date or us_trade_date(raw[-1]["d"])
     mins = [b for b in raw if us_trade_date(b["d"]) == td]
     if until:
         mins = [b for b in mins if us_offset_min(b["d"], td) <= us_offset_min(until, td)]
@@ -545,42 +856,204 @@ def probe_us(sym, account=5000, min_scale=5, until=None):
           f" {'≥' if c1 else '<'} {US_BURST_OFFSET}")
     if not hits:
         print("  [2 量能突变] ✗ 本交易日尚无「≥此前最大 2.5 倍」的分钟量 → 无启动信号")
-        print("  → ❌ 不试仓")
-        out["intraday"] = {"burst_at": None, "allow": False}
-        return out
-    i, ratio, pm = hits[-1]
-    fresh = i >= len(mins) - 2
-    pre = mins[:i]
-    pre_h = max(b["h"] for b in pre) if pre else op
-    pre_l = min(b["l"] for b in pre) if pre else op
-    amp = (pre_h - pre_l) / pre_l if pre_l else 0
-    amp_max = max(PRE_AMP_MAX, US_PRE_AMP_ATR * atr_v / op) if op else PRE_AMP_MAX
-    trigger = mins[i - 1]["c"]
-    cap_px = op + CHASE_ATR * atr_v
-    c2, c3, c4 = True, amp <= amp_max, trigger <= cap_px
-    print(f"  [2 量能突变] ✓ {mins[i]['d'][11:16]} 量 {mins[i]['v']:,.0f} 股"
-          f" = 此前最大 {pm:,.0f} 股的 {ratio:.1f} 倍"
-          f"{'' if fresh else f'  ⚠ 已过去 {len(mins) - 1 - i} 根，信号过期'}")
-    print(f"  [3 蓄势位置] {'✓' if c3 else '✗'} 启动前振幅 {amp * 100:.2f}% "
-          f"{'≤' if c3 else '>'} {amp_max * 100:.2f}%"
-          f"（=max(2.5%, {US_PRE_AMP_ATR:.1f}×ATR%)；A 股为固定 2.5%）")
-    print(f"  [4 未追高 ] {'✓' if c4 else '✗'} 可挂价 {trigger:.2f} "
-          f"{'≤' if c4 else '>'} 开盘+1.0ATR = {cap_px:.2f}")
-    ok = c1 and c2 and c3 and c4 and fresh
-    print(f"  → {'✅ 允许先手，挂 ' + format(trigger, '.2f') if ok else '❌ 不满足，只观察'}")
-    if ok:
-        stop = min(pre_l, mins[i]["l"]) - 0.10 * atr_v
-        n = us_lots(account, trigger, stop)
-        if n:
-            print(f"     先手 {n} 股 = ${n * trigger:,.0f}"
-                  f"（账户 ${account:,} 的 {n * trigger / account * 100:.1f}%）")
-            print(f"     止损 {stop:.2f}（启动前低 −0.10×ATR，距买入 "
-                  f"{(trigger - stop) / trigger * 100:.2f}%），最大亏 "
-                  f"${n * (trigger - stop):,.0f}"
-                  f"；T+0 当日破位即可出，不必留到次日")
-    out["intraday"] = {"trade_date": td, "burst_at": mins[i]["d"][11:16],
-                       "ratio": round(ratio, 1), "trigger": trigger,
-                       "fresh": bool(fresh), "allow": bool(ok)}
+        print("  → ❌ 量能突变通道不试仓")
+        out["intraday"] = {"trade_date": td, "burst_at": None, "allow": False}
+    else:
+        i, ratio, pm = hits[-1]
+        fresh = i >= len(mins) - 2
+        pre = mins[:i]
+        pre_h = max(b["h"] for b in pre) if pre else op
+        pre_l = min(b["l"] for b in pre) if pre else op
+        amp = (pre_h - pre_l) / pre_l if pre_l else 0
+        amp_max = max(PRE_AMP_MAX, US_PRE_AMP_ATR * atr_v / op) if op else PRE_AMP_MAX
+        trigger = mins[i - 1]["c"]
+        cap_px = op + CHASE_ATR * atr_v
+        c2, c3, c4 = True, amp <= amp_max, trigger <= cap_px
+        print(f"  [2 量能突变] ✓ {mins[i]['d'][11:16]} 量 {mins[i]['v']:,.0f} 股"
+              f" = 此前最大 {pm:,.0f} 股的 {ratio:.1f} 倍"
+              f"{'' if fresh else f'  ⚠ 已过去 {len(mins) - 1 - i} 根，信号过期'}")
+        print(f"  [3 蓄势位置] {'✓' if c3 else '✗'} 启动前振幅 {amp * 100:.2f}% "
+              f"{'≤' if c3 else '>'} {amp_max * 100:.2f}%"
+              f"（=max(2.5%, {US_PRE_AMP_ATR:.1f}×ATR%)；A 股为固定 2.5%）")
+        print(f"  [4 未追高 ] {'✓' if c4 else '✗'} 可挂价 {trigger:.2f} "
+              f"{'≤' if c4 else '>'} 开盘+1.0ATR = {cap_px:.2f}")
+        ok = c1 and c2 and c3 and c4 and fresh
+        print(f"  → {'✅ 允许先手，挂 ' + format(trigger, '.2f') if ok else '❌ 不满足，只观察'}")
+        if ok:
+            stop = min(pre_l, mins[i]["l"]) - 0.10 * atr_v
+            n = us_lots(account, trigger, stop)
+            if n:
+                print(f"     先手 {n} 股 = ${n * trigger:,.0f}"
+                      f"（账户 ${account:,} 的 {n * trigger / account * 100:.1f}%）")
+                print(f"     止损 {stop:.2f}（启动前低 −0.10×ATR，距买入 "
+                      f"{(trigger - stop) / trigger * 100:.2f}%），最大亏 "
+                      f"${n * (trigger - stop):,.0f}"
+                      f"；T+0 当日破位即可出，不必留到次日")
+        out["intraday"] = {"trade_date": td, "burst_at": mins[i]["d"][11:16],
+                           "ratio": round(ratio, 1), "trigger": trigger,
+                           "fresh": bool(fresh), "allow": bool(ok)}
+        if ok:
+            # 通道 C 的前置之一：量能突变已放行（启动点 = 爆量那根收盘）
+            pb_ctx_us = {"j": i, "S": round(mins[i]["c"], 2), "K": None,
+                         "tgt": None, "at": mins[i]["d"][11:16],
+                         "src": "量能突变"}
+
+    # ---------- 4) 关键位突破（盘前定 K，盘中站上即触发） ----------
+    print()
+    print(f"── 四、关键位突破（{min_scale} 分钟 · 盘前定 K，站上即触发） ──")
+    pb_ctx_us = None
+    kb = key_break_level(bars, atr_v, last["c"])
+    if not kb:
+        print("  上方 0.2–1.5×ATR 内无可突破位（已在加速段、或离阻力太远）→ 本通道不出信号")
+        out["level_break"] = {"anchor": None, "allow": False}
+    else:
+        K = kb["level"]
+        thr = K + BREAK_BUF_ATR * atr_v
+        cap_px = key_break_cap(op, K, atr_v, "US")
+        stop_k = round(K - BREAK_STOP_ATR * atr_v, 2)
+        _cm = (f"开盘锚 开盘+{BREAK_GAP_ATR}×ATR（盘前已越 K）" if op > K
+               else f"K 锚 K+{BREAK_DMAX_US}×ATR（T+0 可比 A 股多追一档）")
+        print(f"  锚点 {kb['kind']}  K = {K:.2f}"
+              f"{'（' + str(kb['date']) + '）' if kb.get('date') else ''}"
+              f"   距昨收 {kb['dist_atr']:.2f}×ATR")
+        print(f"  触发 {thr:.2f} = K+{BREAK_BUF_ATR}×ATR"
+              f"   上限 {cap_px:.2f}（{_cm}）   止损 {stop_k:.2f}")
+        hit = rej = None
+        cum_v = cum_n = 0
+        for j, b in enumerate(mins):
+            cum_v += b["v"]
+            cum_n += 1
+            if j * min_scale < BREAK_MIN_OFF:
+                continue
+            if b["c"] > thr:
+                if b["c"] > cap_px:
+                    rej = (b, j)
+                else:
+                    hit = (b, j, b["v"] / (cum_v / cum_n) if cum_v else 0)
+                break
+        if rej:
+            print(f"  [触发] ✗ {rej[0]['d'][11:16]} 已越过上限 {cap_px:.2f}"
+                  f"（现 {rej[0]['c']:.2f}）→ 属追高，放弃")
+            out["level_break"] = {"anchor": K, "allow": False, "reason": "越过上限"}
+        elif not hit:
+            print(f"  [触发] ✗ 至今未站上 {thr:.2f} → 未突破")
+            out["level_break"] = {"anchor": K, "allow": False, "reason": "未触发"}
+        else:
+            b, j, rel = hit
+            entry = round(b["c"], 2)
+            risk = entry - stop_k
+            fresh_k = j >= len(mins) - 2
+            # 通道 C 的前置：只要「曾有效突破」（未越上限）即可 ——
+            # C 专为「错过了第一根」而设，故不要求通道 B 当前新鲜。
+            pb_ctx_us = {"j": j, "S": entry, "K": K, "tgt": None,
+                         "at": b["d"][11:16], "src": "关键位突破"}
+            print(f"  [触发] "
+                  f"{'✓' if fresh_k else '⚠ 已过去 ' + str(len(mins) - 1 - j) + ' 根'}"
+                  f"  {b['d'][11:16]} 收 {entry:.2f}"
+                  f"   量 = 当日均量 {rel:.1f} 倍"
+                  f"{'（达标）' if rel >= BREAK_VOL_REL else '（偏弱，确认打折）'}")
+            if not fresh_k:
+                print("  → ❌ 信号已过期，不追")
+                out["level_break"] = {"anchor": K, "allow": False, "reason": "过期"}
+            else:
+                tgt = None
+                try:
+                    Hs2, _ = pivots(bars, 3)
+                    ups2 = sorted({h for _, h in Hs2 if h > K + 0.20 * atr_v})
+                    tgt = ups2[0] if ups2 else None
+                except Exception:
+                    pass
+                if pb_ctx_us:
+                    pb_ctx_us["tgt"] = tgt
+                n = us_lots(account, entry, stop_k)
+                print(f"  → ✅ 试仓 {entry:.2f}   止损 {stop_k:.2f}"
+                      f"（风险 {risk:.2f}/股 = {risk / entry * 100:.2f}%）")
+                if tgt:
+                    print(f"     第一目标 {tgt:.2f}（K 上方最近阻力）"
+                          f"   收益 {tgt - entry:.2f}   "
+                          f"盈亏比 {(tgt - entry) / risk:.2f}:1" if risk > 0 else "")
+                if n:
+                    print(f"     股数 {n} = ${n * entry:,.0f}"
+                          f"（账户 ${account:,} 的 {n * entry / account * 100:.1f}%）"
+                          f"   最大亏 ${n * risk:,.0f}"
+                          f"（账户 {n * risk / account * 100:.2f}%，预算"
+                          f" {US_RISK_PCT * 100:.1f}%）")
+                out["level_break"] = {"anchor": K, "kind": kb["kind"],
+                                      "at": b["d"][11:16], "entry": entry,
+                                      "stop": stop_k, "risk": round(risk, 2),
+                                      "target1": tgt, "qty": n, "allow": True}
+
+    # ---------- 四·C) 通道 C：分钟级回踩确认（需通道 A 或 B 已放行） ----------
+    # 强势股不给日线级回调，只给分钟级 → 换时钟，而不是放宽追高。
+    if mins and pb_ctx_us:
+        band = PULLBACK_BAND_ATR * atr_v
+        S = pb_ctx_us["S"]
+        K = pb_ctx_us["K"]
+        tgt_b = pb_ctx_us["tgt"]
+        stop_b = round(K - BREAK_STOP_ATR * atr_v, 2) if K else None
+        print()
+        print(f"── 四·C、回踩确认（{min_scale} 分钟 · 强势票唯一给得起的入场点） ──")
+        print(f"  启动点 S = {S:.2f}（{pb_ctx_us['src']} · {pb_ctx_us['at']}）"
+              f"   回踩带 {S - band:.2f} ~ {S + band:.2f}")
+        pc = pullback_confirm(mins, pb_ctx_us["j"], S, atr_v)
+        st = pc["state"]
+        if st == "pending":
+            print("  → … 尚未出现「相对前一根下跌且落回带内」的根 —— "
+                  "启动后一路不回头。这条就不给信号，**那就不做**（机会成本，不是失误）")
+        elif st == "failed":
+            print(f"  ✗ {pc['at']} 收 {pc['px']:.2f} 跌破带下沿 {pc['edge']:.2f}"
+                  f" → 突破失败，通道 C 今日作废")
+            out["pullback"] = {"state": "failed", "at": pc["at"]}
+        elif st == "heavy":
+            print(f"  ✗ {pc['at']} 回踩段爆量（{pc['rel']}× 基准量）"
+                  f" → 是出货不是回踩，作废")
+            out["pullback"] = {"state": "heavy", "at": pc["at"]}
+        elif st == "waiting":
+            print(f"  → … 已进回踩带，但还没出现「收阳 + 低点抬高」的企稳根"
+                  f"（截至 {pc['at']}）→ 继续等")
+        else:
+            entry, low = pc["entry"], pc["low"]
+            stop_c = round(low - PULLBACK_STOP_ATR * atr_v, 2)
+            risk = entry - stop_c
+            fresh_c = pc["j"] >= len(mins) - PULLBACK_FRESH
+            print(f"  [1 已启动 ] ✓ {pb_ctx_us['src']} 于 {pb_ctx_us['at']} 放行")
+            print(f"  [2 回踩不破] ✓ 回踩低 {low:.2f}，全程未破 {S - band:.2f}")
+            print(f"  [3 未爆量 ] ✓ 回踩段各根量 < max(启动根量, 当日此前均量)"
+                  f" × {PULLBACK_VOL_MULT:.1f}")
+            print(f"  [4 企稳   ] {'✓' if fresh_c else '⚠'} {pc['at']} 收阳 "
+                  f"{entry:.2f} 且低点抬高")
+            if not fresh_c:
+                print(f"  → ❌ 企稳根已过去 {len(mins) - 1 - pc['j']} 根，"
+                      f"信号过期不追（新鲜度 ≤{PULLBACK_FRESH} 根）")
+                out["pullback"] = {"state": "expired", "at": pc["at"]}
+            else:
+                print(f"  → ✅ 入场 {entry:.2f}（企稳根收盘）   止损 {stop_c:.2f}"
+                      f"（回踩低 {low:.2f} − {PULLBACK_STOP_ATR}×ATR）")
+                risk_b = S - stop_b if (stop_b and S > stop_b) else None
+                if risk_b:
+                    print(f"     风险 {risk:.2f}/股 = {risk / entry * 100:.2f}%"
+                          f"｜{pb_ctx_us['src']}：入场 {S:.2f} → {entry:.2f}"
+                          f"（{entry - S:+.2f}），风险 {risk_b:.2f} → {risk:.2f}/股"
+                          f"（{(1 - risk / risk_b) * 100:.0f}%）")
+                else:
+                    print(f"     风险 {risk:.2f}/股 = {risk / entry * 100:.2f}%")
+                if tgt_b and risk > 0 and risk_b:
+                    print(f"     第一目标 {tgt_b:.2f}"
+                          f"   盈亏比 {(tgt_b - entry) / risk:.2f}:1"
+                          f"（{pb_ctx_us['src']} 同目标 "
+                          f"{(tgt_b - S) / risk_b:.2f}:1）")
+                n = us_lots(account, entry, stop_c)
+                if n:
+                    print(f"     股数 {n} = ${n * entry:,.0f}"
+                          f"（账户 ${account:,} 的 {n * entry / account * 100:.1f}%）"
+                          f"   最大亏 ${n * risk:,.0f}"
+                          f"（账户 {n * risk / account * 100:.2f}%，预算"
+                          f" {US_RISK_PCT * 100:.1f}%）")
+                print("     T+0：破位即走，不必留到次日")
+                out["pullback"] = {"state": "ok", "at": pc["at"], "S": S,
+                                   "entry": entry, "stop": stop_c, "low": low,
+                                   "risk": round(risk, 2), "target1": tgt_b,
+                                   "qty": n, "cheaper_vs_src": round(S - entry, 2)}
     return out
 
 
@@ -595,11 +1068,13 @@ if __name__ == "__main__":
     ap.add_argument("--until", default=None, help="截断到 HH:MM（模拟当时时点）")
     ap.add_argument("--us-account", type=int, default=5000,
                     help="美股账户美元（默认 5000，按风险预算定股数）")
+    ap.add_argument("--date", default=None,
+                    help="回放指定交易日 YYYY-MM-DD（美股；只用该日之前的日线定结构）")
     a = ap.parse_args()
     for c in a.codes:
         try:
             probe(c, a.qty, a.account, a.asof, a.min_scale, a.replay, a.until,
-                  a.us_account)
+                  a.us_account, a.date)
         except Exception as e:
             print(f"[{c}] ERR {type(e).__name__}: {e}")
         print()

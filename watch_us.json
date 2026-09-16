@@ -1,0 +1,6 @@
+{
+  "symbols": ["ILMN"],
+  "account": 5000,
+  "interval_sec": 60,
+  "note": "美股自选池。symbols 里加代码即可（大写，如 MDB、RVMD）。account = 美股账户美元。"
+}

@@ -510,6 +510,100 @@ def test_no_setup_branch_has_empty_buy_zone():
         assert k in z, (k, z)
 
 
+def test_key_break_cap_never_below_anchor():
+    """追高上限必须以 K 为锚，绝不能低于突破位本身。
+
+    旧口径 min(K+0.60ATR, 开盘+0.80ATR) 在「跳空不足 + 突破位较远」时会把
+    上限压到 K 以下 —— 上限低于突破位，触发价必然越线，通道永远不成交。
+    ILMN 2026-09-16：K=231.81、开盘 223.70、ATR 9.181
+        旧 = min(237.32, 231.05) = 231.05 < K   ← bug
+        新 = 231.81 + 1.20×9.181 = 242.83
+    """
+    from probe_intraday import key_break_cap
+    K, op, atr = 231.81, 223.70, 9.181
+    us = key_break_cap(op, K, atr, "US")
+    ash = key_break_cap(op, K, atr, "ASH")
+    assert us > K, (us, K)                      # 必须高于突破位本身
+    assert abs(us - (K + 1.20 * atr)) < 0.02, us
+    assert abs(ash - (K + 0.60 * atr)) < 0.02, ash
+    assert ash < us, (ash, us)                  # A 股口径必须比美股严
+    assert 234.94 <= us, (234.94, us)           # 该触发价在美股上限内（旧口径会误判追高）
+    # 跳空已越过 K：改用开盘锚，与 K 锚不等价
+    gap = key_break_cap(240.0, K, atr, "US")
+    assert abs(gap - (240.0 + 0.60 * atr)) < 0.02, gap
+    assert gap != us, (gap, us)
+
+
+def test_ash_limit_price_board_pct():
+    """A 股涨停价：主板 ±10%，创业板 / 科创板 ±20%。"""
+    from probe_intraday import ash_limit_price
+    assert ash_limit_price("002961", 19.06) == 20.97
+    assert ash_limit_price("600000", 10.00) == 11.00
+    assert ash_limit_price("300723", 40.00) == 48.00
+    assert ash_limit_price("301000", 40.00) == 48.00
+    assert ash_limit_price("688002", 100.00) == 120.00
+
+
+def test_pullback_confirm_states():
+    """通道 C（分钟级回踩确认）：五个状态 + 两个已修 bug 的回归。"""
+    from probe_intraday import pullback_confirm
+    atr, S = 10.0, 100.0        # 回踩带 = 97.0 ~ 103.0
+
+    def bar(t, o, h, l, c, v):
+        return {"d": f"2026-09-15 {t}", "o": o, "h": h, "l": l, "c": c, "v": v}
+
+    # ① ok：启动 → 回踩缩量阴线 → 收阳且低点抬高
+    mins = [bar("09:40", 99.0, 101.0, 98.5, 100.0, 1000),
+            bar("09:45", 100.2, 100.5, 99.2, 99.6, 900),
+            bar("09:50", 99.5, 100.3, 99.4, 100.1, 800)]
+    r = pullback_confirm(mins, 0, S, atr)
+    assert r["state"] == "ok", r
+    assert r["entry"] == 100.10 and r["low"] == 99.2, r
+    # 止损 = 回踩低 − 0.10×ATR（用 low 而非 entry 做锚，风险 1.90/2.00≈1.43 同量级）
+    assert abs((r["low"] - 0.10 * atr) - 98.20) < 1e-9, r
+
+    # ② bug 回归：**上涨**中的根不算回踩（收在带内也不行）
+    #    实测 ILMN 9/15 21:45 就是这种根（放量继续上攻），旧逻辑误判 heavy
+    mins2 = [bar("09:40", 99.0, 101.0, 98.5, 100.0, 1000),
+             bar("09:45", 100.2, 102.5, 100.0, 102.0, 5000),
+             bar("09:50", 102.1, 103.0, 101.8, 102.8, 4000)]
+    assert pullback_confirm(mins2, 0, S, atr)["state"] == "pending"
+
+    # ③ bug 回归：低量启动根不能当缩量基数
+    #    当日此前均量 2333 > 启动根 1000 → base = 2333，门槛 4667
+    #    回踩根 3200 若拿启动根当分母（1000）会被误判 heavy
+    mins3 = [bar("09:30", 98.0, 98.5, 97.5, 98.2, 3000),
+             bar("09:35", 98.2, 99.2, 98.0, 99.0, 3000),
+             bar("09:40", 99.0, 101.0, 98.5, 100.0, 1000),
+             bar("09:45", 100.4, 100.6, 99.5, 99.7, 3200),
+             bar("09:50", 99.7, 100.4, 99.6, 100.2, 2600)]
+    assert pullback_confirm(mins3, 2, S, atr)["state"] == "ok"
+
+    # ④ 真爆量下跌 → heavy（出货，不是回踩）
+    mins4 = [bar("09:40", 99.0, 101.0, 98.5, 100.0, 1000),
+             bar("09:45", 100.4, 100.6, 99.5, 99.7, 9999)]
+    assert pullback_confirm(mins4, 0, S, atr)["state"] == "heavy"
+
+    # ⑤ 跌破带下沿 → failed（突破失败）
+    mins5 = [bar("09:40", 99.0, 101.0, 98.5, 100.0, 1000),
+             bar("09:45", 97.5, 97.6, 96.5, 96.8, 900)]
+    assert pullback_confirm(mins5, 0, S, atr)["state"] == "failed"
+
+    # ⑥ 启动即最后一根 → pending（还没有回踩 K 线）
+    assert pullback_confirm(mins[:1], 0, S, atr)["state"] == "pending"
+
+
+def test_pullback_requires_launch():
+    """通道 C 没有「已启动」前置时必须不出信号（防止在没突破时凭空给回踩单）。"""
+    import probe_intraday as P
+    src = open(P.__file__, encoding="utf-8").read()
+    # 两处调用点都必须由 pb_ctx（A股）/ pb_ctx_us（美股）守卫
+    assert src.count("if live and mins and pb_ctx:") == 1, "A 股调用点缺前置守卫"
+    assert src.count("if mins and pb_ctx_us:") == 1, "美股调用点缺前置守卫"
+    # pb_ctx 必须在分支外初始化，否则 kb 为空时 UnboundLocalError（实测 601233 崩过）
+    assert "pb_ctx = None                     # 通道 C 的前置状态" in src
+
+
 if __name__ == "__main__":
     test_yizi_not_gap_yang()
     test_true_yizi_uses_prev_close()
@@ -536,4 +630,8 @@ if __name__ == "__main__":
     test_reversal_yang_requires_volume()
     test_reversal_yang_rejects_pullback_below_mid()
     test_no_setup_branch_has_empty_buy_zone()
+    test_key_break_cap_never_below_anchor()
+    test_ash_limit_price_board_pct()
+    test_pullback_confirm_states()
+    test_pullback_requires_launch()
     print("ok")
