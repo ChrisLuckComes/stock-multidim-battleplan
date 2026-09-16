@@ -54,7 +54,15 @@ disable-model-invocation: true
 
 **买区口径（突破五档通用）**：买区自**突破位单边向上**，带宽 1.0×ATR，下沿不低于突破位——本模式的定义就是「收盘站上突破位」，在尚未突破的价位挂买单自相矛盾；这同时保证硬止损恒落在买区下沿之下。**跳空突破例外**：突破根跳空越过突破位时，买区基准上移到**缺口上沿（= 突破根低点）**，整段买区不得落进缺口（见「大阳后缩量回踩」第 101 行的同一条原则）。
 
-出买区（现价高出买位 1.0–2.0×ATR）不给 `recommend`，只给回踩挂单价，**禁止市价追**；由此到 >2×ATR 才是 `wait`。
+**可执行闸门（突破类，三档）**——「买区位」与「能不能执行」是两件事，不得用前者卡死后者：
+
+| 现价距突破位 | `recommend` | 含义 |
+|---|---|---|
+| ≤1.0×ATR（买区内） | `True` | 可执行 |
+| 1.0–2.0×ATR（已出买区上沿） | `True` | **仍可执行，但只能挂回踩单（上沿一带），禁止市价追**；`buy_zone.chase_only=True`，报表标「≥上沿·只挂单」 |
+| >2.0×ATR | `False` | 不追，`mode=wait`、verdict「突破已延伸·等回踩」 |
+
+即：出买区不等于不能买，只等于不能市价追。唯一的不追线是「不追高」那条——**离买位 >2×ATR 不买**。
 
 ### 1. 平台突破（优先 T1）
 
@@ -266,7 +274,7 @@ python rule123.py 300207 --data data/300207.json --eod --out out.json
 - `stop_plan`：`struct` + `hard` + 锚名 + `trigger`（两档止损，禁止合成一个价）
 - `targets`：`target1` / `target2` / `rr_target1`
 - 平台突破 `anchor=platform_lip`（活平台沿，不是死 R1）
-- 突破类离买位（level）>2×ATR → `recommend=False`
+- 突破类可执行三档：买区内（≤1.0×ATR）`recommend=True`；出上沿但 ≤2×ATR `recommend=True` 且 `chase_only=True`（只挂回踩单、禁市价追）；>2×ATR `recommend=False`
 
 ATR：Wilder ATR14。美股 Yahoo 失败时脚本内 stooq 兜底。
 

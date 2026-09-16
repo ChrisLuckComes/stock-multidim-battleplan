@@ -650,6 +650,7 @@ def _empty_zone():
         "dist_atr": None,
         "hits": 0,
         "extended": False,
+        "chase_only": False,
         "invalidation": None,
         "vwap5": None,
         "ma5": None,
@@ -1182,28 +1183,32 @@ def plan_entry(bars, ev):
             and z.get("level") is not None
             and z.get("in_zone") is False
         ):
-            # 现价不在买区内（但仍 ≤2×ATR，未触发「不追高」闸门）：只挂单、不市价追。
-            # 买区已改为自突破位单边向上，故必须区分「在上沿之上」与「在下沿之下」。
+            # 现价出买区、但仍在「不追高」闸门（2×ATR）之内。三档语义分开：
+            #   上沿之上（出买区 ≤2×ATR）→ 仍可执行，但只能挂回踩单，禁止市价追（recommend 保持 True）
+            #   下沿之下                 → 突破未成立，不接（recommend=False）
+            # 买区位（≤1.0×ATR）与可执行闸门（≤2.0×ATR）是两件事，不得用前者卡死后者。
             lv = z["level"]
             lo = z.get("primary_lo")
             hi = z.get("primary_hi")
             d = (last_c - lv) / atr_v
             if hi is not None and last_c > hi:
                 note = (
-                    f"现价 {last_c:.2f} 高出买位 {lv} 已 {d:.1f}×ATR，已出买区上沿 {hi}；"
-                    f"不要市价追，在 {hi} 一带挂单"
+                    f"现价 {last_c:.2f} 高出买位 {lv} 已 {d:.1f}×ATR，已出买区上沿 {hi}（≤2×ATR 仍可执行）；"
+                    f"只能挂回踩单在 {hi} 一带，禁止市价追"
                 )
-                verdict = f"突破已延伸·只做回踩 {hi}"
+                verdict = f"突破已延伸·只挂回踩单 {hi}"
+                z["chase_only"] = True
             elif lo is not None and last_c < lo:
                 note = (
                     f"现价 {last_c:.2f} 低于买位 {lv} {abs(d):.1f}×ATR，已跌破买区下沿 {lo}；"
                     f"突破未成立，不接"
                 )
                 verdict = f"跌破买区下沿 {lo}·不接"
+                recommend = False
             else:
                 note = f"现价 {last_c:.2f} 未落入买区 {lo}-{hi}（距买位 {d:+.1f}×ATR）"
                 verdict = "未进买区"
-            recommend = False
+                recommend = False
         z["path"] = path
         z["mode"] = mode
         z["priority"] = priority

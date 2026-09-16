@@ -113,6 +113,7 @@ def analyze(code, name, prefix):
         recommend=plan.get("recommend"),
         anchor=z.get("anchor"),
         vwap5=z.get("vwap5"), in_zone=z.get("in_zone"),
+        chase_only=bool(z.get("chase_only")),
         T1=T1, T2=T2, rr_target1=tg.get("rr_target1"),
         rvol=round(meta["rvol20"], 2) if meta.get("rvol20") else None,
         dd_from_high=round((spot / hi52 - 1) * 100, 1),

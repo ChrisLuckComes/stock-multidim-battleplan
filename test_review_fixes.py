@@ -212,6 +212,62 @@ def test_breakout_zone_starts_at_level():
     assert zone_at_level(100, atr_v, 99.9, "平台突破(优先T1)", {}, bars)["in_zone"] is False
 
 
+def _breakout_at(k_target, plat=100.0):
+    """构造：40 根基座（平台沿=plat）+ 一根突破根，使现价距突破位 ≈ k_target×ATR。"""
+    base = [_bar(f"2026-06-{i + 1:02d}", 100.0, 100.4, 99.6, 100.0, 1e6) for i in range(40)]
+    c, bars, a = 100.9, None, None
+    for _ in range(80):
+        bars = base + [_bar("2026-08-25", 100.2, c + 0.2, 100.05, c, 4e6)]
+        a = atr14(bars)
+        d = (c - plat) / a
+        if abs(d - k_target) < 0.005:
+            break
+        c += (k_target - d) * a * 0.7
+    ev = {
+        "rvol20": 2.0,
+        "platform": {"i": 39, "price": plat},
+        "P0": {"i": 10, "price": 95.0},
+        "P1": {"i": 30, "price": 96.0},
+        "R1": {"i": 39, "price": plat},
+        "c2": True,
+        "w_bottom": None,
+        "bull_flag": None,
+        "down_tl": None,
+    }
+    return bars, c, a, plan_entry(bars, ev)
+
+
+def test_breakout_extended_band_still_actionable():
+    """出买区上沿、但距突破位 ≤2×ATR：仍可执行（只挂回踩单）；>2×ATR 才 wait。
+
+    守护「拿买区半宽去卡可执行闸门」——SKILL 唯一的不追线是 2×ATR，
+    买区位（≤1.0×ATR）与可执行闸门（≤2.0×ATR）是两件事。
+    """
+    # 1.5×ATR：已出买区上沿、仍在闸门内
+    bars, c, a, plan = _breakout_at(1.5)
+    z = plan["buy_zone"]
+    assert z["in_zone"] is False, (c, z)
+    assert c > z["primary_hi"]
+    assert 1.0 < (c - z["level"]) / a <= 2.0
+    assert plan["recommend"] is True, plan
+    assert z.get("chase_only") is True, z
+    assert plan["mode"] == "platform_break"
+    assert "挂" in plan["verdict"], plan["verdict"]
+    assert "禁止市价追" in plan["note"], plan["note"]
+
+    # 买区内不受影响
+    _, _, _, plan_in = _breakout_at(0.5)
+    assert plan_in["recommend"] is True
+    assert plan_in["buy_zone"]["in_zone"] is True
+    assert not plan_in["buy_zone"].get("chase_only")
+
+    # >2×ATR：不追
+    _, _, _, plan_far = _breakout_at(2.5)
+    assert plan_far["recommend"] is False, plan_far
+    assert plan_far["mode"] == "wait"
+    assert plan_far["verdict"] == "突破已延伸·等回踩"
+
+
 def test_line_zone_pad_matches_in_zone():
     demand = {
         "anchor": "hl_trendline",
@@ -295,6 +351,7 @@ if __name__ == "__main__":
     test_breakout_zone_not_below_level()
     test_too_far_gate()
     test_breakout_zone_starts_at_level()
+    test_breakout_extended_band_still_actionable()
     test_line_zone_pad_matches_in_zone()
     test_is_live_bar_session()
     test_no_platform_does_not_fallback_to_r1()

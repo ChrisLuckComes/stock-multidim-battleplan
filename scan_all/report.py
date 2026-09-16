@@ -96,6 +96,9 @@ def main():
         if warn:
             stop_cell += f'<br><span class="red" title="{warn}">⚠ 锚与买区冲突·买区已上抬</span>'
             cls += " warn"
+        if r.get("chase_only"):
+            # 现价已出买区上沿、但仍在 2×ATR 可执行闸门内：可挂回踩单，禁市价追
+            bz += '<br><span class="amb">≥上沿·只挂单</span>'
         tbl += (f'<tr class="{cls}"><td>{r["code"]}</td><td class="l">{r["name"]}</td>'
                 f'<td>{r["market"]}</td><td>{r["regime"]}</td><td>{r["tier"]}</td>'
                 f'<td>{f2(r["spot"])}</td><td>{f2(r.get("platform") or r.get("R1"))}</td><td>{bz}</td>'
@@ -119,6 +122,10 @@ def main():
                        f'<span>RVOL {z(r["rvol"])}</span><span>{r["tier"]}</span></div>')
             if r.get("stop_warning"):
                 charts += f'<p class="warnbox red">⚠ {r["stop_warning"]}</p>'
+            if r.get("chase_only"):
+                charts += (f'<p class="warnbox amb">现价已出买区上沿 '
+                           f'{f2(r.get("support_hi"))}（距买位 &lt;2×ATR，仍可执行）：'
+                           f'只能在上沿一带挂回踩单，禁止市价追。</p>')
             charts += svg_chart(r, bars, f'{r["code"]} {r["name"]}') + '</div>'
         except Exception as e:
             charts += f'<div class="card"><b>{r["code"]} {r["name"]}</b> 图抓取失败：{type(e).__name__}: {e!r}</div>'
@@ -143,6 +150,8 @@ tr.t1 td{{background:#eaf7ee}} tr.t2 td{{background:#fff8e8}}
 tr.warn td{{background:#fdecea}}
 .note{{color:#777;font-size:12px;margin-top:8px}} .muted{{color:#888}} .red{{color:#A32D2D}}
 .warnbox{{background:#fdecea;border:1px solid #f3c2bd;border-radius:6px;padding:8px 10px;font-size:12px;margin:8px 0}}
+.warnbox.amb{{background:#fff6e5;border-color:#f0d6a8}}
+.amb{{color:#C8870A}}
 svg{{width:100%;height:auto;display:block;border:1px solid #eee;border-radius:6px;margin-top:6px}}
 </style></head><body><div class="wrap">
 <h1>全市场 A 股 · 方向感知 123 技术扫描</h1>
@@ -159,7 +168,9 @@ svg{{width:100%;height:auto;display:block;border:1px solid #eee;border-radius:6p
 <p><b>判定口径：</b><br>
 • <b>tier1</b> = recommend 且优先T1，或收盘站上前高/活平台 + 未创新低 + 价在 MA20 上。<br>
 • <b>tier2</b> = recommend 的 T2，或上升延续回踩观察。<br>
-• <b>买区</b>走 rule123.plan_entry（活平台沿，不是死 R1）。<b>突破类买区自突破位单边向上 1.0×ATR</b>（不在「尚未突破」的价位挂买单）；跳空突破时基准上移到缺口上沿（不买回补缺口）。止损列优先硬止损，锚名与计算价一并给出；另有结构止损（收盘破）。禁止用 VWAP 当默认买区。</p>
+• <b>买区</b>走 rule123.plan_entry（活平台沿，不是死 R1）。<b>突破类买区自突破位单边向上 1.0×ATR</b>（不在「尚未突破」的价位挂买单）；跳空突破时基准上移到缺口上沿（不买回补缺口）。<br>
+• <b>可执行闸门（突破类，三档）</b>：距突破位 <b>≤1.0×ATR</b> 在买区内，可执行；<b>1.0–2.0×ATR</b> 已出买区上沿但<b>仍可执行</b>，只能挂回踩单、禁市价追（表中标「≥上沿·只挂单」）；<b>&gt;2.0×ATR 不追</b>（SKILL「离买位 &gt;2×ATR 不追」）。买区位与可执行闸门是两件事，不得用前者卡死后者。<br>
+• 止损列优先硬止损，锚名与计算价一并给出；另有结构止损（收盘破）。禁止用 VWAP 当默认买区。</p>
 </div>
 
 <h2>一、候选总表（{len(cands)} 只 · tier1 优先，按距区间高降序）</h2>
@@ -167,7 +178,7 @@ svg{{width:100%;height:auto;display:block;border:1px solid #eee;border-radius:6p
 <tr><th>代码</th><th>名称</th><th>市场</th><th>regime</th><th>tier</th><th>现价</th><th>R1</th><th>买区</th><th>止损<br><span style="font-weight:400;color:#888">硬止损 / 锚</span></th><th>T1</th><th>T2</th><th>RVOL</th><th>距区间高</th><th>买点类型</th></tr>
 {tbl}
 </table>
-<p class="note">绿=tier1(123完整)；黄=tier2(上升延续回踩)；<b>浅红=锚与买区冲突</b>（硬止损锚价落在买区内，已把买区下沿抬到硬止损之上，可执行价位以买区列为准）。距区间高=相对取数窗口最高价（约 130 根，非严格 52 周）；负=低于窗口高，正=已破新高。RVOL 为末根量/20日均量。</p>
+<p class="note">绿=tier1(123完整)；黄=tier2(上升延续回踩)；<b>浅红=锚与买区冲突</b>（硬止损锚价落在买区内，已把买区下沿抬到硬止损之上，可执行价位以买区列为准）；<b class="amb">买区列标「≥上沿·只挂单」</b>=现价已出买区上沿但距买位 &lt;2×ATR，仍可执行，只能挂回踩单、禁市价追。距区间高=相对取数窗口最高价（约 130 根，非严格 52 周）；负=低于窗口高，正=已破新高。RVOL 为末根量/20日均量。</p>
 </div>
 
 <h2>二、重点候选价格结构图（前 {len(top)}）</h2>
