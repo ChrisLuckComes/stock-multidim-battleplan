@@ -605,10 +605,12 @@ def test_pullback_requires_launch():
 
 
 def test_breakout_preorder_grades():
-    """突破预案单三档分级（老罗 2026-09-16 SDGR 案例驱动）。
+    """突破预案单 setup（老罗 2026-09-16 SDGR 案例驱动；09-17 删掉分级）。
 
     setup：上方有明确突破位 K，且价格贴着它收 —— 此时盘前就该给出
     「站上 K 买入」的条件单，而不是只给一个永不成交的回踩价。
+    分级（strong/normal）已删：全样本 121 条 A 股突破单里 strong 一次未触发，
+    分级没产生信息；现在只剩「距 K ≤ 门槛」一道，两轨门槛不同。
     """
     from probe_intraday import breakout_preorder
 
@@ -621,31 +623,36 @@ def test_breakout_preorder_grades():
                       19.7, 19.6, 19.5])]
     atr_v = 1.0
 
-    # ① strong：距 0.65×ATR + 放量大阳（实体 1.72、量 2.11×）
-    strong = pre + [bar("2026-08-24", 19.03, 21.40, 18.84, 20.75, 1900)]
-    r = breakout_preorder(strong, atr_v, 20.75, profile="us")
-    assert r["grade"] == "strong", r
+    # ① 距 0.65×ATR（原 strong 档的形态）：**分级已删**（老罗 2026-09-17）——
+    #    同一个样本，两轨结论不同：美股档（门槛 0.80）放行，A 股档（0.50）判 far。
+    #    这一条钉住「删 strong」：不再有「放量大阳」这条晋级条件，只剩距离。
+    bo = pre + [bar("2026-08-24", 19.03, 21.40, 18.84, 20.75, 1900)]
+    r = breakout_preorder(bo, atr_v, 20.75, profile="us")
+    assert r["grade"] == "normal", r
     assert r["K"] == 21.40 and r["trigger"] == 21.50, r
     assert r["stop"] == 21.10 and r["risk"] == 0.4, r
     # 近窗口内无更高阻力 → 目标退回 K + 2.0×ATR
     assert r["target"] == 23.40, r
     assert r["cap"] == 22.60, r                  # K + 1.20×ATR（美股档）
+    assert "big_yang" not in r, r                # 分级字段已删干净
 
-    # ② 同一形态换 A 股档：追高上限收到 0.60×ATR
-    r2 = breakout_preorder(strong, atr_v, 20.75, profile="ash")
-    assert r2["cap"] == 22.00, r2
+    r2 = breakout_preorder(bo, atr_v, 20.75, profile="ash")
+    assert r2["grade"] == "far", r2              # 0.65 > BO_NEAR_ASH 0.50
+    assert "trigger" not in r2, r2
 
-    # ③ normal：距 0.45×ATR，即便不是大阳也放行（贴得够近，开盘即可触及）
-    normal = pre + [bar("2026-08-24", 20.50, 21.00, 20.40, 20.95, 900)]
-    r3 = breakout_preorder(normal, atr_v, 20.95, profile="us")
+    # ② 距 0.45×ATR → A 股档放行（≤0.50），追高上限收到 0.60×ATR
+    ash_ok = pre + [bar("2026-08-24", 20.50, 21.00, 20.40, 20.95, 900)]
+    r3 = breakout_preorder(ash_ok, atr_v, 20.95, profile="ash")
     assert r3["grade"] == "normal", r3
     assert r3["trigger"] == 21.50, r3
+    assert r3["cap"] == 22.00, r3
 
-    # ④ far：距 0.90×ATR 且非大阳 → 只报位置，不给可挂价
+    # ③ 距 0.90×ATR → 两轨都只报位置，不给可挂价
     far = pre + [bar("2026-08-24", 20.20, 20.60, 20.10, 20.50, 900)]
     r4 = breakout_preorder(far, atr_v, 20.50, profile="us")
     assert r4["grade"] == "far", r4
     assert "trigger" not in r4, r4
+    assert breakout_preorder(far, atr_v, 20.50, profile="ash")["grade"] == "far"
 
 
 def test_near_resistance_window():
@@ -810,9 +817,10 @@ def test_backtest_uses_probe_constants():
                  "BREAK_BUF_ATR", "BREAK_GAP_ATR", "ASH_BREAK_MIN_OFF",
                  "ASH_LIMIT_BUFFER", "ASH_MAX_POS", "ASH_RISK_PCT",
                  "PULLBACK_VOL_MULT", "PULLBACK_BAND_ATR", "PULLBACK_STOP_ATR",
-                 "PULLBACK_FRESH", "BURST_MULT", "BURST_AFTER", "PRE_AMP_MAX",
-                 "CHASE_ATR", "BO_NEAR_STRONG", "BO_NEAR_NORMAL", "BO_BODY_ATR",
-                 "BO_VOL_REL", "BO_TGT_ATR", "RES_WINDOW"):
+                 "PULLBACK_FRESH", "BURST_MULT", "BURST_MA_BARS", "BURST_AFTER",
+                 "PRE_AMP_MAX", "CHASE_ATR", "BO_NEAR_ASH", "BO_NEAR_US",
+                 "BO_TGT_ATR", "RES_WINDOW", "ASH_PRIMARY", "ASH_RESERVE",
+                 "ASH_TOTAL", "ASH_SINGLE_ABS", "ASH_RESERVE_TIER"):
         assert not hasattr(BT, name), (
             f"回测复制了 {name}；应改成直接用 P.{name}，否则会与线上漂移")
 
@@ -832,6 +840,92 @@ def test_ash_limit_anchor_is_basis_not_snap_prev():
     assert 'ash_limit_price(code, basis[-1]["c"])' in src
     assert 'ash_limit_price(code, snap' not in src, \
         "涨停锚又用了 snap —— 回放时它是「此刻」的快照，与回放日期无关"
+
+
+def test_channel_a_uses_ma_baseline():
+    """通道 A 基准改成「前 N 根均量」（老罗 2026-09-17 改定义）。
+
+    旧定义「≥ 当日此前**最大**量 × 2.5」在 5 分钟粒度上几乎不成立：开盘那根
+    往往就是全天最大量，基准被顶死后当天再也不触发 —— 全样本 903 个标的日
+    只触发 3 次，放宽倍数也救不回来。新定义下同样的行情能正常识别。
+    """
+    import probe_intraday as P
+
+    def bar(v):
+        return {"d": "2026-09-17 10:30:00", "o": 10.0, "h": 10.0,
+                "l": 10.0, "c": 10.0, "v": v}
+
+    # 开盘爆量 1000，随后平量 100×5，再来一根 250
+    mins = [bar(1000)] + [bar(100)] * 5 + [bar(250)]
+    hits = P.vol_bursts(mins)
+    assert [h[0] for h in hits] == [6], hits
+    assert hits[0][2] == 100.0, hits      # 基准 = 前 5 根均量，不是此前最大量
+    assert hits[0][1] == 2.5, hits
+    # 旧口径需要 ≥ 1000×2.5 = 2500 才算突变 → 这根 250 永远看不见
+    assert P.BURST_MA_BARS == 5 and P.BURST_MULT == 2.0
+
+
+def test_ash_portfolio_gate():
+    """组合层闸门：主力 5 万 + 备用 5 万 + 单笔硬顶 5 万（老罗 2026-09-17）。"""
+    import probe_intraday as P
+    assert (P.ASH_PRIMARY, P.ASH_RESERVE, P.ASH_TOTAL, P.ASH_SINGLE_ABS) == \
+        (50000, 50000, 100000, 50000)
+    assert P.ASH_SINGLE_ABS >= P.ASH_PRIMARY, "单笔硬顶不该小于主力额度"
+
+    # ① 额度充裕 → 放行，归主力层
+    g = P.ash_portfolio_gate("600519", 20.0, 1000, held_amt=0.0)
+    assert g["allowed"] and g["layer"] == "main", g
+    assert g["lots"] == 1000 and g["amt"] == 20000.0, g
+
+    # ② 主力层已满 + 普通信号 → 拒绝，并说清备用不够格动
+    g = P.ash_portfolio_gate("600519", 20.0, 1000, held_amt=50000.0)
+    assert not g["allowed"], g
+    assert P.ASH_RESERVE_TIER in g["reason"], g
+
+    # ③ 主力层已满 + 够格信号 → 可动备用
+    g = P.ash_portfolio_gate("600519", 20.0, 1000, held_amt=50000.0,
+                             use_reserve=True)
+    assert g["allowed"] and g["layer"] == "reserve", g
+
+    # ④ 总仓位 10 万已满 → 拒绝
+    g = P.ash_portfolio_gate("600519", 20.0, 1000, held_amt=100000.0,
+                             use_reserve=True)
+    assert not g["allowed"] and "总仓位" in g["reason"], g
+
+    # ⑤ 剩余额度买不到 1 手 → 必须说清是「额度」不够，不是规则不让买
+    g = P.ash_portfolio_gate("600519", 2000.0, 100, held_amt=48000.0)
+    assert not g["allowed"] and "买不到 1 手" in g["reason"], g
+
+    # ⑥ 单笔绝对额硬顶：额度再充裕也不越过 5 万
+    g = P.ash_portfolio_gate("600519", 10.0, 99999, held_amt=0.0)
+    assert g["amt"] <= P.ASH_SINGLE_ABS and g["lots"] == 5000, g
+
+    # ⑦ 科创板最小申报单位 200 股仍然生效
+    g = P.ash_portfolio_gate("688981", 60.0, 201, held_amt=0.0)
+    assert g["lots"] == 200, g
+
+
+def test_ash_t1_struct_stop():
+    """A 股 T+1 的结构止损 = 信号当日日线最低价（老罗 2026-09-17 的 2.a）。"""
+    import probe_intraday as P
+    day = [{"l": 10.5}, {"l": 10.1}, {"l": 10.4}, {"l": 10.2}]
+    assert P.ash_t1_struct_stop(day, 10.6) == 10.1
+    # 当日最低价不低于入场价（异常数据）→ 退回原止损，不造出负风险
+    assert P.ash_t1_struct_stop(day, 10.0, fallback=9.9) == 9.9
+    assert P.ash_t1_struct_stop([], 10.0, fallback=9.9) == 9.9
+
+
+def test_breakout_preorder_has_no_strong_tier():
+    """strong 分级已删（老罗 2026-09-17）：常量与判定分支都不许留。"""
+    import probe_intraday as P
+    for name in ("BO_NEAR_STRONG", "BO_NEAR_NORMAL", "BO_BODY_ATR", "BO_VOL_REL"):
+        assert not hasattr(P, name), f"{name} 应已删除（strong 分级已取消）"
+    assert hasattr(P, "BO_NEAR_ASH") and hasattr(P, "BO_NEAR_US")
+    assert P.BO_NEAR_ASH < P.BO_NEAR_US, "A 股有 T+1 隔夜风险，门槛应更紧"
+    src = (Path(__file__).resolve().parent / "probe_intraday.py").read_text(
+        encoding="utf-8")
+    assert '"strong"' not in src, "还有 strong 档的判定"
+    assert "big_yang" not in src, "big_yang 字段应随分级一起删掉"
 
 
 if __name__ == "__main__":
@@ -874,4 +968,8 @@ if __name__ == "__main__":
     test_ash_limit_anchor_is_basis_not_snap_prev()
     test_room_and_cap_propagates_stop_conflict()
     test_backtest_uses_probe_constants()
+    test_channel_a_uses_ma_baseline()
+    test_ash_portfolio_gate()
+    test_ash_t1_struct_stop()
+    test_breakout_preorder_has_no_strong_tier()
     print("ok")

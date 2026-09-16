@@ -21,7 +21,8 @@
    `entry_next` = 信号**次根开盘**：现实，能看见「信号价买不到」要付多少代价
 4. **出场两套口径** ——
    同日 T+0（美股口径，也是 A 股「能当天出」的对照）
-   次日 T+1（A 股真实口径：当天买了卖不掉，止损是**次日**的事）
+   次日 T+1（A 股真实口径）：**日线结构止损（D 日最低价）+ 次日收盘破**
+   （老罗 2026-09-17 定；旧口径把当日日内止损搬到次日，全样本净账户全负）
 5. **同根同时触损触标 → 按先止损计**（悲观）。
 6. **信号池先于结果确定** —— 流动性/持仓池，不是「涨得好的票」。
    否则等于拿答案挑样本。
@@ -30,6 +31,7 @@
     python backtest_intraday.py                     # 全池 · 全窗口
     python backtest_intraday.py --days 10           # 只回测最近 10 个交易日
     python backtest_intraday.py --sweep             # 未决参数敏感性扫描
+    python backtest_intraday.py --portfolio         # 组合层模拟（主力5万+备用5万）
     python backtest_intraday.py --detail 002961     # 打印单只明细
     python backtest_intraday.py --no-cache          # 强制刷新行情
 """
@@ -45,7 +47,9 @@ CACHE = os.path.join(HERE, "cache")
 MIN_SCALE = 5
 FULL_DAY_BARS = 40          # 少于 40 根视为半日/停牌，不计入
 MIN_DAILY_BARS = 25         # D 之前至少要有 25 根日线才够算结构
-ACCOUNT = 50000             # 账户口径（老罗的 A 股账户）
+T1_MAX_HOLD = 5             # 结构口径的最长持有日数（挂单/持有有效期的老口径是 5 日）
+ACCOUNT = 50000             # 主力额度口径（单笔 30% 闸门与 1.5% 风险预算的基数）
+CAPITAL = 100000            # 总资金（主力 5 万 + 备用 5 万，老罗 2026-09-17 定）
 COST_RT = 0.0012            # A股双边成本率（佣金万2.5×2 + 卖出印花税0.05% + 过户费）
 
 # 信号池：流动性 / 持仓池（先于结果确定，**不按涨跌挑**）
@@ -286,7 +290,7 @@ def run_C_pullback(ctx, sigs_B):
 def run_BO_preorder(ctx):
     """突破预案单：前一晚挂条件单，当日站上触发价即成交（含跳空撤单保护）。"""
     bo = P.breakout_preorder(ctx.b2, ctx.atr, ctx.prev_c, profile="ash")
-    if not bo or bo["grade"] not in ("strong", "normal"):
+    if not bo or bo["grade"] != "normal":
         return []
     room = (ctx.lim - bo["trigger"]) / ctx.lim * 100
     if room < P.ASH_LIMIT_BUFFER * 100:
@@ -339,22 +343,74 @@ def exit_same_day(mins, j, entry, stop, target):
             "mfe": round(mfe, 2), "mae": round(mae, 2)}
 
 
-def exit_next_day(nd, entry, stop, target):
-    """次日日线（A股 T+1 真实口径）：开盘破止损→开盘走；再盘中破→止损；再触标→达标；
-    都没有→次日收盘走（SKILL.md「收盘失守仍走」）。"""
+def exit_next_day(nd, entry, stop, target, close_break=True):
+    """次日结算（A 股 T+1）。
+
+    close_break=True  → 老罗 2026-09-17 的 2.a 口径：**收盘破才算破**（盘中影线不算）
+    close_break=False → 旧口径：盘中触及止损即走（把当日的日内止损原样搬到次日）
+
+    旧口径全样本 T+1 净账户全负（−0.092% ~ −0.181%）的原因是：这些通道的日内
+    止损距入场只有 1.4%–1.6%，隔夜跳空与次日噪音必然把它扫掉。2.a 就是冲这个来的。
+
+    顺序：先判止损（悲观：同一天既破止损又达标 → 算止损）。
+    """
     risk = entry - stop
     if not nd or risk <= 0:
         return None
     if nd["o"] <= stop:
-        return {"exit": "次日开盘走", "R": round((nd["o"] - entry) / risk, 3),
-                "exit_px": nd["o"]}
-    if nd["l"] <= stop:
-        return {"exit": "次日止损", "R": -1.0, "exit_px": stop}
+        return {"exit": "次日开盘破位", "R": round((nd["o"] - entry) / risk, 3),
+                "exit_px": nd["o"], "exit_D": nd["d"][:10]}
+    if close_break:
+        if nd["c"] < stop:
+            return {"exit": "次日收盘破位", "R": round((nd["c"] - entry) / risk, 3),
+                    "exit_px": nd["c"], "exit_D": nd["d"][:10]}
+    else:
+        if nd["l"] <= stop:
+            return {"exit": "次日盘中止损", "R": -1.0, "exit_px": stop,
+                    "exit_D": nd["d"][:10]}
     if target is not None and nd["h"] >= target:
         return {"exit": "次日达标", "R": round((target - entry) / risk, 3),
-                "exit_px": target}
+                "exit_px": target, "exit_D": nd["d"][:10]}
     return {"exit": "次日收盘", "R": round((nd["c"] - entry) / risk, 3),
-            "exit_px": nd["c"]}
+            "exit_px": nd["c"], "exit_D": nd["d"][:10]}
+
+
+def exit_struct_hold(daily, idx, entry, stop_struct, target, max_hold=T1_MAX_HOLD):
+    """结构**续持**口径（对照组）：持有到日线结构破，最长 N 日。
+
+    这是 2.a 的「加强版」：既然止损换成了日线结构位，那持有期是不是也该跟着
+    放到日线级？实测**更差** —— 结构位（信号日最低价）太宽，收盘很少破得到，
+    于是绝大部分单子退化成「买入后持有 5 天到期平」，而这批信号的 5 日漂移为负。
+    它同时也说明：2.a 的收益变化来自「换止损位」，不是「换持有期」。
+
+    规则（逐日，悲观：先判止损）：
+      开盘 ≤ 结构位        → 开盘走（跳空破，跌停开也卖不掉，如实按开盘价）
+      收盘 < 结构位        → 收盘走（收盘破才算破，盘中影线不算）
+      盘中触及目标          → 达标
+      持有满 max_hold 日    → 最后一日收盘走
+    """
+    risk = entry - stop_struct
+    if not daily or risk <= 0:
+        return None
+    lo = idx + 1
+    hi = min(len(daily), idx + 1 + max_hold)
+    if lo >= hi:
+        return None
+    last = None
+    for k in range(lo, hi):
+        b = daily[k]
+        last = b
+        if b["o"] <= stop_struct:
+            return {"exit": "开盘破结构", "R": round((b["o"] - entry) / risk, 3),
+                    "exit_px": b["o"], "bars": k - idx, "exit_D": b["d"][:10]}
+        if b["c"] < stop_struct:
+            return {"exit": "收盘破结构", "R": round((b["c"] - entry) / risk, 3),
+                    "exit_px": b["c"], "bars": k - idx, "exit_D": b["d"][:10]}
+        if target is not None and b["h"] >= target:
+            return {"exit": "达标", "R": round((target - entry) / risk, 3),
+                    "exit_px": target, "bars": k - idx, "exit_D": b["d"][:10]}
+    return {"exit": "到期平", "R": round((last["c"] - entry) / risk, 3),
+            "exit_px": last["c"], "bars": hi - 1 - idx, "exit_D": last["d"][:10]}
 
 
 # ------------------------------------------------------------------
@@ -449,19 +505,35 @@ def collect(code, daily, mins, days, detail=False):
                          acc_pnl=round(lots * (r["exit_px"] - entry) / ACCOUNT * 100, 3))
                 out[s["strategy"]].append(r)
                 if tag == "T0_sig":
-                    rn = exit_next_day(nd, entry, s["stop"], s["target"])
-                    if rn:
+                    # T+1 口径（老罗 2026-09-17 的 2.a）：**日线结构止损（D 日最低价）
+                    # + 持有到结构破（最长 5 日）**。不是把当日日内止损原样搬到次日。
+                    # 更宽的止损 → 用同一套 1.5% 风险预算法重算股数。
+                    stop_t1 = P.ash_t1_struct_stop(ctx.mins, entry, s["stop"])
+                    r["stop_t1"] = stop_t1
+                    for suffix, tag2, rn in (
+                            ("|T1", "T1",
+                             exit_next_day(nd, entry, stop_t1, s["target"], close_break=True)),
+                            ("|T1h", "T1h",
+                             exit_struct_hold(daily, idx, entry, stop_t1, s["target"])),
+                            ("|T1o", "T1o",
+                             exit_next_day(nd, entry, s["stop"], s["target"], close_break=False))):
+                        if not rn:
+                            continue
+                        st_p = stop_t1 if tag2 != "T1o" else s["stop"]
+                        lots_t1 = P.ash_lots(ACCOUNT, entry, st_p, code) or 0
+                        r["lots_t1"] = lots_t1
                         rn.update(code=code, D=D, entry=round(entry, 2),
-                                  stop=s["stop"], target=s["target"], j=s["j"],
-                                  entry_kind="T1", strategy=s["strategy"],
+                                  stop=st_p, target=s["target"], j=s["j"],
+                                  entry_kind=tag2, strategy=s["strategy"],
                                   extra=s["extra"], mfe=0.0, mae=0.0,
                                   ret=round((rn["exit_px"] - entry) / entry * 100, 3),
-                                  risk_pct=round((entry - s["stop"]) / entry * 100, 3),
-                                  lots=lots,
-                                  pos_pct=round(lots * entry / ACCOUNT * 100, 3),
-                                  acc_risk=round(lots * (entry - s["stop"]) / ACCOUNT * 100, 3),
-                                  acc_pnl=round(lots * (rn["exit_px"] - entry) / ACCOUNT * 100, 3))
-                        out[s["strategy"] + "|T1"].append(rn)
+                                  risk_pct=round((entry - st_p) / entry * 100, 3),
+                                  lots=lots_t1,
+                                  pos_pct=round(lots_t1 * entry / ACCOUNT * 100, 3),
+                                  acc_risk=round(lots_t1 * (entry - st_p) / ACCOUNT * 100, 3),
+                                  acc_pnl=round(lots_t1 * (rn["exit_px"] - entry) / ACCOUNT * 100, 3),
+                                  exit_D=rn.get("exit_D"))
+                        out[s["strategy"] + suffix].append(rn)
         if detail:
             for s in found:
                 print(f"  {D}  {s['strategy']:14s} j={s['j']:2d} "
@@ -481,6 +553,10 @@ LABEL = {"预案单(回踩)": "预案单（回踩大阳·旧基线）",
          "通道B(关键位突破)": "通道B 关键位突破",
          "通道C(回踩确认)": "通道C 回踩确认",
          "突破预案单": "突破预案单（盘前条件单）"}
+# 同一天、同一只票有多个信号时，先花掉额度的顺序（老罗口径：C > A > B；
+# 盘前条件单最靠前，它先挂上就先占额度；旧预案单最后）。
+PRIORITY = ["突破预案单", "通道C(回踩确认)", "通道A(量能突变)",
+            "通道B(关键位突破)", "预案单(回踩)"]
 
 
 def report(agg, scope, sym_days=0):
@@ -494,7 +570,8 @@ def report(agg, scope, sym_days=0):
     lines.append(hdr)
     lines.append("-" * 100)
     for s in ORDER:
-        for suffix, note in (("", "  [T+0 同日]"), ("|T1", "  [T+1 次日]")):
+        for suffix, note in (("", "  [T0 同日]"), ("|T1", "  [T1 结构]"),
+                             ("|T1h", "  [T1 续持]"), ("|T1o", "  [T1 旧]")):
             rows = agg.get(s + suffix, [])
             if suffix == "":
                 # 只取「工具报出的价」成交那一套，否则和 T0_next 重复计数
@@ -509,8 +586,12 @@ def report(agg, scope, sym_days=0):
                 f"{(st['PF'] if st['PF'] is not None else 0):>6.2f}{st['tgt%']:>7.1f}"
                 f"{st['mfe']:>8.2f}{st['mae']:>8.2f}")
     lines.append("-" * 100)
-    lines.append("T+0 同日 = 信号后当日走完的 R（美股口径 / A股「能当天出」的对照）")
-    lines.append("T+1 次日 = A 股真实口径（当天买了卖不掉，止损/目标是次日的事）")
+    lines.append("T0 同日 = 信号后当日走完的 R（美股口径 / A股「能当天出」的对照）")
+    lines.append("T1 结构 = **老罗 2026-09-17 的 2.a**：止损换成日线结构位（信号日最低价）、"
+                 "收盘破才算破，持有期仍只到次日")
+    lines.append("T1 续持 = 同一结构止损，但持有到结构破或达标、最长 5 日"
+                 "（隔离「换止损位」与「换持有期」各自的贡献）")
+    lines.append("T1 旧   = 原口径：日内止损（K−0.30×ATR 等）+ 次日盘中触及即走")
     lines.append("R = (出场价−入场价)/(入场价−止损价)；止损 = −1R。")
     lines.append("均MFE/均MAE = 信号后最大浮盈/浮亏（同根极值，当上下包络看，别当精确路径）")
     lines.append("⚠ 通道A 在设计里就没有目标位（probe 输出 target=None）→ 其「达标%」"
@@ -524,7 +605,8 @@ def report(agg, scope, sym_days=0):
                  f"{'毛账户%':>9}{'成本%':>8}{'净账户%':>9}{'最差单笔%':>11}")
     lines.append("-" * 100)
     for s in ORDER:
-        for suffix, note in (("", "  [T+0]"), ("|T1", "  [T+1]")):
+        for suffix, note in (("", "  [T0]"), ("|T1", "  [T1结构]"),
+                             ("|T1h", "  [T1续持]"), ("|T1o", "  [T1旧]")):
             rows = agg.get(s + suffix, [])
             if suffix == "":
                 rows = [r for r in rows if r["entry_kind"] == "T0_sig"]
@@ -614,9 +696,11 @@ def detail_rows(agg, strategy, top=12):
 def sweep(pool_data, days, refresh):
     """未决参数敏感性扫描。改的是 probe_intraday 的模块常量 —— 与线上同一处。"""
     plans = []
-    # 通道 A：903 个标的日只触发 3 次 → 先查它是不是已经死了
-    for v in (1.5, 2.0, 2.5, 3.5):
+    # 通道 A（新定义）：基准改成「前 N 根均量」后，再看倍数该取多少
+    for v in (1.5, 2.0, 2.5, 3.0):
         plans.append((f"BURST_MULT={v:.1f}", {"BURST_MULT": v}))
+    for v in (3, 5, 10):
+        plans.append((f"BURST_MA_BARS={v}", {"BURST_MA_BARS": v}))
     for v in (0.025, 0.050, 0.080):
         plans.append((f"PRE_AMP_MAX={v:.3f}", {"PRE_AMP_MAX": v}))
     # 通道 B / 突破单：追高上限与触发缓冲
@@ -624,7 +708,7 @@ def sweep(pool_data, days, refresh):
         plans.append((f"BREAK_DMAX_ASH={v:.2f}", {"BREAK_DMAX_ASH": v}))
     for v in (0.05, 0.10, 0.20):
         plans.append((f"BREAK_BUF_ATR={v:.2f}", {"BREAK_BUF_ATR": v}))
-    # 止损宽度：T+1 口径普遍为负，先试「放宽止损」是不是解药
+    # 止损宽度：T+1 口径已换结构位，这里看累计 R 与净账户是否仍脱钩
     for v in (0.30, 0.50, 0.80):
         plans.append((f"BREAK_STOP_ATR={v:.2f}", {"BREAK_STOP_ATR": v}))
     # 通道 C
@@ -632,23 +716,19 @@ def sweep(pool_data, days, refresh):
         plans.append((f"PULLBACK_VOL_MULT={v:.1f}", {"PULLBACK_VOL_MULT": v}))
     for v in (0.10, 0.30, 0.50):
         plans.append((f"PULLBACK_BAND_ATR={v:.2f}", {"PULLBACK_BAND_ATR": v}))
-    # 突破预案单三档
-    for v in (0.60, 0.80, 1.00, 1.20):
-        plans.append((f"BO_NEAR_STRONG={v:.2f}", {"BO_NEAR_STRONG": v}))
-    for v in (0.60, 1.00, 1.40):
-        plans.append((f"BO_BODY_ATR={v:.2f}", {"BO_BODY_ATR": v}))
-    for v in (1.00, 1.50, 2.00, 3.00):
-        plans.append((f"BO_VOL_REL={v:.2f}", {"BO_VOL_REL": v}))
+    # 突破预案单：strong 分级已删 → 只剩 A 股侧单一门槛 BO_NEAR_ASH
+    for v in (0.40, 0.50, 0.60, 0.80):
+        plans.append((f"BO_NEAR_ASH={v:.2f}", {"BO_NEAR_ASH": v}))
 
     WATCH = {"BURST_MULT": ["通道A(量能突变)"],
+             "BURST_MA_BARS": ["通道A(量能突变)"],
              "PRE_AMP_MAX": ["通道A(量能突变)"],
              "BREAK_DMAX_ASH": ["通道B(关键位突破)", "突破预案单"],
              "BREAK_BUF_ATR": ["通道B(关键位突破)", "突破预案单"],
              "BREAK_STOP_ATR": ["通道B(关键位突破)", "突破预案单"],
              "PULLBACK_VOL_MULT": ["通道C(回踩确认)"],
              "PULLBACK_BAND_ATR": ["通道C(回踩确认)"],
-             "BO_NEAR_STRONG": ["突破预案单"], "BO_BODY_ATR": ["突破预案单"],
-             "BO_VOL_REL": ["突破预案单"]}
+             "BO_NEAR_ASH": ["突破预案单"]}
 
     lines = ["=" * 100, " 参数敏感性扫描（每次只动一个参数，其余取现值）", "=" * 100]
     lines.append(f"{'参数':<28}{'策略':<16}{'N':>5}{'胜率%':>8}{'平均R(T0)':>11}"
@@ -682,6 +762,116 @@ def sweep(pool_data, days, refresh):
     return "\n".join(lines)
 
 
+def portfolio(agg):
+    """组合层模拟（A 股 T+1 真实约束）—— 老罗 2026-09-17 第 4 条。
+
+    为什么需要它：单笔 30% 闸门只管一笔，多笔叠加以前无人管
+    （4 笔各 28% = 112%）。这里把 T+1 行按时间顺序排开，两层闸门：
+        单笔  = ash_lots（1.5% 预算 + 30% 上限 + 最小申报单位）
+        组合  = ash_portfolio_gate（主力 5 万 / 备用 5 万 / 单笔硬顶 5 万）
+    资金占用：D 日买入 → D+1 日卖出，占用贯穿 D、D+1 两天，D+2 日才释放。
+
+    粒度说明：这是**逐笔独立预留额度**的保守近似 —— 不含做 T、不含部分卖出、
+    不含同日先卖后买的资金复用（A 股 T+1 本来也不允许）。
+    """
+    cand = []
+    for s in ORDER:
+        pri = PRIORITY.index(s) if s in PRIORITY else len(PRIORITY)
+        for r in agg.get(s + "|T1", []):
+            if r.get("exit_D") is None or not r.get("lots"):
+                continue
+            cand.append((r["D"], pri, r["code"], s, r))
+    cand.sort(key=lambda x: (x[0], x[1], x[2]))
+    seen, picks = set(), []
+    for D, _pri, code, s, r in cand:
+        if (D, code) in seen:
+            continue
+        seen.add((D, code))
+        picks.append((D, code, s, r))
+
+    days_sorted = sorted({p[0] for p in picks})
+    held, taken, blocked = [], [], []
+    equity, peak, mdd, max_hold = 0.0, 0.0, 0.0, 0.0
+    for D in days_sorted:
+        held = [h for h in held if D <= h[1]]          # 出在 D-1 及更早的释放掉
+        for (d, code, s, r) in picks:
+            if d != D:
+                continue
+            held_amt = sum(h[2] for h in held)
+            g = P.ash_portfolio_gate(code, r["entry"], r["lots"], held_amt,
+                                     use_reserve=(s == P.ASH_RESERVE_TIER))
+            if not g["allowed"]:
+                blocked.append((D, code, s, g["reason"]))
+                continue
+            pnl = g["lots"] * (r["exit_px"] - r["entry"])
+            equity += pnl / CAPITAL * 100
+            peak = max(peak, equity)
+            mdd = min(mdd, equity - peak)
+            max_hold = max(max_hold, held_amt + g["amt"])
+            taken.append({"D": D, "code": code, "s": s, "lots": g["lots"],
+                          "amt": g["amt"], "layer": g["layer"],
+                          "exit": r["exit"], "pnl": pnl,
+                          "ret%": pnl / CAPITAL * 100})
+            held.append((D, r["exit_D"], g["amt"]))
+
+    # 逐笔独立加总（不设组合上限、每笔都按风险预算法满仓）—— 需同时持有
+    # 全部候选才有这个数，真实账户拿不到；它的用处是当「闸门机会成本」的上界。
+    free_ret = sum(r["lots"] * (r["exit_px"] - r["entry"]) / CAPITAL * 100
+                   for _D, _c, _s, r in picks)
+
+    L = ["=" * 100,
+         f" 组合层模拟（T+1 · 总资金 {CAPITAL:,} = 主力 {P.ASH_PRIMARY:,} + 备用 {P.ASH_RESERVE:,}",
+         "=" * 100]
+    L.append(f"候选「标的×交易日」  : {len(picks)} 条（同一标的同一天只取优先级最高的一条）")
+    L.append(f"实际成交              : {len(taken)} 条"
+             f"（{len(taken) / max(len(picks), 1) * 100:.1f}%）")
+    L.append(f"被额度挡掉            : {len(blocked)} 条"
+             f"（{len(blocked) / max(len(picks), 1) * 100:.1f}%）  ← 额度才是真约束，不是信号不够")
+    L.append(f"窗口                  : {days_sorted[0] if days_sorted else '—'} ~ "
+             f"{days_sorted[-1] if days_sorted else '—'}（{len(days_sorted)} 个交易日）")
+    L.append("-" * 100)
+    L.append(f"组合累计收益          : {equity:+.2f}%（{equity / 100 * CAPITAL:+,.0f} 元 / 总资金 "
+             f"{CAPITAL:,}）＝ {equity * CAPITAL / P.ASH_PRIMARY:+.2f}%（占主力 {P.ASH_PRIMARY:,}）")
+    L.append(f"最大回撤              : {mdd:.2f}%")
+    L.append(f"单时点最大占用        : {max_hold:,.0f} 元"
+             f"（总资金的 {max_hold / CAPITAL * 100:.1f}%）")
+    _avg = sum(t['amt'] for t in taken) / max(len(taken), 1)
+    L.append(f"平均单笔              : {_avg:,.0f} 元"
+             f"（主力账户的 {_avg / P.ASH_PRIMARY * 100:.1f}%）")
+    L.append(f"主力/备用层           : {sum(1 for t in taken if t['layer'] == 'main')} / "
+             f"{sum(1 for t in taken if t['layer'] == 'reserve')} 笔")
+    L.append(f"并发上限推算          : 主力 {P.ASH_PRIMARY:,} ÷ 单笔上限 "
+             f"{P.ASH_PRIMARY * P.ASH_MAX_POS:,.0f} = "
+             f"**{int(P.ASH_PRIMARY / (P.ASH_PRIMARY * P.ASH_MAX_POS))} 笔**（不含备用）")
+    L.append(f"对照·逐笔独立加总     : {free_ret:+.2f}%"
+             f"（差 {free_ret - equity:+.2f}% = 闸门挡掉的机会，但那个数需同时持有 {len(picks)} 笔，"
+             f"真实账户拿不到）")
+    L.append("-" * 100)
+    L.append("按策略：")
+    L.append(f"  {'策略':<24}{'成交':>6}{'笔均收益%':>11}{'合计收益%':>11}{'胜率%':>8}")
+    for s in ORDER:
+        rows = [t for t in taken if t["s"] == s]
+        if not rows:
+            continue
+        L.append(f"  {LABEL[s][:20]:<24}{len(rows):>6}"
+                 f"{sum(t['ret%'] for t in rows) / len(rows):>11.3f}"
+                 f"{sum(t['ret%'] for t in rows):>11.3f}"
+                 f"{100 * sum(1 for t in rows if t['pnl'] > 0) / len(rows):>8.1f}")
+    L.append("-" * 100)
+    L.append("出场分布：" + "  ".join(
+        f"{k}={v}" for k, v in sorted(
+            {e: sum(1 for t in taken if t["exit"] == e) for e in {t["exit"] for t in taken}}.items(),
+            key=lambda kv: -kv[1])))
+    if blocked:
+        from collections import Counter
+        cnt = Counter(b[3][:28] for b in blocked)
+        L.append("被挡原因 Top：" + " | ".join(f"{k} ×{v}" for k, v in cnt.most_common(4)))
+    L.append("")
+    L.append("注：单笔闸门（30%×5万=1.5万）仍以主力 5 万为基数，故组合最多同时持有 3 笔。")
+    L.append("    备用 5 万只在信号 = 突破预案单（全样本唯一净账户为正）时才动。")
+    return "\n".join(L)
+
+
 def run_all(pool_data, days, quiet=False):
     agg = defaultdict(list)
     nsd = 0
@@ -697,6 +887,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=int, default=21, help="回测最近 N 个交易日")
     ap.add_argument("--sweep", action="store_true", help="参数敏感性扫描")
+    ap.add_argument("--portfolio", action="store_true", help="组合层模拟（主力5万+备用5万）")
     ap.add_argument("--detail", default=None, help="打印单只标的的信号明细")
     ap.add_argument("--no-cache", action="store_true", help="强制刷新行情")
     ap.add_argument("--pool", default=None, help="逗号分隔的自定义池")
@@ -728,10 +919,12 @@ def main():
                         if agg.get(s)) or "（无信号）"
     else:
         agg, nsd = run_all(pool_data, a.days)
-        n_sig = sum(len(v) for k, v in agg.items() if not k.endswith("|T1"))
+        n_sig = sum(len(v) for k, v in agg.items() if "|" not in k)
         txt = report(agg, f"池 {len(pool_data)} 只 · 近 {a.days} 个交易日 · {span}"
                           f" · 信号 {n_sig} 条", nsd)
         txt += "\n" + "\n".join(detail_rows(agg, s) for s in ORDER if agg.get(s))
+        if a.portfolio:
+            txt += "\n\n" + portfolio(agg)
         if a.sweep:
             txt += "\n\n" + sweep(pool_data, a.days, a.no_cache)
     if failed:

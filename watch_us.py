@@ -134,7 +134,7 @@ def line_of(out):
     pb = out.get("pullback") or {}
     st.append({"ok": "回踩✓"}.get(pb.get("state"), "回踩…"))
     bo = out.get("breakout_preorder") or {}
-    st.append("可挂✓" if bo.get("grade") in ("strong", "normal") else "可挂✗")
+    st.append("可挂✓" if bo.get("grade") == "normal" else "可挂✗")
     return (f"[{now_str()}] {sess:<8} {sym:<6} {spot if spot else 'n/a':>9} "
             f"({dev})  " + "  ".join(st))
 
@@ -211,7 +211,7 @@ def mode_pre(cfg, codes):
                       f" → 距涨停 <1.5%，放弃")
             else:
                 print(f"  突破单  "
-                      f"{'★强' if bo.get('grade') == 'strong' else '○近'}"
+                      f"○距 {bo.get('dist_atr')}×ATR"
                       f"  K={bo.get('K')}  站上 {bo.get('trigger')} 买入"
                       f"  止损 {bo.get('stop')}  {bo.get('qty')}股"
                       f"  目标 {bo.get('target')}  追高上限 {bo.get('cap')}")

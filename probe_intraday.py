@@ -24,7 +24,8 @@ from rule123 import (  # noqa: E402
 )
 
 UA = {"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn/"}
-BURST_MULT = 2.5      # 量能突变：当根 >= 此前最大 x BURST_MULT
+BURST_MA_BARS = 5      # 量能突变基准 = 前 N 根均量（老罗 2026-09-17 改定义）
+BURST_MULT = 2.0       # 量能突变：当根 >= 前 BURST_MA_BARS 根均量 x BURST_MULT
 BURST_AFTER = "10:00"  # 时间窗下沿
 PRE_AMP_MAX = 0.025    # 启动前当日振幅上限
 CHASE_ATR = 1.0        # 触发价 <= 开盘 + 1.0xATR
@@ -32,6 +33,15 @@ ASH_RISK_PCT = 0.015   # A 股单笔风险预算 = 账户 1.5%（与美股 us_lo
 ASH_MAX_POS = 0.30     # A 股单笔仓位上限（T+1 隔夜无跌停保护 → 比美股的 50% 更紧）
 ASH_LOT_MAIN = 100     # 主板 60/00、创业板 300/301
 ASH_LOT_STAR = 200     # 科创板 688/689
+
+# ── 组合层仓位（老罗 2026-09-17 定）──
+# 单笔闸门（30% × 5 万 = 1.5 万）之上再叠一层「总仓位」约束：
+# 以前只约束单笔，多笔叠加无人管（4 笔各 28% = 112%）。
+ASH_PRIMARY = 50000    # 主力额度：常规建仓只用它
+ASH_RESERVE = 50000    # 备用额度：只在主力层已满、且信号够格时启用
+ASH_TOTAL = ASH_PRIMARY + ASH_RESERVE
+ASH_SINGLE_ABS = 50000 # 单笔绝对额硬顶（老罗：「单笔最好不要过五万」）
+ASH_RESERVE_TIER = "突破预案单"   # 唯一够格动用备用的信号（全样本唯一净账户为正的那个）
 
 
 def _get(url, gbk=False):
@@ -65,13 +75,30 @@ def snapshot(sym):
 
 
 def vol_bursts(mins):
-    """返回今日所有「量能突变」根：(下标, 倍率, 此前最大量)。"""
-    prev_max, hits = 0.0, []
+    """返回今日所有「量能突变」根：(下标, 倍率, 基准量)。
+
+    基准 = **前 BURST_MA_BARS 根（默认 5 根 = 25 分钟）的均量**。
+
+    老罗 2026-09-17 改的定义。旧口径是「≥ 当日此前**最大** 5 分钟量的 2.5 倍」，
+    在 5 分钟粒度上几乎不可能成立：日内最大量通常就出现在开盘那几根，基准被
+    顶到天上后当天再也不会触发。全样本实测（43 只 × 21 个交易日 = 903 个标的日）
+    旧定义只触发 **3 次（0.33%）**，且放宽倍数救不回来（2.0→9 条、1.5→24 条，
+    成绩反而更差）—— 根因不是倍数，是基准选错了。
+
+    换均量后基准随行情漂移，与「开盘那根最大量」解耦：同样 2.0 倍门槛下
+    触发率回到可用区间（见 `盘中通道回测验证.md`）。
+
+    返回第三项是**基准量**（旧口径下是此前最大量），调用方只用于打印。
+    """
+    n = max(1, int(BURST_MA_BARS))
+    hits = []
     for i, b in enumerate(mins):
-        v = b["v"]
-        if prev_max > 0 and v >= prev_max * BURST_MULT:
-            hits.append((i, v / prev_max, prev_max))
-        prev_max = max(prev_max, v)
+        if i < 1:
+            continue
+        win = mins[max(0, i - n):i]
+        base = sum(x["v"] for x in win) / len(win)
+        if base > 0 and b["v"] >= base * BURST_MULT:
+            hits.append((i, b["v"] / base, base))
     return hits
 
 
@@ -130,6 +157,74 @@ def no_ash_reason(code, account, entry, max_pct=ASH_MAX_POS):
               f"{ceiling:,.0f} 元 —— {entry:,.0f} 元属**结构性不可交易**，"
               f"换标的，别等点位")
     return s
+
+
+def ash_portfolio_gate(code, entry, lots, held_amt=0.0, use_reserve=False):
+    """组合层闸门：在「单笔 30%」之上再管住**多笔叠加**。
+
+    老罗 2026-09-17 定的口径：总资金 10 万 = **主力 5 万 + 备用 5 万**，
+    单笔绝对额不超过 5 万。单笔 30% 的基数仍是主力 5 万
+    （→ 可交易价上限不变：主板/创业板 150 元、科创板 75 元，见 ash_price_ceiling）。
+
+    规则（按顺序）：
+      1. 单笔金额 ≤ ASH_SINGLE_ABS（50,000）—— 绝对额硬顶
+      2. 主力层：已持 + 本笔 ≤ ASH_PRIMARY（50,000）
+      3. 超出主力层 → 只有 use_reserve=True（信号等级 = ASH_RESERVE_TIER）才动备用，
+         且已持 + 本笔 ≤ ASH_TOTAL（100,000）
+      4. 额度不够 1 手 → 明确拒绝，并说清是「额度」不够而不是规则不让买
+
+    lots 传 0/None = 只查额度（返回该笔最大可买股数）。
+    返回 dict：allowed / lots / amt / layer / cap_amt / room / reason
+    """
+    lot = first_lot_of(code)
+    empty = {"allowed": False, "lots": 0, "amt": 0.0, "layer": None,
+             "cap_amt": 0.0, "room": 0.0, "reason": ""}
+    if not entry or entry <= 0:
+        return dict(empty, reason="无有效价格")
+    total_cap = ASH_TOTAL if use_reserve else ASH_PRIMARY
+    room = total_cap - (held_amt or 0.0)
+    if room <= 0:
+        if use_reserve:
+            return dict(empty, reason=f"总仓位 {ASH_TOTAL:,} 元已满，不再加")
+        return dict(empty, reason=(
+            f"主力层 {ASH_PRIMARY:,} 元已满 —— 备用 {ASH_RESERVE:,} 元只在"
+            f"「{ASH_RESERVE_TIER}」级信号上启用，本信号不够格"))
+    cap_amt = min(ASH_SINGLE_ABS, room)
+    n = int(cap_amt // entry)
+    if lots:
+        n = min(n, int(lots))
+    n = (n // lot) * lot
+    if n <= 0:
+        return dict(empty, cap_amt=round(cap_amt, 2), room=round(room, 2), reason=(
+            f"剩余额度 {cap_amt:,.0f} 元（单笔硬顶 {ASH_SINGLE_ABS:,}）买不到 1 手："
+            f"{lot} × {entry:,.2f} = {lot * entry:,.0f} 元"))
+    amt = round(n * entry, 2)
+    layer = "main" if (held_amt or 0.0) + amt <= ASH_PRIMARY else "reserve"
+    return {"allowed": True, "lots": n, "amt": amt, "layer": layer,
+            "cap_amt": round(cap_amt, 2), "room": round(room, 2), "reason": ""}
+
+
+def ash_t1_struct_stop(day_bars, entry, fallback=None):
+    """A 股 T+1 的**日线结构止损**（老罗 2026-09-17 定的口径，选项 a）。
+
+    为什么不是「日线也用日内止损」：这些通道的日内止损距入场只有 1.4%–1.6%，
+    搬到次日必然被隔夜跳空与次日噪音扫掉 —— 全样本 T+1 净账户全负
+    （−0.092% ~ −0.181%）。放宽 ATR 倍数只改善 R 账面（−38.9→−18.2），
+    净账户一动不动，因为 1.5% 风险预算法会按新止损自动等比缩股。
+
+    所以换口径，而不是换参数：
+      止损位 = **信号当日（D 日）的日线最低价**
+      触发   = **次日收盘失守**（收盘破才算破，盘中影线不算）
+      例外   = 次日**开盘**就跳空到结构位之下 → 开盘走（跌停开也卖不掉，如实按开盘价）
+
+    用 D 日的低点不构成未来函数：这笔单子在 D 日买入、D+1 日才决策，
+    而 D 日的低点在 D 日收盘时已完全确定。
+    更宽的止损 → 按同一套 1.5% 风险预算法重算股数（调用方负责）。
+    """
+    if not day_bars:
+        return fallback
+    d_low = min(b["l"] for b in day_bars)
+    return round(d_low, 2) if d_low < entry else fallback
 
 
 def room_and_cap(bars, z, mode, atr_v, rr=1.5, last_c=None):
@@ -419,8 +514,8 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
                       f"买到即开板，本通道放弃")
                 out["breakout_preorder"] = {"grade": "limit_near", **bo}
             else:
-                g = ("★ 强 —— 放量大阳贴在前高下" if bo["grade"] == "strong"
-                     else "○ 贴得近 —— 开盘即可触及（非大阳日）")
+                g = (f"○ 距前高 {bo['dist_atr']:.2f}×ATR（≤{BO_NEAR_ASH:.2f}）"
+                     f"—— 开盘即可触及")
                 n = ash_lots(account, bo["trigger"], bo["stop"], code)
                 print(f"  setup   : {g}")
                 print(f"  K       : {bo['K']:.2f}（{bo['kind']}）"
@@ -480,7 +575,7 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
             c5 = (lim - trigger) / lim * 100 >= ASH_LIMIT_BUFFER * 100
             c2, c3, c4 = True, amp <= PRE_AMP_MAX, trigger <= cap
             print(f"  [2 量能突变] ✓ {mins[i]['d'][11:16]} 量 {mins[i]['v'] / 100:,.0f} 手"
-                  f" = 此前最大 {pm / 100:,.0f} 手的 {ratio:.1f} 倍"
+                  f" = 前 {BURST_MA_BARS} 根均量 {pm / 100:,.0f} 手的 {ratio:.1f} 倍"
                   f"{'' if fresh else f'  ⚠ 已过去 {len(mins) - 1 - i} 根，信号过期'}")
             print(f"  [3 蓄势位置] {'✓' if c3 else '✗'} 启动前振幅 {amp * 100:.2f}% "
                   f"{'≤' if c3 else '>'} {PRE_AMP_MAX * 100:.1f}%")
@@ -508,7 +603,8 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
             out["intraday"] = {"burst_at": mins[i]["d"][11:16], "ratio": round(ratio, 1),
                                "trigger": trigger, "fresh": bool(fresh), "allow": bool(ok)}
         else:
-            print("  [2 量能突变] ✗ 今日尚无「≥此前最大 2.5 倍」的分钟量 → 无启动信号")
+            print(f"  [2 量能突变] ✗ 今日尚无「≥前 {BURST_MA_BARS} 根均量 × "
+                  f"{BURST_MULT:.1f}」的分钟量 → 无启动信号")
             print("  → ❌ 不试仓")
             out["intraday"] = {"burst_at": None, "allow": False}
     elif not live:
@@ -816,10 +912,8 @@ def us_offset_min(bj_stamp, td):
 
 
 # ── 盘前「突破预案单」的 setup 判定（老罗 2026-09-16 SDGR 案例驱动） ──
-BO_NEAR_STRONG = 0.80   # 强 setup：基准日收盘距 K ≤ 0.80×ATR
-BO_NEAR_NORMAL = 0.50   # 普通 setup：距 K ≤ 0.50×ATR（贴得极近，开盘即可触及）
-BO_BODY_ATR = 1.00      # 强 setup：基准日实体 ≥ 1.00×ATR
-BO_VOL_REL = 1.50       # 强 setup：基准日量 ≥ 前 20 日均量 × 1.50
+BO_NEAR_ASH = 0.50      # A 股单一 setup 门槛：基准日收盘距 K ≤ 0.50×ATR
+BO_NEAR_US = 0.80       # 美股同门槛放宽到 0.80×ATR（T+0 可当日出，不必扛隔夜）
 BO_TGT_ATR = 2.00       # 目标：K + 2.0×ATR（上方无结构位时用）
 RES_WINDOW = 60         # 阻力位只在近 60 根内找（防远古价位被当目标）
 
@@ -854,10 +948,19 @@ def breakout_preorder(bars, atr_v, last_c, profile="us"):
     实证：9/14 放量大阳（+9.10%、实体 1.69×ATR、量 2.09×20日均量）收 20.75，
     距 9/2 前高 21.40 仅 0.64×ATR → 次日开 20.78 直冲 23.71。
 
-    分级（距 K 用 key_break_level 的 dist_atr，已含 0.2–1.5×ATR 过滤）：
-      strong —— 距 ≤0.80×ATR 且放量大阳（实体 ≥1.0×ATR、量 ≥1.5×）
-      normal —— 距 ≤0.50×ATR（贴得极近，即便不是大阳，开盘也能立即触及）
-      far    —— 有 K 但太远，只提示位置、不给可挂价
+    分级（老罗 2026-09-17 决定**删掉分级，只留一档**）：
+      距 ≤ 门槛×ATR → 可挂，给全套数字
+      更远          → far，只提示位置、不给可挂价（不挂 = 不追）
+
+    怎么定门槛：原 normal 是 0.50、strong 是 0.80（且要求放量大阳）。删掉分级后
+    「只留 normal」= 门槛 0.50。全样本实测支持这个取法 —— 121 条 A 股突破单里
+    strong **一次都没触发**（`BO_NEAR_STRONG` 四个取值结果一字不差），分级本身
+    没产生信息；而把门槛直接放到 0.80 会把 0.50–0.80 那一带整片放进来，那一带
+    是**负贡献**（突破预案单 T+0 净账户从 +0.029% 稀释到 +0.008%/笔）。
+
+    所以按轨道拆开，与 `BREAK_DMAX_ASH/US` 同一套写法：
+      profile="ash" → 0.50（有 T+1 隔夜风险，只接贴得极近的）
+      profile="us"  → 0.80（T+0 可当日出，容许远一点；SDGR 原型距 0.64×ATR 靠它保住）
 
     返回 None = 上方无 K（key_break_level 判无候选）。
     """
@@ -866,28 +969,24 @@ def breakout_preorder(bars, atr_v, last_c, profile="us"):
     kb = key_break_level(bars, atr_v, last_c)
     if not kb:
         return None
+    near = BO_NEAR_ASH if profile == "ash" else BO_NEAR_US
     K, dist = kb["level"], kb["dist_atr"]
+    if dist > near:
+        return {"grade": "far", "K": K, "kind": kb["kind"], "dist_atr": dist}
     last = bars[-1]
     prev20 = bars[-21:-1]
     av20 = (sum(b["v"] for b in prev20) / len(prev20)) if prev20 else 0.0
     vol_rel = (last["v"] / av20) if av20 else 0.0
     body_atr = abs(last["c"] - last["o"]) / atr_v
-    big_yang = body_atr >= BO_BODY_ATR and vol_rel >= BO_VOL_REL
-    if dist <= BO_NEAR_STRONG and big_yang:
-        grade = "strong"
-    elif dist <= BO_NEAR_NORMAL:
-        grade = "normal"
-    else:
-        return {"grade": "far", "K": K, "kind": kb["kind"], "dist_atr": dist}
     dmax = BREAK_DMAX_ASH if profile == "ash" else BREAK_DMAX_US
     trig = round(K + BREAK_BUF_ATR * atr_v, 2)
     stop = round(K - BREAK_STOP_ATR * atr_v, 2)
     tgt = near_resistance(bars, K, atr_v)
     if tgt is None:
         tgt = round(K + BO_TGT_ATR * atr_v, 2)
-    return {"grade": grade, "K": K, "kind": kb["kind"], "dist_atr": dist,
+    return {"grade": "normal", "K": K, "kind": kb["kind"], "dist_atr": dist,
             "vol_rel": round(vol_rel, 2), "body_atr": round(body_atr, 2),
-            "big_yang": bool(big_yang), "trigger": trig, "stop": stop,
+            "trigger": trig, "stop": stop,
             "risk": round(trig - stop, 2), "target": tgt,
             "cap": round(K + dmax * atr_v, 2)}
 
@@ -1038,8 +1137,8 @@ def probe_us(sym, account=5000, min_scale=5, until=None, date=None):
                   f"（不挂 = 不追，等它回来或次日再看）")
             out["breakout_preorder"] = bo
         else:
-            g = ("★ 强 —— 放量大阳贴在前高下" if bo["grade"] == "strong"
-                 else "○ 贴得近 —— 开盘即可触及（非大阳日）")
+            g = (f"○ 距前高 {bo['dist_atr']:.2f}×ATR（≤{BO_NEAR_US:.2f}）"
+                 f"—— 开盘即可触及")
             n = us_lots(account, bo["trigger"], bo["stop"])
             print(f"  setup   : {g}")
             print(f"  K       : {bo['K']:.2f}（{bo['kind']}）"
@@ -1152,7 +1251,7 @@ def probe_us(sym, account=5000, min_scale=5, until=None, date=None):
         cap_px = op + CHASE_ATR * atr_v
         c2, c3, c4 = True, amp <= amp_max, trigger <= cap_px
         print(f"  [2 量能突变] ✓ {mins[i]['d'][11:16]} 量 {mins[i]['v']:,.0f} 股"
-              f" = 此前最大 {pm:,.0f} 股的 {ratio:.1f} 倍"
+              f" = 前 {BURST_MA_BARS} 根均量 {pm:,.0f} 股的 {ratio:.1f} 倍"
               f"{'' if fresh else f'  ⚠ 已过去 {len(mins) - 1 - i} 根，信号过期'}")
         print(f"  [3 蓄势位置] {'✓' if c3 else '✗'} 启动前振幅 {amp * 100:.2f}% "
               f"{'≤' if c3 else '>'} {amp_max * 100:.2f}%"
