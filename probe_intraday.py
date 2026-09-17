@@ -22,6 +22,7 @@ from rule123 import (  # noqa: E402
     bars_from_us, bars_from_em_us, bars_from_yahoo_min, stop_plan, pivots,
     key_break_level,
 )
+from account_config import load_account_config  # noqa: E402
 
 UA = {"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn/"}
 BURST_MA_BARS = 5      # 量能突变基准 = 前 N 根均量（老罗 2026-09-17 改定义）
@@ -29,20 +30,21 @@ BURST_MULT = 2.0       # 量能突变：当根 >= 前 BURST_MA_BARS 根均量 x 
 BURST_AFTER = "10:00"  # 时间窗下沿
 PRE_AMP_MAX = 0.025    # 启动前当日振幅上限
 CHASE_ATR = 1.0        # 触发价 <= 开盘 + 1.0xATR
-ASH_RISK_PCT = 0.015   # A 股单笔风险预算 = 账户 1.5%（与美股 us_lots 同口径）
 ASH_LOT_MAIN = 100     # 主板 60/00、创业板 300/301
 ASH_LOT_STAR = 200     # 科创板 688/689
 
-# ── 组合层仓位（老罗 2026-09-17 定）──
+# ── 账户 / 组合层仓位（人与钱 → env / .env；策略常数仍写死）──
 # 旧的「账户 × 30%」单笔仓位闸门已移除（老罗 2026-09-17：单笔不超过 5 万即可），
 # 单笔上限统一由绝对额 ASH_SINGLE_ABS 控制。注意代价：止损越紧，风险预算法给的
 # 股数越大，失去百分比闸门后仓位会显著变重（止损 0.46×ATR 的票可吃掉 ~88% 账户）。
 # 其上再叠一层「总仓位」约束：以前只约束单笔，多笔叠加无人管（4 笔各 28% = 112%）。
-ASH_PRIMARY = 50000    # 主力额度：常规建仓只用它
-ASH_RESERVE = 50000    # 备用额度：只在主力层已满、且信号够格时启用
-ASH_TOTAL = ASH_PRIMARY + ASH_RESERVE
-ASH_SINGLE_ABS = 50000 # 单笔绝对额硬顶（老罗：「单笔最好不要过五万」）—— 已取代 30% 闸门
-ASH_RESERVE_TIER = "突破预案单"   # 唯一够格动用备用的信号（全样本唯一净账户为正的那个）
+_CFG = load_account_config()
+ASH_RISK_PCT = _CFG["ash_risk_pct"]
+ASH_PRIMARY = _CFG["ash_primary"]
+ASH_RESERVE = _CFG["ash_reserve"]
+ASH_TOTAL = _CFG["ash_total"]
+ASH_SINGLE_ABS = _CFG["ash_single_abs"]
+ASH_RESERVE_TIER = "突破预案单"   # 唯一够格动用备用的信号（策略档位，不进 env）
 
 
 def _get(url, gbk=False):
@@ -87,7 +89,7 @@ def vol_bursts(mins):
     成绩反而更差）—— 根因不是倍数，是基准选错了。
 
     换均量后基准随行情漂移，与「开盘那根最大量」解耦：同样 2.0 倍门槛下
-    触发率回到可用区间（见 `盘中通道回测验证.md`）。
+    触发率回到可用区间（回测见 README「回测结论」）。
 
     返回第三项是**基准量**（旧口径下是此前最大量），调用方只用于打印。
     """
@@ -1025,12 +1027,11 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
 #                 「先手 ≤ 账户 30%（T+1 跌停 −3% 倒推）」在美股不成立，
 #                 改用风险预算法：股数 = 账户 × 1.5% / (入场 − 止损)。
 #   2. 无涨跌停  → 单日缺口不受限，「最坏单日亏损」无法用跌幅比例封顶，
-#                 只能靠硬止损 + 仓位上限（50%）双重约束。
+#                 只能靠硬止损 + 账户全额上限双重约束（无额外 50% 比例闸门）。
 #   3. 时段错配  → 盘中 = 北京 21:30–04:00，盘前 = 北京 16:00–21:30（正好是白天）。
 #                 故美股多一条 A 股没有的「盘前通道」。
 # ============================================================
-US_RISK_PCT = 0.015        # 单笔风险预算 = 账户 1.5%
-US_MAX_POS = 0.50          # 单笔仓位上限（无涨跌停 → 靠止损而非跌幅兜底）
+US_RISK_PCT = _CFG["us_risk_pct"]
 US_PRE_BJ = 16 * 60        # 北京 16:00 = 美东 04:00（盘前开始，夏令时）
 US_OPEN_BJ = 21 * 60 + 30  # 北京 21:30 = 美东 09:30
 US_CLOSE_BJ = 4 * 60       # 北京 04:00 = 美东 16:00
@@ -1206,20 +1207,25 @@ def bo_gap_cancel(open_px, bo, atr_v):
     return None
 
 
-def us_lots(account, entry, stop, risk_pct=US_RISK_PCT, max_pct=US_MAX_POS):
+def us_lots(account, entry, stop, risk_pct=US_RISK_PCT):
     """T+0 风险预算法定股数（美股最小 1 股，无 100 股整手约束）。
 
-    股数 = 账户 × risk_pct / 每股风险，再用「账户 × max_pct / 价格」夹上限。
+    股数 = 账户 × risk_pct / 每股风险，再用「账户 / 价格」夹上限。
+    无额外单笔比例闸门：只要买得起（不超过账户全额）即可。
     """
     if not account or not entry or stop is None or entry <= stop:
         return None
+    cap = int(account / entry)
+    if cap < 1:
+        return None
     n = int(account * risk_pct / (entry - stop))
-    cap = int(account * max_pct / entry)
-    return max(min(n, cap), 1)
+    return min(max(n, 1), cap)
 
 
-def probe_us(sym, account=5000, min_scale=5, until=None, date=None):
+def probe_us(sym, account=None, min_scale=5, until=None, date=None):
     """美股版：收盘后预案 + 盘前通道 + 盘中量能突变（T+0 口径）。"""
+    if account is None:
+        account = _CFG["us_account"]
     sym = sym.upper().strip()
     phase, ref_date = us_phase()
     bars, spot, meta = bars_from_us(sym)
@@ -1274,7 +1280,7 @@ def probe_us(sym, account=5000, min_scale=5, until=None, date=None):
         print(f" note       : {plan['note']}")
     print(f" 口径       : T+0 可当日进出 ｜ 无涨跌停（硬止损兜底）｜ 单笔风险预算"
           f" {US_RISK_PCT * 100:.1f}%（${account * US_RISK_PCT:,.0f}）｜ 仓位上限"
-          f" {US_MAX_POS * 100:.0f}%")
+          f" 账户全额 ${account:,.0f}（无额外比例闸门）")
 
     out = {"code": sym, "market": "US", "session": sess or phase,
            "as_of": meta.get("as_of"), "last_date": last["d"], "last": last["c"],
@@ -1321,7 +1327,7 @@ def probe_us(sym, account=5000, min_scale=5, until=None, date=None):
         if n:
             print(f"  数量    : {n} 股 = ${n * limit:,.0f}"
                   f"（账户 ${account:,} 的 {n * limit / account * 100:.1f}%，"
-                  f"上限 {US_MAX_POS * 100:.0f}%）")
+                  f"上限=账户全额）")
             if hard is not None:
                 print(f"  最大亏损: ${n * (limit - hard):,.0f}"
                       f"（账户 {n * (limit - hard) / account * 100:.2f}%，"
@@ -1365,7 +1371,7 @@ def probe_us(sym, account=5000, min_scale=5, until=None, date=None):
                 risk_amt = n * (bo["trigger"] - bo["stop"])
                 print(f"  数量    : {n} 股 = ${n * bo['trigger']:,.0f}"
                       f"（账户 ${account:,} 的 {n * bo['trigger'] / account * 100:.1f}%，"
-                      f"上限 {US_MAX_POS * 100:.0f}%）")
+                      f"上限=账户全额）")
                 print(f"  最大亏损: ${risk_amt:,.0f}"
                       f"（账户 {risk_amt / account * 100:.2f}%）")
             rr = (bo["target"] - bo["trigger"]) / max(bo["trigger"] - bo["stop"], 1e-9)
@@ -1659,13 +1665,14 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("codes", nargs="+")
     ap.add_argument("--qty", type=int, default=None, help="计划总股数")
-    ap.add_argument("--account", type=int, default=50000)
+    ap.add_argument("--account", type=int, default=_CFG["ash_account"],
+                    help="A 股账户（默认 ASH_ACCOUNT / .env / 50000）")
     ap.add_argument("--asof", default=None, help="回放日期 YYYY-MM-DD")
     ap.add_argument("--min-scale", type=int, default=5)
     ap.add_argument("--replay", action="store_true", help="强制按盘中口径回放")
     ap.add_argument("--until", default=None, help="截断到 HH:MM（模拟当时时点）")
-    ap.add_argument("--us-account", type=int, default=5000,
-                    help="美股账户美元（默认 5000，按风险预算定股数）")
+    ap.add_argument("--us-account", type=int, default=_CFG["us_account"],
+                    help="美股账户美元（默认 US_ACCOUNT / .env / 5000）")
     ap.add_argument("--date", default=None,
                     help="回放指定交易日 YYYY-MM-DD（美股；只用该日之前的日线定结构）")
     a = ap.parse_args()

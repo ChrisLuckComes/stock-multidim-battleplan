@@ -921,10 +921,9 @@ def test_channel_a_uses_ma_baseline():
 
 
 def test_ash_portfolio_gate():
-    """组合层闸门：主力 5 万 + 备用 5 万 + 单笔硬顶 5 万（老罗 2026-09-17）。"""
+    """组合层闸门：主力 + 备用 + 单笔硬顶（额度来自 account_config / 默认值）。"""
     import probe_intraday as P
-    assert (P.ASH_PRIMARY, P.ASH_RESERVE, P.ASH_TOTAL, P.ASH_SINGLE_ABS) == \
-        (50000, 50000, 100000, 50000)
+    assert P.ASH_TOTAL == P.ASH_PRIMARY + P.ASH_RESERVE
     assert P.ASH_SINGLE_ABS >= P.ASH_PRIMARY, "单笔硬顶不该小于主力额度"
 
     # ① 额度充裕 → 放行，归主力层
@@ -933,27 +932,29 @@ def test_ash_portfolio_gate():
     assert g["lots"] == 1000 and g["amt"] == 20000.0, g
 
     # ② 主力层已满 + 普通信号 → 拒绝，并说清备用不够格动
-    g = P.ash_portfolio_gate("600519", 20.0, 1000, held_amt=50000.0)
+    g = P.ash_portfolio_gate("600519", 20.0, 1000, held_amt=float(P.ASH_PRIMARY))
     assert not g["allowed"], g
     assert P.ASH_RESERVE_TIER in g["reason"], g
 
     # ③ 主力层已满 + 够格信号 → 可动备用
-    g = P.ash_portfolio_gate("600519", 20.0, 1000, held_amt=50000.0,
+    g = P.ash_portfolio_gate("600519", 20.0, 1000, held_amt=float(P.ASH_PRIMARY),
                              use_reserve=True)
     assert g["allowed"] and g["layer"] == "reserve", g
 
-    # ④ 总仓位 10 万已满 → 拒绝
-    g = P.ash_portfolio_gate("600519", 20.0, 1000, held_amt=100000.0,
+    # ④ 总仓位已满 → 拒绝
+    g = P.ash_portfolio_gate("600519", 20.0, 1000, held_amt=float(P.ASH_TOTAL),
                              use_reserve=True)
     assert not g["allowed"] and "总仓位" in g["reason"], g
 
     # ⑤ 剩余额度买不到 1 手 → 必须说清是「额度」不够，不是规则不让买
-    g = P.ash_portfolio_gate("600519", 2000.0, 100, held_amt=48000.0)
+    near_full = float(P.ASH_PRIMARY) - 2000.0
+    g = P.ash_portfolio_gate("600519", 2000.0, 100, held_amt=near_full)
     assert not g["allowed"] and "买不到 1 手" in g["reason"], g
 
-    # ⑥ 单笔绝对额硬顶：额度再充裕也不越过 5 万
+    # ⑥ 单笔绝对额硬顶：额度再充裕也不越过硬顶
     g = P.ash_portfolio_gate("600519", 10.0, 99999, held_amt=0.0)
-    assert g["amt"] <= P.ASH_SINGLE_ABS and g["lots"] == 5000, g
+    expect_lots = int(P.ASH_SINGLE_ABS // 10)
+    assert g["amt"] <= P.ASH_SINGLE_ABS and g["lots"] == expect_lots, g
 
     # ⑦ 科创板：200 股起，超出部分 1 股递增（201 合法）；不足 200 则买不到
     g = P.ash_portfolio_gate("688981", 60.0, 201, held_amt=0.0)
@@ -1124,6 +1125,41 @@ def test_ma_anchor_trend_gate():
     assert ma_anchor_trend_ok(up, {"regime": "mixed"}, dem_up) is True
 
 
+def test_us_lots_account_cap_only():
+    """美股无比例上限：风险股数可吃满账户，买不起 1 股则 None。"""
+    from probe_intraday import us_lots
+    # 止损很紧 → 风险法给很多股，但天花板 = 账户/价
+    n = us_lots(5000, 25.0, 24.9, risk_pct=0.015)
+    assert n == 200, n  # 5000/25
+    assert us_lots(5000, 6000.0, 5900.0) is None
+    # 止损宽 → 风险法股数更小，不受旧 50% 砍半
+    n2 = us_lots(5000, 20.0, 18.0, risk_pct=0.015)
+    # risk: 5000*0.015/(2)=37；cap=250；→ 37（旧 50% 会 cap 到 125，但不砍到一半风险单）
+    assert n2 == 37, n2
+
+
+def test_account_config_env_override():
+    """人与钱走 env；未设时回落到 DEFAULTS。"""
+    import os
+    from account_config import DEFAULTS, load_account_config
+
+    c0 = load_account_config(dotenv=False)
+    assert c0["ash_primary"] == DEFAULTS["ash_primary"]
+    assert c0["ash_total"] == c0["ash_primary"] + c0["ash_reserve"]
+
+    old = os.environ.get("ASH_PRIMARY")
+    try:
+        os.environ["ASH_PRIMARY"] = "80000"
+        c1 = load_account_config(dotenv=False)
+        assert c1["ash_primary"] == 80000
+        assert c1["ash_total"] == 80000 + c1["ash_reserve"]
+    finally:
+        if old is None:
+            os.environ.pop("ASH_PRIMARY", None)
+        else:
+            os.environ["ASH_PRIMARY"] = old
+
+
 if __name__ == "__main__":
     test_yizi_not_gap_yang()
     test_true_yizi_uses_prev_close()
@@ -1178,4 +1214,6 @@ if __name__ == "__main__":
     test_vp_regime_ma5_reclaim()
     test_vp_regime_needs_full_window()
     test_ma_anchor_trend_gate()
+    test_us_lots_account_cap_only()
+    test_account_config_env_override()
     print("ok")

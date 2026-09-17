@@ -12,3 +12,4 @@ data_n/
 cache/
 bt_early.txt
 run.log
+.env
