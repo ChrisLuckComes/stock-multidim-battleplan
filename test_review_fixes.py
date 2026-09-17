@@ -176,6 +176,65 @@ def test_gap_breakout_zone_above_gap():
     assert sp["hard"] < z["primary_lo"]
 
 
+def test_hard_stop_widens_out_of_noise_band():
+    """硬止损落进单日噪声带（距买区下沿 < 0.25×ATR）时，让位给同族更宽的合法锚。
+
+    实证：INTC 2026-09-17 盘中突破，买区 107.57-113.53，大阳中点算出硬止损 107.32
+    —— 距买区下沿仅 0.04×ATR，比当日振幅（1.05×ATR）还窄，等于没有止损。
+    用户当时正准备隔夜建仓（「无法盯盘到常规时间结束，要睡觉了」），若不换锚，
+    他会以为有保护，实际一次正常波动就被扫。铁律一/二不变：数值仍恒 = 锚价 − gap，
+    仍落在买区下沿之下，只是不选那条塞在噪声带里的锚。
+    """
+    bars = [_bar("2026-01-01", 104.78, 111.14, 104.70, 111.06, 5e7)]
+    atr_v = 5.96
+    z = {
+        "level": 107.57,
+        "primary_lo": 107.57,
+        "primary_hi": 113.53,
+        "anchor": "platform_lip",
+        "ma5": 101.88,
+    }
+    sp = stop_plan(bars, "platform_break", z, atr_v)
+    assert sp["hard_anchor"] == "阳线下沿", sp
+    assert abs(sp["hard"] - (104.70 - 0.10 * atr_v)) < 0.011, sp
+    assert sp["hard"] < z["primary_lo"], sp
+    assert sp["hard_dist_atr"] >= 0.25, sp
+    assert sp["hard_noise"] is False, sp
+    assert sp.get("hard_note"), "换锚必须留痕，不许静默改锚"
+
+
+def test_tight_stop_flagged_when_no_wider_anchor():
+    """同族没有更宽合法锚时不许硬凑宽度 —— 但必须如实标 hard_noise。
+
+    跳空光脚大阳（SKILL:101 防守仍是大阳低点）：买区已被缺口抬到 125，硬止损
+    124.75 距买区下沿只有 0.10×ATR。这是形态本身决定的，不编造第三个锚，
+    而是在输出里把「名义止损≈没有」标出来。
+    """
+    bars = [_bar(f"2026-07-{i + 1:02d}", 112.5, 113.0, 112.0, 112.5, 1e6) for i in range(30)]
+    bars.append(_bar("2026-08-25", 125.0, 135.0, 125.0, 135.0, 8e6))
+    atr_v = atr14(bars)
+    z = zone_at_level(112.5, atr_v, 135.0, "平台突破(优先T1)", {}, bars)
+    sp = stop_plan(bars, "platform_break", z, atr_v)
+    assert sp["hard_anchor"] == "阳线下沿", sp
+    assert sp["hard_noise"] is True, sp
+
+
+def test_stop_plan_carries_exec_semantics():
+    """两档止损必须自带执行口径：哪条腿不用盯盘、哪条腿要盯盘/条件单。
+
+    用户侧硬约束：不能盯整场 + 券商不支持挂止损单。输出若只给两个价，会让人以为
+    硬止损随时生效（2026-09-18 用户原话「我无法盯盘到常规时间结束，要睡觉了」）。
+    """
+    bars = [_bar("2026-01-01", 100.5, 106.0, 100.4, 105.5, 3e6)]
+    atr_v = 2.0
+    z = zone_at_level(100.0, atr_v, 105.5, "平台突破(优先T1)", {}, bars)
+    sp = stop_plan(bars, "platform_break", z, atr_v)
+    assert "收盘" in sp["struct_exec"] and "盯盘" in sp["struct_exec"], sp
+    assert "盯盘" in sp["hard_exec"] and "不可执行" in sp["hard_exec"], sp
+    assert isinstance(sp["hard_dist_atr"], float), sp
+    assert isinstance(sp["hard_noise"], bool), sp
+
+
 def test_breakout_zone_not_below_level():
     """突破买区不得落在「还没突破」的区域：下沿 ≥ 突破位。"""
     bars = [_bar(f"2026-07-{i + 1:02d}", 100, 100.4, 99.6, 100.0, 1e6) for i in range(40)]
@@ -1267,6 +1326,9 @@ if __name__ == "__main__":
     test_stop_plan_long_yang_keeps_mid_anchor_name()
     test_hard_stop_name_matches_value()
     test_gap_breakout_zone_above_gap()
+    test_hard_stop_widens_out_of_noise_band()
+    test_tight_stop_flagged_when_no_wider_anchor()
+    test_stop_plan_carries_exec_semantics()
     test_breakout_zone_not_below_level()
     test_too_far_gate()
     test_breakout_zone_starts_at_level()

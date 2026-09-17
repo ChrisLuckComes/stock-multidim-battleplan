@@ -1534,6 +1534,16 @@ HARD_STOP_TRIGGER = (
     "1–2分钟收回且非放量加速阴→当毛刺"
 )
 
+# 硬止损距买区下沿不足这么多 ATR 时，等于把止损塞进单日噪声带：名义上有止损，
+# 实际一次正常波动就被扫掉。此时若同族还有**更宽**的合法锚，降级过去（2026-09-18）。
+NOISE_ROOM_ATR = 0.25
+
+# 两档止损的执行口径。用户侧约束：不能盯整场 + 券商不支持条件单时，「盘中轨」根本
+# 执行不了 —— 必须让输出自己说清楚哪条腿不需要盯盘，别让人以为有保护。
+STRUCT_EXEC = "收盘口径 — 不需要盯盘：次日开盘/晨起按收盘价判定，收盘破即走"
+HARD_EXEC = ("盘中口径 — 需要盯盘或券商条件单；两者都没有时此腿不可执行，"
+             "届时保护只剩收盘轨（应改用更低限价买入，用买价替代止损）")
+
 # SKILL 硬止损锚名；禁止静默改写成「买区下沿」
 SKILL_HARD_ANCHORS = ("阳线下沿", "大阳中点", "MA5", "缺口下沿")
 
@@ -1564,9 +1574,17 @@ def stop_plan(bars, mode, z, atr_v):
     def _resolve(cands):
         """cands 已按 SKILL 优先级排序 [(锚名, 锚价)]。
         取第一个「锚价 − gap < 买区下沿」的锚；数值恒 = 锚价 − gap。
-        返回 (锚名, 锚价, hard, warning)。
+        返回 (锚名, 锚价, hard, warning, hard_note)。
+
+        2026-09-18：在「已通过」的锚里，若首选那条距买区下沿 < NOISE_ROOM_ATR×ATR
+        （止损被塞进单日噪声带，名义有止损、实际等于没有），且同族存在**更宽**的合法锚，
+        就降级到更宽那条。铁律一不变（数值恒 = 该锚价 − gap）、铁律二不变（仍在买区下沿
+        之下），只是把「先到先得」换成「噪声带内让位给更宽的合法锚」。
+        触发场景：突破后隔夜/次日入场 —— 买区已上移，大阳中点算出的止损只距沿 0.03×ATR，
+        等于没有止损（INTC 2026-09-17 实例）。
         """
         first = None
+        ok = []
         for name, px in cands:
             if px is None:
                 continue
@@ -1574,18 +1592,32 @@ def stop_plan(bars, mode, z, atr_v):
             if first is None:
                 first = (name, px, h)
             if h < buy_lo:
-                return name, px, h, None
+                ok.append((name, px, h))
+        if ok:
+            name, px, h = ok[0]
+            room = buy_lo - h
+            if room >= NOISE_ROOM_ATR * atr_v or len(ok) == 1:
+                return name, px, h, None, None
+            wname, wpx, wh = min(ok, key=lambda t: t[2])
+            if wname == name:
+                return name, px, h, None, None
+            return wname, wpx, wh, None, (
+                f"首选锚 {name}@{round(px, 2)} − gap 得硬止损 {round(h, 2)}，距买区下沿 "
+                f"{round(buy_lo, 2)} 仅 {round(room / atr_v, 2)}×ATR（落在单日噪声带内）"
+                f"→ 按同族合法锚降级到更宽的 {wname}@{round(wpx, 2)}，硬止损 "
+                f"{round(wh, 2)}（距买区下沿 {round((buy_lo - wh) / atr_v, 2)}×ATR）"
+            )
         if first is None:
-            return None, None, None, None
+            return None, None, None, None, None
         name, px, h = first
         return name, px, h, (
             f"SKILL 合法锚（{' / '.join(str(c[0]) for c in cands)}）中最低的 "
             f"{name}@{round(px, 2)} − gap = {round(h, 2)}，仍不低于买区下沿 "
             f"{round(buy_lo, 2)}；买区与止损锚冲突 —— 已把买区下沿上抬到硬止损之上"
             f"（可执行价位以 primary_lo 为准）"
-        )
+        ), None
 
-    def _finish(struct_name, struct, hard_name, hard, warn):
+    def _finish(struct_name, struct, hard_name, hard, warn, note=None):
         if hard is None:
             return None
         if warn:
@@ -1598,13 +1630,21 @@ def stop_plan(bars, mode, z, atr_v):
             z["primary_lo"], z["primary_hi"] = new_lo, hi
             z["buy_lo_adjusted"] = True
             z["in_zone"] = bool(new_lo <= last_c <= hi)
+        lo_now = z.get("primary_lo")
+        room = (lo_now - hard) if lo_now is not None else None
         out = {
             "struct_anchor": struct_name,
             "struct": round(struct, 2),
             "hard_anchor": hard_name,
             "hard": round(hard, 2),
             "trigger": HARD_STOP_TRIGGER,
+            "struct_exec": STRUCT_EXEC,
+            "hard_exec": HARD_EXEC,
+            "hard_dist_atr": round(room / atr_v, 2) if room is not None else None,
+            "hard_noise": bool(room is not None and room < NOISE_ROOM_ATR * atr_v),
         }
+        if note:
+            out["hard_note"] = note
         if z.get("stop_warning"):
             out["warning"] = z["stop_warning"]
         return out
@@ -1622,28 +1662,29 @@ def stop_plan(bars, mode, z, atr_v):
                 # 锚名归一到 MA5 时，锚价必须同步换成 MA5，否则名值又对不上
                 hard_name = "MA5"
                 anchor_px = z.get("ma5") if z.get("ma5") is not None else level
-        name, px, hard, warn = _resolve([(hard_name, anchor_px)])
+        name, px, hard, warn, note = _resolve([(hard_name, anchor_px)])
         return _finish(struct_name, px if px is not None else anchor_px,
-                       name or hard_name, hard, warn)
+                       name or hard_name, hard, warn, note)
 
     if mode == "impulse_pause":
         floor = level
         if z.get("yi_zi"):
-            name, px, hard, warn = _resolve([("缺口下沿", floor)])
-            return _finish("缺口下沿/前收(收盘破)", floor, name or "缺口下沿", hard, warn)
-        name, px, hard, warn = _resolve([("阳线下沿", floor)])
-        return _finish("大阳低点(收盘破)", floor, name or "阳线下沿", hard, warn)
+            name, px, hard, warn, note = _resolve([("缺口下沿", floor)])
+            return _finish("缺口下沿/前收(收盘破)", floor, name or "缺口下沿", hard, warn, note)
+        name, px, hard, warn, note = _resolve([("阳线下沿", floor)])
+        return _finish("大阳低点(收盘破)", floor, name or "阳线下沿", hard, warn, note)
 
     # 平台 / W底 / 旗形 / 下降趋势线突破
     struct = round(level, 2)
     struct_name = f"{ANCHOR_LABEL.get(z.get('anchor'), z.get('anchor') or '突破位')}@{struct}(收盘破)"
     if long_yang:
-        # SKILL:198 长阳用中点；若中点算出的止损落进买区，按同族合法锚降级到阳线下沿
+        # SKILL:198 长阳用中点；若中点算出的止损落进买区、或落进单日噪声带（距买区下沿
+        # < NOISE_ROOM_ATR×ATR，等于没有止损），按同族合法锚降级到阳线下沿
         cands = [("大阳中点", (y["h"] + y["l"]) / 2.0), ("阳线下沿", y["l"])]
     else:
         cands = [("阳线下沿", y["l"])]
-    name, px, hard, warn = _resolve(cands)
-    return _finish(struct_name, struct, name or cands[0][0], hard, warn)
+    name, px, hard, warn, note = _resolve(cands)
+    return _finish(struct_name, struct, name or cands[0][0], hard, warn, note)
 
 
 def targets(bars, mode, z, atr_v, entry, Hs):
@@ -1690,6 +1731,15 @@ def attach_stops_targets(plan, bars, atr_v, Hs):
         z["hard_trigger"] = sp["trigger"]
         z["invalidation"] = sp["struct"]  # 兼容：结构止损
         z["hard"] = sp["hard"]
+        # 执行口径与噪声带标记（2026-09-18）：让「哪条腿不需要盯盘」随买区一路带出去，
+        # 否则 CLI/报表只有一个价，用户会以为硬止损随时生效。
+        z["struct_exec"] = sp["struct_exec"]
+        z["hard_exec"] = sp["hard_exec"]
+        z["hard_dist_atr"] = sp["hard_dist_atr"]
+        z["hard_noise"] = sp["hard_noise"]
+        if sp.get("hard_note"):
+            z["hard_note"] = sp["hard_note"]
+            plan["hard_note"] = sp["hard_note"]
         if sp.get("warning"):
             z["stop_warning"] = sp["warning"]
             plan["stop_warning"] = sp["warning"]

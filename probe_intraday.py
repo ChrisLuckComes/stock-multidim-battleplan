@@ -644,7 +644,13 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
             print(f"  金额    : {n * limit:,.0f} 元"
                   f"（账户 {account:,} 的 {n * limit / account * 100:.1f}%，"
                   f"单笔硬顶 {ash_single_cap(account):,.0f} 元）")
-        print(f"  止损    : 结构={defend}（收盘破） / 硬={hard}（盘中破即走）")
+        print(f"  止损    : 结构={defend}（收盘破 · 不用盯盘） / 硬={hard}（盘中触价 · 需盯盘或条件单）")
+        if z.get("hard_note"):
+            print(f"  止损锚  : {z['hard_note']}")
+        elif z.get("hard_noise"):
+            print(f"  止损锚  : ⚠ 硬止损距买区下沿仅 {z.get('hard_dist_atr')}×ATR（噪声带内）—— 名义上有止损、等于没有，改用更低限价")
+        if z.get("struct_exec") or z.get("hard_exec"):
+            print(f"  离场纪律: {z.get('struct_exec')} ｜ {z.get('hard_exec')}")
         if t1 and isinstance(hard, (int, float)):
             risk, rew = limit - hard, t1 - limit
             rr_txt = f"{rew / risk:.2f}:1" if risk > 0 else "N/A"
@@ -1359,7 +1365,13 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None):
                 print(f"  最大亏损: ${n * (limit - hard):,.0f}"
                       f"（账户 {n * (limit - hard) / account * 100:.2f}%，"
                       f"预算 {US_RISK_PCT * 100:.1f}%）")
-        print(f"  止损    : 结构={defend}（收盘破） / 硬={hard}（T+0 → 盘中破即走，无需等次日）")
+        print(f"  止损    : 结构={defend}（收盘破 · 不用盯盘） / 硬={hard}（盘中触价 · 需盯盘或券商条件单）")
+        if z.get("hard_note"):
+            print(f"  止损锚  : {z['hard_note']}")
+        elif z.get("hard_noise"):
+            print(f"  止损锚  : ⚠ 硬止损距买区下沿仅 {z.get('hard_dist_atr')}×ATR（噪声带内）—— 名义上有止损、等于没有，改用更低限价")
+        if z.get("struct_exec") or z.get("hard_exec"):
+            print(f"  离场纪律: {z.get('struct_exec')} ｜ {z.get('hard_exec')}")
         if t1 and hard is not None:
             risk, rew = limit - hard, t1 - limit
             rr_txt = f"{rew / risk:.2f}:1" if risk > 0 else "N/A"
