@@ -178,6 +178,27 @@ def ash_lots(account, entry, stop, code,
     return n
 
 
+def ash_risk_warning(account, entry, stop, n, risk_pct=ASH_RISK_PCT):
+    """本笔实际风险超出 1.5% 预算时的警告文案；未超返回 None。
+
+    正常路径不会超（股数本就由预算算出再向下取整）。唯一的超预算来源是
+    `ash_lots` 的兜底分支：预算不足 1 手时仍退回给 1 手，否则小账户永远
+    建不了仓。旧的 30% 闸门会把这类票判成「结构性不可交易」挡掉，闸门移除后
+    它们全部放行 —— 只剩这行提示。按老罗 2026-09-17 的口径：只警告，不拦。
+    """
+    if not account or not n or not isinstance(stop, (int, float)):
+        return None
+    if not entry or entry <= stop:
+        return None
+    budget = account * risk_pct
+    risk = n * (entry - stop)
+    if not budget or risk <= budget:
+        return None
+    return (f"⚠ 超预算 : 本笔 {n} 股风险 {risk:,.0f} 元 = 账户 "
+            f"{risk / account * 100:.2f}%，达 {risk_pct * 100:.1f}% 预算的 "
+            f"{risk / budget:.1f} 倍 —— 最小申报单位所致，程序不拦，自行决定")
+
+
 def ash_price_ceiling(code, account, cap_amt=None):
     """单笔硬顶下的「最高可交易价」：超过它，第一手就超顶 → 结构性不可交易。
 
@@ -611,6 +632,9 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
         if n:
             print(f"  数量    : {n} 股（风险预算法 {ASH_RISK_PCT * 100:.1f}%，"
                   f"单笔硬顶 {ash_single_cap(account):,.0f} 元）")
+            _w = ash_risk_warning(account, limit, hard, n)
+            if _w:
+                print(f"  {_w}")
         else:
             lot = first_lot_of(code)
             print(f"  数量    : 不做 —— {no_ash_reason(code, account, limit)}")
@@ -683,6 +707,9 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
                     print(f"  数量    : {n} 股 = {n * bo['trigger']:,.0f} 元"
                           f"（账户 {account:,} 的 {n * bo['trigger'] / account * 100:.1f}%"
                           f"，风险预算法 {ASH_RISK_PCT * 100:.1f}%）")
+                    _w = ash_risk_warning(account, bo["trigger"], bo["stop"], n)
+                    if _w:
+                        print(f"  {_w}")
                     print(f"  最大亏损: {risk_amt:,.0f} 元"
                           f"（账户 {risk_amt / account * 100:.2f}%）")
                 else:
@@ -751,6 +778,9 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
                           f"，风险预算法 {ASH_RISK_PCT * 100:.1f}%）")
                     print(f"     止损 {stop:.2f}（启动前低点 {pre_l:.2f} −0.10×ATR，"
                           f"距买入 {risk_pct:.1f}%），最大亏 {n * (trigger - stop):,.0f} 元")
+                    _w = ash_risk_warning(account, trigger, stop, n)
+                    if _w:
+                        print(f"     {_w}")
                 else:
                     lot = first_lot_of(code)
                     print(f"     不做 —— {no_ash_reason(code, account, trigger)}")
@@ -853,6 +883,9 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
                               f"，风险预算法 {ASH_RISK_PCT * 100:.1f}%）"
                               f"   最大亏 {n * risk:,.0f} 元"
                               f"（账户 {n * risk / account * 100:.2f}%）")
+                        _w = ash_risk_warning(account, entry, stop_k, n)
+                        if _w:
+                            print(f"     {_w}")
                     else:
                         lot = first_lot_of(code)
                         print(f"     不做 —— {no_ash_reason(code, account, entry)}")
@@ -940,6 +973,9 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
                           f"，风险预算法 {ASH_RISK_PCT * 100:.1f}%）"
                           f"   最大亏 {n * risk:,.0f} 元"
                           f"（账户 {n * risk / account * 100:.2f}%）")
+                    _w = ash_risk_warning(account, entry, stop_c, n)
+                    if _w:
+                        print(f"     {_w}")
                 else:
                     lot = first_lot_of(code)
                     print(f"     不做 —— {no_ash_reason(code, account, entry)}")

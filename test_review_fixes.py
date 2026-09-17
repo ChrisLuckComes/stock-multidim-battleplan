@@ -724,6 +724,27 @@ def test_ash_structural_ceiling():
     assert "结构性不可交易" not in s3 and "硬约束" in s3
 
 
+def test_ash_risk_warning_on_min_lot_overshoot():
+    """1 手风险超 1.5% 预算时必须出警告（30% 闸门移除后唯一的兜底提示）。
+
+    200 元科创板最小 200 股，配 8% 止损 = 风险 3,200 元 = 账户 6.4%，
+    占预算 427%。旧闸门会判「结构性不可交易」挡掉，现在放行 —— 只警告不拦。
+    """
+    from probe_intraday import ash_risk_warning, ash_lots
+    n = ash_lots(50000, 200.0, 184.0, "688981")
+    assert n == 200, n                                  # 兜底给 1 手
+    w = ash_risk_warning(50000, 200.0, 184.0, n)
+    assert w and "超预算" in w and "6.40%" in w, w
+    assert "4.3 倍" in w, w
+    # 正常路径不得误报：股数由预算算出，必然不超
+    n2 = ash_lots(50000, 20.0, 19.0, "002961")
+    assert ash_risk_warning(50000, 20.0, 19.0, n2) is None
+    # 脏输入不得崩
+    assert ash_risk_warning(50000, 20.0, "收盘破19", 100) is None
+    assert ash_risk_warning(50000, 20.0, 21.0, 100) is None
+    assert ash_risk_warning(0, 20.0, 19.0, 100) is None
+
+
 def test_ash_lots_is_risk_based():
     """A 股仓位改用风险预算法（与美股 us_lots 同构）。
 
@@ -1110,6 +1131,7 @@ if __name__ == "__main__":
     test_breakout_preorder_grades()
     test_near_resistance_window()
     test_bo_gap_cancel()
+    test_ash_risk_warning_on_min_lot_overshoot()
     test_ash_lots_is_risk_based()
     test_ash_lots_min_lot_by_board()
     test_ash_structural_ceiling()
