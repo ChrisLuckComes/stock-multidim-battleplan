@@ -144,6 +144,43 @@ def zone_position_txt(c0, lo, hi):
     return f"基准日收 {c0:.2f} **已在买区 {lo}-{hi} 内** —— 不是「未到位」"
 
 
+def prehang_verdict(c0, low_bound, hi=None):
+    """A 股「可预挂性」判定：这张单能不能在开盘前挂好、然后去睡觉。
+
+    A 股券商只有限价单和市价单，**没有 buy-stop（止损买单）**。同花顺之类的
+    「条件单」是软件端辅助工具（需软件在线 + 券商支持），不是交易所原生能力。
+    因此买点相对现价的位置直接决定可行性：
+
+      · 可挂区间有部分落在现价**下方** → 限价单可隔夜预挂，价格落回来自动成交 ✓
+      · 整条可挂区间都在现价**上方**   → 限价挂出立即撮合（等于市价单+价格上限），
+                                          想「等上行触发」只能盯盘或条件单 ✗
+
+    判据必须基于**买区**而不是引擎打印的那个上限挂价：现价已在买区内时，
+    上沿挂价虽然高于现价，买区下沿却远在现价之下，照样可以预挂。
+    （老罗 2026-09-18 用康龙化成抓出这个误判：引擎给上沿 44.61 > 现价 43.75，
+    但买区下沿 42.33 在下方，实际完全可挂。）
+
+    参数
+      low_bound: 可买区间下沿（通常传硬止损；低于它买入＝开仓即止损）
+      hi       : 买区上沿；传 None 表示这是**单一触发价**（突破单）
+    """
+    if c0 is None or low_bound is None:
+        return None
+    if hi is None:
+        if low_bound < c0 * 0.999:
+            return (f"✓ 可预挂 —— 触发价 {low_bound:.2f} 在现价 {c0:.2f} 下方，"
+                    f"限价单可隔夜挂出，不用盯盘")
+        return (f"✗ 不可预挂 —— 触发价 {low_bound:.2f} 不低于现价 {c0:.2f}，"
+                f"限价挂出会立即成交（等于市价+价格上限）；"
+                f"要等价格上行触发只能用同花顺条件单（需软件在线）或盘中盯价")
+    top = min(hi, c0)
+    if low_bound < top:
+        return (f"✓ 可预挂 —— 可在 {low_bound:.2f}~{top:.2f} 挂限价单，"
+                f"隔夜有效、不用盯盘（挂得越低越等于「等回落」）")
+    return (f"✗ 不可预挂 —— 可挂区间 {low_bound:.2f}~{hi:.2f} 整体在现价 {c0:.2f} 上方，"
+            f"限价挂出会立即成交（等于市价+价格上限）")
+
+
 def ash_single_cap(account):
     """单笔金额上限 = min(账户, 单笔绝对额硬顶 5 万)。
 
@@ -626,6 +663,9 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
         print(f"  类型    : {kind}     模式 {plan['mode']}")
         print(f"  挂单    : 限价买 {limit:.2f}（买区 {lo}-{hi} 上沿）"
               f"{'  ⚠ 已被盈亏比闸门下压' if capped else ''}")
+        _ph = prehang_verdict(c0, hard if isinstance(hard, (int, float)) else lo, hi)
+        if _ph:
+            print(f"  可预挂  : {_ph}")
         if isinstance(hard, (int, float)):
             print(f"  有效买入区间: {hard} < 买入价 ≤ {limit:.2f} —— "
                   f"低于硬止损 {hard} 买入 = 开仓即止损，再便宜也不要")
@@ -708,6 +748,9 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
                       f"   距昨收 {bo['dist_atr']:.2f}×ATR")
                 print(f"  触发    : 站上 {bo['trigger']:.2f} 买入"
                       f"（K+{BREAK_BUF_ATR}×ATR）← 券商条件单，或盘中盯到这个价再下手")
+                _ph = prehang_verdict(basis[-1]["c"], bo["trigger"])
+                if _ph:
+                    print(f"  可预挂  : {_ph}")
                 print(f"  止损    : {bo['stop']:.2f}（K−{BREAK_STOP_ATR}×ATR）"
                       f"  ⚠ T+1：当天买了卖不掉，止损是**次日**口径")
                 if n:
