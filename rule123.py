@@ -1538,6 +1538,16 @@ HARD_STOP_TRIGGER = (
 # 实际一次正常波动就被扫掉。此时若同族还有**更宽**的合法锚，降级过去（2026-09-18）。
 NOISE_ROOM_ATR = 0.25
 
+# 噪声带只在**突破类**成立（2026-09-18 收尾）。分家的理由是可执行价不同：
+#   突破类：买区下沿 = 突破位本身，是真实成交价。硬止损塞在它下面 <0.25×ATR，
+#           就是「一次正常波动即扫」= 名义止损。
+#   回踩类（line_pullback / impulse_pause）：买区下沿只是理想成交价，实际成交在线上，
+#           主风控是**收盘破线**的结构止损；硬止损本就是 0.10×ATR 的毛刺滤网。
+#           用同一个阈值去量它，全市场 44 个候选里会误报 15 个（都是 line_pullback），
+#           警告随即退化成噪声。故回踩类只报 hard_dist_atr，不报 hard_noise。
+BREAKOUT_MODES = ("platform_break", "w_bottom_break",
+                  "flag_tl_break", "downtrend_tl_break")
+
 # 两档止损的执行口径。用户侧约束：不能盯整场 + 券商不支持条件单时，「盘中轨」根本
 # 执行不了 —— 必须让输出自己说清楚哪条腿不需要盯盘，别让人以为有保护。
 STRUCT_EXEC = "收盘口径 — 不需要盯盘：次日开盘/晨起按收盘价判定，收盘破即走"
@@ -1641,7 +1651,8 @@ def stop_plan(bars, mode, z, atr_v):
             "struct_exec": STRUCT_EXEC,
             "hard_exec": HARD_EXEC,
             "hard_dist_atr": round(room / atr_v, 2) if room is not None else None,
-            "hard_noise": bool(room is not None and room < NOISE_ROOM_ATR * atr_v),
+            "hard_noise": bool(room is not None and room < NOISE_ROOM_ATR * atr_v
+                               and mode in BREAKOUT_MODES),
         }
         if note:
             out["hard_note"] = note

@@ -72,6 +72,11 @@ def analyze(code, name, prefix):
     stop = sp.get("hard") or sp.get("struct") or z.get("hard_stop") or z.get("struct_stop") or z.get("invalidation")
     struct_stop = sp.get("struct") or z.get("struct_stop")
     hard_stop = sp.get("hard") or z.get("hard_stop")
+    # 预备突破单（buy-stop 埋伏）：与当日 mode 独立并存，先到先做。
+    # 全市场表里这一列比 buy_zone 更可执行 —— A 股用户盯不住盘中，只能靠挂单。
+    pb = plan.get("pre_breakout") or {}
+    if not pb:
+        pb = None
     # 候选：recommend 或 tier 结构信号
     c2, c3 = meta["c2"], meta["c3"]
     sma20 = meta["sma20"]
@@ -108,9 +113,16 @@ def analyze(code, name, prefix):
         hard_stop=hard_stop,
         hard_anchor=sp.get("hard_anchor") or z.get("hard_anchor"),
         stop_warning=sp.get("warning") or z.get("stop_warning"),
+        # 两档止损的「执行口径」字段：报表要能说清哪条腿不需要盯盘（2026-09-18）
+        struct_exec=sp.get("struct_exec") or z.get("struct_exec"),
+        hard_exec=sp.get("hard_exec") or z.get("hard_exec"),
+        hard_dist_atr=sp.get("hard_dist_atr") if sp.get("hard_dist_atr") is not None else z.get("hard_dist_atr"),
+        hard_noise=bool(sp.get("hard_noise") or z.get("hard_noise")),
         buy_lo_adjusted=bool(z.get("buy_lo_adjusted")),
         path=plan.get("path"), mode=plan.get("mode"), priority=plan.get("priority"),
         recommend=plan.get("recommend"),
+        verdict=plan.get("verdict"),
+        pre_breakout=pb,
         anchor=z.get("anchor"),
         vwap5=z.get("vwap5"), in_zone=z.get("in_zone"),
         chase_only=bool(z.get("chase_only")),

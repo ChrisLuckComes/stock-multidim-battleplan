@@ -219,6 +219,37 @@ def test_tight_stop_flagged_when_no_wider_anchor():
     assert sp["hard_noise"] is True, sp
 
 
+def test_pullback_tight_stop_is_not_noise_flagged():
+    """回踩类的紧硬止损是设计（毛刺滤网），不得按突破类口径报「硬止损贴噪声带」。
+
+    2026-09-18 收尾：拿真实全市场样本跑报表，44 个候选里 21 个被标红，其中 15 个是
+    line_pullback（锚=MA5，买区下沿≈线−0.05×ATR，硬止损=线−0.10×ATR）—— 用突破类的
+    「距买区下沿 <0.25×ATR」去量，回踩类几乎必然命中。警告一旦 1/3 命中率就退化成噪声，
+    人就不看了；而回踩类的主风控本来就是**收盘破线**的结构止损，不需要盯盘。
+
+    注意这是「按 mode 分口径」，不是把警告关掉 —— 同一几何换成突破类必须仍然报警。
+    """
+    bars = [_bar(f"2026-07-{i + 1:02d}", 100, 100.5, 99.5, 100.0, 1e6) for i in range(30)]
+    bars.append(_bar("2026-08-25", 100.2, 101.0, 100.0, 100.8, 1.5e6))
+    atr_v = atr14(bars)
+    ma5 = round(sum(b["c"] for b in bars[-5:]) / 5, 2)
+    z = {"level": ma5, "ma5": ma5, "anchor": None,
+         "primary_lo": round(ma5 - 0.05 * atr_v, 2),
+         "primary_hi": round(ma5 + 0.05 * atr_v, 2)}
+
+    sp = stop_plan(bars, "line_pullback", z, atr_v)
+    assert sp["hard_anchor"] == "MA5", sp
+    assert sp["hard_dist_atr"] < 0.25, sp
+    assert sp["hard_noise"] is False, "回踩类不得按突破类口径报噪声带"
+
+    # 同一几何、突破类：买区下沿就是成交价，必须如实报警
+    sp2 = stop_plan(bars, "platform_break", dict(z, anchor="platform_lip"), atr_v)
+    assert sp2["hard_dist_atr"] < 0.25, sp2
+    assert sp2["hard_noise"] is True, sp2
+    # 距离字段不因分家而丢失：回踩类也要能看到「距下沿多少 ATR」
+    assert sp["hard_dist_atr"] is not None
+
+
 def test_stop_plan_carries_exec_semantics():
     """两档止损必须自带执行口径：哪条腿不用盯盘、哪条腿要盯盘/条件单。
 
@@ -1315,6 +1346,108 @@ def test_intraday_bar_only_in_regular_session():
     assert merge_intraday_bar("600519", bars, {"session": "Open"}, "ASH")[1] is None
 
 
+def _report_row(**kw):
+    r = {
+        "code": "600000", "name": "测试股", "market": "sh", "regime": "uptrend",
+        "tier": "tier1", "spot": 105.0, "R1": 104.0, "platform": 104.5,
+        "support_lo": 104.8, "support_hi": 110.0,
+        "stop": 103.2, "struct_stop": 104.5, "hard_stop": 103.2,
+        "hard_anchor": "阳线下沿", "stop_warning": None,
+        "hard_dist_atr": 0.55, "hard_noise": False,
+        "chase_only": False, "intraday": False, "confirm_at": None,
+        "pre_breakout": None, "T1": 118.0, "T2": 130.0, "rvol": 1.8,
+        "dd_from_high": -1.2, "buy_type": "platform", "mode": "platform_break",
+        "candidate": True,
+    }
+    r.update(kw)
+    return r
+
+
+def test_report_renders_pre_breakout_and_two_tier_stop():
+    """扫描报表必须渲染预案单 / 两档止损执行口径 / 盘中口径（2026-09-18）。
+
+    CLI 和盘中入口连打了三轮 `pre_breakout`，HTML 报表一个字段都不显示 ——
+    而报表才是全市场扫描结果唯一的消费口，不渲染等于这三轮修复对扫描无效。
+    """
+    import importlib.util
+    import json
+    import os
+    import tempfile
+
+    root = Path(__file__).resolve().parent
+    spec = importlib.util.spec_from_file_location("scan_report",
+                                                 root / "scan_all" / "report.py")
+    rep = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rep)
+    # 不出网：图表用的日线直接用合成序列顶替
+    rep.sina_kline = lambda prefix, code, n=140: [      # noqa: E731
+        _bar(f"2026-08-{(i % 28) + 1:02d}", 100 + i * 0.1,
+             101 + i * 0.1, 99 + i * 0.1, 100.5 + i * 0.1) for i in range(60)]
+
+    pb = {
+        "order": "buy-stop", "anchor": "down_tl", "level": 105.4, "trigger": 106.68,
+        "hard_stop": 102.9, "risk_per_share": 3.78, "dist_atr": 0.31,
+        "line_from": "8/13高107.57→9/9高106.69", "triggered": True, "fill_px": 106.68,
+        "status": "已触发 → 该埋伏单已成交，按计划持有，不再回头等回踩",
+        "note": "下降趋势线（8/13高107.57→9/9高106.69）下移中",
+    }
+    rows = [
+        _report_row(code="600001", name="已触发股", pre_breakout=pb, intraday=True,
+                    confirm_at="尾盘（北京时间 03:45–04:00 / ET 15:45–16:00）",
+                    hard_noise=True, hard_dist_atr=0.08, tier="tier2"),
+        _report_row(code="600002", name="待挂单股", pre_breakout=dict(
+            pb, anchor=None, triggered=False, fill_px=None, status=None,
+            level=106.0, trigger=106.30)),
+    ]
+
+    old = os.getcwd()
+    with tempfile.TemporaryDirectory() as td:
+        os.makedirs(os.path.join(td, "scan_all"))
+        with open(os.path.join(td, "scan_all", "results.jsonl"),
+                  "w", encoding="utf-8") as f:
+            for r in rows:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        os.chdir(td)
+        try:
+            rep.main()
+            outdir = os.path.join(td, "output")
+            html = open(os.path.join(outdir, os.listdir(outdir)[0]),
+                        encoding="utf-8").read()
+        finally:
+            os.chdir(old)
+
+    # 表头两列必须存在，否则列数与行数不匹配（新增列最容易漏的一处）
+    assert "预案单<br>" in html
+    assert html.count("<th>") == 15, html.count("<th>")
+    assert html.count("</td>") == 2 * 15, html.count("</td>")
+    # 预案单一：触发价 / 挂法 / 风险都要落盘，且「已触发」要显式区别于挂单
+    assert "挂 106.68" in html, "预案单触发价没渲染"
+    assert "斜线 105.40" in html, "预案单挂法（斜线/平台沿）没渲染"
+    assert "已触发 @ 106.68" in html, "已触发的预案单必须显式声明是持仓而非挂单"
+    assert "不再是挂单，是持仓" in html
+    # 预案单二：未触发也要给出挂单价与距多少 ATR
+    assert "挂 106.30" in html
+    assert "尚未触发" in html and "不必市价追" in html
+    # 两档止损的执行口径（从 rule123 取常量，不在报表里另抄）
+    assert "结构止损：收盘口径" in html and "硬止损：盘中口径" in html
+    assert "结构 104.50（收盘破）" in html
+    assert "距下沿 0.08×ATR" in html
+    assert "硬止损贴噪声带" in html, "硬止损落进噪声带必须标红"
+    assert "压低买入价" in html, "噪声带正解是压买价，必须写在报表上"
+    # 盘中口径：盘中价非收盘价，必须给复核时点
+    assert "盘中·未收盘" in html
+    assert "尾盘（北京时间 03:45–04:00" in html
+    # 量能口径：RVOL 降级为参考，不得再暗示「低 RVOL = 假突破」
+    assert "仅参考" in html
+    assert "低 RVOL ≠ 假突破" in html or "低 RVOL 不等于假突破" in html
+    # 图上也必须画出预案单触发线（否则报表里唯一的可执行价只存在于文字里）
+    svg = rep.svg_chart(rows[1], [_bar(f"2026-08-{(i % 28) + 1:02d}",
+                                       100 + i * 0.1, 101 + i * 0.1,
+                                       99 + i * 0.1, 100.5 + i * 0.1) for i in range(60)],
+                        "t")
+    assert "预案单 挂 106.30" in svg, svg[-400:]
+
+
 if __name__ == "__main__":
     test_yizi_not_gap_yang()
     test_true_yizi_uses_prev_close()
@@ -1328,6 +1461,7 @@ if __name__ == "__main__":
     test_gap_breakout_zone_above_gap()
     test_hard_stop_widens_out_of_noise_band()
     test_tight_stop_flagged_when_no_wider_anchor()
+    test_pullback_tight_stop_is_not_noise_flagged()
     test_stop_plan_carries_exec_semantics()
     test_breakout_zone_not_below_level()
     test_too_far_gate()
@@ -1338,6 +1472,7 @@ if __name__ == "__main__":
     test_intraday_bar_uses_et_date_not_beijing()
     test_intraday_merge_refreshes_zone_to_breakout_level()
     test_intraday_bar_only_in_regular_session()
+    test_report_renders_pre_breakout_and_two_tier_stop()
     test_no_platform_does_not_fallback_to_r1()
     test_plan_entry_no_yang_in_uptrend_does_not_crash()
     test_impulse_pause_zone_is_tight_band()
