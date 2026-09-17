@@ -1181,8 +1181,6 @@ def probe_us(sym, account=5000, min_scale=5, until=None, date=None):
     last = bars[-1]
     atr_v = atr14(bars)
     prev_close = meta.get("prev_close") or last["c"]
-    # 同 A 股：先跑 room_and_cap，让 stop_plan 的「铁律二」修正落进 z 再打印
-    rc_us = room_and_cap(bars, z, plan["mode"], atr_v, last_c=last["c"])
     # Nasdaq 自带 marketStatus（Pre-Market/Open/Closed），夏令时不必自算
     sess = meta.get("session") or ""
     if sess:
@@ -1195,6 +1193,9 @@ def probe_us(sym, account=5000, min_scale=5, until=None, date=None):
         return None
     plan = plan_entry(b2, ev)
     z = plan.get("buy_zone") or {}
+    # 同 A 股：先跑 room_and_cap，让 stop_plan 的「铁律二」修正落进 z 再打印。
+    # 必须排在 plan/z 之后 —— 放前面会直接 UnboundLocalError，整条美股路径跑不通。
+    rc_us = room_and_cap(bars, z, plan["mode"], atr_v, last_c=last["c"])
 
     print("=" * 70)
     print(f" {sym}  美股   时段 {sess or phase}   {meta.get('as_of') or ''}")

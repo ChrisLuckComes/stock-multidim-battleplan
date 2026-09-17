@@ -935,6 +935,39 @@ def test_ash_portfolio_gate():
     assert not g["allowed"] and "买不到 1 手" in g["reason"], g
 
 
+def test_probe_us_runs_end_to_end():
+    """美股路径冒烟测试：probe_us 曾因语句顺序错误必崩，整条路径是死的。
+
+    rc_us = room_and_cap(bars, z, plan["mode"], ...) 排在 plan/z 赋值之前 →
+    UnboundLocalError: 'z'。全部走网络的路径没有测试覆盖，坏了多久都没人知道。
+    """
+    import io, contextlib
+    import probe_intraday as P
+
+    bars, px = [], 100.0
+    for i in range(90):
+        px += 0.9 if i % 5 < 3 else -0.7
+        bars.append(_bar(f"2026-{i // 28 + 1:02d}-{i % 28 + 1:02d}",
+                         px - 0.3, px + 0.5, px - 0.6, px, 1e6))
+    orig = (P.bars_from_us, P.bars_from_em_us, P.bars_from_yahoo_min)
+
+    def _boom(*a, **k):
+        raise RuntimeError("stubbed: no network in tests")
+
+    P.bars_from_us = lambda s: (bars, bars[-1]["c"], {"prev_close": bars[-2]["c"]})
+    P.bars_from_em_us = _boom
+    P.bars_from_yahoo_min = _boom
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            P.probe_us("TEST")          # 崩了就是回归
+        txt = buf.getvalue()
+        assert "一、预案单" in txt, txt
+        assert "UnboundLocalError" not in txt
+    finally:
+        P.bars_from_us, P.bars_from_em_us, P.bars_from_yahoo_min = orig
+
+
 def test_zone_position_is_not_derived_from_recommend():
     """类型标签必须说价位真话：43.72 在买区 43.32-46.09 内就不能写「未到位」。
 
@@ -1081,6 +1114,7 @@ if __name__ == "__main__":
     test_backtest_uses_probe_constants()
     test_channel_a_uses_ma_baseline()
     test_ash_portfolio_gate()
+    test_probe_us_runs_end_to_end()
     test_zone_position_is_not_derived_from_recommend()
     test_in_ash_session_is_independent_of_daily_bar()
     test_ash_t1_struct_stop()
