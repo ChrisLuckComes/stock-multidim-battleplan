@@ -12,6 +12,7 @@ from rule123 import (
     held_lows_3d,
     is_live_bar,
     is_yizi,
+    ma_anchor_trend_ok,
     pivots,
     plan_entry,
     stop_plan,
@@ -1098,6 +1099,31 @@ def test_vp_regime_needs_full_window():
     assert P.vp_regime(_vp_series(n=10)) is None
 
 
+def test_ma_anchor_trend_gate():
+    """短均线锚须 continuation 或站上 SMA20；hl_trendline 不受限（科华反例）。"""
+    bars = []
+    px = 40.0
+    for i in range(40):
+        px -= 0.35
+        d = f"2026-08-{(i % 28) + 1:02d}"
+        bars.append(_bar(d, px + 0.2, px + 0.4, px - 0.3, px, 1e6))
+    dem_ma = {"anchor": "ma5", "level": bars[-1]["c"], "hits": 5, "dist_atr": 0.2}
+    dem_tl = {"anchor": "hl_trendline", "level": bars[-1]["c"], "hits": 5, "dist_atr": 0.2}
+    assert ma_anchor_trend_ok(bars, {"regime": "reversal"}, dem_ma) is False
+    assert ma_anchor_trend_ok(bars, {"regime": "mixed"}, dem_ma) is False
+    assert ma_anchor_trend_ok(bars, {"regime": "continuation"}, dem_ma) is True
+    assert ma_anchor_trend_ok(bars, {"regime": "reversal"}, dem_tl) is True
+
+    up = []
+    px = 20.0
+    for i in range(40):
+        px += 0.4
+        d = f"2026-09-{(i % 28) + 1:02d}"
+        up.append(_bar(d, px - 0.2, px + 0.3, px - 0.35, px, 1e6))
+    dem_up = {"anchor": "ema10", "level": up[-1]["c"], "hits": 4, "dist_atr": 0.1}
+    assert ma_anchor_trend_ok(up, {"regime": "mixed"}, dem_up) is True
+
+
 if __name__ == "__main__":
     test_yizi_not_gap_yang()
     test_true_yizi_uses_prev_close()
@@ -1151,4 +1177,5 @@ if __name__ == "__main__":
     test_vp_regime_distribute()
     test_vp_regime_ma5_reclaim()
     test_vp_regime_needs_full_window()
+    test_ma_anchor_trend_gate()
     print("ok")

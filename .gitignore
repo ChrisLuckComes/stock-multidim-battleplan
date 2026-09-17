@@ -1,4 +1,5 @@
 rule123_out.json
+out_*.json
 *_data.json
 data/
 __pycache__/

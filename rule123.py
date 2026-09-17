@@ -744,6 +744,34 @@ def still_uptrend(bars, ev, last_c, c2, p1p):
     return True
 
 
+# 短均线锚：弱票阴跌/横盘也会反复蹭 MA5，肉眼是下跌趋势，脚本却给 line_pullback。
+MA_WALK_ANCHORS = frozenset({"ma5", "ema10", "sma20"})
+
+
+def ma_anchor_trend_ok(bars, ev, demand):
+    """短均线锚的沿线回踩趋势闸门（2026-09-17 科华数据 002335 反例）。
+
+    hl_trendline（摆动上升趋势线）不受限——那才是肉眼可见的升势沿线。
+    ma5 / ema10 / sma20 必须满足其一，否则 recommend 强制 False：
+      1. regime == continuation；或
+      2. 收盘 > SMA20。
+    """
+    if demand is None:
+        return True
+    if demand.get("anchor") not in MA_WALK_ANCHORS:
+        return True
+    if ev.get("regime") == "continuation":
+        return True
+    if not bars:
+        return False
+    closes = [b["c"] for b in bars]
+    s20 = sma_at(closes, 20, len(bars) - 1)
+    last_c = bars[-1]["c"]
+    if s20 is not None and last_c > s20:
+        return True
+    return False
+
+
 def reversal_yang_ok(bars, imp, p1p, last_c, atr_v):
     """反转态下仍允许「大阳后缩量回踩」的放宽门控（2026-09-16 决定松绑）。
 
@@ -1619,6 +1647,7 @@ def plan_entry(bars, ev):
             and demand is not None
             and demand["hits"] >= 4
             and 0.0 <= demand["dist_atr"] <= 1.0
+            and ma_anchor_trend_ok(bars, ev, demand)
         )
         if boost:
             label = ANCHOR_LABEL.get(demand["anchor"], demand["anchor"])
@@ -1711,7 +1740,13 @@ def plan_entry(bars, ev):
         elif d_atr <= 1.0:
             rec = bool(vol_shrink)
             note = f"沿线回踩{label}@{lv}（近12根触及{demand['hits']}次）"
-            if not vol_shrink:
+            if not ma_anchor_trend_ok(bars, ev, demand):
+                rec = False
+                note += (
+                    f"；短均线锚·趋势偏弱（regime={ev.get('regime')}，"
+                    f"非continuation且收盘未站上SMA20），不做"
+                )
+            elif not vol_shrink:
                 rec = False
                 note += f"；量能偏大 RVOL={round(rvol, 2)}，等缩量尾盘"
             bz_line["type"] = f"沿线回踩(优先T1)·{label}"
