@@ -376,6 +376,91 @@ def pullback_confirm(mins, j_start, S, atr_v):
             "at": mins[-1]["d"][11:16]}
 
 
+# ── 量价研判（2026-09-17 兆龙互连案例固化：防买在派发阶段）──
+# 判买只是「结构 + 位置」成立；最后一步还要看近 20 日筹码是收集还是派发：
+#   涨放跌缩 + 回调缩量 = 收集/洗盘，可按预案执行；
+#   跌放涨缩 = 派发特征，⚠ 提示暂缓（只提示不否决——能否决交易的只有硬约束）。
+VP_LOOK = 20             # 研判窗口（交易日）
+VP_COLLECT_RATIO = 1.30  # 阳线日均量 / 阴线日均量 ≥ 1.3 → 收集特征
+VP_DISTRIB_RATIO = 0.80  # < 0.8 → 派发特征（跌放涨缩）
+VP_VOL_SPIKE = 1.50      # 当日量 ≥ 窗口均量 1.5 倍 = 放量
+
+
+def vp_regime(bars, look=VP_LOOK):
+    """近 look 日量价研判（用已完成 K 线，传入 basis 即「截至基准日」口径）。
+
+    返回 dict（bars 不足窗口返回 None）：
+      verdict       collect / distribute / neutral
+      up_v / dn_v   阳线 / 阴线日均量；ratio = up_v / dn_v（涨跌量比）
+      vol_trend     近5日均量 / 前(look-5)日均量（<1 = 回调缩量）
+      last_vol_ratio 末根量 / 窗口均量
+      ma5_reclaim   末根缩量刺破 MA5 收回（洗盘特征）
+      ret           窗口涨幅；window_low 证伪位（放量收盘破 = 派发确认）
+    """
+    if len(bars) < look:
+        return None
+    win = bars[-look:]
+    prev_c = bars[-look - 1]["c"] if len(bars) > look else win[0]["o"]
+    ups, dns = [], []
+    for b in win:
+        if b["c"] > prev_c:
+            ups.append(b["v"])
+        elif b["c"] < prev_c:
+            dns.append(b["v"])
+        prev_c = b["c"]
+    up_v = sum(ups) / len(ups) if ups else 0.0
+    dn_v = sum(dns) / len(dns) if dns else 0.0
+    if dn_v:
+        ratio = up_v / dn_v
+    else:
+        ratio = float("inf") if up_v else 1.0
+    vols = [b["v"] for b in win]
+    vol_avg = sum(vols) / look
+    vol_trend = (sum(vols[-5:]) / 5) / (sum(vols[:-5]) / (look - 5)) \
+        if sum(vols[:-5]) else 1.0
+    last = win[-1]
+    last_vol_ratio = last["v"] / vol_avg if vol_avg else 1.0
+    ma5 = sum(b["c"] for b in win[-5:]) / 5
+    ma5_reclaim = (last["l"] < ma5 <= last["c"] and last_vol_ratio < 1.0)
+    ret = last["c"] / win[0]["o"] - 1
+    if ratio < VP_DISTRIB_RATIO:
+        verdict = "distribute"
+    elif ratio >= VP_COLLECT_RATIO and ret > 0:
+        verdict = "collect"
+    else:
+        verdict = "neutral"
+    return {"verdict": verdict, "up_v": up_v, "dn_v": dn_v, "ratio": ratio,
+            "vol_trend": vol_trend, "last_vol_ratio": last_vol_ratio,
+            "ma5": ma5, "ma5_reclaim": ma5_reclaim, "ret": ret,
+            "window_low": min(b["l"] for b in win)}
+
+
+def _print_vp_regime(vp, section_no):
+    """量价研判打印（A 股/美股共用）。verdict 只提示不否决。"""
+    print(f"── {section_no}、量价研判（近{VP_LOOK}日 · 防买在派发） ──")
+    ratio_txt = f"{vp['ratio']:.2f}×" if vp["ratio"] != float("inf") else "∞"
+    print(f"  涨/跌量比 : 阳线日均 {vp['up_v']:,.0f} / 阴线日均 {vp['dn_v']:,.0f}"
+          f" = {ratio_txt}"
+          f"{'  → 涨放跌缩，收集特征 ✓' if vp['ratio'] >= VP_COLLECT_RATIO else ''}"
+          f"{'  → 跌放涨缩，⚠ 派发特征' if vp['ratio'] < VP_DISTRIB_RATIO else ''}")
+    print(f"  量能趋势  : 近5日均量 / 前{VP_LOOK - 5}日均量 = "
+          f"{vp['vol_trend']:.2f}×"
+          f"{'（回调缩量 ✓）' if vp['vol_trend'] < 1 else ''}")
+    ma5_txt = f"，盘中刺破 MA5({vp['ma5']:.2f}) 收回 —— 洗盘特征" \
+        if vp["ma5_reclaim"] else ""
+    print(f"  末根行为  : 量比 {vp['last_vol_ratio']:.2f}×"
+          f"（{'缩量' if vp['last_vol_ratio'] < 1 else '放量' if vp['last_vol_ratio'] >= VP_VOL_SPIKE else '常量'}）{ma5_txt}")
+    print(f"  区间涨幅  : 近{VP_LOOK}日 {vp['ret'] * 100:+.1f}%")
+    print(f"  证伪位    : {vp['window_low']:.2f}（窗口最低）—— "
+          f"放量（≥{VP_VOL_SPIKE:.1f}×均量）收盘破 = 派发确认，预案单作废")
+    if vp["verdict"] == "collect":
+        print("  结论      : 收集·洗盘 → 可按预案执行")
+    elif vp["verdict"] == "distribute":
+        print("  结论      : ⚠ 派发特征 → 暂缓挂单，等缩量企稳或放量收复再评")
+    else:
+        print("  结论      : 中性（涨跌量比不极端）→ 仓位照旧，盯死证伪位")
+
+
 def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
           until=None, us_account=5000, date=None):
     if not (code.isdigit() and len(code) == 6):
@@ -816,6 +901,14 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
                         "zone": [prev_low, round(prev_low + CHASE_ATR * atr_v, 2)]}
     else:
         print("  → 不构成次级观察位（未缩量或已远离前低）")
+
+    # ---------- 4) 量价研判（防买在派发；老罗 2026-09-17 兆龙互连案例） ----------
+    # 只在「判买」（买区有效）时输出：判买之后还要确认筹码在收集不在派发。
+    vp = vp_regime(basis)
+    if vp is not None and has_zone and not invalid:
+        print()
+        _print_vp_regime(vp, "四")
+        out["vp"] = vp
     return out
 
 
@@ -1429,6 +1522,14 @@ def probe_us(sym, account=5000, min_scale=5, until=None, date=None):
                                    "entry": entry, "stop": stop_c, "low": low,
                                    "risk": round(risk, 2), "target1": tgt_b,
                                    "qty": n, "cheaper_vs_src": round(S - entry, 2)}
+
+    # ---------- 五) 量价研判（防买在派发；与 A 股同口径） ----------
+    vp = vp_regime(bars)   # bars 只含已收盘交易日，无盘中半根问题
+    if (vp is not None and z.get("primary_hi") is not None
+            and not z.get("invalid")):
+        print()
+        _print_vp_regime(vp, "五")
+        out["vp"] = vp
     return out
 
 

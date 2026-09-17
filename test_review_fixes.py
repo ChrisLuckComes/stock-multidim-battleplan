@@ -950,6 +950,52 @@ def test_breakout_preorder_has_no_strong_tier():
     assert "big_yang" not in src, "big_yang 字段应随分级一起删掉"
 
 
+def _vp_series(up_vol=3e6, dn_vol=1e6, n=25):
+    """量价研判测试序列：交替涨（量 up_vol）/跌（量 dn_vol），净向上。"""
+    bars, c = [], 40.0
+    for i in range(n):
+        up = i % 2 == 0
+        c2 = c + 0.5 if up else c - 0.25
+        bars.append(_bar(f"2026-08-{i + 1:02d}", c, max(c, c2) + 0.1,
+                         min(c, c2) - 0.1, c2, up_vol if up else dn_vol))
+        c = c2
+    return bars
+
+
+def test_vp_regime_collect():
+    """涨放跌缩 + 上行 → 收集（兆龙互连口径，2026-09-17 固化）。"""
+    import probe_intraday as P
+    vp = P.vp_regime(_vp_series())
+    assert vp["verdict"] == "collect"
+    assert vp["ratio"] >= P.VP_COLLECT_RATIO
+    assert vp["ret"] > 0
+
+
+def test_vp_regime_distribute():
+    """跌放涨缩 → 派发特征，无论区间涨跌方向。"""
+    import probe_intraday as P
+    vp = P.vp_regime(_vp_series(up_vol=1e6, dn_vol=3e6))
+    assert vp["verdict"] == "distribute"
+    assert vp["ratio"] < P.VP_DISTRIB_RATIO
+
+
+def test_vp_regime_ma5_reclaim():
+    """缩量刺破 MA5 收回 = 洗盘特征（兆龙互连 9/16 的形态）。"""
+    import probe_intraday as P
+    bars = _vp_series()
+    ma5 = sum(b["c"] for b in bars[-5:]) / 5
+    bars[-1] = _bar(bars[-1]["d"], ma5 - 0.5, ma5 + 0.3, ma5 - 1.0, ma5 + 0.1,
+                    1e6)  # 量 < 窗口均量 2e6
+    vp = P.vp_regime(bars)
+    assert vp["ma5_reclaim"] is True
+
+
+def test_vp_regime_needs_full_window():
+    """K 线不足窗口 → 返回 None，不许拿短窗口硬判。"""
+    import probe_intraday as P
+    assert P.vp_regime(_vp_series(n=10)) is None
+
+
 if __name__ == "__main__":
     test_yizi_not_gap_yang()
     test_true_yizi_uses_prev_close()
@@ -995,4 +1041,8 @@ if __name__ == "__main__":
     test_ash_t1_struct_stop()
     test_breakout_preorder_has_no_strong_tier()
     test_band_pos_is_signal_time_not_full_day()
+    test_vp_regime_collect()
+    test_vp_regime_distribute()
+    test_vp_regime_ma5_reclaim()
+    test_vp_regime_needs_full_window()
     print("ok")
