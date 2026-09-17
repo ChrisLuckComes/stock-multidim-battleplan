@@ -743,6 +743,7 @@ disable-model-invocation: true
 
 ```bash
 python fetch_market.py 601233 --out data/601233.json
+python fetch_ashare.py 688222 --out data/688222.json --n 300   # 东财被阻断时的 A 股备用源（新浪，不复权）
 python fetch_market.py CF --out data/cf.json
 python rule123.py CF --data data/cf.json
 python rule123.py 300207 --data data/300207.json --eod --out out.json
@@ -784,7 +785,7 @@ ATR：Wilder ATR14。
 
 | 市场 | 主源 | 降级 | 备注 |
 |---|---|---|---|
-| A 股 | 东方财富 | — | HTTPS 被中间设备阻断时自动降级 HTTP（`fetch_json_fallback`） |
+| A 股 | 东方财富 | **新浪 `fetch_ashare.py`** | HTTPS 被中间设备阻断时自动降级 HTTP（`fetch_json_fallback`）。若 https / http **双双 `RemoteDisconnected`**（2026-09-18 实测：东财 `push2` 与 `push2his` 直连全挂），**停止重试**，直接跑 `python fetch_ashare.py <code> --out data/<code>.json --n 300` —— 输出与 `rule123.py` 兼容。注意：新浪日 K 为**不复权**价（分红缺口可能含噪）；批量抓 ~180 只后返回 HTTP 456 限流 |
 | 美股 | Nasdaq 官方 API | 东财 http → Yahoo → stooq | Nasdaq 独有**盘前价/盘前量/市场状态**；东财 http 独有**分钟级带量 K 线** |
 
 - 美股 `session` 字段由 Nasdaq 直接给出（`Pre-Market` / `Open` / `Closed` / `After-Hours`），**不要自行判断夏令时/冬令时**。
