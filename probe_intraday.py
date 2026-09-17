@@ -125,6 +125,22 @@ def ash_round_qty(n, code):
     return n if str(code).startswith(("688", "689")) else (n // lot) * lot
 
 
+def zone_position_txt(c0, lo, hi):
+    """基准日收盘相对买区的**真实**位置。
+
+    类型标签不能只由 recommend 推断：recommend=False 的原因可能与价位无关
+    （如量能偏大、等缩量），此时硬写「未到位，等回落」会撒谎 —— 价格明明在
+    买区里，用户看到低开就当成「回落到位了」，反而买在买区下沿之下。
+    """
+    if lo is None or hi is None or c0 is None:
+        return "买区缺失，无法定位"
+    if c0 < lo:
+        return f"基准日收 {c0:.2f} 在买区下沿 {lo} **下方** —— 跌出买区，等回升进区再说"
+    if c0 > hi:
+        return f"基准日收 {c0:.2f} 在买区上沿 {hi} **上方** —— 未到位，等回落"
+    return f"基准日收 {c0:.2f} **已在买区 {lo}-{hi} 内** —— 不是「未到位」"
+
+
 def ash_lots(account, entry, stop, code,
              risk_pct=ASH_RISK_PCT, max_pct=ASH_MAX_POS):
     """A 股风险预算法定股数（与美股 us_lots 同构，唯一差别是最小申报单位）。
@@ -550,11 +566,29 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
         capped = cap is not None and hi > cap
         limit = round(cap, 2) if capped else hi
         cut = round(hi + CHASE_ATR * atr_v, 2)
+        c0 = basis[-1]["c"]
+        print(f"  价位关系: {zone_position_txt(c0, lo, hi)}")
+    if has_zone and not invalid and not plan["recommend"]:
+        # recommend=False 不给可执行价：一张填好的单子会盖过上面那行 False。
+        print("  类型    : ❌ 不建议执行（recommend=False）—— 不给挂单价 / 数量 / 金额")
+        print(f"  原因    : {note_txt or '未标注'}")
+        print(f"  参考位  : 买区 {lo}-{hi} ｜ 结构止损 {defend}（收盘破）"
+              f" ｜ 硬止损 {hard}（盘中破即走）")
+        if isinstance(hard, (int, float)):
+            print(f"  ⚠ 若仍要自行做多：买入价必须 > 硬止损 {hard} —— "
+                  f"低于它买入 = 开仓即止损，这笔单一成交就已经该走")
+        out["pre_order"] = {"kind": "not_recommended", "limit": None, "cap": cap,
+                            "qty": None, "stop_struct": defend, "stop_hard": hard,
+                            "target1": t1, "reason": note_txt}
+    elif has_zone and not invalid:
         n = ash_lots(account, limit, hard, code)
-        kind = "突破跟单" if plan["recommend"] else "回踩单（未到位，等回落）"
+        kind = "突破跟单"
         print(f"  类型    : {kind}     模式 {plan['mode']}")
         print(f"  挂单    : 限价买 {limit:.2f}（买区 {lo}-{hi} 上沿）"
               f"{'  ⚠ 已被盈亏比闸门下压' if capped else ''}")
+        if isinstance(hard, (int, float)):
+            print(f"  有效买入区间: {hard} < 买入价 ≤ {limit:.2f} —— "
+                  f"低于硬止损 {hard} 买入 = 开仓即止损，再便宜也不要")
         if cap is not None:
             print(f"  买入上限: {cap:.2f}   ← 高于此价，盈亏比跌破 {rc['rr']:.1f}:1，不挂")
         if n:
@@ -574,7 +608,6 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
             print(f"  目标    : {t1}（现价上方 {rc['room_pct']}%）"
                   f"  → 挂 {limit:.2f}：风险 {risk:.2f} / 收益 {rew:.2f} = {rr_txt}")
         print(f"  撤单    : 开盘跳空 > {cut}（买区上沿 +1.0×ATR）")
-        c0 = basis[-1]["c"]
         print(f"  高开处置: 开盘 ≤ {c0 * 1.01:.2f}（+1%）→ 挂单原样有效"
               f" ｜ {c0 * 1.01:.2f}~{c0 * 1.03:.2f}（+1~3%）→ 只挂不追，不得高于买入上限"
               f" ｜ > {c0 * 1.03:.2f}（+3%）→ 回踩单作废，只留盘中量能突变")
@@ -1208,11 +1241,27 @@ def probe_us(sym, account=5000, min_scale=5, until=None, date=None):
         capped = cap is not None and hi > cap
         limit = round(cap, 2) if capped else hi
         hard = round(hard, 2) if hard is not None else None
+        print(f"  价位关系: {zone_position_txt(last['c'], lo, hi)}")
+    if has_zone and not invalid and not plan["recommend"]:
+        print("  类型    : ❌ 不建议执行（recommend=False）—— 不给挂单价 / 数量 / 金额")
+        print(f"  原因    : {plan.get('note') or '未标注'}")
+        print(f"  参考位  : 买区 {lo}-{hi} ｜ 结构止损 {defend}（收盘破）"
+              f" ｜ 硬止损 {hard}（盘中破即走）")
+        if hard is not None:
+            print(f"  ⚠ 若仍要自行做多：买入价必须 > 硬止损 {hard} —— "
+                  f"低于它买入 = 开仓即止损")
+        out["pre_order"] = {"kind": "not_recommended", "limit": None, "cap": cap,
+                            "qty": None, "stop_struct": defend, "stop_hard": hard,
+                            "target1": t1, "reason": plan.get("note")}
+    elif has_zone and not invalid:
         n = us_lots(account, limit, hard)
-        kind = "突破跟单" if plan["recommend"] else "回踩单（未到位，等回落）"
+        kind = "突破跟单"
         print(f"  类型    : {kind}     模式 {plan['mode']}")
         print(f"  挂单    : 限价买 {limit:.2f}（买区 {lo}-{hi} 上沿）"
               f"{'  ⚠ 已被盈亏比闸门下压' if capped else ''}")
+        if hard is not None:
+            print(f"  有效买入区间: {hard} < 买入价 ≤ {limit:.2f} —— "
+                  f"低于硬止损 {hard} 买入 = 开仓即止损，再便宜也不要")
         if cap is not None:
             print(f"  买入上限: {cap:.2f}   ← 高于此价，盈亏比跌破 {rc['rr']:.1f}:1，不挂")
         if n:

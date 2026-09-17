@@ -935,6 +935,21 @@ def test_ash_portfolio_gate():
     assert not g["allowed"] and "买不到 1 手" in g["reason"], g
 
 
+def test_zone_position_is_not_derived_from_recommend():
+    """类型标签必须说价位真话：43.72 在买区 43.32-46.09 内就不能写「未到位」。
+
+    旧代码 kind = "突破跟单" if recommend else "回踩单（未到位，等回落）"，
+    recommend=False 的真实原因是量能偏大，却对外宣称价格未到位；用户看到
+    低开就当「回落到位」，买在买区下沿之下、硬止损之下（300913 9/17 实况）。
+    """
+    from probe_intraday import zone_position_txt
+    assert "已在买区" in zone_position_txt(43.72, 43.32, 46.09)
+    assert "未到位" in zone_position_txt(47.00, 43.32, 46.09)      # 高于上沿才叫未到位
+    assert "下方" in zone_position_txt(42.80, 43.32, 46.09)        # 今天这笔：跌出买区
+    assert "未到位" not in zone_position_txt(42.80, 43.32, 46.09)
+    assert zone_position_txt(43.72, None, None) == "买区缺失，无法定位"
+
+
 def test_in_ash_session_is_independent_of_daily_bar():
     """盘中判定不能依赖日线末根：新浪日线盘中不返回当日半根。
 
@@ -1066,6 +1081,7 @@ if __name__ == "__main__":
     test_backtest_uses_probe_constants()
     test_channel_a_uses_ma_baseline()
     test_ash_portfolio_gate()
+    test_zone_position_is_not_derived_from_recommend()
     test_in_ash_session_is_independent_of_daily_bar()
     test_ash_t1_struct_stop()
     test_breakout_preorder_has_no_strong_tier()
