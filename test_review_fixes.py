@@ -694,28 +694,32 @@ def test_bo_gap_cancel():
 
 
 def test_ash_structural_ceiling():
-    """闸门下的「最高可交易价」：5 万账户 / 30% → 主板 150 元、科创 75 元。
+    """单笔硬顶下的「最高可交易价」：5 万硬顶 → 主板 500 元、科创 250 元。
 
     这是「点位到了也买不到」的唯一正当来源（物理约束：最小申报单位 × 股价），
     必须在**下单前**就筛掉，不能给了买区再告诉人买不了。
     """
-    from probe_intraday import ash_price_ceiling, no_ash_reason, ash_lots
-    assert ash_price_ceiling("002961", 50000) == 150.0   # 100 股单位
-    assert ash_price_ceiling("688002", 50000) == 75.0    # 200 股单位
+    from probe_intraday import (ash_price_ceiling, no_ash_reason, ash_lots,
+                                ash_single_cap)
+    # 30% 闸门已移除（老罗 2026-09-17）：门槛 = 单笔硬顶 5 万 ÷ 最小申报单位
+    assert ash_single_cap(50000) == 50000
+    assert ash_single_cap(200000) == 50000     # 账户再大，单笔仍封顶 5 万
+    assert ash_single_cap(20000) == 20000      # 账户小于硬顶 → 以账户为准
+    assert ash_price_ceiling("002961", 50000) == 500.0   # 100 股单位（旧 150）
+    assert ash_price_ceiling("688002", 50000) == 250.0   # 200 股单位（旧 75）
     assert ash_price_ceiling("002961", 0) is None        # 未给账户 → 不猜
-    # 门槛之上：1 手即超闸门 → 必须 None（不悄悄超标）
-    assert ash_lots(50000, 160.0, 150.0, "002961") is None
-    assert ash_lots(50000, 76.0, 70.0, "688002") is None
-    # 门槛之下：正常给股数
-    assert ash_lots(50000, 140.0, 130.0, "002961") == 100
-    assert ash_lots(50000, 74.0, 70.0, "688002") == 200
+    # 门槛之上：1 手即超硬顶 → 必须 None（不悄悄超标）
+    assert ash_lots(50000, 600.0, 560.0, "002961") is None   # 1 手 6 万 > 5 万
+    assert ash_lots(50000, 300.0, 280.0, "688002") is None   # 1 手 6 万 > 5 万
+    # 门槛之下：正常给股数（旧闸门下这两个都会被判 None）
+    assert ash_lots(50000, 160.0, 150.0, "002961") == 100
+    assert ash_lots(50000, 76.0, 70.0, "688002") == 200
     # 说明里要出现「结构性不可交易」与门槛价
-    s = no_ash_reason("688002", 50000, 200.0)
-    assert "结构性不可交易" in s and "75" in s
-    s2 = no_ash_reason("002961", 50000, 160.0)
-    assert "结构性不可交易" in s2 and "150" in s2
+    s = no_ash_reason("688002", 50000, 300.0)
+    assert "结构性不可交易" in s and "250" in s
+    s2 = no_ash_reason("002961", 50000, 600.0)
+    assert "结构性不可交易" in s2 and "500" in s2
     # 1 手在额度内 → 不冤枉成「结构性不可交易」，只报金额占比
-    # （2000 账户 / 30% → 主板门槛仅 6 元，取 5 元才是门槛内）
     s3 = no_ash_reason("002961", 2000, 5.0)
     assert "结构性不可交易" not in s3 and "硬约束" in s3
 
@@ -724,14 +728,15 @@ def test_ash_lots_is_risk_based():
     """A 股仓位改用风险预算法（与美股 us_lots 同构）。
 
     旧口径是「计划仓 1/3」—— 一个拍脑袋的比例，与风险无关；也不能没有
-    --qty 就不给股数。新口径 = min(账户 × 1.5% / 每股风险, 账户 × 30% / 价格)。
+    --qty 就不给股数。新口径 = min(账户 × 1.5% / 每股风险, 单笔硬顶 / 价格)。
     """
     from probe_intraday import ash_lots
-    # 风险 1.0/股 → 750 股；仓位闸 50000×30%/20 = 750 股 → 取 700（向下整手）
+    # 风险 1.0/股 → 750 股；单笔硬顶 50000/20 = 2500 股 → 风险预算绑定，取 700
     assert ash_lots(50000, 20.0, 19.0, "002961") == 700
-    # 止损很近（0.10）→ 风险预算法给 7500 股，被仓位闸 150 夹住 → 100 股
-    assert ash_lots(50000, 100.0, 99.9, "002961") == 100
-    # 止损很宽（5.0）→ 150 股，未被闸门干预
+    # 止损很近（0.10）→ 风险预算法要 7500 股，被单笔硬顶 50000/100=500 夹住
+    # 30% 闸门时代这里只有 100 股 —— 移除闸门后仓位放大 5 倍，正是代价所在
+    assert ash_lots(50000, 100.0, 99.9, "002961") == 500
+    # 止损很宽（5.0）→ 150 股，未被硬顶干预
     assert ash_lots(50000, 20.0, 15.0, "002961") == 100
     # 结构止损可能是文字 → None，不得崩
     assert ash_lots(50000, 20.0, "收盘破19", "002961") is None
@@ -760,10 +765,10 @@ def test_ash_lots_min_lot_by_board():
     assert ash_round_qty(99, "002961") == 0
     assert ash_lots(50000, 20.0, 19.0, "688002") == 750
     assert ash_lots(50000, 20.0, 19.0, "002961") == 700
-    # 1 手即超仓位上限 → None（明确不做，不悄悄超标）
-    assert ash_lots(5000, 200.0, 190.0, "688002") is None
-    assert ash_lots(2000, 10.0, 9.0, "002961") is None     # 1 手 1000 元 = 50%
+    # 1 手即超单笔硬顶 → None（明确不做，不悄悄超标）
+    assert ash_lots(5000, 200.0, 190.0, "688002") is None  # 1 手 4 万 > 账户 5 千
     # 但 1 手在额度内仍要给 —— 否则钱少就永远建不了仓
+    assert ash_lots(2000, 10.0, 9.0, "002961") == 100      # 1 手 1000 ≤ 账户 2000
     assert ash_lots(5000, 10.0, 9.0, "002961") == 100
 
 
@@ -821,7 +826,7 @@ def test_backtest_uses_probe_constants():
     assert BT.P is PI, "回测必须 import probe_intraday 本体"
     for name in ("BREAK_DMAX_ASH", "BREAK_DMAX_US", "BREAK_STOP_ATR",
                  "BREAK_BUF_ATR", "BREAK_GAP_ATR", "ASH_BREAK_MIN_OFF",
-                 "ASH_LIMIT_BUFFER", "ASH_MAX_POS", "ASH_RISK_PCT",
+                 "ASH_LIMIT_BUFFER", "ASH_RISK_PCT",
                  "PULLBACK_VOL_MULT", "PULLBACK_BAND_ATR", "PULLBACK_STOP_ATR",
                  "PULLBACK_FRESH", "BURST_MULT", "BURST_MA_BARS", "BURST_AFTER",
                  "PRE_AMP_MAX", "CHASE_ATR", "BO_NEAR_ASH", "BO_NEAR_US",

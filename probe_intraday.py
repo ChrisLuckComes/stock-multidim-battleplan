@@ -30,17 +30,18 @@ BURST_AFTER = "10:00"  # 时间窗下沿
 PRE_AMP_MAX = 0.025    # 启动前当日振幅上限
 CHASE_ATR = 1.0        # 触发价 <= 开盘 + 1.0xATR
 ASH_RISK_PCT = 0.015   # A 股单笔风险预算 = 账户 1.5%（与美股 us_lots 同口径）
-ASH_MAX_POS = 0.30     # A 股单笔仓位上限（T+1 隔夜无跌停保护 → 比美股的 50% 更紧）
 ASH_LOT_MAIN = 100     # 主板 60/00、创业板 300/301
 ASH_LOT_STAR = 200     # 科创板 688/689
 
 # ── 组合层仓位（老罗 2026-09-17 定）──
-# 单笔闸门（30% × 5 万 = 1.5 万）之上再叠一层「总仓位」约束：
-# 以前只约束单笔，多笔叠加无人管（4 笔各 28% = 112%）。
+# 旧的「账户 × 30%」单笔仓位闸门已移除（老罗 2026-09-17：单笔不超过 5 万即可），
+# 单笔上限统一由绝对额 ASH_SINGLE_ABS 控制。注意代价：止损越紧，风险预算法给的
+# 股数越大，失去百分比闸门后仓位会显著变重（止损 0.46×ATR 的票可吃掉 ~88% 账户）。
+# 其上再叠一层「总仓位」约束：以前只约束单笔，多笔叠加无人管（4 笔各 28% = 112%）。
 ASH_PRIMARY = 50000    # 主力额度：常规建仓只用它
 ASH_RESERVE = 50000    # 备用额度：只在主力层已满、且信号够格时启用
 ASH_TOTAL = ASH_PRIMARY + ASH_RESERVE
-ASH_SINGLE_ABS = 50000 # 单笔绝对额硬顶（老罗：「单笔最好不要过五万」）
+ASH_SINGLE_ABS = 50000 # 单笔绝对额硬顶（老罗：「单笔最好不要过五万」）—— 已取代 30% 闸门
 ASH_RESERVE_TIER = "突破预案单"   # 唯一够格动用备用的信号（全样本唯一净账户为正的那个）
 
 
@@ -141,14 +142,27 @@ def zone_position_txt(c0, lo, hi):
     return f"基准日收 {c0:.2f} **已在买区 {lo}-{hi} 内** —— 不是「未到位」"
 
 
+def ash_single_cap(account):
+    """单笔金额上限 = min(账户, 单笔绝对额硬顶 5 万)。
+
+    旧口径是「账户 × 30%」（5 万账户 → 1.5 万）。老罗 2026-09-17 移除该闸门，
+    改为只受绝对额约束。代价要记住：风险预算法的股数与每股风险成反比，
+    失去百分比闸门后，止损越紧仓位越重（0.46×ATR 的止损可吃掉 ~88% 账户）。
+    """
+    if not account:
+        return None
+    return min(account, ASH_SINGLE_ABS)
+
+
 def ash_lots(account, entry, stop, code,
-             risk_pct=ASH_RISK_PCT, max_pct=ASH_MAX_POS):
+             risk_pct=ASH_RISK_PCT, cap_amt=None):
     """A 股风险预算法定股数（与美股 us_lots 同构，唯一差别是最小申报单位）。
 
-    股数 = min(账户 × risk_pct / 每股风险, 账户 × max_pct / 价格)，
+    股数 = min(账户 × risk_pct / 每股风险, 单笔金额上限 / 价格)，
     再按 `ash_round_qty` 取整（科创板 200 起 1 股递增 / 其余 100 的整数倍）。
+    单笔金额上限见 `ash_single_cap`（30% 闸门已移除，只剩 5 万绝对额）。
 
-    若 1 手即超仓位上限 → 返回 None（调用方须明确拒绝并说明是「钱不够」，
+    若 1 手即超单笔硬顶 → 返回 None（调用方须明确拒绝并说明是「钱不够」，
     不是拍脑袋的软规则）；这样「点位到了买不到」只可能因为硬约束。
     """
     lot = first_lot_of(code)
@@ -156,46 +170,49 @@ def ash_lots(account, entry, stop, code,
         return None
     if entry <= stop:
         return None
-    n = int(min(account * risk_pct / (entry - stop), account * max_pct / entry))
+    cap = cap_amt or ash_single_cap(account)
+    n = int(min(account * risk_pct / (entry - stop), cap / entry))
     n = ash_round_qty(n, code)
     if n <= 0:
-        return lot if lot * entry <= account * max_pct else None
+        return lot if lot * entry <= cap else None
     return n
 
 
-def ash_price_ceiling(code, account, max_pct=ASH_MAX_POS):
-    """闸门下的「最高可交易价」：超过它，第一手就超上限 → 结构性不可交易。
+def ash_price_ceiling(code, account, cap_amt=None):
+    """单笔硬顶下的「最高可交易价」：超过它，第一手就超顶 → 结构性不可交易。
 
-    0100 单位换算：门槛 = 账户 × 上限% ÷ 最小申报单位。
-    5 万账户 / 30% 闸门 → 主板·创业板 150 元，科创板 75 元。
+    门槛 = 单笔金额上限 ÷ 最小申报单位。
+    5 万单笔硬顶 → 主板·创业板 500 元，科创板 250 元（旧 30% 闸门下是 150 / 75）。
     比这个价高的票，问题不在图形、不在时机，在「最小申报单位 × 股价」——
     给买区也没用，所以要在**下单前**就筛掉，而不是等点位到了才说买不了。
     """
-    if not account or not max_pct:
+    cap = cap_amt or ash_single_cap(account)
+    if not cap:
         return None
-    return account * max_pct / first_lot_of(code)
+    return cap / first_lot_of(code)
 
 
-def no_ash_reason(code, account, entry, max_pct=ASH_MAX_POS):
-    """「1 手即超闸门」的统一说明（含门槛价，点明是否属结构性不可交易）。"""
+def no_ash_reason(code, account, entry, cap_amt=None):
+    """「1 手即超单笔硬顶」的统一说明（含门槛价，点明是否属结构性不可交易）。"""
     lot = first_lot_of(code)
     amt = lot * entry
+    cap = cap_amt or ash_single_cap(account)
     s = (f"最小 1 手 {lot} 股 = {amt:,.0f} 元 = 账户 {amt / account * 100:.0f}%，"
-         f"超 {max_pct * 100:.0f}% 上限（硬约束，不是拍脑袋的软规则）")
-    ceiling = ash_price_ceiling(code, account, max_pct)
+         f"超单笔硬顶 {cap:,.0f} 元（硬约束，不是拍脑袋的软规则）")
+    ceiling = ash_price_ceiling(code, account, cap)
     if ceiling and entry > ceiling:
-        s += (f"\n              ↑ 该闸门下 {code[:3]} 最高可交易价 "
+        s += (f"\n              ↑ 该硬顶下 {code[:3]} 最高可交易价 "
               f"{ceiling:,.0f} 元 —— {entry:,.0f} 元属**结构性不可交易**，"
               f"换标的，别等点位")
     return s
 
 
 def ash_portfolio_gate(code, entry, lots, held_amt=0.0, use_reserve=False):
-    """组合层闸门：在「单笔 30%」之上再管住**多笔叠加**。
+    """组合层闸门：在「单笔绝对额」之上再管住**多笔叠加**。
 
     老罗 2026-09-17 定的口径：总资金 10 万 = **主力 5 万 + 备用 5 万**，
-    单笔绝对额不超过 5 万。单笔 30% 的基数仍是主力 5 万
-    （→ 可交易价上限不变：主板/创业板 150 元、科创板 75 元，见 ash_price_ceiling）。
+    单笔绝对额不超过 5 万。同日移除了「账户 × 30%」单笔闸门，单笔只剩绝对额约束
+    （→ 可交易价上限随之抬高：主板/创业板 500 元、科创板 250 元，见 ash_price_ceiling）。
 
     规则（按顺序）：
       1. 单笔金额 ≤ ASH_SINGLE_ABS（50,000）—— 绝对额硬顶
@@ -593,14 +610,14 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
             print(f"  买入上限: {cap:.2f}   ← 高于此价，盈亏比跌破 {rc['rr']:.1f}:1，不挂")
         if n:
             print(f"  数量    : {n} 股（风险预算法 {ASH_RISK_PCT * 100:.1f}%，"
-                  f"上限 {ASH_MAX_POS * 100:.0f}%）")
+                  f"单笔硬顶 {ash_single_cap(account):,.0f} 元）")
         else:
             lot = first_lot_of(code)
             print(f"  数量    : 不做 —— {no_ash_reason(code, account, limit)}")
         if n:
             print(f"  金额    : {n * limit:,.0f} 元"
                   f"（账户 {account:,} 的 {n * limit / account * 100:.1f}%，"
-                  f"上限 {ASH_MAX_POS * 100:.0f}%）")
+                  f"单笔硬顶 {ash_single_cap(account):,.0f} 元）")
         print(f"  止损    : 结构={defend}（收盘破） / 硬={hard}（盘中破即走）")
         if t1 and isinstance(hard, (int, float)):
             risk, rew = limit - hard, t1 - limit

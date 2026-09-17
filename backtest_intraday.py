@@ -1124,9 +1124,9 @@ def portfolio(agg):
              f"（主力账户的 {_avg / P.ASH_PRIMARY * 100:.1f}%）")
     L.append(f"主力/备用层           : {sum(1 for t in taken if t['layer'] == 'main')} / "
              f"{sum(1 for t in taken if t['layer'] == 'reserve')} 笔")
-    L.append(f"并发上限推算          : 主力 {P.ASH_PRIMARY:,} ÷ 单笔上限 "
-             f"{P.ASH_PRIMARY * P.ASH_MAX_POS:,.0f} = "
-             f"**{int(P.ASH_PRIMARY / (P.ASH_PRIMARY * P.ASH_MAX_POS))} 笔**（不含备用）")
+    L.append(f"并发上限推算          : 主力 {P.ASH_PRIMARY:,} ÷ 单笔硬顶 "
+             f"{P.ASH_SINGLE_ABS:,} = "
+             f"**{int(P.ASH_PRIMARY / P.ASH_SINGLE_ABS)} 笔**（不含备用）")
     L.append(f"对照·逐笔独立加总     : {free_ret:+.2f}%"
              f"（差 {free_ret - equity:+.2f}% = 闸门挡掉的机会，但那个数需同时持有 {len(picks)} 笔，"
              f"真实账户拿不到）")
