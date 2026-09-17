@@ -935,6 +935,26 @@ def test_ash_portfolio_gate():
     assert not g["allowed"] and "买不到 1 手" in g["reason"], g
 
 
+def test_in_ash_session_is_independent_of_daily_bar():
+    """盘中判定不能依赖日线末根：新浪日线盘中不返回当日半根。
+
+    2026-09-17 10:23 实测：日线末根仍是 09-16 → is_live_bar=False，
+    旧代码据此打【已收盘】并跳过盘中确认，整个交易时段工具不可用。
+    """
+    import datetime
+    from rule123 import in_ash_session, is_live_bar
+    D = datetime.datetime
+    for h, m, exp in ((9, 25, False), (9, 30, True), (11, 40, True),
+                      (12, 30, True), (14, 59, True), (15, 0, False), (20, 0, False)):
+        assert in_ash_session("2026-09-17", D(2026, 9, 17, h, m)) is exp, (h, m)
+    # 休市：快照停在上一交易日 → 不是盘中
+    assert in_ash_session("2026-09-16", D(2026, 9, 17, 10, 30)) is False
+    # 日线缺当日半根时两者必然分叉，这正是 bug 的成因
+    stale = [{"d": "2026-09-16", "o": 1, "h": 1, "l": 1, "c": 1, "v": 1}]
+    assert is_live_bar(stale, now=D(2026, 9, 17, 10, 30)) is False
+    assert in_ash_session("2026-09-17", D(2026, 9, 17, 10, 30)) is True
+
+
 def test_ash_t1_struct_stop():
     """A 股 T+1 的结构止损 = 信号当日日线最低价（老罗 2026-09-17 的 2.a）。"""
     import probe_intraday as P
@@ -1046,6 +1066,7 @@ if __name__ == "__main__":
     test_backtest_uses_probe_constants()
     test_channel_a_uses_ma_baseline()
     test_ash_portfolio_gate()
+    test_in_ash_session_is_independent_of_daily_bar()
     test_ash_t1_struct_stop()
     test_breakout_preorder_has_no_strong_tier()
     test_band_pos_is_signal_time_not_full_day()

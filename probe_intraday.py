@@ -18,7 +18,7 @@ import sys, os, json, argparse, urllib.request, datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from rule123 import (  # noqa: E402
-    build_ev, plan_entry, atr14, is_live_bar,
+    build_ev, plan_entry, atr14, is_live_bar, in_ash_session,
     bars_from_us, bars_from_em_us, bars_from_yahoo_min, stop_plan, pivots,
     key_break_level,
 )
@@ -488,11 +488,15 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
     if asof:
         daily = [b for b in daily if b["d"][:10] <= asof]
         live = bool(replay)          # --asof 默认=该日收盘后；加 --replay 则=该日盘中
+        drop_last = live
     else:
-        live = is_live_bar(daily) or replay
+        # 「是否盘中」与「末根要不要丢」必须分开：新浪日线盘中不含当日半根，
+        # 只靠 is_live_bar 会把交易时段误判成已收盘并跳过盘中确认。
+        drop_last = is_live_bar(daily)
+        live = drop_last or in_ash_session(snap.get("date")) or replay
 
     # 基准日：盘中用「昨收结构」；收盘后/回放用「当日收盘结构」
-    basis = daily[:-1] if live else daily
+    basis = daily[:-1] if drop_last else daily
     basis_d = basis[-1]["d"]
 
     ev, b2, meta = build_ev(basis)

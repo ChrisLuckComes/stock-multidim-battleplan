@@ -620,6 +620,21 @@ def is_live_bar(bars, market="ASH", now=None):
     return _ASH_LIVE[0] <= t < _ASH_LIVE[1]
 
 
+def in_ash_session(date_str=None, now=None):
+    """现在是否处于 A 股交易时段（09:30–15:00，含午休）。
+
+    与 `is_live_bar` 分工不同：后者问「日线末根要不要丢」，本函数问「现在是不是盘中」。
+    新浪日线在盘中**不返回当日半根**（10:23 取到的末根仍是昨天），两者必然不一致；
+    合成一个判断会把盘中误报成【已收盘】，从而跳过盘中确认、错给次日预案。
+    `date_str` 传实时快照的日期，用来排除非交易日（休市时快照停在上一交易日）。
+    """
+    now = now or datetime.datetime.now()
+    if date_str and str(date_str)[:10] != now.strftime("%Y-%m-%d"):
+        return False
+    t = now.hour * 60 + now.minute
+    return _ASH_LIVE[0] <= t < _ASH_LIVE[1]
+
+
 def is_yizi(bar, prev_c, atr_v):
     """真一字/振幅极小跳空：有缺口 + 振幅 tiny + 实体≈0。光脚大阳天然排除。"""
     if prev_c is None:
