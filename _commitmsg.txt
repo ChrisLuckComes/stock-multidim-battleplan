@@ -1,6 +1,0 @@
-﻿账户额度改走 env；美股去掉 50% 比例上限；删除临时验证文档。
-
-- 新增 account_config / .env.example，人与钱可配，策略常数仍在代码
-- 本仓库独立 AGENTS.md（从上级目录迁出股票条款）
-- us_lots 天花板改为账户全额（默认 US_ACCOUNT=5000）
-- 移除四份回测/回放验证 md，结论保留在 README/SKILL
