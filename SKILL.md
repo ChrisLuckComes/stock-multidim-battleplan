@@ -771,7 +771,7 @@ ATR：Wilder ATR14。
 
 ## 输出规范
 
-- HTML 落盘 `C:\Users\luoyu\stock-reports\<TICKER>-YYYYMMDD.html`（不要写入代码仓库）。首屏结论 + 模式卡 + 入场/止损/目标1-目标2 + **扫雷一行** + **双轨打分** + **龙头对照（优先做谁）**。不输出 Gamma 卡。CDN 被挡时再写 `*_standalone.html`。
+- HTML 落盘 `C:\Users\luoyunlai\stock-reports\<TICKER>-YYYYMMDD.html`（不要写入代码仓库）。首屏结论 + 模式卡 + 入场/止损/目标1-目标2 + **扫雷一行** + **双轨打分** + **龙头对照（优先做谁）**。不输出 Gamma 卡。CDN 被挡时再写 `*_standalone.html`。
 - 无文件环境：markdown 同等结构。
 - 对话附 200–300 字摘要（须含双轨分数 + 龙头优先结论）。关键数据标来源+日期。
 - 含买卖价位时附：
