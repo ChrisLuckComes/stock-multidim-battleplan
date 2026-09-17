@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from rule123 import (  # noqa: E402
     build_ev, plan_entry, atr14, is_live_bar, in_ash_session,
     bars_from_us, bars_from_em_us, bars_from_yahoo_min, stop_plan, pivots,
-    key_break_level,
+    key_break_level, merge_intraday_bar,
 )
 from account_config import load_account_config  # noqa: E402
 
@@ -1237,14 +1237,20 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None):
         if not bars:
             print(f"[{sym}] 无 {date} 之前的日线")
             return None
-    last = bars[-1]
-    atr_v = atr14(bars)
-    prev_close = meta.get("prev_close") or last["c"]
+    last_closed = bars[-1]
+    prev_close = meta.get("prev_close") or last_closed["c"]
     # Nasdaq 自带 marketStatus（Pre-Market/Open/Closed），夏令时不必自算
     sess = meta.get("session") or ""
     if sess:
         s = sess.lower()
         phase = "pre" if "pre" in s else ("open" if "open" in s else "closed")
+
+    # 盘中：先把今日未收盘 bar 并入再定结构。原实现只按昨收算 —— 突破当天
+    # 模式/买区整体滞后一天（INTC 2026-09-17 已破 107.57，买区却还是 99.45~104.03
+    # 的回踩位，三条盘中通道又全判「过期/不给」，输出只剩「一直等回踩」）。
+    bars, live_bar = merge_intraday_bar(sym, bars, meta, "US")
+    last = bars[-1]
+    atr_v = atr14(bars)
 
     ev, b2, _m = build_ev(bars)
     if ev is None:
@@ -1252,6 +1258,12 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None):
         return None
     plan = plan_entry(b2, ev)
     z = plan.get("buy_zone") or {}
+    # 昨收口径的埋伏单：用来回答「盘前挂的那张单今天成交了没有」
+    pb_closed = None
+    if live_bar is not None:
+        ev_c, b_c, _mc = build_ev(bars[:-1])
+        if ev_c is not None:
+            pb_closed = plan_entry(b_c, ev_c).get("pre_breakout")
     # 同 A 股：先跑 room_and_cap，让 stop_plan 的「铁律二」修正落进 z 再打印。
     # 必须排在 plan/z 之后 —— 放前面会直接 UnboundLocalError，整条美股路径跑不通。
     rc_us = room_and_cap(bars, z, plan["mode"], atr_v, last_c=last["c"])
@@ -1259,23 +1271,37 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None):
     print("=" * 70)
     print(f" {sym}  美股   时段 {sess or phase}   {meta.get('as_of') or ''}")
     print("=" * 70)
-    print(f" 最近收盘   : {last['d']}  {last['c']:.2f}")
+    print(f" 最近收盘   : {last_closed['d']}  {last_closed['c']:.2f}")
+    if live_bar is not None:
+        print(f" 盘中口径   : 已并入今日未收盘 K 线 "
+              f"{live_bar['o']:.2f}/{live_bar['h']:.2f}/{live_bar['l']:.2f}/"
+              f"{live_bar['c']:.2f} —— 模式/买区按盘中刷新（非昨收口径）")
     if spot is not None:
         dev = (spot - prev_close) / prev_close * 100 if prev_close else 0.0
         flat = prev_close and abs(spot - prev_close) < 1e-9
         print(f" 实时/盘前  : {spot:.2f}   昨收 {prev_close:.2f}（{dev:+.2f}%）"
               f"{'   ⚠ 等于昨收 = 该时段暂无成交，不是「平静」' if flat else ''}")
-    print(f" ATR14      : {atr_v:.2f}  （{atr_v / last['c'] * 100:.2f}% 波动率）")
+    print(f" ATR14      : {atr_v:.2f}  （{atr_v / last_closed['c'] * 100:.2f}% 波动率）")
     print(f" 模式       : {plan['mode']}   recommend={plan['recommend']}"
           f"{'   ⚠ 买区已作废' if z.get('invalid') else ''}")
     _zt = ("（已作废 · 勿挂单）" if z.get("invalid")
            else f"{z.get('primary_lo')} ~ {z.get('primary_hi')}")
     print(f" 买区       : {_zt}"
+          f"{'（盘中口径）' if live_bar is not None else ''}"
           f"   防守位 {z.get('invalidation')}")
     if z.get("relaxed"):
         print(f" 门控       : ⚠ 已放宽 —— {z.get('relaxed_reason')}")
     if z.get("stop_warning"):
         print(f" ⚠ 止损冲突 : {z['stop_warning']}")
+    if live_bar is not None and pb_closed:
+        bt = pb_closed.get("trigger")
+        if bt is not None and live_bar["h"] >= bt:
+            fp = max(bt, live_bar["o"]) if live_bar["o"] >= bt else bt
+            print(f" ⚑ 预案单    : 昨收口径挂的 buy-stop {bt} 今日已触发"
+                  f"（今日高 {live_bar['h']:.2f}）→ 按 {fp:.2f} 成交，不再回头等回踩")
+        elif bt is not None:
+            print(f" ⚑ 预案单    : 昨收口径 buy-stop {bt} 尚未触发"
+                  f"（今日高 {live_bar['h']:.2f}）")
     if plan.get("note"):
         print(f" note       : {plan['note']}")
     print(f" 口径       : T+0 可当日进出 ｜ 无涨跌停（硬止损兜底）｜ 单笔风险预算"
@@ -1290,7 +1316,8 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None):
 
     # ---------- 1) 预案单 ----------
     print()
-    print("── 一、预案单（最近收盘结构 → 开盘前挂） ──")
+    print("── 一、预案单（最近收盘结构 → 开盘前挂） ──" if live_bar is None else
+          "── 一、盘中口径（今日未收盘 K 线已并入 → 当前买区） ──")
     invalid = bool(z.get("invalid"))
     has_zone = z.get("primary_lo") is not None and z.get("primary_hi") is not None
     if has_zone and not invalid:
@@ -1351,7 +1378,9 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None):
     bo = breakout_preorder(bars, atr_v, last["c"], profile="us")
     if bo:
         print()
-        print("── 一·B、突破预案单（setup 就绪 → 开盘挂条件买单） ──")
+        print("── 一·B、突破预案单（setup 就绪 → 开盘挂条件买单） ──"
+              if live_bar is None else
+              "── 一·B、下一关键位（盘中口径 → 未破的上方位，够格才挂条件单） ──")
         if bo["grade"] == "far":
             print(f"  上方 K = {bo['K']:.2f}（{bo['kind']}）距昨收 "
                   f"{bo['dist_atr']:.2f}×ATR —— 太远、当日不可及，不给挂单价。"
@@ -1390,21 +1419,26 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None):
 
     # ---------- 2) 盘前通道（美股独有） ----------
     print()
-    print("── 二、盘前通道（北京 16:00–21:30 · 美股独有） ──")
+    print("── 二、盘前通道（北京 16:00–21:30 · 美股独有） ──"
+          if live_bar is None else
+          "── 二、现价 vs 买区（盘前时段已过 · 盘中口径） ──")
     if spot is None or not prev_close:
         print("  无盘前快照")
     else:
         dev = (spot - prev_close) / prev_close * 100
         flat = abs(spot - prev_close) < 1e-9
-        print(f"  盘前价 {spot:.2f}（{dev:+.2f}% vs 昨收）"
+        print(f"  {'现价' if live_bar is not None else '盘前价'} {spot:.2f}"
+              f"（{dev:+.2f}% vs 昨收）"
               f"{'  ← 暂无盘前成交，按「无信号」处理，不要当利好' if flat else ''}")
         if has_zone:
             lo, hi = z["primary_lo"], z["primary_hi"]
             if spot < lo:
                 print(f"  → 低于买区下沿 {lo}：仍在调整区下方，按回踩单等（勿因盘前弱就抢）")
             elif spot <= hi:
-                print(f"  → ✅ 落在买区 {lo}-{hi} 内：开盘前挂 {hi} 即可吃到，"
-                      f"不必市价追盘前")
+                _how = (f"挂 {hi} 限价即可，不必市价追"
+                        if live_bar is not None
+                        else f"开盘前挂 {hi} 即可吃到，不必市价追盘前")
+                print(f"  → ✅ 落在买区 {lo}-{hi} 内：{_how}")
             else:
                 d_atr = (spot - hi) / atr_v
                 if cap is not None and spot > cap:
@@ -1414,7 +1448,9 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None):
                     print(f"  → ⚠ 高于买区上沿 {hi} {d_atr:.2f}×ATR 但仍在闸门内："
                           f"只挂不追，挂价不得高于 {cap if cap else hi}")
             idx = (spot - prev_close) / prev_close * 100 if prev_close else 0
-            if idx > 3:
+            # 「高开>3% 回踩单作废」是**盘前**闸门：那时回踩单还挂在昨收的调整位上。
+            # 盘中口径下买区已刷到突破位，再套这条会与上一行「✅ 落在买区内」打架。
+            if idx > 3 and live_bar is None:
                 print(f"  → 盘前已 +{idx:.1f}%：高开 >3%，回踩单作废（避接盘）")
         out["premarket"] = {"price": spot, "dev_pct": round(dev, 2)}
 
@@ -1652,7 +1688,8 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None):
                                    "qty": n, "cheaper_vs_src": round(S - entry, 2)}
 
     # ---------- 五) 量价研判（防买在派发；与 A 股同口径） ----------
-    vp = vp_regime(bars)   # bars 只含已收盘交易日，无盘中半根问题
+    # 筹码口径只用已收盘日线：盘中半根量能未走完，混进去会被读成「缩量」
+    vp = vp_regime(bars if live_bar is None else bars[:-1])
     if (vp is not None and z.get("primary_hi") is not None
             and not z.get("invalid")):
         print()

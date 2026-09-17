@@ -635,6 +635,115 @@ def in_ash_session(date_str=None, now=None):
     return _ASH_LIVE[0] <= t < _ASH_LIVE[1]
 
 
+# 美股「未收盘」时段：只有常规盘中才把今日 bar 合成进结构。
+# 盘前/盘后成交稀疏，用它们充当「收盘站上」会造出新的假突破 —— 不合成。
+# Closed → 日线本身已完整，合成反而会造出重复的一根。
+_US_INTRADAY_SESSION = ("open",)
+_US_SESSION_MIN = 390                    # 常规时段 09:30–16:00 ET
+_US_OPEN_MIN = 9 * 60 + 30
+_MON = {m: i for i, m in enumerate(
+    ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"), 1)}
+
+
+def us_session_clock(meta):
+    """从 Nasdaq 快照的 `as_of`（'Sep 17, 2026 12:19 PM ET'）解出 (ET 日期, ET 分钟)。
+
+    无时区库时不去自己换算夏令时 —— Nasdaq 已经把 ET 算好写进字符串，
+    直接解析它，比拿北京时间减固定偏移稳。返回 (None, None) 表示解不出。
+    """
+    if not meta:
+        return None, None
+    m = re.search(r"([A-Z][a-z]{2}) (\d{1,2}), (\d{4}) (\d{1,2}):(\d{2}) (AM|PM)",
+                  str(meta.get("as_of") or ""))
+    if not m:
+        return None, None
+    mon, day, yr, hh, mi, ap = m.groups()
+    mo = _MON.get(mon)
+    if not mo:
+        return None, None
+    h = int(hh) % 12 + (12 if ap == "PM" else 0)
+    return f"{int(yr):04d}-{mo:02d}-{int(day):02d}", h * 60 + int(mi)
+
+
+def project_session_volume(v, meta):
+    """盘中累计量 → 预计全日量（量比口径）。
+
+    半天的累计量直接比整日均量必然偏低：INTC 2026-09-17 12:26 ET 已成交 85.5M，
+    rvol20 却算出 0.94 被标成「非放量」，而按已走时段折算约 2.1× = 真放量。
+    低标放量会错误地压低仓位，故按 A 股量比习惯折算。取不到时钟则原样返回。
+    """
+    _, clk = us_session_clock(meta)
+    if not v or clk is None:
+        return v
+    elapsed = min(max(clk - _US_OPEN_MIN, 1), _US_SESSION_MIN)
+    return v * _US_SESSION_MIN / float(elapsed)
+
+
+def intraday_bar(sym, meta, bars, fetch=None):
+    """合成「今日盘中未收盘」的一根 K 线（美股）。
+
+    背景（2026-09-17 INTC）：Nasdaq historical **只含已收盘交易日**，盘中取到的
+    末根仍是昨日。原实现把 spot 只当一个附带字段，结构依旧按昨收算 —— 于是突破
+    当天引擎完全看不见突破：模式停在昨收的 line_pullback，买区（99.45~104.03）
+    整段落在突破位 106.69 之下，输出只剩「等回踩」。用户实况：「突破了平台，
+    却让我 104.03 买」＝ 这个口径错位。
+
+    今日 o/h/l/c 用 5 分钟线聚合。`v_raw` = 当日累计量（与 Nasdaq primaryData 的
+    volume 实测吻合，INTC 9/17 12:19 ET：84.57M vs 84.56M）；`v` = 按已走时段折算的
+    预计全日量（量比口径），避免半天量比整日均量被误读成「缩量」。
+
+    仅在「常规盘中（session=Open）+ 日线尚未含当日」时才合成。盘前/盘后成交稀疏，
+    不参与；已收盘或拿不到数据也返回 None。
+    """
+    if not bars or not meta:
+        return None
+    if str(meta.get("session") or "").strip().lower() not in _US_INTRADAY_SESSION:
+        return None
+    d_et, _ = us_session_clock(meta)
+    if not d_et or str(bars[-1]["d"])[:10] >= d_et:
+        return None                     # 拿不到交易日，或日线已含当日
+    fn = fetch or (lambda s: bars_from_yahoo_min(s)[0])
+    try:
+        m5 = fn(sym) or []
+    except Exception:
+        return None
+    m5 = [x for x in m5 if x.get("o") is not None and x.get("c") is not None]
+    if not m5:
+        return None
+    hs = [x["h"] for x in m5 if x.get("h") is not None]
+    ls = [x["l"] for x in m5 if x.get("l") is not None]
+    if not hs or not ls:
+        return None
+    v_raw = sum(x.get("v") or 0 for x in m5)
+    return {
+        "d": d_et,
+        "o": m5[0]["o"],
+        "h": max(hs),
+        "l": min(ls),
+        "c": m5[-1]["c"],
+        "v": project_session_volume(v_raw, meta),   # 量比口径，见函数注释
+        "v_raw": v_raw,
+        "live": True,                   # 标记：未收盘，量能为折算值
+    }
+
+
+def merge_intraday_bar(sym, bars, meta, market="US", fetch=None):
+    """把今日盘中未收盘 bar 并入日线序列 → (bars2, live_bar|None)。
+
+    并入后 build_ev / plan_entry 会自然地把「今日站上平台沿」算成 fresh_break，
+    买区随之从昨收的回踩位刷到突破位 —— 这是「不再永远等回踩」的关键。
+    量能字段缺 A 股（东财日线盘中不返回当日半根，meta 为空）→ 自动不合成。
+    `fetch` 仅供测试注入 5 分钟线，生产走默认取数。
+    """
+    if not bars or market == "ASH":
+        return bars, None
+    b = intraday_bar(sym, meta, bars, fetch=fetch)
+    if not b:
+        return bars, None
+    return bars + [b], b
+
+
 def is_yizi(bar, prev_c, atr_v):
     """真一字/振幅极小跳空：有缺口 + 振幅 tiny + 实体≈0。光脚大阳天然排除。"""
     if prev_c is None:
@@ -1127,6 +1236,95 @@ def detect_w_bottom(bars, Hs, Ls, atr_v, lookback=55):
     return best
 
 
+def local_highs(bars, w=2):
+    """±w 滚动窗内的局部高点（比 pivots 更宽松）。
+
+    必须比 pivots(w=3) 宽松：**单调下移段内 w=3 根本不产生枢轴高**。
+    TEM 2026-08-27 高 71.89 因左侧 08-24 高 72.02 更高而被 w=3 丢弃，于是
+    「下降高点连线」取不到锚点 —— 而 71.89 正是肉眼那条斜线的起点之一。
+    """
+    n = len(bars)
+    out = []
+    for i in range(w, n - w):
+        h = bars[i]["h"]
+        if all(bars[j]["h"] <= h for j in range(i - w, i + w + 1) if j != i):
+            out.append((i, h))
+    ded = []
+    for i, h in out:
+        if ded and i - ded[-1][0] < w:
+            if h > ded[-1][1]:
+                ded[-1] = (i, h)
+            continue
+        ded.append((i, h))
+    return ded
+
+
+def detect_down_trendline(bars, atr_v, start_i=None, lookback=30, w=2,
+                          touch_k=0.35, viol_w=1.5, min_touch=2, max_viol=3):
+    """下降趋势线：近端高点依次下移，选「被最多触碰、被最少收盘穿越」的那条。
+
+    为什么不能用「P1 之前的两个枢轴高」（旧口径）：TEM 2026-09 的 P1 是 09-02
+    低 60.06，其前两个枢轴高是 08-12@57.03 与 08-21@72.96 —— 那是一条**上升**
+    线，外推到末根得到 97.99→111.65（而当期价格只有 60-70），declining=False，
+    于是 downtrend_tl_break 永不触发。该画的其实是 08-21@72.96 → 09-02@67.10
+    （下移、9 次触碰），即肉眼那条斜线。
+
+    本函数只负责把线画对；突破判定（last_c > tl_now 且 days_above_tl ≤ 3）与
+    量能门控交给调用方。锚点不含末根（末根是待判突破的那根，不能当摆动高）。
+    """
+    n = len(bars)
+    if n < 12 or not atr_v or atr_v <= 0:
+        return None
+    lo_i = max(start_i if start_i is not None else 0, n - lookback)
+    cand = [(i, h) for i, h in local_highs(bars, w) if i >= lo_i and i <= n - w - 1]
+    if len(cand) < 2:
+        return None
+    best = None
+    for a in range(len(cand)):
+        for b in range(a + 1, len(cand)):
+            i1, y1 = cand[a]
+            i2, y2 = cand[b]
+            if y2 >= y1 or i2 - i1 < w:
+                continue
+            p_b, p_a = (i1, y1), (i2, y2)
+            touch = sum(
+                1 for k in range(i1, n)
+                if abs(bars[k]["h"] - line_val(p_b, p_a, k)) <= touch_k * atr_v
+            )
+            # 突破前的收盘穿越（末根不算：末根正是要判突破的那一根）
+            viol = sum(
+                1 for k in range(i1, n - 1)
+                if bars[k]["c"] > line_val(p_b, p_a, k)
+            )
+            score = touch - viol_w * viol
+            if best is None or score > best["score"]:
+                best = {
+                    "i1": i1, "y1": y1, "i2": i2, "y2": y2,
+                    "touch": touch, "viol": viol, "score": score,
+                }
+    if best is None:
+        return None
+    if best["touch"] < min_touch or best["viol"] > max_viol:
+        return None
+    # 线的右端必须够近：远期化石线即使统计好看也不是「当期」结构
+    if best["i2"] < n - 20:
+        return None
+    pb, pa = (best["i1"], best["y1"]), (best["i2"], best["y2"])
+    tl_now = line_val(pb, pa, n - 1)
+    if tl_now is None:
+        return None
+    return {
+        "pb": {"i": best["i1"], "price": round(best["y1"], 4), "d": bars[best["i1"]]["d"]},
+        "pa": {"i": best["i2"], "price": round(best["y2"], 4), "d": bars[best["i2"]]["d"]},
+        "tl_now": tl_now,
+        "days_above_tl": days_above_line(bars, pb, pa),
+        "touches": best["touch"],
+        "viol": best["viol"],
+        "score": best["score"],
+        "dist_atr": (bars[-1]["c"] - tl_now) / atr_v,
+    }
+
+
 def detect_bull_flag(bars, Hs, atr_v, lookback=45):
     """上升旗形：先有旗杆（短促大涨），再有下降高点连成的旗面。
 
@@ -1166,25 +1364,34 @@ def detect_bull_flag(bars, Hs, atr_v, lookback=45):
     pe = best_pole["end"]
     # 旗面高点：旗杆结束后的下降摆动高（至少两个，后高低于前高）
     flag_hs = [(i, h) for i, h in Hs if i > pe]
-    if len(flag_hs) < 2:
-        # 枢轴不够时，用旗杆后分段最高点近似
-        seg = bars[pe + 1:]
-        if len(seg) < 4:
-            return None
-        mid = pe + 1 + len(seg) // 2
-        h1 = max(range(pe + 1, mid + 1), key=lambda i: bars[i]["h"])
-        h2 = max(range(mid, n), key=lambda i: bars[i]["h"])
-        if h2 <= h1 or bars[h2]["h"] >= bars[h1]["h"]:
-            return None
-        flag_hs = [(h1, bars[h1]["h"]), (h2, bars[h2]["h"])]
-    # 取最近两个下降高点
     pb = pa = None
-    for k in range(len(flag_hs) - 1, 0, -1):
-        i2, p2 = flag_hs[k]
-        i1, p1 = flag_hs[k - 1]
-        if p2 < p1 and i2 > i1:
-            pb, pa = (i1, p1), (i2, p2)
-            break
+    if len(flag_hs) >= 2:
+        for k in range(len(flag_hs) - 1, 0, -1):
+            i2, p2 = flag_hs[k]
+            i1, p1 = flag_hs[k - 1]
+            if p2 < p1 and i2 > i1:
+                pb, pa = (i1, p1), (i2, p2)
+                break
+    if pb is None or pa is None:
+        # 枢轴不够（下移段内 w=3 不产生枢轴高）→ 用近端局部高点检出。
+        # 旧实现取「旗杆后右半段最高点」近似，突破那根自己会成为右半段最高点，
+        # 线被拖到突破价、days_above_tl 归零 —— 形态在突破当天自我消失
+        # （TEM 2026-09-15：9/14 线=62.18 正确，9/15 跳到 68.94、days_above=0）。
+        alt = detect_down_trendline(bars, atr_v, start_i=pe + 1)
+        if alt is not None:
+            pb = (alt["pb"]["i"], alt["pb"]["price"])
+            pa = (alt["pa"]["i"], alt["pa"]["price"])
+        else:
+            seg = bars[pe + 1:]
+            if len(seg) < 4:
+                return None
+            mid = pe + 1 + len(seg) // 2
+            hi_end = max(mid + 1, n - 1)        # 右段最高点候选不含末根
+            h1 = max(range(pe + 1, mid + 1), key=lambda i: bars[i]["h"])
+            h2 = max(range(mid, hi_end), key=lambda i: bars[i]["h"])
+            if bars[h2]["h"] >= bars[h1]["h"]:
+                return None
+            pb, pa = (h1, bars[h1]["h"]), (h2, bars[h2]["h"])
     if pb is None or pa is None:
         return None
     # 旗面通常 3–20 根；更长是通道不是旗。回撤不超过旗杆 2/3。
@@ -1492,11 +1699,25 @@ def attach_stops_targets(plan, bars, atr_v, Hs):
         z["target2"] = tg["target2"]
         z["rr_target1"] = tg["rr_target1"]
         if tg.get("rr_target1") is not None and tg["rr_target1"] < 1.0:
-            rr_note = f"盈亏比 rr_target1={tg['rr_target1']}<1.0，结构有效但赔率差"
+            # 突破类单：头顶最近的枢轴高会天然压低静态赔率（SDGR 2026-09-15
+            # rr=0.17），这是结构失真，不代表机会变差。旧措辞「赔率差」会让
+            # 人在趋势启动第一天就放弃，故单列口径。
+            if mode in ("platform_break", "w_bottom_break", "flag_tl_break",
+                        "downtrend_tl_break"):
+                rr_note = (
+                    f"静态赔率 rr_target1={tg['rr_target1']}<1.0 属突破初期失真"
+                    f"（头顶最近枢轴高天然压住赔率），机会未变差；"
+                    f"趋势单用移动止损（MA5/大阳中点）替代固定目标"
+                )
+            else:
+                rr_note = f"盈亏比 rr_target1={tg['rr_target1']}<1.0，结构有效但赔率差"
             prev = plan.get("note") or ""
             plan["note"] = f"{prev}；{rr_note}" if prev else rr_note
             v = plan.get("verdict") or ""
-            if v and "赔率" not in v:
+            if v and "赔率" not in v and mode not in (
+                "platform_break", "w_bottom_break", "flag_tl_break",
+                "downtrend_tl_break",
+            ):
                 plan["verdict"] = f"{v}·赔率偏弱"
     plan["buy_zone"] = z
     plan["stop_plan"] = sp
@@ -1504,13 +1725,151 @@ def attach_stops_targets(plan, bars, atr_v, Hs):
     return plan
 
 
+def pre_breakout_order(bars, ev, atr_v, plat, last_c, rvol):
+    """预备突破单（buy-stop 埋伏）：价格逼近「未被收盘打穿」的活平台沿时给出。
+
+    补 SDGR 2026-09-14 缺口：当日活平台沿 21.40 距收盘仅 0.64×ATR（kind=pressing），
+    而 plan_entry 只输出了「大阳回踩 18.84-19.86」——该回踩从未发生，次日直接跳空
+    越过买区，整段 +46% 被完整错过。买点就是突破位本身（不属追高），buy-stop 需
+    触发才成交、假突破自动不成交，故与「不追高」闸门不冲突。
+
+    只在：pressing 平台 / 距沿 ≤1.2×ATR / 非极度缩量 / 非下跌段且站上 MA20 时给出。
+    """
+    if not plat or plat.get("kind") != "pressing":
+        return None
+    if not atr_v or atr_v <= 0 or last_c is None:
+        return None
+    lv = plat.get("price")
+    if lv is None or lv <= last_c:
+        return None
+    dist_atr = (lv - last_c) / atr_v
+    if dist_atr > 1.2:
+        return None
+    if rvol is not None and rvol < 0.8:
+        return None
+    # 结构守卫：不埋伏明确下跌段。此处**不能用 c2**（自 P1 未创新低）——
+    # 反转初期 c2 必为 False（SDGR 9/14 正是如此，9/11 低 18.63 < P1 19.13），
+    # 用它会把本信号要覆盖的场景整个挡掉。改用 regime + MA20。
+    if ev.get("regime") == "downtrend":
+        return None
+    ma20 = sma([b["c"] for b in bars], 20)
+    if ma20 is not None and last_c < ma20:
+        return None
+    trigger = round(lv + 0.05 * atr_v, 2)
+    ma5 = sma([b["c"] for b in bars], 5)
+    floors = [lv - 0.5 * atr_v]
+    if ma5 is not None:
+        floors.append(ma5 - 0.10 * atr_v)
+    hard = round(max(f for f in floors if f < trigger), 2)
+    from_d = bars[plat["i"]]["d"] if plat.get("i") is not None else None
+    return {
+        "order": "buy-stop",
+        "level": round(lv, 2),
+        "trigger": trigger,
+        "hard_stop": hard,
+        "risk_per_share": round(trigger - hard, 2),
+        "dist_atr": round(dist_atr, 2),
+        "platform_from": from_d,
+        "note": (
+            f"上方活平台沿 {round(lv, 2)}（{from_d}）未破，距收盘 {dist_atr:.2f}×ATR；"
+            f"挂 buy-stop {trigger} 埋伏，触发即突破确认。硬止损 {hard}"
+            f"（跌回平台沿下方=假突破）；突破后按移动止损管理，不设固定目标。"
+            f"此为埋伏单，与当日回踩买点并存、先到先做"
+        ),
+    }
+
+
+def pre_breakout_line_order(bars, ev, atr_v, last_c, rvol=None):
+    """斜线预备突破单：价格贴在**下降趋势线**下方时，在线上方挂 buy-stop。
+
+    补 ILMN / TEM 2026-09 缺口（用户 2026-09-17 指正：这两个都该按「画斜线突破
+    下降趋势线」处理，而不是水平平台）。平台版挂水平沿，这里挂下移斜线 ——
+    触发价必须取**下一根**的线值：线在下移，用当日线值会把单子挂高。
+
+    买点仍是突破位本身（不是追高）：buy-stop 需真被触发才成交，假突破自动不成交，
+    故与「不追高」闸门不冲突。
+
+    止损给线下 1.0×ATR：ILMN 20 笔样本显示 0.55×ATR 的贴沿止损有 94% 在 10 日内
+    被扫后又涨回（错杀），1.0×ATR 才是期望最优，故不沿用平台版的 0.5×ATR。
+    """
+    if not atr_v or atr_v <= 0 or last_c is None:
+        return None
+    dl = ev.get("down_tl") or {}
+    if dl.get("src") != "local_highs":
+        return None
+    a, b = dl.get("a"), dl.get("b")
+    if not a or not b or a["i"] == b["i"]:
+        return None
+    pb, pa = (b["i"], b["price"]), (a["i"], a["price"])
+    if pa[1] >= pb[1]:                       # 必须是下移线
+        return None
+    nxt = len(bars)                          # 下一根的索引：触发价按下一根的线值
+    line_next = line_val(pb, pa, nxt)
+    if line_next is None or last_c >= line_next:
+        return None                          # 已站上 → 交给突破类模式，不挂埋伏单
+    dist_atr = (line_next - last_c) / atr_v
+    if dist_atr > 1.2:                       # 离得太远，埋伏无意义
+        return None
+    if ev.get("regime") == "downtrend":
+        return None                          # 明确下跌段不接飞刀（反转态才埋伏）
+    trigger = round(line_next + 0.05 * atr_v, 2)
+    if trigger <= last_c:
+        return None
+    hard = round(line_next - 1.0 * atr_v, 2)
+    from_txt = (f"{bars[b['i']]['d']}高{b['price']:.2f}→"
+                f"{bars[a['i']]['d']}高{a['price']:.2f}")
+    return {
+        "order": "buy-stop",
+        "anchor": "down_tl",
+        "level": round(line_next, 2),
+        "trigger": trigger,
+        "hard_stop": hard,
+        "risk_per_share": round(trigger - hard, 2),
+        "dist_atr": round(dist_atr, 2),
+        "line_from": from_txt,
+        "note": (
+            f"下降趋势线（{from_txt}）下移中，下一根线值 {round(line_next, 2)}，"
+            f"收盘在线下 {dist_atr:.2f}×ATR；挂 buy-stop {trigger} 于线上方埋伏，"
+            f"触发即「画斜线突破」确认。硬止损 {hard}（线下1×ATR=假突破）；"
+            f"突破后按移动止损管理，不设固定目标。此为埋伏单，与当日买点并存、先到先做"
+        ),
+    }
+
+
 def plan_entry(bars, ev):
     """当日只给一种 mode（含 W底/旗形突破）。"""
     last_c = bars[-1]["c"] if bars else None
     atr_v = atr14(bars)
     rvol = ev.get("rvol20")
-    vol_ok = rvol is None or rvol > 1.5
+    vol_ok = rvol is None or rvol > 1.5   # 2026-09-17 起不再作突破类闸门（仅保留供参考/提示）
     vol_shrink = rvol is None or rvol <= 1.2
+    # 价格型突破确认（2026-09-17 用户定：RVOL 不是硬闸门，「价格说明一切」）。
+    # 站上关键位的确认改看价格本身：收盘落在当日振幅上半区（排除上影插针式站上），
+    # 且收盘不低于前收（非下跌日）。量能降级为提示，不再一票否决。
+    _lb = bars[-1] if bars else {}
+    _prev_c = bars[-2]["c"] if len(bars) > 1 else None
+    _rng = (_lb.get("h", 0) - _lb.get("l", 0)) if bars else 0
+    price_conf = bool(
+        bars and _lb.get("c") is not None
+        and (_rng <= 0 or (_lb["c"] - _lb["l"]) / _rng >= 0.5)
+        and (_prev_c is None or _lb["c"] >= _prev_c)
+    )
+
+    def vol_note():
+        """量能降级为提示：放量=加分项；无量只说明「非放量突破」，按价格结构确认。"""
+        if rvol is None:
+            return "；无量能数据，确认打折"
+        if rvol > 1.5:
+            return f"；放量确认 RVOL={round(rvol, 2)}"
+        return (f"；无量（RVOL={round(rvol, 2)}≤1.5）——按价格结构确认（阳线、收盘上半区），"
+                f"属非放量突破，仓位打折")
+
+    # 宽幅强阳：实体 ≥1.2×ATR 且收盘落在振幅上半区。无量时的**价格替代确认**，
+    # 用于平台/W底突破（下降趋势线家族已完全按价格确认，不设量能闸门）。
+    strong_bar = bool(
+        price_conf and atr_v and _lb.get("o") is not None
+        and (_lb["c"] - _lb["o"]) >= 1.2 * atr_v
+    )
     r1p = _px(ev.get("R1"))[1]
     plat = ev.get("platform")  # 不回落旧 R1；无活平台沿则不做平台突破
     plat_p = _px(plat)[1]
@@ -1596,6 +1955,41 @@ def plan_entry(bars, ev):
                 )
                 verdict = f"突破已延伸·只挂回踩单 {hi}"
                 z["chase_only"] = True
+                # 强突破次日多不给回踩：SDGR 2026-09-15 RVOL=3.85，次日
+                # 23.29 跳空越过买区上沿 22.59，之后再未回落 —— 只挂回踩单＝整段吃不到
+                # （原回踩单 22.59 从未成交）。故对强突破额外开一条**次日限价**次优路径，
+                # 代价用「半仓＋更紧止损」对冲，且不越「不追高」那条线：
+                #   上限 = 闸门边界 level+2×ATR（与不追高同一条线，不越线）
+                #   止损 = 突破阳 (H+L)/2（比结构止损紧）
+                #   仅次日有效，不成交即作废
+                # 触发口径（2026-09-17 用户定 RVOL 不作硬闸门）：放量 **或** 价格型
+                # 宽幅强阳（实体≥1.2ATR、收盘上半区，见 strong_bar）—— 无量强突破同样
+                # 不给回踩机会，只认 RVOL 会系统性错过它们。
+                _vol_strong = rvol is not None and rvol >= 2.5
+                if atr_v and (_vol_strong or strong_bar):
+                    yang = bars[-1]
+                    chase_stop = round((yang["h"] + yang["l"]) / 2, 2)
+                    if chase_stop >= last_c:
+                        chase_stop = round(last_c - 0.5 * atr_v, 2)
+                    chase_cap = round(lv + 2.0 * atr_v, 2)
+                    why = (f"RVOL={rvol:.2f}≥2.5" if _vol_strong
+                           else f"实体{(yang['c'] - yang['o']) / atr_v:.2f}ATR 宽幅强阳")
+                    z["next_day_chase"] = {
+                        "limit": chase_cap,
+                        "size_ratio": 0.5,
+                        "stop": chase_stop,
+                        "valid_for": "仅次日",
+                        "note": (
+                            f"强突破（{why}）次日多不回踩："
+                            f"若次日开盘 ≤{chase_cap}，可**半仓**限价执行，"
+                            f"止损收紧到突破阳中点 {chase_stop}；只此一天，不成交即作废"
+                        ),
+                    }
+                    note += (
+                        f"；**强突破例外**（{why}）：次日开盘 ≤{chase_cap} "
+                        f"可半仓限价执行，止损收紧至突破阳中点 {chase_stop}，仅次日有效"
+                    )
+                    verdict = f"突破已延伸·只挂回踩单 {hi} 或次日半仓追（强突破）"
             elif lo is not None and last_c < lo:
                 note = (
                     f"现价 {last_c:.2f} 低于买位 {lv} {abs(d):.1f}×ATR，已跌破买区下沿 {lo}；"
@@ -1624,23 +2018,48 @@ def plan_entry(bars, ev):
             "days_above_r1": n_above_r1,
             "days_above_platform": n_above,
         }
-        return attach_stops_targets(result, bars, atr_v, Hs_all)
+        result = attach_stops_targets(result, bars, atr_v, Hs_all)
+        # 收盘正顶未破的位 → 附「预备突破单」，与当日 mode 独立并存。
+        # 两种挂法：水平平台沿（平台版）/ 下移斜线（下降趋势线版）；同时够格取更近的。
+        pb_plat = pre_breakout_order(bars, ev, atr_v, plat, last_c, rvol)
+        pb_line = pre_breakout_line_order(bars, ev, atr_v, last_c, rvol)
+        cands = [x for x in (pb_plat, pb_line) if x]
+        if cands:
+            result["pre_breakout"] = min(cands, key=lambda x: x["dist_atr"])
+            if len(cands) == 2:
+                other = max(cands, key=lambda x: x["dist_atr"])
+                result["pre_breakout"]["note"] += (
+                    f"；另有"
+                    f"{'活平台沿' if other.get('anchor') != 'down_tl' else '下降趋势线'}"
+                    f" {other['level']} 的埋伏单同样够格（距 {other['dist_atr']}×ATR），先到先做"
+                )
+        return result
 
     plat_txt = f"{round(plat_p, 2)}" if plat_p is not None else "N/A"
     fresh_plat = plat_p is not None and last_c is not None and last_c > plat_p and n_above <= 3
-    if fresh_plat and vol_ok:
-        note = "过平台沿但无量能数据，突破确认打折" if rvol is None else ""
+    # 2026-09-17 用户定「价格说明一切」：突破类不再以量能作一票否决闸门。
+    # 放量（vol_ok）/宽幅强阳（strong_bar）都只是加分确认，最终一律要过价格确认
+    # price_conf —— 收盘落在当日振幅上半区且不低于前收，排除长上影插针式站上。
+    if fresh_plat and not price_conf:
+        return pack(
+            "wait", None, "wait", "平台突破·价格未确认", False,
+            f"近{n_above}根站上活平台沿 {plat_txt}，但收盘落在当日振幅下半区"
+            f"（或收低于前收）= 上影插针式站上，不算突破" + vol_note(),
+            _empty_zone(),
+        )
+    if fresh_plat and (vol_ok or strong_bar):
+        note = ""
         if declining and days_above_tl <= 3:
-            note = (note + "；" if note else "") + "下降趋势线同步突破，按平台突破（优先T1）执行"
+            note = "下降趋势线同步突破，按平台突破（优先T1）执行"
         if r1p is not None and abs(plat_p - r1p) > 0.01:
             extra = f"活平台沿 {plat_txt}（123 R1={round(r1p, 2)} 已不作突破位）"
             note = (note + "；" if note else "") + extra
+        note = (note + "；" if note else "") + vol_note().lstrip("；")
         z = zone_at_level(plat_p, atr_v, last_c, "平台突破(优先T1)", ev, bars)
         return pack("platform_break", 1, "breakout", "平台突破(优先T1)", True, note, z)
-    if fresh_plat and not vol_ok:
-        # 平台量能不足 = 疑似假突破。但老罗 2026-09-17 定「强上加强」：
-        # 若同时明显沿线主升（贴轨 ≥4 次、收盘仍在线上 ≤1×ATR），平台破位与
-        # 沿线主升两结构互证 —— 优先级高于单独任何一路，不被「量能不足」拦截，
+    if fresh_plat and not (vol_ok or strong_bar):
+        # 量能不足且非宽幅强阳 = 疑似假突破。但老罗 2026-09-17 定「强上加强」：
+        # 平台破位与沿线主升两结构互证 —— 优先级高于单独任何一路，
         # 直接按沿线回踩给出买点。收盘已跌破该线（dist_atr<0）则不豁免，仍 wait。
         boost = (
             structure_ok
@@ -1655,21 +2074,26 @@ def plan_entry(bars, ev):
             rec = bool(vol_shrink)
             note = (
                 f"【强上加强】近{n_above}根站上活平台沿 {plat_txt} 但 RVOL="
-                f"{round(rvol, 2)}≤1.5；同时沿{label}@{lv}主升（触及{demand['hits']}次、"
+                f"{round(rvol, 2) if rvol is not None else 'N/A'}≤1.5 且非宽幅强阳；"
+                f"同时沿{label}@{lv}主升（触及{demand['hits']}次、"
                 f"距线 {demand['dist_atr']:.2f}×ATR）→ 两结构互证，按沿线回踩买"
             )
             if not vol_shrink:
                 note += f"；量能偏大 RVOL={round(rvol, 2)}，等缩量尾盘"
             bz_line["type"] = f"强上加强·沿线回踩·{label}"
             return pack("line_pullback", 1, "pullback", "强上加强(平台+沿线主升)", rec, note, bz_line)
-        # 量能不足 = 假突破，明确「不买」。不给买区：原先不传 buy_zone，
-        # pack() 回退到 bz_line，打印出一个 2×ATR 宽的区间，看起来像可挂单价位。
-        # 活平台沿的信息 report 已有独立列，不靠 buy_zone 承载。
-        return pack(
-            "wait", None, "wait", "平台突破·量能不足", False,
-            f"近{n_above}根站上活平台沿 {plat_txt} 但 RVOL={round(rvol, 2)}≤1.5，不买假突破",
-            _empty_zone(),
+        # 上面 price_conf 闸门已过 → 价格本身成立，只是「未放量」。
+        # 2026-09-17 用户定「价格说明一切」：非放量突破不再判假突破「不买」
+        # —— 那正是 ILMN 踏空的成因。给买区，但明确打折为半仓/试错仓。
+        z = zone_at_level(plat_p, atr_v, last_c, "平台突破(优先T1)", ev, bars)
+        note = (
+            f"近{n_above}根站上活平台沿 {plat_txt}；价格已确认（收盘在当日振幅上半区、"
+            f"不低于前收），但量能未放（RVOL="
+            f"{round(rvol, 2) if rvol is not None else 'N/A'}）→ 非放量突破："
+            f"半仓/试错仓，次日不破当日低点再加"
+            + vol_note()
         )
+        return pack("platform_break", 1, "breakout", "平台突破(优先T1)·非放量", True, note, z)
 
     wpat = ev.get("w_bottom")
     if wpat is None:
@@ -1680,23 +2104,22 @@ def plan_entry(bars, ev):
         fresh_w = last_c > neck and 1 <= n_neck <= 3
         if fresh_w and wpat["l2"]["i"] < len(bars) - 1:
             neck_txt = round(neck, 2)
-            if vol_ok:
+            if price_conf:
                 z = zone_at_level(neck, atr_v, last_c, "W底颈线突破(优先T1)", ev, bars)
                 z["anchor"] = "w_neckline"
                 note = (
                     f"W底颈线 {neck_txt}："
                     f"左底 {wpat['l1']['d']}@{round(wpat['l1']['price'], 2)} / "
                     f"右底 {wpat['l2']['d']}@{round(wpat['l2']['price'], 2)}；"
-                    f"结构止损看颈线下"
+                    f"结构止损看颈线下" + vol_note()
                 )
-                if rvol is None:
-                    note += "；无量能数据，确认打折"
                 return pack(
                     "w_bottom_break", 1, "breakout", "W底颈线突破(优先T1)", True, note, z,
                 )
             return pack(
-                "wait", None, "wait", "W底颈线突破·量能不足", False,
-                f"近{n_neck}根站上颈线 {neck_txt} 但 RVOL={round(rvol, 2)}≤1.5，不买假突破",
+                "wait", None, "wait", "W底颈线突破·价格未确认", False,
+                f"近{n_neck}根站上颈线 {neck_txt}，但收盘落在当日振幅下半区"
+                f"（或收低于前收）= 上影插针式站上，不算突破" + vol_note(),
                 _empty_zone(),
             )
 
@@ -1707,25 +2130,41 @@ def plan_entry(bars, ev):
         f_tl = flag["tl_now"]
         f_days = flag["days_above_tl"]
         fresh_flag = last_c > f_tl and 1 <= f_days <= 3
-        if fresh_flag:
+        if fresh_flag and price_conf:
             tl_txt = round(f_tl, 2)
-            if vol_ok:
-                z = zone_at_level(f_tl, atr_v, last_c, "旗形下降趋势线突破(优先T1)", ev, bars)
-                z["anchor"] = "flag_tl"
-                note = (
-                    f"旗形突破：旗杆 {flag['pole_d0']}→{flag['pole_d1']} "
-                    f"({round(flag['pole_lo'], 2)}→{round(flag['pole_hi'], 2)})，"
-                    f"旗面下降趋势线 @{tl_txt}；结构止损看该线下"
-                )
-                if rvol is None:
-                    note += "；无量能数据，确认打折"
-                return pack(
-                    "flag_tl_break", 1, "breakout", "旗形下降趋势线突破(优先T1)", True, note, z,
-                )
+            z = zone_at_level(f_tl, atr_v, last_c, "旗形下降趋势线突破(优先T1)", ev, bars)
+            z["anchor"] = "flag_tl"
+            note = (
+                f"旗形突破：旗杆 {flag['pole_d0']}→{flag['pole_d1']} "
+                f"({round(flag['pole_lo'], 2)}→{round(flag['pole_hi'], 2)})，"
+                f"旗面下降趋势线 @{tl_txt}；结构止损看该线下" + vol_note()
+            )
             return pack(
-                "wait", None, "wait", "旗形突破·量能不足", False,
-                f"近{f_days}根站上旗面趋势线 {tl_txt} 但 RVOL={round(rvol, 2)}≤1.5，不买假突破",
-                _empty_zone(),
+                "flag_tl_break", 1, "breakout", "旗形下降趋势线突破(优先T1)", True, note, z,
+            )
+
+    # 下降趋势线突破（与旗形同族：都是斜线突破）。必须放在「回踩类」分支之前 ——
+    # 2026-09-17 用户指正 TEM / ILMN：线已被收盘站上是**已发生的突破事实**，
+    # 不该被「等回踩」的预案（大阳当日不追 / 调整未缩量 / 等回调整区）覆盖掉。
+    # ILMN 9/15 RVOL=1.70 本已过量能闸门，却被「大阳当日不追」抢先返回，
+    # 线突破根本没被评估 → 9/15 开盘 208.95 直接跳过整条旗面线（踏空）。
+    # 有旗形时不用泛化 downtrend_tl_break 抢标（test_flag_blocks_generic_dtl 明确此规则）：
+    # 旗形与斜线同族，旗形已在上面优先评估；此处只在「无旗形」时才由泛化斜线出手。
+    # TEM 9/15 那种「旗面线已离价过远」的情形，由 9/10-9/11 的斜线预备突破单
+    # 与 9/14 的旗形信号覆盖，不靠抢标解决。
+    if flag is None:
+        fresh_dtl = (
+            declining and tl_now is not None and last_c is not None
+            and last_c > tl_now and days_above_tl <= 3
+        )
+        if fresh_dtl and price_conf:
+            z = zone_at_level(tl_now, atr_v, last_c, "下降趋势线突破(次优先T2)", ev, bars)
+            z["anchor"] = "down_tl"
+            tgt_lv = plat_p if plat_p is not None else r1p
+            tgt = f"目标1先看平台沿 {round(tgt_lv, 2)}" if tgt_lv else "目标1看最近前高"
+            note = f"次优先T2，试错仓。未过前高则{tgt}；过前高升级为平台突破" + vol_note()
+            return pack(
+                "downtrend_tl_break", 2, "breakout", "下降趋势线突破(次优先T2)", True, note, z,
             )
 
     line_wait_verdict = None
@@ -1858,29 +2297,6 @@ def plan_entry(bars, ev):
                 "impulse_pause", 2, "pullback", "大阳后缩量回踩(次优先T2)", True, note, z,
             )
 
-    if flag is None:
-        fresh_dtl = (
-            declining and tl_now is not None and last_c is not None
-            and last_c > tl_now and days_above_tl <= 3
-        )
-        if fresh_dtl and vol_ok:
-            z = zone_at_level(tl_now, atr_v, last_c, "下降趋势线突破(次优先T2)", ev, bars)
-            z["anchor"] = "down_tl"
-            tgt_lv = plat_p if plat_p is not None else r1p
-            tgt = f"目标1先看平台沿 {round(tgt_lv, 2)}" if tgt_lv else "目标1看最近前高"
-            note = f"次优先T2，试错仓。未过前高则{tgt}；过前高升级为平台突破"
-            if rvol is None:
-                note += "；无量能数据，确认打折"
-            return pack(
-                "downtrend_tl_break", 2, "breakout", "下降趋势线突破(次优先T2)", True, note, z,
-            )
-        if fresh_dtl and not vol_ok:
-            return pack(
-                "wait", None, "wait", "下降趋势线突破·量能不足", False,
-                f"RVOL={round(rvol, 2)}≤1.5，T2 也不买假突破",
-                _empty_zone(),
-            )
-
     if line_wait_note:
         return pack(
             "wait", None, "wait", line_wait_verdict, False, line_wait_note, bz_line,
@@ -1969,7 +2385,22 @@ def build_ev(bars, drop_live=False):
     c3 = (R1 is not None) and (last_c > R1[1])
     c1 = False
     tl_note = "N/A"
-    if h_a and h_b:
+    # 下降趋势线：条件1（站上下降趋势线）与 downtrend_tl_break 共用此来源。
+    # 旧口径取「P1 之前两个枢轴高」：TEM 2026-09 取到 08-12@57.03 与 08-21@72.96
+    # —— 那是一条**上升**线，外推到末根 97.99→111.65（当期价格仅 60-70），
+    # 于是 declining=False、c1 永远 False。优先用近端下移局部高点检出
+    # （见 detect_down_trendline），检出失败才退回旧口径。
+    dline = detect_down_trendline(bars, atr_v)
+    if dline is not None:
+        tl_at_last = dline["tl_now"]
+        c1 = last_c > tl_at_last
+        tl_note = (
+            f"下降趋势线@末根≈{round(tl_at_last, 2)}"
+            f"（连 {dline['pb']['d']}高{dline['pb']['price']:.2f}→"
+            f"{dline['pa']['d']}高{dline['pa']['price']:.2f}，"
+            f"触及{dline['touches']}次/线上收盘{dline['viol']}根）"
+        )
+    elif h_a and h_b:
         tl_at_last = line_val(h_b, h_a, last_i)
         c1 = last_c > tl_at_last
         tl_note = (
@@ -1994,10 +2425,22 @@ def build_ev(bars, drop_live=False):
         "platform": plat,
         "w_bottom": w_bottom,
         "bull_flag": bull_flag,
-        "down_tl": {
-            "b": {"i": h_b[0], "price": h_b[1]},
-            "a": {"i": h_a[0], "price": h_a[1]},
-        } if (h_a and h_b) else None,
+        "down_tl": (
+            {
+                "b": {"i": dline["pb"]["i"], "price": dline["pb"]["price"]},
+                "a": {"i": dline["pa"]["i"], "price": dline["pa"]["price"]},
+                "src": "local_highs",
+                "touches": dline["touches"],
+                "viol": dline["viol"],
+            }
+            if dline is not None else (
+                {
+                    "b": {"i": h_b[0], "price": h_b[1]},
+                    "a": {"i": h_a[0], "price": h_a[1]},
+                    "src": "pivots_before_p1",
+                } if (h_a and h_b) else None
+            )
+        ),
     }
     meta = {
         "Hs": Hs, "Ls": Ls, "P0": P0, "P1": P1, "R1": R1,
@@ -2016,6 +2459,16 @@ def evaluate(sym, data_file=None, eod=False):
     _us = qmeta or {}                       # 美股：session/as_of/prev_close
     sym_code = str(sym).split(".")[0] if sym else ""
     market = "ASH" if (is_ash(sym_code) or (data_file and sym_code.isdigit())) else "US"
+    # 盘中：先把今日未收盘 bar 并入再判结构。不并的话突破当天引擎仍按昨收算，
+    # 模式/买区整体滞后一天 —— 就是「已破平台却只给回踩价」的成因（INTC 9/17）。
+    bars_closed = bars
+    bars, live_bar = (bars, None) if eod else merge_intraday_bar(
+        sym, bars, qmeta, market)
+    stale_plan = None
+    if live_bar is not None:
+        ev_stale, _, _ = build_ev(bars_closed)
+        if ev_stale is not None:
+            stale_plan = plan_entry(bars_closed, ev_stale)
     # 盘中未收盘：默认禁止 recommend（量能不可判）；--eod 丢弃末根
     live = is_live_bar(bars, market=market)
     drop_live = bool(eod or False)
@@ -2023,8 +2476,9 @@ def evaluate(sym, data_file=None, eod=False):
     if ev is None:
         return {"sym": sym, "verdict": "N/A", "reason": meta.get("reason", "无法判定"), "last": last_q}
 
-    if live and not drop_live:
-        # 仍算出结构，但强制不买
+    if live and not drop_live and live_bar is None:
+        # 仍算出结构，但强制不买。注意：能吃上真实盘中 OHLC 时（live_bar 非空）
+        # 不走这里 —— 那条路径给得出可执行结构，见下方「盘中口径」段。
         plan = plan_entry(bars, ev)
         plan["recommend"] = False
         plan["verdict"] = "盘中数据未收盘，量能不可判"
@@ -2146,6 +2600,51 @@ def evaluate(sym, data_file=None, eod=False):
     if h_a and h_b:
         out["trendline_at_last"] = rnd(line_val(h_b, h_a, meta["last_i"]))
     out["buy_zone"] = plan["buy_zone"]
+
+    # ---- 盘中（未收盘）口径 -------------------------------------------------
+    # live_bar 非空 = 今日未收盘 K 线已并入结构。买区/模式随之刷到突破位，
+    # 不再是昨收口径的回踩位；但仍要声明「盘中价非收盘价」并给出尾盘复核时点。
+    if live_bar is not None:
+        _clk = us_session_clock(_us)[1]
+        _tail = _clk is not None and _clk >= 15 * 60 + 45
+        out["intraday"] = True
+        out["intraday_bar"] = {
+            "d": live_bar["d"], "o": rnd(live_bar["o"]), "h": rnd(live_bar["h"]),
+            "l": rnd(live_bar["l"]), "c": rnd(live_bar["c"]), "v": live_bar.get("v"),
+        }
+        out["confirm_at"] = "尾盘（北京时间 03:45–04:00 / ET 15:45–16:00）"
+        out["verdict"] = "盘中·" + str(out.get("verdict") or "")
+        out["note"] = (
+            f"【盘中口径·未收盘】{_us.get('as_of') or ''} 现价 {rnd(live_bar['c'])}"
+            f"（今日 {rnd(live_bar['o'])}/{rnd(live_bar['h'])}/{rnd(live_bar['l'])}）；"
+            f"已并入今日未收盘 K 线，结构/买区按盘中刷新（非昨收口径）。"
+            + ("已到尾盘时段，可按现价定夺。" if _tail else
+               "盘中价非收盘价：以尾盘复核为准，收盘仍成立才动手。")
+            + "今日量为盘中累计按已走时段折算的预计全日量（量比口径），含外推成分。"
+            f" ｜ {note or ''}"
+        )
+
+    _pbsrc = (stale_plan or plan).get("pre_breakout")
+    if _pbsrc:
+        pb = dict(_pbsrc)
+        if live_bar is not None:
+            _trig = pb.get("trigger")
+            _h, _o = live_bar.get("h"), live_bar.get("o")
+            if _trig is not None and _h is not None and _h >= _trig:
+                pb["triggered"] = True
+                pb["fill_px"] = rnd(_o if (_o is not None and _o >= _trig) else _trig)
+                pb["status"] = (
+                    f"已触发（今日最高 {rnd(_h)} ≥ 触发价 {_trig}）→ 该埋伏单已成交，"
+                    f"按计划持有，不再回头等回踩")
+            elif _trig is not None:
+                pb["triggered"] = False
+                pb["status"] = f"未触发（今日最高 {rnd(_h)} < 触发价 {_trig}）→ 继续挂着"
+        out["pre_breakout"] = pb
+        _t = pb.get("trigger")
+        if pb.get("triggered"):
+            out["verdict"] = f"命中预案单 {pb.get('fill_px')}｜{out.get('verdict')}"
+        elif _t is not None and "预备突破单" not in str(out.get("verdict") or ""):
+            out["verdict"] = f"预备突破单 {_t}｜{out.get('verdict')}"
     return out
 
 
@@ -2190,7 +2689,7 @@ if __name__ == "__main__":
         res.append(r)
         print(f"=== {s} ===")
         for k, v in r.items():
-            if k in ("buy_zone", "stop_plan", "targets", "w_bottom", "bull_flag", "P0", "P1", "R1", "platform"):
+            if k in ("buy_zone", "stop_plan", "targets", "w_bottom", "bull_flag", "P0", "P1", "R1", "platform", "pre_breakout"):
                 print(f"  {k}: {v}")
             elif k not in ("note",) and not isinstance(v, (dict, list)):
                 print(f"  {k}: {v}")

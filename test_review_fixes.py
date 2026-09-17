@@ -1160,6 +1160,102 @@ def test_account_config_env_override():
             os.environ["ASH_PRIMARY"] = old
 
 
+def _intraday_fixture():
+    """上升（含回调形成枢轴）+ 顶部平台 + 突破前夜，末根 = 2026-09-16。
+
+    几何对齐 INTC 2026-09-17 实况：平台沿 80.60 尚未被收盘打穿，突破位就是它；
+    昨收口径的买区基准落在回踩线 79.1，而不是突破位。
+    """
+    rows, px = [], 50.0
+    for _ in range(5):
+        for _ in range(5):
+            px += 0.9
+            rows.append((px - 0.3, px + 0.5, px - 0.7, px, 1e6))
+        for _ in range(3):
+            px -= 0.7
+            rows.append((px + 0.3, px + 0.6, px - 0.9, px, 1e6))
+    for _ in range(9):
+        px += 2.0
+        rows.append((px - 0.6, px + 0.6, px - 1.1, px, 1.3e6))
+    for k in range(8):
+        c = px - 0.4 - 0.1 * k
+        rows.append((c + 0.3, c + 0.7, c - 0.7, c, 0.8e6))
+    d0 = datetime.date(2026, 9, 16) - datetime.timedelta(days=len(rows) - 1)
+    return [_bar((d0 + datetime.timedelta(days=i)).isoformat(), *r)
+            for i, r in enumerate(rows)]
+
+
+def _intraday_m5():
+    """今日 5 分钟线（跨北京零点，ET 日期仍是 09-17）+ 一根突破根。"""
+    return [{"d": "2026-09-17 21:30", "o": 79.8, "h": 82.0, "l": 79.5, "c": 81.5,
+             "v": 1e6},
+            {"d": "2026-09-18 00:20", "o": 81.5, "h": 84.4, "l": 81.0, "c": 84.0,
+             "v": 1e6}]
+
+
+def test_intraday_bar_uses_et_date_not_beijing():
+    """合成 bar 的日期取 Nasdaq 快照的 ET 日；5 分钟线跨北京零点不能改成 09-18。
+
+    旧实现只把 spot 当附带字段，盘中缺口根本不产生 —— INTC 2026-09-17 已站上
+    平台沿 107.57，买区却还是昨收的 99.45~104.03 回踩位。
+    """
+    from rule123 import intraday_bar, us_session_clock
+    bars = _intraday_fixture()
+    assert bars[-1]["d"] == "2026-09-16"
+    meta = {"session": "Open", "as_of": "Sep 17, 2026 12:19 PM ET"}
+    b = intraday_bar("INTC", meta, bars, fetch=lambda s: _intraday_m5())
+    assert b["d"] == "2026-09-17"
+    assert (b["o"], b["h"], b["l"], b["c"]) == (79.8, 84.4, 79.5, 84.0)
+    # v_raw = 当日累计量；v = 按已走时段折算的预计全日量（量比口径）
+    from rule123 import project_session_volume
+    assert b["v_raw"] == 2e6
+    assert abs(b["v"] - project_session_volume(2e6, meta)) < 1e-6
+    assert b["v"] > b["v_raw"], "12:19 ET 只走了 176/390 分钟，折算应放大"
+    assert abs(project_session_volume(2e6, meta) - 2e6 * 390 / 169) < 1e-6
+    assert project_session_volume(2e6, {}) == 2e6   # 取不到时钟则原样返回
+    assert us_session_clock(meta) == ("2026-09-17", 739)
+
+
+def test_intraday_merge_refreshes_zone_to_breakout_level():
+    """并入今日未收盘 bar 后，买区基准必须从回踩线抬到突破位（平台沿）。"""
+    from rule123 import build_ev, merge_intraday_bar
+    bars = _intraday_fixture()
+    ev0, b0, _ = build_ev(bars)
+    p0 = plan_entry(b0, ev0)
+    assert p0["mode"] != "platform_break"
+    assert p0["buy_zone"]["level"] < 80.5, "昨收口径的买区基准应是回踩线"
+
+    meta = {"session": "Open", "as_of": "Sep 17, 2026 12:19 PM ET"}
+    merged, live = merge_intraday_bar("INTC", bars, meta, "US",
+                                      fetch=lambda s: _intraday_m5())
+    assert live is not None and len(merged) == len(bars) + 1
+    ev1, b1, _ = build_ev(merged)
+    p1 = plan_entry(b1, ev1)
+    assert p1["mode"] == "platform_break" and p1["recommend"] is True
+    assert abs(p1["buy_zone"]["level"] - 80.6) < 0.1, p1["buy_zone"]["level"]
+    assert p1["buy_zone"]["primary_lo"] > p0["buy_zone"]["level"]
+
+
+def test_intraday_bar_only_in_regular_session():
+    """盘前/盘后/已收盘都不合成 —— 稀疏成交不能当「收盘站上」；A 股路径也不合成。"""
+    from rule123 import intraday_bar, merge_intraday_bar
+    bars = _intraday_fixture()
+    f = lambda s: _intraday_m5()  # noqa: E731
+    for sess in ("Closed", "Pre-Market", "After-Hours", ""):
+        assert intraday_bar("INTC", {"session": sess,
+                                     "as_of": "Sep 17, 2026 12:19 PM ET"},
+                            bars, fetch=f) is None, sess
+    # 日线已含当日 → 不重复追加
+    today = _bar("2026-09-17", 80, 84, 79, 84)
+    assert intraday_bar("INTC", {"session": "Open",
+                                 "as_of": "Sep 17, 2026 12:19 PM ET"},
+                        bars + [today], fetch=f) is None
+    # 解不出 ET 日期 → 宁可不判，也不造一根日期错的 bar
+    assert intraday_bar("INTC", {"session": "Open", "as_of": "garbage"},
+                        bars, fetch=f) is None
+    assert merge_intraday_bar("600519", bars, {"session": "Open"}, "ASH")[1] is None
+
+
 if __name__ == "__main__":
     test_yizi_not_gap_yang()
     test_true_yizi_uses_prev_close()
@@ -1177,6 +1273,9 @@ if __name__ == "__main__":
     test_breakout_extended_band_still_actionable()
     test_line_zone_pad_matches_in_zone()
     test_is_live_bar_session()
+    test_intraday_bar_uses_et_date_not_beijing()
+    test_intraday_merge_refreshes_zone_to_breakout_level()
+    test_intraday_bar_only_in_regular_session()
     test_no_platform_does_not_fallback_to_r1()
     test_plan_entry_no_yang_in_uptrend_does_not_crash()
     test_impulse_pause_zone_is_tight_band()
