@@ -110,12 +110,27 @@ def first_lot_of(code):
     return ASH_LOT_STAR if str(code).startswith(("688", "689")) else ASH_LOT_MAIN
 
 
+def ash_round_qty(n, code):
+    """按申报单位取整，不足最小单位返回 0。
+
+    科创板 688/689：单笔不小于 200 股，**超过 200 股的部分以 1 股递增**
+    （上交所科创板交易特别规定，如 201、202 股合法）。旧口径取整到 200 的
+    倍数，750 股会被砍到 600 —— 少买 20%，属白白丢掉的仓位。
+    深市主板/创业板 300/301 仍是 100 股或其整数倍（深交所交易规则 3.3.8）。
+    """
+    n = int(n)
+    lot = first_lot_of(code)
+    if n < lot:
+        return 0
+    return n if str(code).startswith(("688", "689")) else (n // lot) * lot
+
+
 def ash_lots(account, entry, stop, code,
              risk_pct=ASH_RISK_PCT, max_pct=ASH_MAX_POS):
     """A 股风险预算法定股数（与美股 us_lots 同构，唯一差别是最小申报单位）。
 
     股数 = min(账户 × risk_pct / 每股风险, 账户 × max_pct / 价格)，
-    再向下取整到最小申报单位（科创板 200 / 其余 100）。
+    再按 `ash_round_qty` 取整（科创板 200 起 1 股递增 / 其余 100 的整数倍）。
 
     若 1 手即超仓位上限 → 返回 None（调用方须明确拒绝并说明是「钱不够」，
     不是拍脑袋的软规则）；这样「点位到了买不到」只可能因为硬约束。
@@ -126,7 +141,7 @@ def ash_lots(account, entry, stop, code,
     if entry <= stop:
         return None
     n = int(min(account * risk_pct / (entry - stop), account * max_pct / entry))
-    n = (n // lot) * lot
+    n = ash_round_qty(n, code)
     if n <= 0:
         return lot if lot * entry <= account * max_pct else None
     return n
@@ -193,7 +208,7 @@ def ash_portfolio_gate(code, entry, lots, held_amt=0.0, use_reserve=False):
     n = int(cap_amt // entry)
     if lots:
         n = min(n, int(lots))
-    n = (n // lot) * lot
+    n = ash_round_qty(n, code)
     if n <= 0:
         return dict(empty, cap_amt=round(cap_amt, 2), room=round(room, 2), reason=(
             f"剩余额度 {cap_amt:,.0f} 元（单笔硬顶 {ASH_SINGLE_ABS:,}）买不到 1 手："

@@ -744,15 +744,21 @@ def test_ash_lots_min_lot_by_board():
 
     创业板 300/301 是 100 股 —— 旧代码把 300/301 也当成 200，已修。
     """
-    from probe_intraday import first_lot_of, ash_lots
+    from probe_intraday import first_lot_of, ash_lots, ash_round_qty
     assert first_lot_of("688002") == 200
     assert first_lot_of("689009") == 200
     assert first_lot_of("300723") == 100
     assert first_lot_of("301000") == 100
     assert first_lot_of("002961") == 100
     assert first_lot_of("601233") == 100
-    # 同一笔单，科创板取整到 200 的倍数
-    assert ash_lots(50000, 20.0, 19.0, "688002") == 600
+    # 科创板 200 起、超出部分 1 股递增；主板/创业板 100 的整数倍
+    assert ash_round_qty(750, "688002") == 750
+    assert ash_round_qty(201, "688002") == 201
+    assert ash_round_qty(199, "688002") == 0
+    assert ash_round_qty(750, "002961") == 700
+    assert ash_round_qty(750, "300723") == 700
+    assert ash_round_qty(99, "002961") == 0
+    assert ash_lots(50000, 20.0, 19.0, "688002") == 750
     assert ash_lots(50000, 20.0, 19.0, "002961") == 700
     # 1 手即超仓位上限 → None（明确不做，不悄悄超标）
     assert ash_lots(5000, 200.0, 190.0, "688002") is None
@@ -922,9 +928,11 @@ def test_ash_portfolio_gate():
     g = P.ash_portfolio_gate("600519", 10.0, 99999, held_amt=0.0)
     assert g["amt"] <= P.ASH_SINGLE_ABS and g["lots"] == 5000, g
 
-    # ⑦ 科创板最小申报单位 200 股仍然生效
+    # ⑦ 科创板：200 股起，超出部分 1 股递增（201 合法）；不足 200 则买不到
     g = P.ash_portfolio_gate("688981", 60.0, 201, held_amt=0.0)
-    assert g["lots"] == 200, g
+    assert g["lots"] == 201, g
+    g = P.ash_portfolio_gate("688981", 60.0, 199, held_amt=0.0)
+    assert not g["allowed"] and "买不到 1 手" in g["reason"], g
 
 
 def test_ash_t1_struct_stop():
