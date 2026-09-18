@@ -794,8 +794,13 @@ def living_demand(bars, ev):
         }
 
     tl_res = None
+    slope = tl_slope_atr(bars, ev, atr_v)
+    tl_steep = slope is not None and slope > TL_SLOPE_MAX_ATR
+    # 加速线不作回踩锚：斜率超过 TL_SLOPE_MAX_ATR 时，这条线外推后必然「追上」
+    # 价格，把横盘误报成跌破（2026-09-18 BE）。此时直接跳过它，让均线锚有机会。
     if (
-        p0i is not None and p1i is not None
+        not tl_steep
+        and p0i is not None and p1i is not None
         and p1p is not None and p0p is not None
         and p1p > p0p and p1i != p0i
     ):
@@ -826,10 +831,16 @@ def living_demand(bars, ev):
 
     # 默认趋势线；均线只在「离趋势线很远 + 明显贴轨」时覆盖
     if walk is not None and (tl_res is None or tl_res["dist_atr"] > 1.5):
-        return walk
-    if tl_res is not None:
-        return tl_res
-    return walk
+        out = walk
+    elif tl_res is not None:
+        out = tl_res
+    else:
+        out = walk
+    if out is not None:
+        # 诊断字段：供 note 说明「为什么没用 P0→P1 线」
+        out["tl_steep"] = tl_steep
+        out["tl_slope_atr"] = slope
+    return out
 
 
 def rising_tl_level(bars, ev):
@@ -844,9 +855,17 @@ def rising_tl_level(bars, ev):
 
 
 def still_uptrend(bars, ev, last_c, c2, p1p):
-    """大阳后缩量回踩的升势过滤：收盘须在 P1 之上且未跌破 P0→P1 线。"""
+    """大阳后缩量回踩的升势过滤：收盘须在 P1 之上且未跌破 P0→P1 线。
+
+    加速线豁免（2026-09-18 BE）：斜率 > TL_SLOPE_MAX_ATR 的 P0→P1 线，每天自行
+    抬升的幅度已接近标的日波动，外推后「追上」价格是必然，不代表升势走坏 ——
+    此时不以该线作否决，升势只由 P1 与 c2 把关（宁松勿错杀）。
+    """
     if p1p is None or last_c is None or last_c <= p1p or not c2:
         return False
+    _slope = tl_slope_atr(bars, ev, atr14(bars))
+    if _slope is not None and _slope > TL_SLOPE_MAX_ATR:
+        return True
     tl = rising_tl_level(bars, ev)
     if tl is not None and last_c < tl:
         return False
@@ -855,6 +874,33 @@ def still_uptrend(bars, ev, last_c, c2, p1p):
 
 # 短均线锚：弱票阴跌/横盘也会反复蹭 MA5，肉眼是下跌趋势，脚本却给 line_pullback。
 MA_WALK_ANCHORS = frozenset({"ma5", "ema10", "sma20"})
+
+# P0→P1 上升趋势线的斜率上限（单位：×ATR/根）。
+# 超过此值的线是「加速轨迹线」而非「支撑线」：它每天自行抬升的幅度已接近标的的
+# 正常日波动，外推时会「追上」价格 —— 只要价格横盘一两根就自动变成「跌破」，
+# 与价格是否真的走弱无关。此时该线既不作回踩锚，也不作否决依据。
+#
+# 2026-09-18 BE 实例：P0=9/1 低 197.50 → P1=9/14 低 249.05，斜率 6.44 元/根
+# = 0.341×ATR/天（34 只样本第 94 百分位）。外推到 9/18 = 274.83；而按昨线
+# 268.38 看，价格 269.64 仍在线上方 —— 外推一天就翻转了「是否跌破」的结论。
+# 当日「跌破」的 5.19 元里，6.44 元是线自己涨上去的。
+#
+# 阈值 0.25 取自实测分布的 90 分位（50%:0.008 / 75%:0.088 / 90%:0.242）。
+TL_SLOPE_MAX_ATR = 0.25
+
+
+def tl_slope_atr(bars, ev, atr_v):
+    """P0→P1 上升趋势线的斜率，单位 ×ATR/根。无有效线时返回 None。"""
+    if not atr_v or atr_v <= 0:
+        return None
+    p0i, p0p = _px(ev.get("P0"))
+    p1i, p1p = _px(ev.get("P1"))
+    if (
+        p0i is None or p1i is None or p0p is None or p1p is None
+        or p1p <= p0p or p1i == p0i
+    ):
+        return None
+    return (p1p - p0p) / (p1i - p0i) / atr_v
 
 
 def ma_anchor_trend_ok(bars, ev, demand):
@@ -2234,9 +2280,18 @@ def plan_entry(bars, ev):
         label = ANCHOR_LABEL.get(demand["anchor"], demand["anchor"])
         lv = round(demand["level"], 2)
         d_atr = demand["dist_atr"]
+        # 加速线透明度：引擎跳过了 P0→P1 线（斜率超限），必须说明原因，
+        # 否则用户会问「为什么没提那条趋势线」——2026-09-18 BE 的诉求点。
+        _acc = ""
+        if demand.get("tl_steep"):
+            _s = demand.get("tl_slope_atr") or 0.0
+            _acc = (
+                f"；P0→P1 线斜率 {_s:.2f}×ATR/根（>{TL_SLOPE_MAX_ATR}，加速线）"
+                f"外推会追上价格，已不作锚"
+            )
         if d_atr < 0:
             line_wait_verdict = "已跌破该线"
-            line_wait_note = f"{label}@{lv}，收盘已在线下 {abs(d_atr):.2f}×ATR，不买"
+            line_wait_note = f"{label}@{lv}，收盘已在线下 {abs(d_atr):.2f}×ATR，不买" + _acc
         elif d_atr <= 1.0:
             rec = bool(vol_shrink)
             note = f"沿线回踩{label}@{lv}（近12根触及{demand['hits']}次）"
@@ -2249,6 +2304,7 @@ def plan_entry(bars, ev):
             elif not vol_shrink:
                 rec = False
                 note += f"；量能偏大 RVOL={round(rvol, 2)}，等缩量尾盘"
+            note += _acc
             bz_line["type"] = f"沿线回踩(优先T1)·{label}"
             return pack("line_pullback", 1, "pullback", "沿线回踩(优先T1)", rec, note, bz_line)
         elif d_atr > 2.0:
