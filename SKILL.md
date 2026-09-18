@@ -735,6 +735,7 @@ disable-model-invocation: true
 - **蓄势门槛按波动率归一化**：A 股用固定 2.5%（启动前振幅），美股用 `max(2.5%, 1.0×ATR/H)`——美股 ATR/H 普遍 3–5%（ILMN 4.13%、MDB 5.7%），固定 2.5% 会系统性偏严（实测 ILMN 9/15 启动前 3.41% = 0.83×ATR 被误拦）。**该系数只有 1 个样本支撑，属待验证参数。**
 - **数据源**：日线/盘前/市场状态走 Nasdaq 官方（`marketStatus` 自带 `Pre-Market`/`Open`/`Closed`，夏令时不必自算）；**分钟级带量 K 线**先走东财 http，被限流时退 Yahoo（需本地代理，`WB_US_PROXY` 可指定端口）。
 - 命令：`python probe_intraday.py ILMN --us-account 5000`（非 6 位代码自动按美股处理）。
+- **代码格式（必读）**：美股传**裸 ticker**（`MU` / `ILMN` / `SNDK`），**不要带行情源前缀** —— `usMU` 这种写在 westock 命令里、直接喂给本引擎会打到 Nasdaq/Yahoo 上 404，报 `全部数据源失败`。A 股直接传 6 位数字（`601233`、`688758`）。
 
 ---
 
