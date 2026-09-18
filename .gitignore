@@ -13,3 +13,6 @@ cache/
 bt_early.txt
 run.log
 .env
+
+# 工作区记忆 / 自动化文件，勿入仓库（2026-09-18）
+.workbuddy/
