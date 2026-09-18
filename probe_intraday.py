@@ -77,7 +77,7 @@ def snapshot(sym):
     }
 
 
-def vol_bursts(mins):
+def vol_bursts(mins, drop_tail=0):
     """返回今日所有「量能突变」根：(下标, 倍率, 基准量)。
 
     基准 = **前 BURST_MA_BARS 根（默认 5 根 = 25 分钟）的均量**。
@@ -91,11 +91,16 @@ def vol_bursts(mins):
     换均量后基准随行情漂移，与「开盘那根最大量」解耦：同样 2.0 倍门槛下
     触发率回到可用区间（回测见 README「回测结论」）。
 
+    drop_tail：**尾部 N 根不参与判定**（基准窗口不受影响，仍取该根之前的真实量）。
+    美股必须传 1 —— 北京 04:00 那根是美东 16:00 收盘集合竞价，制度性巨量，
+    不排除则每只票都会在收盘凭空触发一次（2026-09-18 定位，见 US_BURST_DROP_TAIL）。
+
     返回第三项是**基准量**（旧口径下是此前最大量），调用方只用于打印。
     """
     n = max(1, int(BURST_MA_BARS))
+    scan = mins[: len(mins) - drop_tail] if drop_tail > 0 else mins
     hits = []
-    for i, b in enumerate(mins):
+    for i, b in enumerate(scan):
         if i < 1:
             continue
         win = mins[max(0, i - n):i]
@@ -1086,6 +1091,14 @@ US_OPEN_BJ = 21 * 60 + 30  # 北京 21:30 = 美东 09:30
 US_CLOSE_BJ = 4 * 60       # 北京 04:00 = 美东 16:00
 US_BURST_OFFSET = 30       # 开盘后 30 分钟内不试（区间未走完，分位会骗人）
 US_PRE_AMP_ATR = 1.0       # 蓄势门槛按 ATR 归一化：≤ max(2.5%, 1.0×ATR/H)
+# 收盘竞价根不参与量能突变判定（2026-09-18 定位）。
+#   北京 04:00 = 美东 16:00 的**收盘集合竞价**，成交量是制度化巨量（占全天 8–15%），
+#   与「盘中启动」毫无关系。实测 2026-09-17：MU 该根量 = 前 5 根均量 **19.1 倍**、
+#   SNDK 10.1 倍、HPE 14.2 倍 —— 三只美股全部在收盘竞价那根触发量能突变；
+#   而该根永远是序列最后一根，`fresh` 恒为真，等于**每只美股都会在收盘凭空多出
+#   一次「✅ 允许先手」**。剔除尾部 1 根即可。
+#   A 股不跟改：A 股通道有 live 门控，且沪深收盘竞价量级远小于美股（无同等问题）。
+US_BURST_DROP_TAIL = 1
 
 # ── 关键位突破通道（通道四）──
 # 解决的问题：量能突变通道要求「≥当日此前最大量的 2.5 倍」，遇到开盘就爆量的票
@@ -1512,6 +1525,9 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None):
     # ---------- 3) 盘中量能突变（跨日） ----------
     print()
     print(f"── 三、盘中量能突变（{min_scale} 分钟 · 北京 21:30–04:00） ──")
+    if US_BURST_DROP_TAIL:
+        print(f"  注：北京 04:00（美东 16:00）收盘集合竞价根不参与判定"
+              f"（制度性巨量，会误报为盘中启动）")
     raw, src, errs = None, "", []
     try:
         raw = bars_from_em_us(sym, klt=min_scale, lmt=400)[0]
@@ -1543,17 +1559,19 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None):
     print(f"  开盘 {op:.2f}   最新 {mins[-1]['c']:.2f}"
           f"（{(mins[-1]['c'] - op) / op * 100:+.2f}% vs 开盘，"
           f"距开盘 {off_now} 分钟）")
-    hits = vol_bursts(mins)
+    hits = vol_bursts(mins, drop_tail=US_BURST_DROP_TAIL)
     c1 = off_now >= US_BURST_OFFSET
     print(f"  [1 时间窗 ] {'✓' if c1 else '✗'} 当前距开盘 {off_now} 分钟"
           f" {'≥' if c1 else '<'} {US_BURST_OFFSET}")
+    n_eff = len(mins) - US_BURST_DROP_TAIL      # 可触发根数（收盘竞价根已剔除）
     if not hits:
-        print("  [2 量能突变] ✗ 本交易日尚无「≥此前最大 2.5 倍」的分钟量 → 无启动信号")
+        print(f"  [2 量能突变] ✗ 本交易日尚无「≥前 {BURST_MA_BARS} 根均量 × "
+              f"{BURST_MULT:.1f}」的分钟量 → 无启动信号")
         print("  → ❌ 量能突变通道不试仓")
         out["intraday"] = {"trade_date": td, "burst_at": None, "allow": False}
     else:
         i, ratio, pm = hits[-1]
-        fresh = i >= len(mins) - 2
+        fresh = i >= n_eff - 2
         pre = mins[:i]
         pre_h = max(b["h"] for b in pre) if pre else op
         pre_l = min(b["l"] for b in pre) if pre else op
@@ -1564,7 +1582,7 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None):
         c2, c3, c4 = True, amp <= amp_max, trigger <= cap_px
         print(f"  [2 量能突变] ✓ {mins[i]['d'][11:16]} 量 {mins[i]['v']:,.0f} 股"
               f" = 前 {BURST_MA_BARS} 根均量 {pm:,.0f} 股的 {ratio:.1f} 倍"
-              f"{'' if fresh else f'  ⚠ 已过去 {len(mins) - 1 - i} 根，信号过期'}")
+              f"{'' if fresh else f'  ⚠ 已过去 {n_eff - 1 - i} 根，信号过期'}")
         print(f"  [3 蓄势位置] {'✓' if c3 else '✗'} 启动前振幅 {amp * 100:.2f}% "
               f"{'≤' if c3 else '>'} {amp_max * 100:.2f}%"
               f"（=max(2.5%, {US_PRE_AMP_ATR:.1f}×ATR%)；A 股为固定 2.5%）")
