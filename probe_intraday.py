@@ -1508,11 +1508,14 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None):
                         else f"开盘前挂 {hi} 即可吃到，不必市价追盘前")
                 print(f"  → ✅ 落在买区 {lo}-{hi} 内：{_how}")
             else:
-                d_atr = (spot - hi) / atr_v
                 if cap is not None and spot > cap:
-                    print(f"  → ❌ 已高于买入上限 {cap}（+{d_atr:.2f}×ATR）："
+                    # 此处显示的是「高于买入上限」的距离，必须用 cap 而非买区上沿 hi 计算，
+                    # 否则标签写 cap、数字却按 hi 算（曾把 0.72×ATR 印成 0.21×ATR）。
+                    print(f"  → ❌ 已高于买入上限 {cap}"
+                          f"（+{(spot - cap) / atr_v:.2f}×ATR）："
                           f"回踩单作废，只留盘中量能突变")
                 else:
+                    d_atr = (spot - hi) / atr_v
                     print(f"  → ⚠ 高于买区上沿 {hi} {d_atr:.2f}×ATR 但仍在闸门内："
                           f"只挂不追，挂价不得高于 {cap if cap else hi}")
             idx = (spot - prev_close) / prev_close * 100 if prev_close else 0
