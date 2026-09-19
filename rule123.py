@@ -1962,8 +1962,20 @@ def pre_breakout_order(bars, ev, atr_v, plat, last_c, rvol):
     触发才成交、假突破自动不成交，故与「不追高」闸门不冲突。
 
     只在：pressing 平台 / 距沿 ≤1.2×ATR / 非极度缩量 / 非下跌段且站上 MA20 时给出。
+
+    ★ 2026-09-19 拓宽（用户「预判突破买」实证后定）：原闸门要求 kind == "pressing"，
+    这只覆盖「价格正贴着沿」的形态。但用户要的是**T-1 就挂好、次日触发**，
+    需要在「尚未贴近、但方向已明」时就给埋单位，否则 T-1 无单可挂 → 只能次日顶着买。
+    实测（赛分 688758 / 康龙 688621 / TEM / ILMN / SDGR / INTC）：
+      顶着买（T 日收盘）→ T+1 盘中破止损率 49~52%
+      预判埋伏（T 触发价）→ T+1 盘中破止损率 2~13%
+    → 故放宽为「kind ∈ {pressing, near, broken}」且距沿放宽到 1.2×ATR（不变），
+      即：只要平台沿在头上且不太远，就给埋单位。极远端（>1.2×ATR）仍不给，
+      因为埋伏单离触发太远=挂在那里长期不成交，占注意力无收益。
     """
-    if not plat or plat.get("kind") != "pressing":
+    if not plat:
+        return None
+    if plat.get("kind") not in ("pressing", "near", "broken"):
         return None
     if not atr_v or atr_v <= 0 or last_c is None:
         return None
@@ -1998,6 +2010,18 @@ def pre_breakout_order(bars, ev, atr_v, plat, last_c, rvol):
         "risk_per_share": round(trigger - hard, 2),
         "dist_atr": round(dist_atr, 2),
         "platform_from": from_d,
+        # 埋伏单 = 独立于当日 mode 的「优先 T1」入口（2026-09-19 用户定级）。
+        # 机制：买价更低 → 1R 更小 → 同预算可开仓位更大（赛分 9-14 埋伏 vs 9-15 顶着买 = 1.46 倍）。
+        # 实测优势集中在 T+1 市场：A 股顶着买 T+1 被扫 49~52%，埋伏买 2~13%。
+        # 美股（T+0）优势小但仍不劣 → 全局 T1。
+        "priority": 1,
+        "tier": "T1",
+        "setup_kind": "pre_breakout",
+        "role": "primary_entry",
+        "cushion_note": (
+            "★ 买点低于突破确认日收盘价：触发成交后当日收盘多半已带浮盈垫，"
+            "垫子就是次日（A股 T+1）低开的缓冲；这是「预判买」相对「顶着买」的核心优势"
+        ),
         "note": (
             f"上方活平台沿 {round(lv, 2)}（{from_d}）未破，距收盘 {dist_atr:.2f}×ATR；"
             f"挂 buy-stop {trigger} 埋伏，触发即突破确认。硬止损 {hard}"
@@ -2055,6 +2079,14 @@ def pre_breakout_line_order(bars, ev, atr_v, last_c, rvol=None):
         "risk_per_share": round(trigger - hard, 2),
         "dist_atr": round(dist_atr, 2),
         "line_from": from_txt,
+        "priority": 1,
+        "tier": "T1",
+        "setup_kind": "pre_breakout",
+        "role": "primary_entry",
+        "cushion_note": (
+            "★ 买点低于突破确认日收盘价：触发成交后当日收盘多半已带浮盈垫，"
+            "垫子就是次日（A股 T+1）低开的缓冲"
+        ),
         "note": (
             f"下降趋势线（{from_txt}）下移中，下一根线值 {round(line_next, 2)}，"
             f"收盘在线下 {dist_atr:.2f}×ATR；挂 buy-stop {trigger} 于线上方埋伏，"
@@ -2062,6 +2094,425 @@ def pre_breakout_line_order(bars, ev, atr_v, last_c, rvol=None):
             f"突破后按移动止损管理，不设固定目标。此为埋伏单，与当日买点并存、先到先做"
         ),
     }
+
+
+def ma_reclaim_break(bars, ev, atr_v, last_c, res_win=25):
+    """★ T0 买法：均线收复后「过昨高」买（2026-09-20 用户定稿，优先级高于 T1 买突破）。
+
+    用户自研战法，八个实证案例（均为真实走势）：
+      赛分科技 688758 2026-09-15 信号 → 09-16 过昨高买
+      纳微科技 688690 2026-09-08 信号 → 09-09 过昨高买（→ 9/18 收 47.20）
+      康龙化成 300759 2026-08-04 信号 → 08-05 过昨高 / 08-06 回踩买（用户实盘买 40 卖 47）
+              ⚠ 2026-09-20 用户澄清：「康龙这个买法买的是**缩量回踩**，不用纠结锚」
+                 —— 康龙这道单属于「缩量回踩」体系，**不是** T0 过昨高体系。
+                 故「康龙 42.66 的锚归属」不是待办，无需再审。
+                 列在 T0 案例里只是因为 08-04 那天形态同时满足 T0 的判据。
+      东富龙   300171 2026-09-17 信号 → 09-18 过昨高（演示，用户未入场）
+      成都先导 688222 2026-09-16 信号 → 09-17 过昨高 37.19 买 → 09-18 收 +7.48%
+      科泰电源 300153 2026-09-16 信号 → 09-17 **跳空高开直接买 26.01** → 09-18 收 +11.38%
+              ★ 八案例中唯一「D1 开盘已在触发价之上」的样本（开盘买，无需等触发）
+              ★ 也是唯一 ma_aligned=True（均线多头排列）的样本
+              ★ 实体/ATR 仅 0.72x（很弱的小阳）照样成立 → **实体大小不是判据**
+      浩瀚深度 688292 2026-09-16 信号 → 09-17 过昨高 18.50 买 → **09-18 收 23.02 = +20.02%（科创板 20cm 涨停）**
+              ★ 最极致的一个：触发价 18.50 → 止损 18.24 只差 0.26（1.41%），两天走 +24.43% = **17.38R**
+              ★ D0 涨幅仅 +0.66%（几乎平盘）却成立 → **再次证明「大阳」不是必要条件**
+              ★ 平台度 100%、收盘位 94% —— 真正的判据是「贴着平台沿收强」
+              ★ 用户自述是「回踩收绿跌回收盘价买 19.18」→ 实测那是**次优价**：
+                比触发价 18.50 贵 +3.68%，R 从 17.38 掉到 4.09。**P1 触发价才是最优入场**。
+      美股 AI 制药共振 TEM / SDGR / ILMN（2026-09-14~15 同日给信号，用户未买到）
+      ── 反面案例 ──
+      联瑞新材 688300 2026-08-28 被平台度闸门拦下（见下 ①-B）
+
+      ── ★ 港股（2026-09-20 用户提出，**最重要的「重复信号」样本**）───────────
+      联想集团 00992.HK —— 同一条规则、同一只票、相隔 15 个交易日给出**两次**信号，
+      第一次被扫、第二次吃到整段主升浪。**这是"一次成功不了得来几次"的实证**：
+
+        · 第一次 D0=07-09  C24.040 (+7.71%)  mode=downtrend_tl_break  平台度 84%
+          触发 24.30 / 止损 23.27（实体中点）/ 计划风险 4.24%
+          D1=07-10 **跳空 +8.82%**（开 26.160 vs 昨收 24.040）→ 按规则用**开盘价 26.160** 入场
+          ⇒ 止损距入场 = **11.05%**，1R = 2.890 元
+          D1 当天从开盘往下杀 −6.57%，**07-13 一根 −4.82% 直接扫掉** → **−1.00R**
+
+        · 第二次 D0=07-31  C23.860 (+9.75%)  mode=ma_reclaim_break     平台度 96%
+          触发 24.32 / 止损 23.68（实体中点）/ 计划风险 2.63%
+          D1=08-03 **平开**（开 23.880，+0.08%）→ 挂触发价成交在 **24.320**
+          ⇒ 止损距入场 = **2.63%**，1R = 0.640 元（只有第一次的 22%）
+          D1 日内最大回撤仅 −1.34% → 止损纹丝不动
+          持有 30 根：**+32.15% = +12.22R**（峰值 08-14 达 **+18.50R**），
+          含 **08-13 +20.18%**（29.040 → 34.900，量能 3.9 倍）
+
+        ⇒ **两次合计 +11.22R。** 若因第一次被扫就放弃这只票/这条规则，
+          第二次那 +12.22R 整段拿不到。
+
+      ★★ 机制（本案例最重要的产出）：**跳空把入场价推高，止损线却不动**
+         两次的触发价（24.30 / 24.32）与止损锚（都是实体中点）几乎一样，
+         差别**全在 D1 怎么开盘**：
+           · 07-09 跳空 +8.82% → 入场被抬到 26.160 → 1R 从计划的 3.20%
+             被撑大到 **11.05%（4.20 倍）** → 同一条止损线从「保险」变成「随手被扫」
+           · 07-31 平开 +0.08% → 入场就在触发价上 → 1R 保持 **2.63%**
+         ⇒ **「挂触发价等触发」永远优于「跳空后追开盘价」**
+           —— 与浩瀚深度案例（17.38R vs 4.09R）是同一个结论的再次验证。
+
+      ★ 事前唯一可见的差异（**只能当人工复核项，不可写成硬闸门**）：
+        **D0-1 的形态** —— 07-09 前面是 07-08 +6.90%（**连续第二天大涨**，
+        两天累涨 15.1% = 情绪透支，D1 高开就是最后一口气）；
+        07-31 前面是 07-30 −5.40% 且**收在振幅下沿 22%**（刚被砸过洗过，
+        07-31 的 +9.75% 是「调整后第一根放量长阳」= 重新启动）。
+        ⚠ 此模式在 8 个正案例里**无一致性证据** → 不设阈值、只提示人工复核。
+
+      ★ 港股数据通道（**引擎目前不支持**）：`fetch_us` 对港股代码三源全失败；
+        东财 `push2his` 港股（`secid=116.00992`）可用但**易触发限流 RemoteDisconnected**；
+        新浪港股返回 `Service not valid`；Yahoo 隧道 502。
+        **可用源 = 腾讯 `https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=hk00992,day,,,320,qfq`**
+        （返回 `data.hk00992.qfqday|day`，字段顺序 日期/开/收/高/低/量）。
+
+    ── ★★ 八案例的共性提炼（2026-09-20，这是规则的真正内核）──────
+    八案例的「实体/ATR」从 **0.22x 到 2.43x**、「D0 涨幅」从 **+0.66% 到 +14.05%**，
+    跨度极大 → **「大阳线」不是判据**，D0 是平盘小阳（浩瀚 +0.66%）照样成立。
+    真正一致的只有三条：
+      ① 收盘站上全部均线（八案例全中）
+      ② 平台度 ≥50%（实测 60%~100%，反面案例联瑞仅 44%）
+      ③ **收盘位置在当日振幅高位**（八案例除赛分 41% 外全部 ≥61%，
+         浩瀚 94% / 科泰 90% / 成都 90% / 纳微 91%）
+    ⇒ **内核 = 「贴着平台沿、收在当日最高附近」**，而不是「涨得多」。
+       涨得多（成都 +14%）与涨得少（浩瀚 +0.66%）都能成立，
+       因为两者都是「收盘贴在平台沿上、没有上影抛压」。
+
+    ── 判据（2026-09-20 定稿）────────────────────────────────────────
+    D0（信号日）：
+      ① 收盘站上 **MA5、MA10、MA20 全部三条**
+         ★ 用户定：「不做均线下方的股票」—— 均线下方=还有套牢盘压着，压力更大。
+         实测（23 只 A 股全历史，P1 口径）：≥2 条 → 胜率 32.4% / 硬止损 12.7%；
+         全部三条 → 胜率 37.2% / 硬止损 9.9%。C/D/E（加 MA60/120/250）无进一步改善。
+         ★ 2026-09-20 用户再次强调：「收盘价格要站上所有均线，**跟排列无关**」
+           —— 只判「站上/未站上」，MA5>MA10>MA20 的多头排列**不作条件**。
+      ② 上方有阻力位：resistance = 近 res_win 根最高价（不含当日）
+         要求 resistance >= D0.close（在上方）
+         且 (resistance - D0.close)/D0.close <= 板块涨停上限
+           主板（60/00 开头） 10% ／ 创业板(30)、科创板(68) 20%
+         ★ 用户定：「0-20%，当然低一些更好」。实测**越贴墙越好**：
+           0~2%（贴墙）  胜率 50.0% 均R +0.80 收益 +2.08% 硬止损  5.3%
+           2~10%（半路） 胜率 29.1% 均R -0.05 收益 -0.21% 硬止损 12.6%
+           → 故输出按距离分档标注，贴墙者标 T0-primary。
+         ★ 2026-09-20 窗口 20 → **25** 根：成都先导 688222 的锚 41.78 在 08-13，
+           距 09-16 信号日为 **24 个交易根**，20 根窗口刚好切掉它，引擎误抓 08-20 的
+           40.57。25 根即可覆盖。用户原话「60根太多了」→ 仍未回到 60。
+
+    D1（次日）：
+      ★★ 「昨高」= **D0 的最高价 `D0.high`（含上影线插针）**，不是 D0 收盘价。
+         （2026-09-20 用户提问「昨高指的是收盘价还是最高价」→ 已定稿为**最高价**。）
+         判据也一致：P1 分支是 `D1.high > D0.high`，全程比的是 high，不是 close。
+         为何必须是最高价：突破的定义是「越过昨天全部成交的价位」，
+         D0 的上影线里挂着真实抛压；用收盘价当触发线等于把 2/3 的墙拆掉。
+         实证七案例（`_yesterday_high.txt`）——若误用昨收，触发价会**全线大幅下移**：
+           浩瀚 18.50 → 18.43（−0.38%）｜ 科泰 25.58 → 25.44（−0.55%）
+           纳微 41.87 → 41.40（−1.12%）｜ 康龙 40.43 → 39.92（−1.26%）
+           成都 37.19 → 36.62（−1.53%）｜ 赛分 29.02 → 28.30（**−2.48%**）
+           东富龙 14.79 → 14.36（**−2.91%**）
+         ⇒ 误用昨收 = 提前买入 = D0 那根上影线的抛压还没被消化就进场。
+      P1 过昨高买   D1.high > D0.high  →  entry = max(D1.open, D0.high)
+                    ★ 用户定：「不是开盘过高，而是次日任意时点过高都买」
+                    开盘已过高则用开盘价，否则用触发价 D0.high（盯盘挂单）
+      P3 尾盘买     D1.high <= D0.high →  entry = D1.close（尾盘定夺，破位不买）
+                    ★ 用户定：「越不过昨日高点代表今天调整预期…尾盘买是最佳选择，破位就不买了」
+                    ★ 注意 P3 的入场价是 **D1 收盘**，那是「没追到时的补救价」，
+                      不是把「昨高」定义成收盘价 —— 两个 close 是不同的东西，别混。
+
+    止损锚 ★ 2026-09-20 口径扩展（用户定：「取全部锚中离触发价最近」）：
+      候选 = { MA5, MA10, MA20, D0 实体中点 (o+c)/2, D0.low }
+      取 **低于触发价且离触发价最近** 的一条。
+      ── 为什么加入 K 线锚 ──
+      成都先导 09-16 是一根 +14.05% 的大阳，把 MA5/MA10 远远甩在下方：
+        MA20 33.26（风险 10.57%）< MA5 32.60（12.34%）< MA10 32.33（13.07%）
+      均线锚全部偏宽、且被「>8% 做不了」闸门拦下。而 **D0 实体中点 34.40 只有 7.50%**：
+        → 大阳的实体中点 = 「获利盘兑现压力」的分界，是比均线更贴切的结构锚。
+      ── 为什么旧口径排除 MA5 而现在放开 ──
+      旧注释说「MA5 长期贴价，必落在 0.25×ATR 噪声带内」。但在**大阳突破日**，
+      恰恰相反：MA5 被大阳拉高后反而**离得远**，而它的方向仍是「最贴近价格」。
+      以「离触发价最近」这一条单一规则统一处理，不再对 MA5 做先验排除
+      —— 噪声带风险由 `NOISE_ROOM_ATR` 检查在更上层兜底。
+
+    ── 为什么是 T0（用户 2026-09-20 定级）────────────────────────────
+    与 T1「买突破」的区别：T1 在**位已破之后**追；本 setup 在**位未破之前**、均线已
+    收复、贴着墙蓄势时进场。同一道墙，买点低一截、止损窄一截 → 盈亏比更高。
+    即用户最早那条「预判埋伏优于顶着买」的同一逻辑，但锚更明确（昨日高点 + 前方阻力位）。
+    执行提示：P1 触发价在现价上方，用户券商无 buy-stop/条件单 → **需盯盘手动触发**；
+              P3 买点在下方 → 可预挂限价。两者用户都能执行（自述「我会盯盘，做好战术就行」）。
+
+    ── ⚠️ 七案例 vs 全样本回测的背离（2026-09-20 实测，务必记住）──────
+    976 笔 T0 成交样本分档（越界即止，20 根后收盘计浮盈，R 截断到 [-1,+5]）：
+      D0 实体/ATR  0.7~1.0x（科泰地带）n=120 被扫 83.3% 均R **-0.16**
+                   1.5~2.5x           n= 38 被扫 73.7% 均R **+0.24**
+      单股风险     0~2%（赛分地带）   n=432 被扫 95.8% 均R **-0.75**
+                   5~8%               n= 67 被扫 68.7% 均R **+0.24**
+      D0 振幅      3~5%（科泰地带）   n=373 被扫 93.0% 均R **-0.63**
+    「科泰特征」严格匹配样本 n=28 → 被扫 92.9%、均R **-0.57**，但它实际走出 +11.38%。
+    ⇒ **两级推论（不可混淆）**：
+       ① 对选股层：用户收益**不是**来自这些技术参数，而来自基本面+板块+题材筛选
+          —— 这正是无选股层回测缺的那一层，**回测系统性低估用户**。
+       ② 对参数调优：**禁止**照这批数据改规则（加实体门槛/放宽止损会得到另一个系统）。
+          真正常态要盯的判据是 **止损不要太窄**（0~2% 被扫 95.8%），
+          但对策是**主动放弃太窄的单子**，不是把止损改宽。
+    """
+    if not bars or len(bars) < 25 or not atr_v or atr_v <= 0 or last_c is None:
+        return None
+
+    closes = [b["c"] for b in bars]
+    ma5, ma10, ma20 = sma(closes, 5), sma(closes, 10), sma(closes, 20)
+    if ma5 is None or ma10 is None or ma20 is None:
+        return None
+    # ① 全部三条均线之上（用户定：不做均线下方的股票）
+    if not (last_c > ma5 and last_c > ma10 and last_c > ma20):
+        return None
+
+    # ② 阻力位 ★ 2026-09-20 双锚并列，**取更高者**（用户定）：
+    #   锚1 = 近 res_win 根最高价（不含当日）—— 纯最高，含长上影插针
+    #   锚2 = 同窗口内的**枢轴高**（左右各 2 根都低于它）中 ≥ 收盘价 的**最高**那个
+    #   两者通常是**同一个日线平台上的两个测点** → 平台沿 = **更高者**。
+    #   ── 为什么不是「取近者」（我 2026-09-20 一度按取近者实现，被用户纠正）──
+    #   取近者会把「平台内一个较低的次级高点」当成墙，等于把墙画低了：
+    #     康龙 08-04：枢轴高 40.96 vs 窗口最高 42.00 —— 两者同属 7~8 月那个平台，
+    #     墙是 42.00（用户实盘认的锚），不是 40.96。
+    #     赛分 09-15：枢轴高 28.33 vs 窗口最高 31.97 —— 同属平台，墙应取更高者。
+    #   用户原话：「这两个高点应该取更高者，因为都是属于同一个日线平台」。
+    #   ⇒ 取更高者同时解决两件事：① 不把墙画低（赔率不虚高）；
+    #     ② 长上影插针若确实是平台的一部分，也自然被包含进来。
+    seg = bars[-(res_win + 1):-1] if len(bars) >= res_win + 1 else bars[:-1]
+    if not seg:
+        return None
+    res_i = max(range(len(seg)), key=lambda k: seg[k]["h"])
+    res_max = seg[res_i]["h"]                 # 锚1：窗口内最高
+    res_max_from = seg[res_i]["d"]
+
+    # 锚2：枢轴高（左右各 2 根都 <= 它），取 >= last_c 的**最高**者
+    _ph = []
+    for _i in range(2, len(seg) - 2):
+        _b = seg[_i]
+        _okl = (seg[_i - 1]["h"] <= _b["h"] and seg[_i - 2]["h"] <= _b["h"])
+        _okr = (seg[_i + 1]["h"] <= _b["h"] and seg[_i + 2]["h"] <= _b["h"])
+        if _okl and _okr and _b["h"] >= last_c:
+            _ph.append((_b["h"], _b["d"]))
+    res_piv = res_piv_from = None
+    if _ph:
+        _ph.sort(key=lambda x: x[0])
+        res_piv, res_piv_from = _ph[-1]        # 最高者
+
+    # 两者取**更高者**作主锚（同一平台 → 平台沿是高那个）
+    if res_piv is not None and res_piv > res_max:
+        resistance, res_from, res_kind = res_piv, res_piv_from, "枢轴高"
+        resistance_alt, resistance_alt_from = res_max, res_max_from
+    else:
+        resistance, res_from, res_kind = res_max, res_max_from, "窗口最高"
+        resistance_alt, resistance_alt_from = (res_piv, res_piv_from) if res_piv is not None else (None, None)
+
+    if resistance < last_c:
+        return None
+    # ③ ★ 2026-09-20 新增「左侧必须有锚（平台成形）」闸门 —— 用户定
+    #   用户原话（联瑞新材 688300 案例）：
+    #     「联瑞新材要看大阳线次日入场那一天左侧的锚，**根本就没有锚啊，平台都没有形成**，
+    #       最高都跑到 297.31 了，这种肯定不能做了」
+    #   背景：联瑞 08-27 是一根 +20% 涨停大阳（收 186.24），08-28/08-31 连续 PASS 全部均线，
+    #     但**左侧是 6 月 297.31 崩塌到 8-03 的 98.78（−66.8%）后的报复性反弹**，
+    #     08-28 当日已冲到左侧 25 根最高之上（距最高 −1.9%），头上没有任何可参照的阻力位
+    #     —— 所谓「阻力位 202.88」是它自己那根反弹的高点，不是左侧的墙。
+    #   ── 本质：T0 需要「左侧平台 → 前方前高 → 次日过昨高」三段结构 ──
+    #     联瑞缺第一段（左侧无平台）。用户第 4 条原理：「这个规则成立的前提是买突破的前置
+    #     setup，否则任意一个站上所有均线我都去试，没有意义」——联瑞就是那个反例。
+    #   ── 判据：平台度 = 窗口内收盘落在「中位价 ±10%」的根数占比 ──
+    #     实测六案例（`_plat2.txt`）：
+    #       赛分 100% / 东富龙 100% / 纳微 76% / 成都先导 72% / 康龙 60%  ← 五个正案例
+    #       联瑞 44%                                                  ← 用户判「不能做」
+    #     阈值 **50%**（用户定）：高于联瑞 44%、低于正案例最低 60%，留余量。
+    #   ── 与「距最高」的关系 ──
+    #     联瑞距窗口最高 −1.9%（已冲出左侧区间）；五个正案例 +5.2%~+14.1%（头上有墙）。
+    #     平台度已能区分两者，故「距最高 > 0」不单独设闸门，仅记录 `above_range` 供复盘。
+    _seg33 = seg
+    _cs33 = sorted(b["c"] for b in _seg33)
+    _mid33 = _cs33[len(_cs33) // 2]
+    _plat_deg = (sum(1 for b in _seg33 if abs(b["c"] - _mid33) / _mid33 <= 0.10)
+                 / len(_seg33) * 100)
+    _hi33 = max(b["h"] for b in _seg33)
+    _above_range = last_c > _hi33          # 价格已冲出左侧窗口区间
+    if _plat_deg < 50.0:
+        return None
+
+    gap_pct = (resistance - last_c) / last_c * 100
+    # 板块涨跌幅上限：主板 10% / 创业板(30)、科创板(68) 20%。
+    # 优先取 ev 里的 ticker（build_ev 调用方注入）；取不到再退回振幅推断。
+    _tk = str(ev.get("ticker") or ev.get("symbol") or ev.get("code") or "")
+    # ★ 市场判据（2026-09-20 新增，用于 note 的「尾盘」措辞分支）：
+    #   A 股 6 位纯数字 → 有尾盘（14:57 集合竞价前定夺）
+    #   美股/港股 → 无「尾盘 14:57」概念，措辞改为「收盘前定夺（ET 15:45–16:00）」
+    #   ⚠ 用户 2026-09-20 已定：美股不做盘中盯守（致富证券无 buy-stop，且盘中在北京深夜），
+    #     故美股措辞必须避免让人误以为要「守着盘到尾盘」。
+    _is_cn = bool(re.fullmatch(r"\d{6}", _tk.strip())) if _tk.strip() else None
+    if _tk:
+        _c6 = _tk[-6:] if len(_tk) >= 6 else _tk
+        cap = 20.0 if _c6.startswith(("30", "68")) else 10.0
+        board_src = f"code:{_c6}"
+    else:
+        cap = 20.0 if _is_dual_crea(bars) else 10.0
+        board_src = "振幅推断"
+    if gap_pct > cap:
+        return None
+
+    # D1 尚未发生 —— 本函数在 D0 收盘时给「次日执行方案」
+    d0 = bars[-1]
+    trigger = round(d0["h"], 2)          # ★ 触发价 = 昨日**最高价**（不是收盘价，2026-09-20 定稿）
+
+    # 止损锚 ★ 2026-09-20 口径扩展（用户定：「取全部锚中离触发价最近」）：
+    #   候选 = { MA5, MA10, MA20, D0 实体中点, D0.low }
+    #   取「低于触发价且离触发价最近」的一条。
+    #   ── 旧口径只取 MA10/MA20 且排除 MA5，在大阳突破日会失效 ──
+    #   成都先导 09-16（+14.05% 大阳）实测：
+    #     MA20 33.26（风险10.57%）< MA5 32.60（12.34%）< MA10 32.33（13.07%）
+    #     → 均线锚全部偏宽（大阳把均线甩在下方），被 >8% 闸门拦下；
+    #     而 **D0 实体中点 34.40 只有 7.50%**，是「获利盘兑现压力」的分界，更贴切。
+    #   ── 为什么放开 MA5 ──
+    #   旧注释称「MA5 长期贴价必落噪声带内」，但**在大阳日恰好相反**：MA5 被拉高后
+    #   反而离得远。统一用「离触发价最近」单一规则处理，不再对 MA5 先验排除；
+    #   噪声带风险由上层 `NOISE_ROOM_ATR` 检查兜底。
+    st = None
+    st_name = None
+    _mid = (d0["o"] + d0["c"]) / 2.0
+    for _nm, v in (("MA5", ma5), ("MA10", ma10), ("MA20", ma20),
+                   ("实体中点", _mid), ("大阳低点", d0["l"])):
+        if v is None or v >= trigger:
+            continue
+        if st is None or v > st:
+            st, st_name = v, _nm
+    if st is None:
+        return None
+    hard = round(st, 2)
+    risk_pct_v = (trigger - hard) / trigger * 100
+    # 风险闸门：超 8% 的止损在小账户上做不了仓位管理（用户「小亏」框架）。
+    # 保留信号但标注超限，由消费方决定半仓/放弃 —— 不静默丢弃。
+    risk_over = risk_pct_v > 8.0
+
+    # 分档：贴墙(≤2%) / 半路(>2%)
+    close_to_wall = gap_pct <= 2.0
+    tier = "T0" if close_to_wall else "T0"
+    grade = "贴墙" if close_to_wall else "半路"
+    dist_atr = (resistance - last_c) / atr_v
+
+    # 买点前置幅度：过昨高买 vs 现价
+    prem_pct = (trigger - last_c) / last_c * 100
+
+    exec_hint = (
+        f"★ 需盯盘：触发价 {trigger} 在现价 {round(last_c, 2)} 上方 {prem_pct:.2f}%，"
+        f"券商无 buy-stop/条件单，只能盘中手动打（A股 T+0 买入当日不可卖，"
+        f"但 A 股本身 T+1 交割，买入即锁定至次日）"
+    )
+
+    return {
+        "setup_kind": "ma_reclaim_break",
+        "mode": "ma_reclaim_break",
+        "tier": tier,
+        "priority": 1,
+        "role": "primary_entry",
+        "path": "B",
+        "grade": grade,                    # 贴墙 / 半路
+        "order": "buy-on-break",
+        "level": trigger,                  # 触发价 = 昨日**最高价** D0.high
+        "trigger": trigger,
+        "hard_stop": hard,
+        "risk_per_share": round(trigger - hard, 2),
+        "risk_pct": round(risk_pct_v, 2),
+        "risk_atr": round((trigger - hard) / atr_v, 2) if atr_v else None,
+        "stop_anchor": st_name,
+        "risk_over_limit": risk_over,
+        "resistance": round(resistance, 2),
+        "resistance_from": res_from,
+        "resistance_kind": res_kind,          # 枢轴高 / 窗口最高（双锚取近者）
+        "resistance_alt": round(resistance_alt, 2) if resistance_alt else None,
+        "resistance_alt_from": resistance_alt_from,
+        # ★ 左侧平台质量（2026-09-20 新增，联瑞新材案例）：< 50% 直接不出 T0
+        "plateau_degree": round(_plat_deg, 1),
+        "above_range": bool(_above_range),
+        "dist_to_wall_pct": round(gap_pct, 2),
+        "dist_to_wall_atr": round(dist_atr, 2),
+        "board_cap_pct": cap,
+        "board_src": board_src,
+        # ★ 均线排列**不作闸门**（2026-09-20 用户定）：纳微 9-08 突破时均线也未走顺
+        #   （MA10/MA20 仍纠缠），后面还调了几天，但不影响最终结果。仅记录供复盘。
+        "ma_aligned": bool(ma5 > ma10 > ma20),
+        # ★ 板块共振（用户 2026-09-20 指出：这是真正提高胜率的维度）：
+        #   「对板块强度有要求，能提高胜率，大部分是同时启动的」。
+        #   实证：TEM/SDGR/ILMN（AI制药）+ 赛分/纳微 于 2026-09-14~15 同日共振。
+        #   引擎单票无法判定板块 —— 该字段由批处理层（watch_cn / scanner 聚合）注入，
+        #   此处只占位，避免消费方 KeyError。
+        "sector_resonance": None,
+        "ma_state": {
+            "ma5": round(ma5, 2), "ma10": round(ma10, 2), "ma20": round(ma20, 2),
+        },
+        "exec": exec_hint,
+        # ★ 市场分支（2026-09-20 新增）：A 股才有「尾盘 14:57」；美股/港股措辞改写。
+        #   且用户已定美股不做盘中盯守 → 明说「睡前挂单 / 次日补判」，不写「守到尾盘」。
+        "alt_tail_entry": (
+            {
+                "condition": "D1.high <= D0.high（未过昨高）",
+                "entry": "D1 收盘价（尾盘 14:57 定夺，破位不买）",
+                "note": (
+                    "越不过昨日高点 = 今日调整预期，尾盘买最佳，破位就不买。"
+                    "买点在下方 → 可预挂限价单；无执行难度"
+                ),
+            }
+            if _is_cn is not False else
+            {
+                "condition": "D1.high <= D0.high（未过昨高）",
+                "entry": "D1 收盘价（收盘前定夺，破位不买）",
+                "note": (
+                    "越不过昨日高点 = 今日调整预期，收盘前买最佳，破位就不买。"
+                    "★ 美股无「尾盘 14:57」概念，且盘中在北京深夜 → "
+                    "按用户口径【不熬夜】：睡前把单子处理完，或只记录、次日按实际走势补判，"
+                    "不做盘中盯守。"
+                ),
+            }
+        ),
+        "note": (
+            f"【T0·均线收复+过昨高】站上全部均线（MA5 {round(ma5,2)} / "
+            f"MA10 {round(ma10,2)} / MA20 {round(ma20,2)}），"
+            f"上方阻力位 {round(resistance,2)}（{res_from}·{res_kind}）距收盘 "
+            f"{gap_pct:.2f}%（{dist_atr:.2f}×ATR，{grade}）"
+            + (f"，另锚 {round(resistance_alt,2)}（{resistance_alt_from}）"
+               if resistance_alt else "")
+            + f"，左侧平台度 {_plat_deg:.0f}%"
+            + f"—— 距墙分档仅作**参考**（贴墙≤2% / 半路2~10% / 远端>10%）："
+            f"用户五个实证案例的距墙为 5.2%~14.1%（多数在 10%~14%），"
+            f"而无选股层的全样本回测里「半路」期望≈0 —— 差距来自板块/题材/基本面筛选，"
+            f"故**不因距墙远而否定信号**，只标注位置供人工取舍。"
+            f"次日过昨高 {trigger} 即买（开盘已过高用开盘价）；"
+            + ("不过则尾盘定夺。" if _is_cn is not False else
+               "不过则【收盘前定夺】（美股无尾盘 14:57；按用户口径不熬夜——"
+               "睡前处理完或次日补判）。")
+            + f"止损锚 {st_name} {hard}"
+            f"（风险 {risk_pct_v:.2f}%）。"
+            + (f" ⚠ 风险 {risk_pct_v:.2f}%>8%，小账户难做仓位管理，"
+               f"建议降为半仓或改做更贴墙的标的" if risk_over else "")
+        ),
+    }
+
+
+def _is_dual_crea(bars):
+    """判断是否创业板/科创板（20% 涨跌幅）—— 用代码前缀兜底。
+
+    真实代码由调用方在 ev/scan 层注入；此处无法从 bars 拿到代码时，
+    退化为按振幅判断：近 60 根最大单日涨幅 >10.5% 即视为 20% 板。
+    """
+    try:
+        code = (bars[0].get("code") or bars[-1].get("code") or "")
+        if isinstance(code, str) and code:
+            c = code[-6:] if len(code) >= 6 else code
+            return c.startswith(("30", "68"))
+    except Exception:
+        pass
+    # 兜底：按历史单日涨幅推断
+    seg = bars[-60:] if len(bars) >= 60 else bars
+    for k in range(1, len(seg)):
+        pc = seg[k - 1]["c"]
+        if pc and (seg[k]["h"] - pc) / pc > 0.105:
+            return True
+    return False
 
 
 def plan_entry(bars, ev):
@@ -2254,6 +2705,13 @@ def plan_entry(bars, ev):
         cands = [x for x in (pb_plat, pb_line) if x]
         if cands:
             result["pre_breakout"] = min(cands, key=lambda x: x["dist_atr"])
+            # 埋伏单是独立 T1 入口，须与当日买点争夺「先成交者」。按成交价高低定先后：
+            # 买点在上方（突破/追高类）而埋伏单在下方 → 埋伏单先触发，它才是实际首选。
+            if mode in breakout_modes:
+                pb_px = result["pre_breakout"].get("trigger")
+                zz = z.get("level") if isinstance(z, dict) else None
+                if pb_px is not None and zz is not None and pb_px <= zz:
+                    result["pre_breakout"]["beats_current_mode"] = True
             if len(cands) == 2:
                 other = max(cands, key=lambda x: x["dist_atr"])
                 result["pre_breakout"]["note"] += (
@@ -2261,7 +2719,70 @@ def plan_entry(bars, ev):
                     f"{'活平台沿' if other.get('anchor') != 'down_tl' else '下降趋势线'}"
                     f" {other['level']} 的埋伏单同样够格（距 {other['dist_atr']}×ATR），先到先做"
                 )
+        # ★ T0 均线收复+过昨高：**总是**计算并挂在结果上（供股池复盘/盯盘方案消费）。
+        # 纯增量，不改变当日 mode —— 它回答「次日怎么挂单」，不回答「在哪买」。
+        # 提升规则（2026-09-20，用户在 pack() 出口统一做，不再打分支补丁）：
+        #   mode=="wait"               → T0 接管（原本无买点，它是唯一入口）
+        #   recommend==False           → T0 接管（原买法自身已否，T0 仍有独立方案；
+        #                                如东富龙 9-17 line_pullback「赔率偏弱」）
+        #   mode=="impulse_pause" 等
+        #     「大阳后」家族（赛分 9-15「大阳后未满三日」/ 纳微 9-08「大阳当日不追」）
+        #                              → T0 接管。★ 这两条是 T1 的纪律，与 T0 天然冲突：
+        #                                T0 要的正是「大阳次日的过昨高」，不是等回踩。
+        #   其他 recommend==True 的形态  → 保留原 mode，T0 仅并列挂载（先到先做）
+        if t0:
+            result["ma_reclaim"] = t0
+            result["tier_t0"] = "T0"
+            _takeover = (
+                result.get("mode") == "wait"
+                or not result.get("recommend")
+                or result.get("mode") in ("impulse_pause",)
+                or "大阳" in str(result.get("verdict") or "")
+            )
+            if _takeover:
+                result = _t0_takeover(result, t0)
         return result
+
+    # ★★ T0 入口：均线收复 + 过昨高（2026-09-20 用户定级，优先级**高于** T1 买突破）
+    #
+    # 设计（2026-09-20 修正）：T0 是「**执行方案**」，不是「形态」。它回答的是
+    # 「次日怎么挂单」，而形态回答「在哪买」。故它**不抢标**其他 mode：
+    #   ① 无条件计算，挂在 result["ma_reclaim"]（股池复盘/盯盘方案用，纯增量）
+    #   ② 仅当其他所有 mode 都判为 wait（当日无买点）时，才把 mode 提升为
+    #      ma_reclaim_break —— 此时它是**唯一入口**，按用户定级给 T0。
+    #
+    # 为什么不能无条件抢标（2026-09-20 回归发现）：T0 判据（站上全部均线 + 上方
+    # 有阻力位）比「反转态大阳」「平台突破」宽，放在最前面 return 会吃掉大量本该
+    # 走其他路径的样本 —— test_review_fixes::test_reversal_yang_gate_relaxes
+    # 断言 gate=="reversal_yang" 却拿到 T0 即为实证。
+    #
+    # T0 自带的买区：触发价 = 昨日高点，止损锚 = MA10/MA20 中更近的那条。
+    # ★ 不能传 bz_line（那是「回踩(A)·上升趋势线」买区）—— 会把趋势线位
+    #   （常高于现价）喂给 stop_plan，触发「止损锚在现价之上·买入即止损」误判
+    #   （2026-09-20 康龙 8-04 实测：结构止损被算成趋势线 40.44 > 现价 39.92）。
+    t0 = ma_reclaim_break(bars, ev, atr_v, last_c)
+    _t0z = None
+    if t0:
+        _t0z = {
+            "level": t0["trigger"],
+            "primary_lo": round(t0["hard_stop"], 2),
+            "primary_hi": t0["trigger"],
+            "in_zone": True,
+            "type": f"T0·均线收复+过昨高（{t0['grade']}·距墙{t0['dist_to_wall_pct']}%）",
+            "anchor": "ma_reclaim",
+            "counter": t0["resistance"],
+            "struct_stop": t0["hard_stop"],
+            "struct_anchor": f"{t0['stop_anchor']}@{t0['hard_stop']}（收盘破）",
+            "hard_stop": t0["hard_stop"],
+            "hard_anchor": t0["stop_anchor"],
+            "invalidation": t0["hard_stop"],
+            "hard": t0["hard_stop"],
+            # ★ 2026-09-20 口径同步（同上）：不再是「MA10/MA20 排除 MA5」。
+            "stop_basis": (
+                "{MA5, MA10, MA20, D0 实体中点, D0.low} 中「< 触发价且离触发价最近」的一条"
+            ),
+            "struct_exec": STRUCT_EXEC,
+        }
 
     plat_txt = f"{round(plat_p, 2)}" if plat_p is not None else "N/A"
     fresh_plat = plat_p is not None and last_c is not None and last_c > plat_p and n_above <= 3
@@ -2556,6 +3077,88 @@ def plan_entry(bars, ev):
     )
 
 
+def _t0_takeover(result, t0):
+    """★ T0 接管（2026-09-20）：当日原买法为 wait / 不推荐 / 「大阳后」家族时，
+    由 T0「均线收复+过昨高」接管为首选入口。
+
+    用户定级：T0 优先于 T1 买突破（盈亏比最高）。但 T0 是**执行方案**不是形态，
+    故只在原买法「本身没给出可执行买点」时才接管 mode —— 不抢平台突破/W底/旗形
+    等 recommend=True 的强形态的标（抢标会破坏既有判定，见 test_review_fixes 回归）。
+
+    为何「大阳后」家族必须让位：`impulse_pause`/「大阳当日不追」/「大阳后未满三日」
+    都是 T1 的纪律（等缩量回踩），而 T0 要的正是「大阳次日过昨高即买」——
+    两者对同一根大阳给出相反指令，T0 优先级更高故须覆盖。
+    实证：赛分 9-15（大阳后未满三日）、纳微 9-08（大阳当日不追），若不让位则
+    T0 全部被压成 wait，用户举的两个案例都出不来。
+    """
+    z = {
+        "level": t0["trigger"],
+        "primary_lo": round(t0["hard_stop"], 2),
+        "primary_hi": t0["trigger"],
+        "in_zone": True,
+        "type": f"T0·均线收复+过昨高（{t0['grade']}·距墙{t0['dist_to_wall_pct']}%）",
+        "anchor": "ma_reclaim",
+        "counter": t0["resistance"],
+        "struct_stop": t0["hard_stop"],
+        "struct_anchor": f"{t0['stop_anchor']}@{t0['hard_stop']}（收盘破）",
+        "hard_stop": t0["hard_stop"],
+        "hard_anchor": t0["stop_anchor"],
+        "invalidation": t0["hard_stop"],
+        "hard": t0["hard_stop"],
+        # ★ 2026-09-20 口径同步：止损锚已从「MA10/MA20 排除 MA5」放宽为
+        #   「{MA5, MA10, MA20, 实体中点, D0.low} 中 < 触发价且最近者」。
+        #   此处原为旧口径文本，会让渲染层与 t0["stop_anchor"] 自相矛盾（正帆/成都实测踩到）。
+        "stop_basis": (
+            "{MA5, MA10, MA20, D0 实体中点, D0.low} 中「< 触发价且离触发价最近」的一条"
+        ),
+        "struct_exec": STRUCT_EXEC,
+    }
+    # ★ 保留被接管路径的元数据（不丢信息）：原「反转态大阳」「大阳后未满三日」等
+    #   判定仍是事实，只是执行方案换成 T0。report/scanner 若按旧 key 读取不会 KeyError。
+    _prev_z = result.get("buy_zone") or {}
+    _prev_mode = result.get("mode")
+    _prev_verdict = result.get("verdict")
+    result["mode"] = "ma_reclaim_break"
+    result["priority"] = 1
+    result["setup"] = "breakout"
+    result["path"] = "B"
+    result["verdict"] = (f"T0·均线收复+过昨高（贴墙·距墙{t0['dist_to_wall_pct']}%）"
+                         if t0["grade"] == "贴墙"
+                         else f"T0·均线收复+过昨高（半路·距墙{t0['dist_to_wall_pct']}%）")
+    result["recommend"] = True
+    result["prev_verdict"] = _prev_verdict
+    result["t0_superseded_mode"] = _prev_mode
+    result["note"] = t0["note"]
+    result["exec"] = t0["exec"]
+    result["alt_tail_entry"] = t0["alt_tail_entry"]
+    result["tier"] = "T0"
+    result["grade"] = t0["grade"]
+    result["buy_zone"] = z
+    # ★ 同步覆盖 stop_plan 对象：渲染层（watch_cn / scan_all 报表）读的是
+    #   plan["stop_plan"]，只改 buy_zone 会让「止损」那一行仍显示 stop_plan 按
+    #   未知 mode 算出的锚（正帆 9-18 实测：T0 说 MA20 65.5，渲染层却显示 63.40·锚MA5）。
+    result["stop_plan"] = {
+        "struct": t0["hard_stop"],
+        "struct_anchor": f"{t0['stop_anchor']}@{t0['hard_stop']}（收盘破）",
+        "hard": t0["hard_stop"],
+        "hard_anchor": t0["stop_anchor"],
+        "trigger": None,
+        "struct_exec": STRUCT_EXEC,
+        "hard_exec": HARD_EXEC,
+        "hard_dist_atr": t0.get("risk_atr"),
+        "hard_noise": False,
+        "stop_basis": z["stop_basis"],
+        "t0": True,
+    }
+    # 把被接管路径的 gate/relaxed/state 透传到 T0 买区，供测试与复盘追溯
+    for _k in ("gate", "relaxed", "relaxed_reason", "state", "yang_i", "gate_src"):
+        if _prev_z.get(_k) is not None:
+            z[f"prev_{_k}"] = _prev_z[_k]
+    result.pop("stop_above_price", None)
+    result.pop("stop_warning", None)
+    return result
+
+
 def buy_zone(ev, bars):
     """兼容扫描器：买区由 plan_entry 的活需求给出，禁止硬编码均线底座。"""
     if not bars:
@@ -2580,11 +3183,14 @@ def classify_regime(last_c, ema10, sma20, sma50, sma20_up, hh, hl, c2, p1_px):
     return "mixed"
 
 
-def build_ev(bars, drop_live=False):
+def build_ev(bars, drop_live=False, ticker=None):
     """从日线构造 plan_entry 所需 ev（扫描器与 evaluate 共用）。
 
     drop_live=True 时丢弃今日未收盘末根。
     无有效活平台沿时不回落旧 R1（避坑）。
+    ticker：可选，标的代码（如 '300171'）。用于判断板块涨跌幅上限
+            （主板 10% / 创业板·科创板 20%），T0 的阻力位距离闸门需要它。
+            不传则由 T0 内部按历史振幅推断（不可靠，仅为兼容旧调用）。
     """
     if drop_live and bars and is_live_bar(bars):
         bars = bars[:-1]
@@ -2654,6 +3260,7 @@ def build_ev(bars, drop_live=False):
         "regime": regime,
         "passed": passed,
         "rvol20": rvol20,
+        "ticker": ticker,          # T0 判定板块涨跌幅上限用（主板10%/双创20%）
         "cond3_break_prior_high": c3,
         "c2": c2,
         "cond2_no_new_low": c2,
@@ -2704,13 +3311,13 @@ def evaluate(sym, data_file=None, eod=False):
         sym, bars, qmeta, market)
     stale_plan = None
     if live_bar is not None:
-        ev_stale, _, _ = build_ev(bars_closed)
+        ev_stale, _, _ = build_ev(bars_closed, ticker=sym_code)
         if ev_stale is not None:
             stale_plan = plan_entry(bars_closed, ev_stale)
     # 盘中未收盘：默认禁止 recommend（量能不可判）；--eod 丢弃末根
     live = is_live_bar(bars, market=market)
     drop_live = bool(eod or False)
-    ev, bars, meta = build_ev(bars, drop_live=drop_live)
+    ev, bars, meta = build_ev(bars, drop_live=drop_live, ticker=sym_code)
     if ev is None:
         return {"sym": sym, "verdict": "N/A", "reason": meta.get("reason", "无法判定"), "last": last_q}
 

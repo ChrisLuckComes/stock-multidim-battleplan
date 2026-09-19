@@ -629,26 +629,59 @@ def test_reversal_yang_gate_relaxes():
 
     守护「ILMN 型信号被整段丢弃」：c2=False 但已站上 P1 的放量大阳，
     原 uptrend 门控会把整套大阳回踩分支跳过，产出 wait 且买区为空。
+
+    ★ 2026-09-20 更新：T0「均线收复+过昨高」定级高于 T1 后，本样本会被 T0 接管
+    （其距墙仅 0.48% = 贴墙档，实测胜率 50%/均R+0.80）。接管时原路径的
+    gate/relaxed/state 会透传到 `prev_*` 键，故此处接受两种正确结果之一：
+      (a) 原「反转态大阳·已放宽」路径直接给出买区（T0 未命中）
+      (b) T0 接管，且 `prev_gate == "reversal_yang"` 证明原判定仍是事实
     """
     bars = _reversal_bars()
     plan = plan_entry(bars, _reversal_ev())
     z = plan["buy_zone"]
-    assert z.get("gate") == "reversal_yang", (z.get("gate"), plan["verdict"])
-    assert z.get("relaxed") is True, z
-    assert z.get("relaxed_reason"), z
+    if z.get("gate") == "reversal_yang":
+        # (a) 原路径
+        assert z.get("relaxed") is True, z
+        assert z.get("relaxed_reason"), z
+        assert z["primary_lo"] is not None and z["primary_hi"] is not None, z
+        assert z["state"] == "yang_today", z
+        band = z["primary_hi"] - z["primary_lo"]
+        assert abs(band - 1.0 * atr14(bars)) < 0.05, (band, z)
+        assert "【反转态·放量大阳·已放宽】" in plan["note"], plan["note"]
+        return
+    # (b) T0 接管：必须证明原判定未丢失，且 T0 给出可执行买区
+    assert plan["mode"] == "ma_reclaim_break", plan.get("verdict")
+    assert z.get("prev_gate") == "reversal_yang", (z.get("prev_gate"), plan.get("verdict"))
+    assert z.get("prev_relaxed") is True, z
+    assert z.get("prev_state") == "yang_today", z
+    t0 = plan.get("ma_reclaim") or {}
+    assert t0.get("setup_kind") == "ma_reclaim_break", t0
+    assert t0.get("trigger") is not None and t0.get("hard_stop") is not None, t0
+    assert t0["hard_stop"] < t0["trigger"], t0
     assert z["primary_lo"] is not None and z["primary_hi"] is not None, z
-    assert z["state"] == "yang_today", z
-    # 买区宽度仍须是贴防守位 1.0×ATR 的下单带（松绑不得复辟「整条大阳体当买区」）
-    band = z["primary_hi"] - z["primary_lo"]
-    assert abs(band - 1.0 * atr14(bars)) < 0.05, (band, z)
-    assert "【反转态·放量大阳·已放宽】" in plan["note"], plan["note"]
+    assert plan["recommend"] is True, plan
 
 
 def test_reversal_yang_requires_volume():
-    """反转态 + 缩量大阳 → 不放宽（缺放量确认的破位修复不认）。"""
+    """反转态 + 缩量大阳 → 原「反转态放宽」路径不认（缺放量确认的破位修复不认）。
+
+    ★ 2026-09-20 更新：T0「均线收复+过昨高」**不设量能条件**（用户定：
+    「和量没关系，就是最高点就完了，简单」）。故本样本若被 T0 接管即为正确，
+    此时只须校验接管后的可执行性；未被接管则仍走原「等待」分支。
+    两者都不得给出「反转态·已放宽」的 gate。
+    """
     bars = _reversal_bars(yang_vol=7e5)          # 与大阳前均量持平 → 无放量
     plan = plan_entry(bars, _reversal_ev())
-    assert plan["buy_zone"].get("gate") != "reversal_yang", plan["buy_zone"]
+    z = plan["buy_zone"]
+    assert z.get("gate") != "reversal_yang", z
+    if plan["mode"] == "ma_reclaim_break":
+        # T0 接管（与量能无关，符合用户定稿口径）
+        t0 = plan.get("ma_reclaim") or {}
+        assert t0.get("setup_kind") == "ma_reclaim_break", t0
+        assert t0["hard_stop"] < t0["trigger"], t0
+        assert z["primary_lo"] is not None and z["primary_hi"] is not None, z
+        assert plan["recommend"] is True, plan
+        return
     assert plan["verdict"] == "等待", plan["verdict"]
 
 

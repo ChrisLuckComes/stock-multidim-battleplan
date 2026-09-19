@@ -39,6 +39,30 @@ CFG = os.path.join(HERE, "watch_cn.json")
 REPORTS = os.path.join(HERE, "reports")
 
 
+# ─────────────────── 板块归并（板块共振分组用） ───────────────────
+# ★ 必须归并到「粗粒度板块」，不能直接比 theme 串。
+#   同一板块内部细分不同却同步启动的实例：
+#     A股：正帆「半导体·工艺设备与电子特气」vs 圣邦「半导体·模拟芯片」vs 德邦「半导体·封装材料/TIM」
+#          细分不同，但半导体设备/材料/芯片同属一波资金。
+#     美股：SNDK「存储·NAND闪存」vs MU「存储·DRAM/HBM」；HOOD「加密经纪」vs PURR「加密财库」。
+BUCKET_RULES = [
+    ("生物医药", "生物医药"), ("医药", "生物医药"), ("医疗", "生物医药"),
+    ("半导体", "半导体"), ("光伏", "半导体"), ("面板", "半导体"),
+    ("AI服务器", "AI服务器"), ("算力", "AI服务器"), ("铜箔", "AI服务器"),
+    ("存储", "存储"), ("光模块", "光模块"),
+]
+
+
+def sk_bucket(theme):
+    """theme 串 → 粗粒度板块名（板块共振分组用）。兜底取「·」前的主段。"""
+    th = theme or ""
+    for kw, bucket in BUCKET_RULES:
+        if kw in th:
+            return bucket
+    return th.split("·")[0] or "未分类"
+
+
+
 def load_cfg():
     with open(CFG, encoding="utf-8") as f:
         return json.load(f)
@@ -67,7 +91,7 @@ def analyze_one(item):
     r["date"] = bars[-1]["d"]
     r["prev_close"] = round(prev, 2)
 
-    ev, bars2, meta = build_ev(bars, drop_live=False)
+    ev, bars2, meta = build_ev(bars, drop_live=False, ticker=r.get("code"))
     if ev is None:
         r["err"] = "build_ev 返回空"
         return r
@@ -105,6 +129,23 @@ def analyze_one(item):
     r["rvol"] = round(meta["rvol20"], 2) if meta.get("rvol20") else None
     r["ma5"] = z.get("ma5")
     r["ma20"] = round(meta["sma20"], 2) if meta.get("sma20") else None
+
+    # ★ T0「均线收复+过昨高」（2026-09-20 用户定级高于 T1）
+    t0 = plan.get("ma_reclaim") or None
+    r["t0"] = t0
+    r["tier"] = plan.get("tier") or ("T0" if t0 else None)
+    r["is_t0"] = bool(t0) and plan.get("mode") == "ma_reclaim_break"
+    if t0:
+        r["t0_trigger"] = t0.get("trigger")
+        r["t0_stop"] = t0.get("hard_stop")
+        r["t0_risk_pct"] = t0.get("risk_pct")
+        r["t0_anchor"] = t0.get("stop_anchor")
+        r["t0_wall"] = t0.get("resistance")
+        r["t0_wall_from"] = t0.get("resistance_from")
+        r["t0_gap_pct"] = t0.get("dist_to_wall_pct")
+        r["t0_grade"] = t0.get("grade")
+        r["t0_risk_over"] = bool(t0.get("risk_over_limit"))
+        r["t0_ma_aligned"] = bool(t0.get("ma_aligned"))
 
     # 收盘价距两档止损 / 买区的 ATR 距离 —— 复盘最该看的三个数
     for k, v in (("d_struct_atr", r["struct_stop"]), ("d_hard_atr", r["hard_stop"])):
@@ -250,6 +291,37 @@ def render(cfg, rows, senti, idx):
         L.append(f"  {r['name']:<9}{fmt(r['spot']):>10}{r['chg_pct']:>+8.2f}%  "
                  f"{str(r.get('regime')):<13}{str(r.get('mode')):<19}{pos_txt:<22}")
 
+    # 三·B、T0 专区 —— 均线收复+过昨高（用户定级最高，优先于 T1 买突破）
+    t0rows = [r for r in rows if r.get("t0") and not r.get("err")]
+    L.append("")
+    L.append("【三·B】★ T0 均线收复+过昨高 —— 定级高于 T1 买突破（盈亏比最高）")
+    if not t0rows:
+        L.append("  今日无 T0 信号")
+    for r in t0rows:
+        t = r["t0"]
+        det = "（已接管为当日首选）" if r.get("is_t0") else "（并列·当日另有买点）"
+        L.append(f"  {r['name']:<9}{fmt(r['spot']):>10}  {r.get('t0_grade') or ''}"
+                 f"  距墙 {fmt(r.get('t0_gap_pct'))}%{det}")
+        L.append(f"      触发 {fmt(r.get('t0_trigger'))} 买（过昨高即买，开盘已过高用开盘价）"
+                 f"  ｜ 止损 {fmt(r.get('t0_stop'))}·锚{r.get('t0_anchor')}"
+                 f"  风险 {fmt(r.get('t0_risk_pct'))}%")
+        L.append(f"      阻力位 {fmt(r.get('t0_wall'))}（{r.get('t0_wall_from')}）"
+                 f"  ｜ 均线排列 {'多头' if r.get('t0_ma_aligned') else '未走顺（不拦，符合口径）'}")
+        if r.get("t0_risk_over"):
+            L.append(f"      ⚠ 风险 {fmt(r.get('t0_risk_pct'))}%>8% —— 小账户难做仓位管理，"
+                     f"建议降半仓或改做更贴墙的标的")
+        # 板块共振（用户：这是提高胜率的真正维度）
+        cnt = r.get("t0_theme_count")
+        if cnt and cnt >= 2:
+            mine = r["name"]
+            others = [x for x in (r.get("t0_theme_peers") or []) if x != mine]
+            L.append(f"      ★ 板块共振 [{r.get('t0_bucket') or r.get('theme')}] 同日 {cnt} 只出 T0："
+                     f"{'、'.join([mine] + others)} —— 板块级资金流入，胜率上修")
+        elif cnt == 1:
+            L.append(f"      · [{r.get('t0_bucket') or r.get('theme')}] 板块内仅此 1 只出 T0（无共振）")
+        L.append(f"      执行：触发价在现价上方 → A股无 buy-stop，需盯盘手动打；"
+                 f"不过昨高则尾盘 14:57 定夺（破位不买）")
+
     # 四、可执行明细（有信号 / 在买区 的才展开）
     L.append("")
     L.append("【四】可执行明细（模式给出方向·买区·两档止损）")
@@ -324,6 +396,29 @@ def main():
         pool = [p for p in pool if p["code"] in want]
 
     rows = [analyze_one(p) for p in pool]
+    # ★ 板块共振聚合（2026-09-20 用户指出：「对板块强度有要求，能提高胜率，
+    #   大部分是同时启动的」）。引擎单票判定不了板块，故在批处理层统计：
+    #   同一**粗粒度板块**内当日有多少只票同时给出 T0 信号 —— 该数值越高，共振越强。
+    #   实证：TEM/SDGR/ILMN（AI制药）+ 赛分/纳微 于 2026-09-14~15 同日共振。
+    #   ★ 用「有没有 t0 块」判断，**不用 is_t0** —— is_t0 还要求 mode=="ma_reclaim_break"
+    #     （= T0 已接管为首选），但 mode 是 w_bottom_break/line_pullback 的票同样挂 T0
+    #     块并参与共振。用 is_t0 会系统性少算共振数（美股 09-18 加密链 2 只误报成 0）。
+    #   ★ 分组用 sk_bucket(theme) 粗粒度归并，**不是**直接比 theme 串。
+    #     否则「半导体·工艺设备」与「半导体·模拟芯片」会被判成两个板块 → 共振恒为 0。
+    _by_theme = {}
+    for r in rows:
+        if r.get("t0"):
+            _by_theme.setdefault(sk_bucket(r.get("theme")), []).append(
+                r.get("name") or r.get("code"))
+    for r in rows:
+        bk = sk_bucket(r.get("theme"))
+        peers = _by_theme.get(bk, [])
+        r["t0_bucket"] = bk
+        r["t0_theme_peers"] = [x for x in peers if x != (r.get("name") or r.get("code"))]
+        r["t0_theme_count"] = len(peers)
+        r["sector_resonance"] = (
+            "强" if len(peers) >= 3 else ("中" if len(peers) == 2 else ("弱" if len(peers) == 1 else None))
+        )
     senti = []
     for s in cfg.get("sentiment", []):
         q = quote_of(s["code"], s["prefix"])

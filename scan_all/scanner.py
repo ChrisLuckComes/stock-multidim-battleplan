@@ -45,7 +45,7 @@ def analyze(code, name, prefix):
     # 盘中未收盘：不出票，避免半日量污染全市场表
     if is_live_bar(bars, market="ASH"):
         return None
-    ev, bars, meta = build_ev(bars, drop_live=False)
+    ev, bars, meta = build_ev(bars, drop_live=False, ticker=code)
     if ev is None:
         return None
     plan = plan_entry(bars, ev)

@@ -50,6 +50,30 @@ GAP_BREAK_PCT = 0.12
 GAP_BUDGET_PCT = 3.0        # 跨财报口径可接受的最坏损失（账户 %）
 ATR_HIGH_PCT = 4.0          # ATR 占价格 > 4% = 高波动，不能盯盘时格外危险
 
+# 细分 theme → 粗粒度板块（板块共振要按**粗**粒度比，否则同步启动的票会被拆开）
+# 2026-09-20 加：SNDK「存储·NAND闪存」vs MU「存储·DRAM/HBM」细分不同却同链；
+# 「加密经纪·交易平台」vs「加密财库·HYPE」同理。按细分串比 = 误判「无共振」。
+BUCKET_RULES = [
+    ("加密", "加密链"),          # 币股：HOOD/PURR/MSTR/COIN/CRCL 同步性最高
+    ("存储", "存储链"),          # SNDK/MU/SKHY
+    ("半导体", "半导体"),        # INTC 等
+    ("AI服务器", "算力硬件"),
+    ("AI云", "算力硬件"),
+    ("医疗AI", "AI医疗"),
+    ("AI制药", "AI医疗"),
+    ("基因测序", "AI医疗"),
+    ("合成生物", "AI医疗"),
+]
+
+
+def sk_bucket(theme):
+    """theme 串 → 粗粒度板块名（板块共振分组用）。"""
+    th = theme or ""
+    for kw, bucket in BUCKET_RULES:
+        if kw in th:
+            return bucket
+    return th.split("·")[0] or "未分类"
+
 
 def load_cfg():
     with open(CFG, encoding="utf-8") as f:
@@ -153,6 +177,23 @@ def analyze_one(item, cfg):
     r["rvol"] = round(meta["rvol20"], 2) if meta.get("rvol20") else None
     r["ma5"] = z.get("ma5")
     r["ma20"] = round(meta["sma20"], 2) if meta.get("sma20") else None
+
+    # ★ T0「均线收复+过昨高」（2026-09-20 用户定级高于 T1）
+    t0 = plan.get("ma_reclaim") or None
+    r["t0"] = t0
+    r["tier"] = plan.get("tier") or ("T0" if t0 else None)
+    r["is_t0"] = bool(t0) and plan.get("mode") == "ma_reclaim_break"
+    if t0:
+        r["t0_trigger"] = t0.get("trigger")
+        r["t0_stop"] = t0.get("hard_stop")
+        r["t0_risk_pct"] = t0.get("risk_pct")
+        r["t0_anchor"] = t0.get("stop_anchor")
+        r["t0_wall"] = t0.get("resistance")
+        r["t0_wall_from"] = t0.get("resistance_from")
+        r["t0_gap_pct"] = t0.get("dist_to_wall_pct")
+        r["t0_grade"] = t0.get("grade")
+        r["t0_risk_over"] = bool(t0.get("risk_over_limit"))
+        r["t0_ma_aligned"] = bool(t0.get("ma_aligned"))
 
     for k, v in (("d_struct_atr", r["struct_stop"]), ("d_hard_atr", r["hard_stop"])):
         r[k] = round((spot - v) / atr, 2) if v else None
@@ -349,6 +390,35 @@ def render(cfg, rows, watch_rows, senti, idx, manual):
                  + rpad(f"{r['chg_pct']:+.2f}%", 9) + rpad(f"{r['atr_pct']:.2f}%", 7)
                  + "  " + wpad(r.get("regime"), 14) + wpad(r.get("mode"), 20) + pos_txt)
 
+    # 三·B、T0 专区 —— 均线收复+过昨高（用户定级最高，优先于 T1 买突破）
+    t0rows = [r for r in rows if r.get("t0") and not r.get("err")]
+    L.append("")
+    L.append("【三·B】★ T0 均线收复+过昨高 —— 定级高于 T1 买突破（盈亏比最高）")
+    if not t0rows:
+        L.append("  今日无 T0 信号")
+    for r in t0rows:
+        t = r["t0"]
+        det = "（已接管为当日首选）" if r.get("is_t0") else "（并列·当日另有买点）"
+        L.append(f"  {wpad(r['name'], 20)}{rpad(fmt(r['spot']), 10)}  {r.get('t0_grade') or ''}"
+                 f"  距墙 {fmt(r.get('t0_gap_pct'))}%{det}")
+        L.append(f"      触发 {fmt(r.get('t0_trigger'))} 买（过昨高即买；D1 开盘已过高 → 直接用开盘价）"
+                 f"  ｜ 止损 {fmt(r.get('t0_stop'))}·锚{r.get('t0_anchor')}"
+                 f"  风险 {fmt(r.get('t0_risk_pct'))}%")
+        L.append(f"      阻力位 {fmt(r.get('t0_wall'))}（{r.get('t0_wall_from')}）"
+                 f"  ｜ 均线排列 {'多头' if r.get('t0_ma_aligned') else '未走顺（不拦，符合口径）'}")
+        if r.get("t0_risk_over"):
+            L.append(f"      ⚠ 风险 {fmt(r.get('t0_risk_pct'))}%>8% —— 小账户难做仓位管理，"
+                     f"建议降半仓或改做更贴墙的标的")
+        # 板块共振（用户：「对板块强度有要求，能提高胜率，大部分是同时启动的」）
+        cnt = r.get("t0_theme_count")
+        if cnt and cnt >= 2:
+            L.append(f"      ★ 板块共振 [{r.get('t0_bucket') or r.get('theme')}] 同日 {cnt} 只出 T0："
+                     f"{'、'.join(r.get('t0_theme_peers') or [])} —— 板块级资金流入，胜率上修")
+        elif cnt == 1:
+            L.append("      · 本主题仅此 1 只出 T0（无共振）")
+        L.append("      执行：触发价在现价上方 → 致富无 buy-stop，**只能盯盘手动打 ✗**"
+                 "（美股盘中在北京深夜）；不过昨高则次日再看（无尾盘可等）")
+
     # 四、可执行明细
     L.append("")
     L.append("【四】可执行明细（买区 · 两档止损 · 目标 · 仓位上限）")
@@ -483,6 +553,35 @@ def main():
 
     rows = [analyze_one(p, cfg) for p in pool]
     watch_rows = [analyze_one(p, cfg) for p in watch]
+
+    # ★ 板块共振聚合（2026-09-20 从 watch_cn.py 移植）。用户：「对板块强度有要求，
+    #   能提高胜率，大部分是同时启动的」。引擎单票判不了板块，故在批处理层统计：
+    #   同一板块内当日有多少只票同时给出 T0 信号。
+    #   实证：09-18 加密链 HOOD/MSTR/COIN/PURR/CRCL 同日共振 5 只（池内 PURR+HOOD 2 只）。
+    #   ★ 分组必须用**粗粒度板块**：SNDK「存储·NAND闪存」与 MU「存储·DRAM/HBM」细分
+    #     不同，但同属存储链、同步启动 —— 按细分串比会误判「无共振」。见 sk_bucket()。
+    def _grp(r):
+        return sk_bucket(r.get("theme") or "")
+
+    _all = rows + watch_rows
+    _by_theme = {}
+    for r in _all:
+        # ★ 用「有没有 T0 块」判断，**不用 is_t0**。
+        #   is_t0 还要求 mode=="ma_reclaim_break"（= T0 已接管为首选），
+        #   但 mode 是 w_bottom_break / line_pullback 的票同样会挂 T0 块并参与共振
+        #   （实证：09-18 PURR mode=w_bottom_break 却给 T0，与 HOOD 同属加密链）。
+        #   用 is_t0 筛 → 共振数被系统性少算（加密链 2 只误报成「无共振」）。
+        if r.get("t0"):
+            _by_theme.setdefault(_grp(r), []).append(r.get("name") or r.get("sym"))
+    for r in rows:
+        peers = _by_theme.get(_grp(r), [])
+        me = r.get("name") or r.get("sym")
+        r["t0_bucket"] = _grp(r)
+        r["t0_theme_peers"] = [x for x in peers if x != me]
+        r["t0_theme_count"] = len(peers)
+        r["sector_resonance"] = (
+            "强" if len(peers) >= 3 else ("中" if len(peers) == 2
+                                          else ("弱" if len(peers) == 1 else None)))
 
     # 指数/温度计复用池内已抓到的日线，减少一次网络往返（Yahoo 源尤其不稳）
     have = {r["sym"]: None for r in (rows + watch_rows) if not r.get("err")}

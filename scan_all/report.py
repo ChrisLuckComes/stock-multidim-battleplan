@@ -191,6 +191,19 @@ def main():
                            f'在 <b>{f2(pb.get("trigger"))}</b> 挂买入（触发价 = 线上方 0.05×ATR），'
                            f'硬止损 {f2(pb.get("hard_stop"))}（{f2(pb.get("risk_per_share"))}/股）。{_st}'
                            f'<br><span class="muted">{pb.get("note") or ""}</span></p>')
+                if pb.get("cushion_note"):
+                    _gap = ""
+                    try:
+                        _d = (float(pb.get("trigger")) - float(r.get("spot"))) / float(r.get("spot")) * 100
+                        _gap = f'（距现价 {_d:+.2f}%）' if _d else ""
+                    except Exception:
+                        pass
+                    charts += (f'<p class="pbbox"><b>先手权（预判买 vs 顶着买）</b>{_gap}：'
+                               f'{pb.get("cushion_note")}</p>')
+                if pb.get("beats_current_mode"):
+                    charts += ('<p class="warnbox amb">★ 本埋伏单位于当日买点<b>下方</b>'
+                               '（买点在现价上方、需等上行触发）→ <b>埋伏单先成交，它是首选入口</b>；'
+                               '当日 mode 的买点属次选。此单与 T1 同级。</p>')
             if r.get("intraday"):
                 charts += (f'<p class="warnbox amb">⚠ 盘中口径·未收盘 —— 结构与买区已并入今日未收盘 K 线'
                            f'（非昨收口径）。盘中价非收盘价，决策点：'
