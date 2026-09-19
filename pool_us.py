@@ -8,8 +8,12 @@
   是这份**收盘复盘**：我池子里这几只今天走到哪了、有没有进买区、能不能开仓。
 
 与 A 股版（watch_cn.py）的差异（都是真实规则差异，不是风格差异）：
-  1. **美股支持 buy-stop** —— 买点在现价上方（突破买）可以挂条件单预埋；
-     A 股没有，突破买必须盯盘。所以美股"突破类"是可执行的。
+  1. **致富证券既无 buy-stop 也无条件单（2026-09-19 用户确认）** —— 别把美股"市场支持
+     stop 单"当成"你的券商能挂"。实际能力 = **只有限价单 + 市价单**：
+       · 买点在现价**下方**（回踩/低吸买）→ 限价单可隔夜预挂 ✓ 睡觉也能成交
+       · 买点在现价**上方**（突破买）→ 限价挂出会立即成交（等于市价+价格上限），
+         想"等上行触发"**只能盯盘** ✗（美股盘中在你这里是深夜 → 实际做不了）
+     ⇒ 结论：**美股只有"回踩买"是可执行的**；突破类买点标为「不可预挂 / 需盯盘」。
   2. **券商不支持挂止损单（2026-08-26 确认）** —— 不能盯盘时硬止损档直接失效，
      真实敞口 = 隔夜跳空。所以仓位要按**最坏跳空**反推，不按止损宽度。
      本脚本直接给「不让最坏损失超过预算」的股数表。
@@ -161,7 +165,7 @@ def analyze_one(item, cfg):
         r["zone_pos"] = None
     r["stop_too_close"] = bool(r["d_struct_atr"] is not None and r["d_struct_atr"] < 0.25)
 
-    # 买点方向：决定"怎么挂"（美股两类都能预挂，挂法不同）
+    # 买点方向：决定"怎么挂"。致富证券无条件单 → 只有「买点在下方」的限价单能预挂
     pb = r["pre_breakout"] or {}
     trg = pb.get("trigger") or pb.get("K")
     parts = []
@@ -170,11 +174,13 @@ def analyze_one(item, cfg):
         parts.append(f"现价在买区内（位置 {zp:.0%}）→ 可直接买，但先看是否靠近下沿"
                      if zp is not None else "现价在买区内")
     elif r["zone_hi"] and spot > r["zone_hi"]:
-        parts.append(f"买点在下方 → 等回踩到 {r['zone_lo']:.2f}~{r['zone_hi']:.2f}（可挂限价单）")
+        parts.append(f"买点在下方 → 等回踩到 {r['zone_lo']:.2f}~{r['zone_hi']:.2f}"
+                     f"（**限价单可隔夜预挂** ✓）")
     elif r["zone_lo"] and spot < r["zone_lo"]:
         parts.append(f"现价已低于买区下沿 {r['zone_lo']:.2f}（回踩过深，等企稳再说）")
     if trg and trg > spot:
-        parts.append(f"上方 buy-stop 站上 {trg:.2f} 买")
+        parts.append(f"上方突破买 站上 {trg:.2f}（**无 buy-stop → 只能盯盘，"
+                     f"不能预挂** ✗，美股盘中在你的深夜 → 实际不可执行）")
     r["buy_side"] = "；".join(parts) if parts else "—"
 
     # 信号冲突：主判"不追"但突破单几乎贴现价 → 两个结论互斥，必须人工二选一
@@ -392,7 +398,7 @@ def render(cfg, rows, watch_rows, senti, idx, manual):
         pb = r.get("pre_breakout") or {}
         if pb:
             L.append(f"      突破埋伏单：站上 {fmt(pb.get('trigger') or pb.get('K'))} 买"
-                     f"（美股支持 buy-stop，可预挂）  止损 {fmt(pb.get('stop'))}"
+                     f"（**致富无 buy-stop → 只能盯盘，不可预挂**）  止损 {fmt(pb.get('stop'))}"
                      + (f"  距今 {fmt(pb.get('dist_atr'))}×ATR"
                         if pb.get("dist_atr") is not None else ""))
         if r.get("buy_side") and r["buy_side"] != "—":
@@ -447,9 +453,12 @@ def render(cfg, rows, watch_rows, senti, idx, manual):
     L.append("")
     L.append("─" * 96)
     L.append("口径提醒：")
-    L.append("  · 美股**支持 buy-stop** —— 买点在现价上方（突破买）可挂条件单预埋，不需要盯盘；")
-    L.append("    这与 A 股相反（A 股无 buy-stop，突破买只能盯盘）。")
-    L.append("  · 但**券商不能挂止损单** —— 不能盯盘时硬止损档失效，真实敞口 = 隔夜跳空，")
+    L.append("  · **致富证券：既无 buy-stop、也无条件单（2026-09-19 用户确认）** —— 别把")
+    L.append("    「美股市场支持 stop 单」当成「你的券商能挂」。实际只有限价单 + 市价单。")
+    L.append("    ⇒ **买点在现价下方（回踩/低吸）→ 限价单可隔夜预挂 ✓**")
+    L.append("    ⇒ **买点在现价上方（突破）→ 只能盯盘才能等触发 ✗**（美股盘中在你的深夜）")
+    L.append("    ⇒ 选标的时这是一个硬维度：同一逻辑里优先做「买点在下方」的那只。")
+    L.append("  · 且**券商不能挂止损单** —— 不能盯盘时硬止损档失效，真实敞口 = 隔夜跳空，")
     L.append("    所以仓位按「最坏跳空」反推（见每只的仓位上限），不按止损宽度。")
     L.append("  · 日线取 Nasdaq 官方（Yahoo/stooq 降级）；yahoo 源可能只有 ~127 根。")
     L.append("  · 「在买区内」≠「现价是好买点」—— 回踩类要看是否靠近买区下沿。")
