@@ -1164,8 +1164,22 @@ def _empty_zone():
     }
 
 
+# 回踩买区下沿相对锚的容差（×ATR）。
+#
+# 2026-09-18 SNDK：旧版买区是「锚 ±1.0×ATR」双侧对称，下沿落在锚下方整整 1 个 ATR。
+# 那是**破线之后**的区域，本不该挂买单；更要命的是它必然低于任何「锚 −0.10×ATR」的
+# 硬止损，于是 stop_plan 每次都判「买区与止损锚冲突」→ 把买区下沿抬到硬止损之上。
+# 当硬止损锚（MA5）本身高过现价时，抬完的买区整个飞到现价上方：
+#   SNDK 9/16 收 1519.97，回踩锚=上升趋势线 1492.76，输出的买区却是 1580.16~1604.72
+#   （在收盘上方 60 元），结构止损 1585.76 还高过次日开盘 1564.53 = 买入即止损。
+# 下沿只留毛刺余量（0.05×ATR），让「锚 −0.10×ATR」的硬止损天然落在买区下沿之下，
+# 不再触发那条抬买区的分支；上沿保留 1.0×ATR，与 in_zone 的贴线门槛一致。
+PULLBACK_ZONE_PAD_LO_ATR = 0.05
+PULLBACK_ZONE_PAD_HI_ATR = 1.0
+
+
 def zone_from_demand(demand, bars, ev):
-    """沿线回踩买区：半宽与 in_zone 门槛统一为 1.0×ATR（与 SKILL 贴线触发一致）。"""
+    """沿线回踩买区：下沿=锚 −0.05×ATR（毛刺），上沿=锚 +1.0×ATR（与贴线门槛一致）。"""
     closes = [b["c"] for b in bars]
     last_c = closes[-1]
     ma5 = sma(closes, 5)
@@ -1180,8 +1194,10 @@ def zone_from_demand(demand, bars, ev):
     atr_v = demand.get("atr") or atr14(bars)
     level = demand["level"]
     pad = 1.0 * atr_v if atr_v else level * 0.01
-    lo = min(demand.get("cluster_lo", level), level) - pad
-    hi = max(demand.get("cluster_hi", level), level) + pad
+    # 下沿：只留毛刺余量（见 PULLBACK_ZONE_PAD_LO_ATR 注释）。cluster 只在锚之上时
+    # 才可能抬高上沿，下沿恒以锚为基准，不再整体下探 1 个 ATR。
+    lo = min(demand.get("cluster_lo", level), level) - PULLBACK_ZONE_PAD_LO_ATR * pad
+    hi = max(demand.get("cluster_hi", level), level) + PULLBACK_ZONE_PAD_HI_ATR * pad
     if last_c and hi - lo < last_c * 0.002:
         mid = (lo + hi) / 2.0
         lo, hi = mid * 0.997, mid * 1.003
@@ -1612,6 +1628,12 @@ def stop_plan(bars, mode, z, atr_v):
     铁律二：硬止损必须落在买区下沿之下。若 SKILL 的合法锚都做不到（买区与锚冲突），
             如实挂 stop_warning，并把买区下沿抬到硬止损之上 —— 让路的是买区，
             不是止损数值，也不是锚名。
+    铁律零（2026-09-18 SNDK）：**任何止损锚都必须低于现价**。锚价 ≥ 现价 = 买入的那一刻
+            就已经在止损之下（买入即止损），这个锚不是"宽一点/紧一点"的问题，是
+            根本不可用 —— 必须先剔除，再谈铁律一/二。剔除后无处可去的，如实不给止损，
+            由 attach_stops_targets 的总闸门撤销 recommend，绝不靠抬买区去迁就。
+            触发场景：SNDK 9/14~9/16，价格从 1764 跌到 1519，MA5=1676/1634/1586
+            全在收盘价之上，旧代码仍拿它当「收盘破」的结构止损。
     """
     if not bars or not atr_v or not z or z.get("level") is None:
         return None
@@ -1626,6 +1648,14 @@ def stop_plan(bars, mode, z, atr_v):
     level = z["level"]
     buy_lo = z.get("primary_lo") if z.get("primary_lo") is not None else level
     gap = 0.10 * atr_v
+    last_c = y["c"]
+
+    def _usable(px):
+        """铁律零：锚价必须低于现价，否则买入即止损。"""
+        return px is not None and px < last_c
+
+    def _rej_txt(rejected):
+        return "、".join(f"{n}@{round(p, 2)}" for n, p in rejected)
 
     def _resolve(cands):
         """cands 已按 SKILL 优先级排序 [(锚名, 锚价)]。
@@ -1638,27 +1668,44 @@ def stop_plan(bars, mode, z, atr_v):
         之下），只是把「先到先得」换成「噪声带内让位给更宽的合法锚」。
         触发场景：突破后隔夜/次日入场 —— 买区已上移，大阳中点算出的止损只距沿 0.03×ATR，
         等于没有止损（INTC 2026-09-17 实例）。
+
+        2026-09-18 铁律零：进入本函数前先把「锚价 ≥ 现价」的候选剔除，并在 hard_note
+        里写明剔除原因 —— 不让「买入即止损」的锚混进铁律一/二的取舍。
         """
         first = None
         ok = []
+        rejected = []
+        usable_n = 0
         for name, px in cands:
             if px is None:
                 continue
             h = px - gap
-            if first is None:
-                first = (name, px, h)
+            if not _usable(px):
+                rejected.append((name, px))
+                continue
+            usable_n += 1
             if h < buy_lo:
                 ok.append((name, px, h))
+            # first 只在**可用**锚里取最低的那条：warn 分支要把买区抬到硬止损之上，
+            # 若这里留着一个「买入即止损」的锚，抬完的买区会整个飞到现价上方
+            # （SNDK 2026-09-16 就是这么来的）。
+            if first is None or h < first[2]:
+                first = (name, px, h)
+        rej_note = (
+            f"已剔除不低于现价 {round(last_c, 2)} 的锚 {_rej_txt(rejected)}（买入即止损）"
+            if rejected else None
+        )
         if ok:
             name, px, h = ok[0]
             room = buy_lo - h
             if room >= NOISE_ROOM_ATR * atr_v or len(ok) == 1:
-                return name, px, h, None, None
+                return name, px, h, None, rej_note
             wname, wpx, wh = min(ok, key=lambda t: t[2])
             if wname == name:
-                return name, px, h, None, None
+                return name, px, h, None, rej_note
             return wname, wpx, wh, None, (
-                f"首选锚 {name}@{round(px, 2)} − gap 得硬止损 {round(h, 2)}，距买区下沿 "
+                (rej_note + "；" if rej_note else "")
+                + f"首选锚 {name}@{round(px, 2)} − gap 得硬止损 {round(h, 2)}，距买区下沿 "
                 f"{round(buy_lo, 2)} 仅 {round(room / atr_v, 2)}×ATR（落在单日噪声带内）"
                 f"→ 按同族合法锚降级到更宽的 {wname}@{round(wpx, 2)}，硬止损 "
                 f"{round(wh, 2)}（距买区下沿 {round((buy_lo - wh) / atr_v, 2)}×ATR）"
@@ -1666,19 +1713,56 @@ def stop_plan(bars, mode, z, atr_v):
         if first is None:
             return None, None, None, None, None
         name, px, h = first
+        if usable_n == 0:
+            return None, None, None, (
+                f"SKILL 合法锚（{_rej_txt([(n, p) for n, p in cands if p is not None])}）"
+                f"全不低于现价 {round(last_c, 2)} —— 买入即止损，本档不给出硬止损"
+            ), rej_note
         return name, px, h, (
             f"SKILL 合法锚（{' / '.join(str(c[0]) for c in cands)}）中最低的 "
             f"{name}@{round(px, 2)} − gap = {round(h, 2)}，仍不低于买区下沿 "
             f"{round(buy_lo, 2)}；买区与止损锚冲突 —— 已把买区下沿上抬到硬止损之上"
             f"（可执行价位以 primary_lo 为准）"
-        ), None
+        ), rej_note
 
     def _finish(struct_name, struct, hard_name, hard, warn, note=None):
+        # 结构止损自身就在现价之上 = 买入即止损。这里不给任何止损，交总闸门撤销
+        # 整单 —— 不能靠抬买区去迁就一个错误的锚（铁律零）。
+        if struct is None or not _usable(struct):
+            return {
+                "struct_anchor": struct_name,
+                "struct": round(struct, 2) if struct is not None else None,
+                "hard_anchor": None,
+                "hard": None,
+                "trigger": HARD_STOP_TRIGGER,
+                "struct_exec": STRUCT_EXEC,
+                "hard_exec": HARD_EXEC,
+                "hard_dist_atr": None,
+                "hard_noise": False,
+                "warning": (
+                    f"结构止损锚 {struct_name}@{round(struct, 2)} 不低于现价 "
+                    f"{round(last_c, 2)} —— 买入即止损，该锚当前不可用"
+                ),
+            }
         if hard is None:
-            return None
+            # SKILL 合法锚全部不可用：只保留结构止损那一档，并如实说明没有硬止损
+            return {
+                "struct_anchor": struct_name,
+                "struct": round(struct, 2),
+                "hard_anchor": None,
+                "hard": None,
+                "trigger": HARD_STOP_TRIGGER,
+                "struct_exec": STRUCT_EXEC,
+                "hard_exec": HARD_EXEC,
+                "hard_dist_atr": None,
+                "hard_noise": False,
+                "hard_note": note,
+                "warning": warn or "无可用硬止损锚 —— 保护只剩收盘轨（结构止损）",
+            }
         if warn:
             z["stop_warning"] = warn
-            last_c = bars[-1]["c"]
+            # last_c 用外层 stop_plan 的那个（此处不可再赋值，否则会把上面两个
+            # 提前返回分支里的 last_c 变成未绑定的局部变量）
             new_lo = round(hard + 0.05 * atr_v, 2)
             hi = z.get("primary_hi")
             if hi is None or hi <= new_lo:
@@ -1707,21 +1791,37 @@ def stop_plan(bars, mode, z, atr_v):
         return out
 
     if mode == "line_pullback":
-        # 结构锚默认 MA5；贴轨例外用已选均线 level
-        if z.get("anchor") in ("hl_trendline", None):
-            anchor_px = z.get("ma5") if z.get("ma5") is not None else level
-            struct_name, hard_name = "MA5(收盘破)", "MA5"
+        # 结构锚 = 回踩锚本身（2026-09-18 SNDK 修正）。
+        #
+        # 旧代码在 anchor=hl_trendline 时把结构止损换成 MA5，出发点是「均线比外推的
+        # 趋势线更实」。但 MA5 是**滞后**的：价格急跌时 MA5 还停在高处 —— SNDK 从
+        # 9/9 的 1764 一路跌到 9/16 的 1519，MA5 依次是 1676 / 1634 / 1586，全都
+        # **高过当日收盘**。拿它当「收盘破」的结构止损，等于买入那一刻就已触发
+        # （买入即止损）；随后 stop_plan 还会把买区抬到硬止损之上，输出一个整个
+        # 位于现价上方的买区（9/16：收 1519.97，买区 1580.16~1604.72）。
+        # 回踩单的定义就是「回踩到这条线买、收盘破这条线走」，止损锚必须是这条线
+        # 本身。MA5 只在该线已不可用（价格跌到线下）时作备选，且同样须过铁律零。
+        _an = z.get("anchor")
+        _label = ANCHOR_LABEL.get(_an, _an) if _an else "回踩线"
+        struct_px, struct_name = level, f"{_label}(收盘破)"
+        if not _usable(struct_px):
+            _ma5 = z.get("ma5")
+            if _usable(_ma5):
+                struct_px, struct_name = _ma5, "MA5(收盘破)"
+        # 硬止损：主锚 MA5。只有在 MA5 不可用（高过现价 = 买入即止损）或缺失时，
+        # 才退到「阳线下沿」—— 不为了"更宽"而平白换锚：MA5 能用时回踩类的紧止损
+        # 本来就是设计好的毛刺滤网（见 test_pullback_tight_stop_is_not_noise_flagged）。
+        # MA5 不可用时仍把它一并传入，好让铁律零把剔除原因留在 hard_note 里。
+        _cands = []
+        _ma5 = z.get("ma5")
+        if _ma5 is not None and _usable(_ma5):
+            _cands.append(("MA5", _ma5))
         else:
-            anchor_px = level
-            struct_name = f"{ANCHOR_LABEL.get(z.get('anchor'), z.get('anchor'))}(收盘破)"
-            hard_name = ANCHOR_LABEL.get(z.get("anchor"), z.get("anchor"))
-            if hard_name not in SKILL_HARD_ANCHORS:
-                # 锚名归一到 MA5 时，锚价必须同步换成 MA5，否则名值又对不上
-                hard_name = "MA5"
-                anchor_px = z.get("ma5") if z.get("ma5") is not None else level
-        name, px, hard, warn, note = _resolve([(hard_name, anchor_px)])
-        return _finish(struct_name, px if px is not None else anchor_px,
-                       name or hard_name, hard, warn, note)
+            if _ma5 is not None:
+                _cands.append(("MA5", _ma5))
+            _cands.append(("阳线下沿", y["l"]))
+        name, px, hard, warn, note = _resolve(_cands)
+        return _finish(struct_name, struct_px, name or "MA5", hard, warn, note)
 
     if mode == "impulse_pause":
         floor = level
@@ -1800,6 +1900,27 @@ def attach_stops_targets(plan, bars, atr_v, Hs):
         if sp.get("warning"):
             z["stop_warning"] = sp["warning"]
             plan["stop_warning"] = sp["warning"]
+        # 总闸门（铁律零的最后一道防线，2026-09-18 SNDK）：
+        # 止损 ≥ 现价 = 买入即止损，无论它是怎么算出来的都撤销整单。
+        # 之前同类错误的共同点是「锚点逻辑正确 ≠ 锚点数值可用」，单点修补总会
+        # 有下一个锚踩坑，所以在出口统一拦一道：recommend=True 必须自带一个
+        # 真正位于现价之下的止损。
+        if plan.get("recommend"):
+            bad = [
+                f"{nm} {round(v, 2)}"
+                for nm, v in (("结构止损", sp.get("struct")), ("硬止损", sp.get("hard")))
+                if v is not None and last_c is not None and v >= last_c
+            ]
+            if bad:
+                plan["recommend"] = False
+                plan["stop_above_price"] = True
+                plan["verdict"] = "止损锚在现价之上·买入即止损·不接"
+                _prev = plan.get("note") or ""
+                plan["note"] = (_prev + "；" if _prev else "") + (
+                    f"{'、'.join(bad)} 均不低于现价 {round(last_c, 2)} —— 买入即止损"
+                    f"（买进去就已经在止损之下），该锚当前不可用"
+                    f"（多为价格急跌、均线滞后所致），本单撤销"
+                )
     tg = targets(bars, mode, z, atr_v, last_c, Hs or []) if mode != "wait" else None
     if tg:
         z["target1"] = tg["target1"]

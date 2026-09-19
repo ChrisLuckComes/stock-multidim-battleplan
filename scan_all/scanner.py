@@ -119,6 +119,8 @@ def analyze(code, name, prefix):
         hard_dist_atr=sp.get("hard_dist_atr") if sp.get("hard_dist_atr") is not None else z.get("hard_dist_atr"),
         hard_noise=bool(sp.get("hard_noise") or z.get("hard_noise")),
         buy_lo_adjusted=bool(z.get("buy_lo_adjusted")),
+        # 铁律零闸门（2026-09-18）：止损 ≥ 现价 = 买入即止损，整单被撤销的标记
+        stop_above_price=bool(plan.get("stop_above_price")),
         path=plan.get("path"), mode=plan.get("mode"), priority=plan.get("priority"),
         recommend=plan.get("recommend"),
         verdict=plan.get("verdict"),
