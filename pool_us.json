@@ -1,0 +1,56 @@
+{
+  "_schema": "pool_us v1 —— 美股股池（交易候选 + 观察位 + 情绪温度计 分离）",
+  "_note": "pool = 交易候选（截图 11 只，可抓的 9 只）；watch = 已突破过远的观察位，只跟踪不追；sentiment/indices = 只读温度计，不产生买卖信号；manual = 数据源拿不到、需在富途自看。",
+  "account": 4694.80,
+  "risk_pct": 1.5,
+  "pool": [
+    {"sym": "SNDK", "name": "闪迪", "theme": "存储·NAND闪存", "pos": null,
+     "flag": "2026-09-18 +10.99%（用户熟悉、流动性好、弹性佳的核心跟踪标的）"},
+    {"sym": "MU", "name": "美光科技", "theme": "存储·DRAM/HBM", "pos": null},
+    {"sym": "SKHY", "name": "SK海力士(ADR)", "theme": "存储·HBM", "pos": null,
+     "min_bars": 45,
+     "flag": "韩股 000660 的 ADR；上市时间短（仅 ~50 根日线），结构可信度低于其他票"},
+    {"sym": "MRVL", "name": "迈威尔科技", "theme": "定制ASIC·光互联", "pos": null},
+    {"sym": "INTC", "name": "英特尔", "theme": "半导体·x86/代工", "pos": null,
+     "flag": "Q3 财报 2026-10-22 盘后；历史财报次日跳空 −7.89%/+23.60%/−17.03%（均值 ~12%）—— 是止损宽度的 3.5 倍"},
+    {"sym": "NBIS", "name": "NEBIUS", "theme": "AI云·算力租赁", "pos": null},
+    {"sym": "HPE", "name": "慧与科技", "theme": "AI服务器·网络设备", "pos": null},
+    {"sym": "BE", "name": "Bloom Energy", "theme": "燃料电池·AI数据中心供电", "pos": null,
+     "flag": "2026-09-18 −5.39%：用户 9/18 已出局（收盘破 MA10 结构）"},
+    {"sym": "PURR", "name": "Hyperliquid Strategies", "theme": "加密财库·HYPE", "pos": null,
+     "flag": "仅 199 根日线（2026 新上市）；9/18 +9.82%，波动极端，不适合不能盯盘时持有"}
+  ],
+  "watch": [
+    {"sym": "TEM", "name": "Tempus AI", "theme": "医疗AI·基因检测数据平台",
+     "note": "已突破过远，不追；等回踩结构"},
+    {"sym": "ILMN", "name": "Illumina", "theme": "基因测序", "note": "已突破过远，不追；等回踩结构"},
+    {"sym": "SDGR", "name": "Schrodinger", "theme": "AI制药·计算化学", "note": "已突破过远，不追；等回踩结构"},
+    {"sym": "TWST", "name": "Twist Bioscience", "theme": "合成生物·DNA合成", "note": "已突破过远，不追；等回踩结构"}
+  ],
+  "sentiment": [
+    {"sym": "^VIX", "name": "VIX恐慌指数", "tag": "风险温度",
+     "read": "VIX 抬升 = 风险偏好退潮，池内高 beta（NBIS/PURR/SNDK）先减不加；VIX 回落 = 风险偏好在，可做结构"}
+  ],
+  "indices": [
+    {"sym": "QQQ", "name": "纳指100"},
+    {"sym": "SOXX", "name": "费半"}
+  ],
+  "manual": [
+    {"code": "000660", "name": "SK海力士(韩)", "note": "数据源不支持韩股，请在富途看；美股侧用 SKHY ADR 代"},
+    {"code": "005930", "name": "三星电子(韩)", "note": "数据源不支持韩股，请在富途看；存储链另一极"}
+  ],
+  "captured_at": "2026-09-18",
+  "captured_snapshot": {
+    "QQQ": [721.45, "+0.00%"],
+    "SOXX": [533.07, "+0.00%"],
+    "^VIX": [14.81, "+0.00%"],
+    "SNDK": [1791.82, "+10.99%"], "MU": [1015.80, "+3.92%"],
+    "SKHY": [187.50, "+2.46%"], "MRVL": [244.25, "+1.45%"],
+    "INTC": [108.60, "-0.18%"], "NBIS": [223.54, "+2.55%"],
+    "HPE": [60.76, "-0.46%"], "BE": [265.63, "-5.39%"],
+    "PURR": [14.09, "+9.82%"],
+    "TEM": [77.84, "n/a"], "ILMN": [239.62, "n/a"],
+    "SDGR": [29.02, "n/a"], "TWST": [166.99, "n/a"],
+    "SK海力士(韩)": [1857000, "+6.42%"], "三星电子(韩)": [261000, "+3.37%"]
+  }
+}
