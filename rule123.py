@@ -767,8 +767,8 @@ def too_far_from_zone(z, atr_v, last_c, limit=2.0):
 
 def living_demand(bars, ev):
     """沿线回踩的线：默认 = P0→P1 上升趋势线。
-    仅当很明显贴着均线走（近 8 根至少 4 次触及）且趋势线离现价 >1.5×ATR 时，才改用该均线。
-    不用 VWAP/R1 抢默认买区。
+    当该上升趋势线不可用（加速线豁免或 P0/P1 点数不足）时，才以明显贴轨的均线（EMA10/MA5/SMA20，
+    近 8 根至少 4 次触及）兜底；趋势线可用时优先趋势线。不用 VWAP/R1 抢默认买区。
     """
     atr_v = atr14(bars)
     if not atr_v:
@@ -829,13 +829,8 @@ def living_demand(bars, ev):
         if walk is None or w["hits"] > walk["hits"]:
             walk = w
 
-    # 默认趋势线；均线只在「离趋势线很远 + 明显贴轨」时覆盖
-    if walk is not None and (tl_res is None or tl_res["dist_atr"] > 1.5):
-        out = walk
-    elif tl_res is not None:
-        out = tl_res
-    else:
-        out = walk
+    # 默认趋势线；趋势线不可用（加速线豁免/点数不足）时以均线锚兜底，不再用 1.5×ATR 归一化阈值卡切换
+    out = tl_res if tl_res is not None else walk
     if out is not None:
         # 诊断字段：供 note 说明「为什么没用 P0→P1 线」
         out["tl_steep"] = tl_steep
