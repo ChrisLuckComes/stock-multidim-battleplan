@@ -395,6 +395,17 @@ def fetch_us(symbol):
     raise RuntimeError(f"美股 {symbol} 三源全失败 → " + " | ".join(errs))
 
 
+def resolve_out_path(out_path, market):
+    """若 --out 给的是裸文件名(无目录分隔)，按市场重定向到 out_cn/(ASH) 或 out_us/(其他)；
+    若已带目录，则保持原样。"""
+    if not out_path:
+        return out_path
+    if os.path.basename(out_path) != out_path:
+        return out_path
+    mdir = "out_cn" if market == "ASH" else "out_us"
+    return os.path.join(mdir, out_path)
+
+
 def main():
     if len(sys.argv) < 2:
         print("usage: python fetch_market.py <TICKER> [--out path.json]", file=sys.stderr)
@@ -404,6 +415,7 @@ def main():
     if "--out" in sys.argv:
         out_path = sys.argv[sys.argv.index("--out") + 1]
     market, code, secid_or_sym = detect_market(ticker)
+    out_path = resolve_out_path(out_path, market)
     try:
         data = fetch_ash(secid_or_sym) if market == "ASH" else fetch_us(secid_or_sym)
     except Exception as e:

@@ -3493,6 +3493,39 @@ def evaluate(sym, data_file=None, eod=False):
     return out
 
 
+def _market_dir_for_sym(sym):
+    """按标的判定市场子目录：首字符为数字(含北交所/科创板/主板6位代码)→out_cn，字母→out_us。"""
+    if sym is None:
+        return None
+    s = str(sym).strip()
+    if not s:
+        return None
+    return "out_cn" if s[0].isdigit() else "out_us"
+
+
+def resolve_out_path(out_path, syms):
+    """若 --out 给的是裸文件名(无目录分隔)，按市场自动重定向到 out_cn/ 或 out_us/；
+    若已带目录或无法判定市场，则保持原样。"""
+    if not out_path:
+        return out_path
+    if os.path.basename(out_path) != out_path:
+        return out_path  # 已含目录，不重定向
+    # 裸文件名优先从文件名解析 sym（约定 out_<SYM>[_eod].json）
+    base = out_path
+    name = os.path.splitext(base)[0]
+    cand = name[len("out_"):] if name.startswith("out_") else name
+    for suf in ("_eod2", "_eod"):
+        if cand.endswith(suf):
+            cand = cand[: -len(suf)]
+            break
+    mdir = _market_dir_for_sym(cand)
+    if mdir is None and syms:
+        mdir = _market_dir_for_sym(syms[0])  # 回退：用首个标的判定
+    if mdir is None:
+        return out_path
+    return os.path.join(mdir, base)
+
+
 if __name__ == "__main__":
     args = sys.argv[1:]
     syms, data_map = [], {}
@@ -3542,7 +3575,11 @@ if __name__ == "__main__":
             print(f"  note: {r['note']}")
         print(f"  verdict: {r.get('verdict')}")
 
+    out_path = resolve_out_path(out_path, syms)
     if out_path:
+        mdir = os.path.dirname(out_path)
+        if mdir:
+            os.makedirs(mdir, exist_ok=True)
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(res if len(res) > 1 else res[0], f, ensure_ascii=False, indent=2, default=str)
         print(f"-> {out_path} written")
