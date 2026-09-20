@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from rule123 import (
     SKILL_HARD_ANCHORS,
+    attach_stops_targets,
     atr14,
     find_impulse_pause,
     held_lows_3d,
@@ -250,6 +251,81 @@ def test_pullback_tight_stop_is_not_noise_flagged():
     assert sp["hard_dist_atr"] is not None
 
 
+def test_pullback_struct_stop_is_the_line_not_lagging_ma5():
+    """回踩单的结构止损 = 回踩锚本身，不能用滞后的 MA5 顶替（SNDK 2026-09-16）。
+
+    价格从高位急跌时 MA5 还停在高处，会**高过当日收盘**：SNDK 9/14~9/16 收
+    1551.99 / 1530.89 / 1519.97，而 MA5 依次是 1676.02 / 1634.60 / 1585.76。
+    旧代码在 anchor=hl_trendline 时把结构止损换成 MA5，于是「收盘破 MA5」在买入
+    那一刻就已成立（买入即止损），stop_plan 还会把买区抬到硬止损之上 —— 输出的
+    买区 1580.16~1604.72 整个在收盘 1519.97 之上，recommend 却仍为 True。
+    回踩单的定义是「回踩到这条线买、收盘破这条线走」，止损锚必须是这条线。
+    """
+    bars = [_bar(f"2026-07-{i + 1:02d}", 100, 100.5, 99.5, 100.0, 1e6) for i in range(26)]
+    bars += [
+        _bar("2026-08-01", 100.0, 112.0, 100.0, 111.0, 2e6),
+        _bar("2026-08-02", 111.0, 113.0, 110.0, 112.0, 2e6),
+        _bar("2026-08-03", 112.0, 114.0, 111.0, 113.0, 2e6),
+        _bar("2026-08-04", 113.0, 115.0, 112.0, 114.0, 2e6),
+        _bar("2026-08-05", 114.0, 114.0, 104.0, 105.0, 3e6),  # 急跌
+    ]
+    atr_v = atr14(bars)
+    last_c = bars[-1]["c"]
+    ma5 = round(sum(b["c"] for b in bars[-5:]) / 5, 2)
+    assert ma5 > last_c, (ma5, last_c)            # 前置：MA5 确实高过现价
+    line_px = 100.0                               # 上升趋势线（在现价之下）
+    z = {
+        "level": line_px, "ma5": ma5, "anchor": "hl_trendline",
+        "primary_lo": round(line_px - 0.05 * atr_v, 2),
+        "primary_hi": round(line_px + 1.0 * atr_v, 2),
+    }
+    sp = stop_plan(bars, "line_pullback", z, atr_v)
+    assert "MA5" not in sp["struct_anchor"], sp   # 结构止损不许被 MA5 顶替
+    assert abs(sp["struct"] - line_px) < 0.011, sp
+    assert sp["struct"] < last_c, "结构止损必须在现价之下"
+    assert sp["hard"] is not None and sp["hard"] < last_c, sp
+    assert sp["hard_anchor"] == "阳线下沿", "MA5 不可用时退到阳线下沿"
+    assert "MA5" in (sp.get("hard_note") or ""), "剔除 MA5 必须留痕"
+    # 关键：买区不能被抬到现价之上（旧版 9/16 就是这么输出的）
+    assert z["primary_lo"] < last_c, (z["primary_lo"], last_c)
+    assert z["primary_lo"] <= last_c <= z["primary_hi"], z
+
+
+def test_stop_above_price_cancels_recommend():
+    """出口总闸门：任何止损 ≥ 现价 = 买入即止损，recommend 必须撤销。
+
+    单点补锚总会漏下一个（INTC 昨收口径、赛分盈亏比压穿、BE 陡线外推…共同点是
+    「锚点逻辑正确 ≠ 锚点数值可用」），所以在 attach_stops_targets 出口统一拦一道：
+    recommend=True 必须自带一个真正位于现价之下的止损。
+    """
+    bars = [_bar(f"2026-07-{i + 1:02d}", 100, 100.5, 99.5, 100.0, 1e6) for i in range(30)]
+    bars.append(_bar("2026-08-25", 100.2, 101.0, 100.0, 100.8, 1.5e6))
+    atr_v = atr14(bars)
+    last_c = bars[-1]["c"]
+    z = {"level": 104.0, "ma5": 103.0, "anchor": "hl_trendline",
+         "primary_lo": 103.9, "primary_hi": 105.0}
+    sp = stop_plan(bars, "line_pullback", z, atr_v)
+    assert sp["struct"] is not None and sp["struct"] >= last_c, sp
+    assert sp["hard"] is None, sp
+    assert "买入即止损" in sp["warning"], sp
+
+    plan = {"mode": "line_pullback", "recommend": True, "buy_zone": dict(z),
+            "note": "", "verdict": "沿线回踩"}
+    plan = attach_stops_targets(plan, bars, atr_v, [])
+    assert plan["recommend"] is False, plan
+    assert plan.get("stop_above_price") is True, plan
+    assert "买入即止损" in plan["note"], plan
+
+    # 对照：止损在现价之下时不得误杀
+    plan_ok = {"mode": "line_pullback", "recommend": True,
+               "buy_zone": {"level": 99.0, "ma5": 100.16, "anchor": "hl_trendline",
+                            "primary_lo": 98.9, "primary_hi": 100.0},
+               "note": "", "verdict": "沿线回踩"}
+    plan_ok = attach_stops_targets(plan_ok, bars, atr_v, [])
+    assert plan_ok["recommend"] is True, plan_ok
+    assert not plan_ok.get("stop_above_price"), plan_ok
+
+
 def test_stop_plan_carries_exec_semantics():
     """两档止损必须自带执行口径：哪条腿不用盯盘、哪条腿要盯盘/条件单。
 
@@ -361,6 +437,14 @@ def test_breakout_extended_band_still_actionable():
 
 
 def test_line_zone_pad_matches_in_zone():
+    """回踩买区：上沿=锚 +1.0×ATR（与 in_zone 门槛同源），下沿只留 0.05×ATR 毛刺。
+
+    2026-09-18 SNDK 修正：旧版是「锚 ±1.0×ATR」双侧对称，下沿落在**破线之后**的区域，
+    且必然低于任何「锚 −0.10×ATR」的硬止损 → stop_plan 每次都判「买区与止损锚冲突」
+    并把买区下沿抬到硬止损之上；当硬止损锚（MA5）本身高过现价时，抬完的买区整个
+    飞到现价上方（9/16 收 1519.97，买区却是 1580.16~1604.72，recommend 仍为 True）。
+    下沿收成毛刺余量后，硬止损天然落在买区下沿之下，不再触发那条抬买区的分支。
+    """
     demand = {
         "anchor": "hl_trendline",
         "level": 100.0,
@@ -372,8 +456,8 @@ def test_line_zone_pad_matches_in_zone():
     }
     bars = [_bar("2026-01-01", 100, 104, 99, 103.6)]
     z = zone_from_demand(demand, bars, {})
-    assert z["primary_lo"] == 96.0
-    assert z["primary_hi"] == 104.0
+    assert z["primary_lo"] == 99.8      # 100 − 0.05×4：只留毛刺，不下探 1 个 ATR
+    assert z["primary_hi"] == 104.0     # 100 + 1.0×4：与贴线门槛同源
     assert z["in_zone"] is True
     demand2 = dict(demand, dist_atr=1.2)
     z2 = zone_from_demand(demand2, bars, {})
@@ -545,26 +629,59 @@ def test_reversal_yang_gate_relaxes():
 
     守护「ILMN 型信号被整段丢弃」：c2=False 但已站上 P1 的放量大阳，
     原 uptrend 门控会把整套大阳回踩分支跳过，产出 wait 且买区为空。
+
+    ★ 2026-09-20 更新：T0「均线收复+过昨高」定级高于 T1 后，本样本会被 T0 接管
+    （其距墙仅 0.48% = 贴墙档，实测胜率 50%/均R+0.80）。接管时原路径的
+    gate/relaxed/state 会透传到 `prev_*` 键，故此处接受两种正确结果之一：
+      (a) 原「反转态大阳·已放宽」路径直接给出买区（T0 未命中）
+      (b) T0 接管，且 `prev_gate == "reversal_yang"` 证明原判定仍是事实
     """
     bars = _reversal_bars()
     plan = plan_entry(bars, _reversal_ev())
     z = plan["buy_zone"]
-    assert z.get("gate") == "reversal_yang", (z.get("gate"), plan["verdict"])
-    assert z.get("relaxed") is True, z
-    assert z.get("relaxed_reason"), z
+    if z.get("gate") == "reversal_yang":
+        # (a) 原路径
+        assert z.get("relaxed") is True, z
+        assert z.get("relaxed_reason"), z
+        assert z["primary_lo"] is not None and z["primary_hi"] is not None, z
+        assert z["state"] == "yang_today", z
+        band = z["primary_hi"] - z["primary_lo"]
+        assert abs(band - 1.0 * atr14(bars)) < 0.05, (band, z)
+        assert "【反转态·放量大阳·已放宽】" in plan["note"], plan["note"]
+        return
+    # (b) T0 接管：必须证明原判定未丢失，且 T0 给出可执行买区
+    assert plan["mode"] == "ma_reclaim_break", plan.get("verdict")
+    assert z.get("prev_gate") == "reversal_yang", (z.get("prev_gate"), plan.get("verdict"))
+    assert z.get("prev_relaxed") is True, z
+    assert z.get("prev_state") == "yang_today", z
+    t0 = plan.get("ma_reclaim") or {}
+    assert t0.get("setup_kind") == "ma_reclaim_break", t0
+    assert t0.get("trigger") is not None and t0.get("hard_stop") is not None, t0
+    assert t0["hard_stop"] < t0["trigger"], t0
     assert z["primary_lo"] is not None and z["primary_hi"] is not None, z
-    assert z["state"] == "yang_today", z
-    # 买区宽度仍须是贴防守位 1.0×ATR 的下单带（松绑不得复辟「整条大阳体当买区」）
-    band = z["primary_hi"] - z["primary_lo"]
-    assert abs(band - 1.0 * atr14(bars)) < 0.05, (band, z)
-    assert "【反转态·放量大阳·已放宽】" in plan["note"], plan["note"]
+    assert plan["recommend"] is True, plan
 
 
 def test_reversal_yang_requires_volume():
-    """反转态 + 缩量大阳 → 不放宽（缺放量确认的破位修复不认）。"""
+    """反转态 + 缩量大阳 → 原「反转态放宽」路径不认（缺放量确认的破位修复不认）。
+
+    ★ 2026-09-20 更新：T0「均线收复+过昨高」**不设量能条件**（用户定：
+    「和量没关系，就是最高点就完了，简单」）。故本样本若被 T0 接管即为正确，
+    此时只须校验接管后的可执行性；未被接管则仍走原「等待」分支。
+    两者都不得给出「反转态·已放宽」的 gate。
+    """
     bars = _reversal_bars(yang_vol=7e5)          # 与大阳前均量持平 → 无放量
     plan = plan_entry(bars, _reversal_ev())
-    assert plan["buy_zone"].get("gate") != "reversal_yang", plan["buy_zone"]
+    z = plan["buy_zone"]
+    assert z.get("gate") != "reversal_yang", z
+    if plan["mode"] == "ma_reclaim_break":
+        # T0 接管（与量能无关，符合用户定稿口径）
+        t0 = plan.get("ma_reclaim") or {}
+        assert t0.get("setup_kind") == "ma_reclaim_break", t0
+        assert t0["hard_stop"] < t0["trigger"], t0
+        assert z["primary_lo"] is not None and z["primary_hi"] is not None, z
+        assert plan["recommend"] is True, plan
+        return
     assert plan["verdict"] == "等待", plan["verdict"]
 
 
@@ -1462,6 +1579,8 @@ if __name__ == "__main__":
     test_hard_stop_widens_out_of_noise_band()
     test_tight_stop_flagged_when_no_wider_anchor()
     test_pullback_tight_stop_is_not_noise_flagged()
+    test_pullback_struct_stop_is_the_line_not_lagging_ma5()
+    test_stop_above_price_cancels_recommend()
     test_stop_plan_carries_exec_semantics()
     test_breakout_zone_not_below_level()
     test_too_far_gate()
