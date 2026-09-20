@@ -13,8 +13,6 @@
     {"code": "688596", "name": "正帆科技", "prefix": "sh", "theme": "半导体·工艺设备与电子特气", "pos": null},
     {"code": "300661", "name": "圣邦股份", "prefix": "sz", "theme": "半导体·模拟芯片", "pos": null},
     {"code": "300820", "name": "英杰电气", "prefix": "sz", "theme": "半导体/光伏·工业电源", "pos": null},
-    {"code": "301511", "name": "德福科技", "prefix": "sz", "theme": "AI服务器·高频铜箔(HVLP)", "pos": null},
-    {"code": "603115", "name": "海星股份", "prefix": "sh", "theme": "AI服务器·电极箔(电容上游)", "pos": null},
     {"code": "688035", "name": "德邦科技", "prefix": "sh", "theme": "半导体·封装材料/TIM", "pos": null}
   ],
   "sentiment": [
