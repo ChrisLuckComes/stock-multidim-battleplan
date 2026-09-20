@@ -352,6 +352,30 @@ def room_and_cap(bars, z, mode, atr_v, rr=1.5, last_c=None):
 
     last_c：显式现价（美股盘前价 ≠ 最近收盘，避免用错锚算 room_pct）。
     """
+    # ★ T0（ma_reclaim_break，2026-09-20 修）：买区由 rule123._apply_t0 构造 ——
+    #   level 是**上方**的「过昨高」触发价（不是可当突破位/支撑位的水平位），
+    #   且 T0 是趋势单、不设固定目标位。走下面的通用逻辑会**双错**：
+    #     ① stop_plan 认不出该 mode，把 level 当突破位 → level 高于现价 → 被铁律零
+    #        剔除 → hard=None → 兜底 level−0.10×ATR，得出一个**高于现价**的「止损」。
+    #        301335 实测 hard=25.72 > 现价 25.43 → 预案单打出「风险 −0.08 / 收益 −0.11
+    #        = N/A / 不做」，整张单子是废的。
+    #     ② 用「最近阻力」当目标：该阻力可能低于触发价（301335 t1=25.53 < 触发 25.84），
+    #        盈亏比闸门会把挂价压到目标之下，把 T0 买单变成一张不相干的回踩单。
+    #   T0 的两档止损与锚名已在 _apply_t0 里算好并写进 buy_zone，直接采用；
+    #   不设目标 / 不设上限（趋势单用移动止损管理）。
+    if mode == "ma_reclaim_break":
+        _hs = z.get("hard_stop")
+        if _hs is None:
+            _hs = z.get("hard")
+        if _hs is None:
+            _hs = z.get("struct_stop")
+        return {
+            "target1": None,
+            "room_pct": None,
+            "hard": round(_hs, 2) if _hs is not None else None,
+            "cap": None,
+            "rr": rr,
+        }
     c = last_c if last_c is not None else bars[-1]["c"]
     hard = None
     try:

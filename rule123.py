@@ -1826,6 +1826,36 @@ def stop_plan(bars, mode, z, atr_v):
         name, px, hard, warn, note = _resolve([("阳线下沿", floor)])
         return _finish("大阳低点(收盘破)", floor, name or "阳线下沿", hard, warn, note)
 
+    if mode == "ma_reclaim_break":
+        # T0（2026-09-20 补分支）：z 由 _apply_t0 构造 —— level 是**上方**的「过昨高」
+        # 触发价，不是可当突破位/支撑位的水平位。走下面的通用分支会把 struct 设成
+        # level（高于现价）→ 被铁律零剔除 → hard=None；调用方（probe_intraday.
+        # room_and_cap）再兜底 level−0.10×ATR，就得到一个**高于现价**的「止损」
+        # （301335 实测 25.72 > 现价 25.43，预案单因此打出「风险为负 / 不做」）。
+        # T0 的结构止损与硬止损是同一个价（= 买区下沿 itself），锚名/数值已在
+        # buy_zone 里算好，此处原样透传，不顺带做任何买区上抬。
+        _hs = z.get("hard_stop")
+        if _hs is None:
+            _hs = z.get("hard")
+        if _hs is None:
+            _hs = z.get("struct_stop")
+        if _hs is None:
+            return None
+        _an = z.get("hard_anchor") or z.get("struct_anchor") or "实体中点"
+        return {
+            "struct_anchor": z.get("struct_anchor") or f"{_an}@{round(_hs, 2)}（收盘破）",
+            "struct": round(_hs, 2),
+            "hard_anchor": _an,
+            "hard": round(_hs, 2),
+            "trigger": HARD_STOP_TRIGGER,
+            "struct_exec": STRUCT_EXEC,
+            "hard_exec": HARD_EXEC,
+            "hard_dist_atr": z.get("hard_dist_atr"),
+            "hard_noise": False,
+            "stop_basis": z.get("stop_basis"),
+            "t0": True,
+        }
+
     # 平台 / W底 / 旗形 / 下降趋势线突破
     struct = round(level, 2)
     struct_name = f"{ANCHOR_LABEL.get(z.get('anchor'), z.get('anchor') or '突破位')}@{struct}(收盘破)"
@@ -2091,6 +2121,60 @@ def pre_breakout_line_order(bars, ev, atr_v, last_c, rvol=None):
     }
 
 
+def find_ma_reclaim_bar(bars):
+    """★ 2026-09-20 新增：定位「**最近的突破均线的日K**」。
+
+    ── 用户原话（德邦科技 688035 案例）──────────────────────────────
+      「78.23 好像也没有比昨天收盘价低多少啊，而且 **9-18 这么小的 K 线实体，
+        为啥要取它的中点，当然是取 9-16 的中点**，这是代码的问题，
+        应该找**最近的突破均线的日K**。」
+      「能买的低成本当然比追着买要强。」
+
+    ── 旧实现为什么错（无条件下 `bars[-1]` 取 K 线锚）──────────────
+    突破日之后若又跟了 1~2 根**小实体**，最后一根的中点就贴在收盘价上：
+
+      | 德邦 688035 | 实体 | 实体/ATR | 中点 | 距收盘 |
+      |---|---|---|---|---|
+      | 09-16 真突破日 | 6.68 | **1.39×** | **74.32** | −5.3% |
+      | 09-18 最后一根 | 0.52 | **0.11×** | 78.23 | **−0.33%** |
+
+    ⇒ 用 78.23 当止损：距收盘仅 0.33%（0.05×ATR），一次正常波动就扫 = **等于没有止损**；
+      用它当回踩买点：比收盘只便宜 0.33%，**根本不是「低成本」**，与用户
+      「能买低成本就不追着买」的原则相悖。
+    ⇒ 真正的结构锚在**把股价拉上全部均线的那根**（德邦 09-16，实体 1.39×ATR）。
+
+    ── 定义 ──────────────────────────────────────────────────────
+    从最后一根往回找，**当前这段「收盘 > MA5 且 > MA10 且 > MA20」连续段的启动根**，
+    即最近一次「由下向上收复全部均线」的那根 K。要求该根 > 0（否则说明历史起点
+    就在均线上方，定位不到突破日，此时退回旧口径 `bars[-1]`）。
+
+    ⚠️ 与八案例的兼容性：赛分/纳微/成都/科泰/浩瀚/东富龙/康龙 的**信号日当天就是突破日**
+    （`back == 0`），本函数返回最后一根 → 输出数值与旧实现**逐字相同**，回归不受影响。
+    """
+    n = len(bars)
+    if n < 21:
+        return None
+    closes = [b["c"] for b in bars]
+
+    def _above(i):
+        if i < 20:
+            return False
+        c = closes[i]
+        for w in (5, 10, 20):
+            if c <= sum(closes[i - w + 1:i + 1]) / w:
+                return False
+        return True
+
+    if not _above(n - 1):
+        return None
+    j = n - 1
+    while j - 1 >= 0 and _above(j - 1):
+        j -= 1
+    if j <= 0:
+        return None          # 定位不到突破日（历史全程在均线上方）
+    return j
+
+
 def ma_reclaim_break(bars, ev, atr_v, last_c, res_win=25):
     """★ T0 买法：均线收复后「过昨高」买（2026-09-20 用户定稿，优先级高于 T1 买突破）。
 
@@ -2214,8 +2298,17 @@ def ma_reclaim_break(bars, ev, atr_v, last_c, res_win=25):
                       不是把「昨高」定义成收盘价 —— 两个 close 是不同的东西，别混。
 
     止损锚 ★ 2026-09-20 口径扩展（用户定：「取全部锚中离触发价最近」）：
-      候选 = { MA5, MA10, MA20, D0 实体中点 (o+c)/2, D0.low }
+      候选 = { MA5, MA10, MA20, **突破日均K** 实体中点 (o+c)/2, 突破日低点 }
       取 **低于触发价且离触发价最近** 的一条。
+      ★★ 2026-09-20 二次修正（德邦科技 688035 案例，用户定）：
+        K 线锚的**取K对象**从「最后一根 bars[-1]」改为「**最近的突破均线的日K**」
+        （= 当前「收盘站上全部均线」连续段的启动根，见 `find_ma_reclaim_bar`）。
+        理由：德邦 9-16 是真突破日（实体 1.39×ATR），9-17/9-18 只是跟涨，
+        9-18 实体仅 0.11×ATR → 它的中点 78.23 距收盘只 0.33%，**既不是止损也不是低成本买点**。
+        用户原话：「9-18 这么小的 K 线实体，为啥要取它的中点，当然是取 9-16 的中点，
+        应该找最近的突破均线的日K。」「能买的低成本当然比追着买要强。」
+        ⚠ 八案例（赛分/纳微/成都/科泰/浩瀚/东富龙/康龙）信号日**当天即突破日**，
+           `back == 0` → 输出与旧口径逐字相同，不受影响。
       ── 为什么加入 K 线锚 ──
       成都先导 09-16 是一根 +14.05% 的大阳，把 MA5/MA10 远远甩在下方：
         MA20 33.26（风险 10.57%）< MA5 32.60（12.34%）< MA10 32.33（13.07%）
@@ -2367,11 +2460,23 @@ def ma_reclaim_break(bars, ev, atr_v, last_c, res_win=25):
     #   旧注释称「MA5 长期贴价必落噪声带内」，但**在大阳日恰好相反**：MA5 被拉高后
     #   反而离得远。统一用「离触发价最近」单一规则处理，不再对 MA5 先验排除；
     #   噪声带风险由上层 `NOISE_ROOM_ATR` 检查兜底。
+    # ★★ K 线锚取「**最近的突破均线的日K**」（2026-09-20 用户定，德邦科技 688035 案例）
+    #   原实现无条件用 `bars[-1]`，当突破日之后又走 1~2 根**小实体**时，
+    #   最后一根的中点会贴在收盘价上（德邦 9-18 实体仅 0.11×ATR → 中点 78.23
+    #   vs 收 78.49，只差 0.33%）—— 既不是有意义的止损，也不是「低成本」买点。
+    #   改为锚定「把股价拉上全部均线的那根」（德邦 9-16，实体 1.39×ATR）。
+    #   `back == 0`（最后一根即突破日）时行为与旧实现**逐字相同**，八案例不受影响。
+    _kb_i = find_ma_reclaim_bar(bars)
+    kb = bars[_kb_i] if _kb_i is not None else d0
+    kb_back = (len(bars) - 1 - _kb_i) if _kb_i is not None else 0
     st = None
     st_name = None
-    _mid = (d0["o"] + d0["c"]) / 2.0
+    _mid = (kb["o"] + kb["c"]) / 2.0
+    _mid_nm = "实体中点" if kb_back == 0 else "突破日实体中点"
+    _low_nm = "大阳低点" if kb_back == 0 else "突破日低点"
+    _body_atr_kb = abs(kb["c"] - kb["o"]) / atr_v if atr_v else None
     for _nm, v in (("MA5", ma5), ("MA10", ma10), ("MA20", ma20),
-                   ("实体中点", _mid), ("大阳低点", d0["l"])):
+                   (_mid_nm, _mid), (_low_nm, kb["l"])):
         if v is None or v >= trigger:
             continue
         if st is None or v > st:
@@ -2415,6 +2520,14 @@ def ma_reclaim_break(bars, ev, atr_v, last_c, res_win=25):
         "risk_pct": round(risk_pct_v, 2),
         "risk_atr": round((trigger - hard) / atr_v, 2) if atr_v else None,
         "stop_anchor": st_name,
+        # ★ K 线锚溯源（2026-09-20 新增）：K 线锚取自哪一根、距今几根、那根的实体有多大。
+        #   消费方（报表/probe/复盘）据此判断「这个止损是不是贴在小实体上」。
+        "kanchor_date": kb["d"],
+        "kanchor_back": kb_back,
+        "kanchor_mid": round(_mid, 2),
+        "kanchor_low": round(kb["l"], 2),
+        "kanchor_body_atr": round(_body_atr_kb, 2) if _body_atr_kb is not None else None,
+        "last_bar_body_atr": round(abs(d0["c"] - d0["o"]) / atr_v, 2) if atr_v else None,
         "risk_over_limit": risk_over,
         "resistance": round(resistance, 2),
         "resistance_from": res_from,
@@ -2482,6 +2595,12 @@ def ma_reclaim_break(bars, ev, atr_v, last_c, res_win=25):
                "睡前处理完或次日补判）。")
             + f"止损锚 {st_name} {hard}"
             f"（风险 {risk_pct_v:.2f}%）。"
+            + (f" ★ K线锚取自**突破均线那天 {kb['d']}**"
+               f"（实体中点 {round(_mid, 2)} / 低点 {round(kb['l'], 2)}，"
+               f"实体 {_body_atr_kb:.2f}×ATR），不是最后一根 —— 突破日之后第 {kb_back} 根"
+               f"的实体只有 {abs(d0['c'] - d0['o']) / atr_v:.2f}×ATR，"
+               f"其中点贴在收盘价上、不构成结构位。"
+               if kb_back > 0 else "")
             + (f" ⚠ 风险 {risk_pct_v:.2f}%>8%，小账户难做仓位管理，"
                f"建议降为半仓或改做更贴墙的标的" if risk_over else "")
         ),
@@ -2774,7 +2893,9 @@ def plan_entry(bars, ev):
             "hard": t0["hard_stop"],
             # ★ 2026-09-20 口径同步（同上）：不再是「MA10/MA20 排除 MA5」。
             "stop_basis": (
-                "{MA5, MA10, MA20, D0 实体中点, D0.low} 中「< 触发价且离触发价最近」的一条"
+                "{MA5, MA10, MA20, 突破日均K 实体中点, 突破日低点} 中"
+                "「< 触发价且离触发价最近」的一条"
+                "（K 线锚取「最近的突破均线的日K」，非最后一根）"
             ),
             "struct_exec": STRUCT_EXEC,
         }
@@ -3104,7 +3225,9 @@ def _t0_takeover(result, t0):
         #   「{MA5, MA10, MA20, 实体中点, D0.low} 中 < 触发价且最近者」。
         #   此处原为旧口径文本，会让渲染层与 t0["stop_anchor"] 自相矛盾（正帆/成都实测踩到）。
         "stop_basis": (
-            "{MA5, MA10, MA20, D0 实体中点, D0.low} 中「< 触发价且离触发价最近」的一条"
+            "{MA5, MA10, MA20, 突破日均K 实体中点, 突破日低点} 中"
+            "「< 触发价且离触发价最近」的一条"
+            "（K 线锚取「最近的突破均线的日K」，非最后一根）"
         ),
         "struct_exec": STRUCT_EXEC,
     }
