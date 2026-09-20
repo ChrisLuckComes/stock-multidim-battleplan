@@ -690,11 +690,29 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
         n = ash_lots(account, limit, hard, code)
         kind = "突破跟单"
         print(f"  类型    : {kind}     模式 {plan['mode']}")
-        print(f"  挂单    : 限价买 {limit:.2f}（买区 {lo}-{hi} 上沿）"
-              f"{'  ⚠ 已被盈亏比闸门下压' if capped else ''}")
-        _ph = prehang_verdict(c0, hard if isinstance(hard, (int, float)) else lo, hi)
+        _is_t0 = plan["mode"] == "ma_reclaim_break"
+        if _is_t0:
+            print(f"  挂单    : 触发买 {hi:.2f}（过昨高 · 现价"
+                  f"{'上方' if hi > c0 else '下方'} {abs(hi / c0 - 1) * 100:.1f}%）")
+        else:
+            print(f"  挂单    : 限价买 {limit:.2f}（买区 {lo}-{hi} 上沿）"
+                  f"{'  ⚠ 已被盈亏比闸门下压' if capped else ''}")
+        if _is_t0:
+            # T0 是「突破单」：真买点是「过昨高」（= 买区上沿），在现价**上方**；
+            # 买区下沿只是止损位，不是可低吸的价位。若照买区口径判定（传 hi），
+            # 会得出「✓ 可预挂 可在 24.41~25.43 挂限价」——那是**另一种买法**
+            # （未经突破确认的提前埋伏）。2026-09-20 用天元宠物抓出此误判。
+            _ph = prehang_verdict(c0, hi, None)
+        else:
+            _ph = prehang_verdict(c0, hard if isinstance(hard, (int, float)) else lo, hi)
         if _ph:
             print(f"  可预挂  : {_ph}")
+        if _is_t0:
+            _mb = prehang_verdict(c0, hard if isinstance(hard, (int, float)) else lo, hi)
+            if _mb and _mb.startswith("✓"):
+                print(f"  可选埋伏: {_mb}")
+                print("            ↑ 这是「未经突破确认」的提前进场，与 T0 的「过昨高」"
+                      "是两种买法；选了它须自担假突破风险，止损仍按下方硬止损执行")
         if isinstance(hard, (int, float)):
             print(f"  有效买入区间: {hard} < 买入价 ≤ {limit:.2f} —— "
                   f"低于硬止损 {hard} 买入 = 开仓即止损，再便宜也不要")
