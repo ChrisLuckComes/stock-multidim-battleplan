@@ -8,7 +8,7 @@ disable-model-invocation: true
 
 > **何时用**：用户要求对某只股票做多维度分析、作战计划、买卖点、止损止盈。
 >
-> **取数**：WorkBuddy 已连接通达信时优先使用 `tdx_lookup` / `tdx_quotes` / `tdx_kline`；不可用时依次降级到 `wb-finance-skill`、`fetch_market.py`。结构判定只用 `rule123.py`。通达信取数结果先用 `snapshot_from_tdx.py` 落成统一快照，再喂 `rule123.py --data` / `probe_intraday.py --data`（禁止手工拼 `bars`）。
+> **取数**：WorkBuddy 已连接通达信时优先使用 `tdx_lookup` / `tdx_quotes` / `tdx_kline`；不可用时依次降级到 `wb-finance-skill`、`fetch_market.py`。结构判定只用 `rule123.py`。通达信取数结果先用 `snapshot_from_tdx.py` 落成统一快照（**当日多只票一次取完**时用 `--batch <一段含多个返回的文本|目录>`，默认落到 `data/tdx/`），再喂 `rule123.py --data` / `probe_intraday.py --data`（禁止手工拼 `bars`）。所有日线取数（`scanner` / `watch_cn` / `pool_us`）已统一走 `bars_source.py` 三级链路 **本地快照 → 磁盘缓存 → 网络**，所以 `watch_cn.py --snap-dir data/tdx` / `pool_us.py --snap-dir data/tdx` 可**全离线**出复盘；报告首部会把「快照/缓存/网络各多少只」打出来。缓存状态与清理：`python bars_source.py --stat|--clear`。
 
 ## 执行原则
 

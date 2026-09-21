@@ -12,6 +12,9 @@ python fetch_ashare.py 688222 --out data/688222.json --n 300   # 东财被阻断
 python fetch_market.py CF --out data/cf.json
 python rule123.py CF --data data/cf.json
 python snapshot_from_tdx.py raw_tdx.json --out data/301015.json   # 通达信 tdx_kline 返回 → 统一快照（rule123/probe 都吃它）
+python snapshot_from_tdx.py --batch raw_multi.json                 # 批量：一段含多个 tdx 返回的文本 → data/tdx/<code>.json
+python bars_source.py --stat                                      # 看数据缓存命中 / 市场时钟 / 清理：--clear
+python watch_cn.py --snap-dir data/tdx                            # 复盘全离线：只吃 Agent 落的快照
 python rule123.py 300207 --data data/300207.json --eod --out out.json
 python probe_intraday.py 002961 --qty 1500                    # 收盘后：次日预案单 + 次级观察位
 python probe_intraday.py 002961 --asof 2026-09-16 --replay --until 10:25   # 盘中/回放：量能突变三档
@@ -105,5 +108,14 @@ ATR：Wilder ATR14。
 5. **独立请求并行**：主标的与同行轻筛的独立取数并行执行，耗时以最慢一次请求为准，不得逐票串行累计；同行升级为完整分析时仍沿用同一份快照。
 6. **停止无效重试**：同一数据源完整失败后进入下一降级源，不得由 Agent 重跑同一命令；代码内部已负责有限重试。解析任务使用 Python 与仓库路径，不因 shell 兼容问题重复执行。
 7. **主标的研究与分钟线并行**：日线快照一旦落盘，财报/SEC/公告/内部人/催化/风险检索与 `probe_intraday.py --data` 必须同时启动，不得等 probe 结束再搜。检索一次并行发出，优先复用财报原文和监管文件；只有关键字段缺失时再补查。默认不对同行检索财报、SEC 或内部人。
+8. **取数统一走 `bars_source.py` 三级链路（2026-09-21）**：`scanner.sina_kline` / `watch_cn.get_bars` / `pool_us.fetch_us` 现在都是 **本地快照 → 磁盘缓存 → 网络**，不再各自联网：
+   - 快照目录：`data/tdx/`（`snapshot_from_tdx.py --batch` 默认输出）+ `data/`（`fetch_market.py --out data/x.json` 的习惯位置）；文件按 `<code>.json` 命名，带 `sh/sz/bj` 前缀也能被裸代码命中。
+   - 缓存目录：`data/cache/cn_<code>.json` / `us_<code>.json`。`python bars_source.py --stat` 看每个文件命中与否，`--clear [--market ASH|US]` 清理。
+   - **失效判据就两条，两个坑都在这里**：① 末根日期 ≥ **最近已完成交易日**（写成「== 今天」会让周末/节假日永久不命中 —— 周六拿到的完整日线末根是周五）；② 存盘时刻在该日**定稿之后**（A 股 15:05 / 美股北京次日 05:00），否则盘中半日 bar 会被当完成日线缓存、污染当日复盘。盘中另加 120s 短 TTL。
+   - 收盘复盘时还会**拒用盘中截的 tdx 快照**（`as_of` 早于当日收盘 → 末根疑为半日 bar）；盘中调阅则不拦。
+   - 实测 `watch_cn.py`（9 票 + 2 温度计 + 3 指数，14 只）：冷启动 2.5s → 热启动 0.95s。CLI 可 `--no-cache` / `--no-snap` 强制走网络（怀疑数据旧了时用）。
+9. **批量复盘离线化**：`snapshot_from_tdx.py --batch <文本|目录>` 一次把多个 `tdx_kline` 返回落成 `data/tdx/<code>.json`（同一段文本里的多个 JSON 都会处理，非 K 线对象自动跳过），随后 `watch_cn.py --snap-dir data/tdx` / `pool_us.py --snap-dir data/tdx`（不传也在默认查找目录内）**全程不联网**。报告首部会打「取数：快照 N · 缓存 M · 网络 K」与「快照时点：<代码> 取数时刻 …」，据此判断数据新旧。
+   - 边界：`data/` 里旧课残留的快照（如 09-17 盘中取的）会在收盘复盘时被自动拒用，不会静默当成当日数据；`data/cache` 与 `data/tdx` 都是可再生文件，怀疑数据不对时直接 `bars_source.py --clear` + 删 `data/tdx`。
+   - **刻意不做**：`probe_intraday.kline()` 保持自己联网（它取分钟线，盘中每根都在变，「收盘定稿」判据不成立；复用口就是它已有的 `--data` 日线快照）。
 
 ---

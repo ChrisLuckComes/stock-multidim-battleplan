@@ -34,6 +34,7 @@ import os
 import sys
 import threading
 import unicodedata
+from collections import Counter
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -41,6 +42,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 import fetch_market as F  # noqa: E402
+from bars_source import us_quote as _bs_us_quote  # noqa: E402
 from rule123 import build_ev, plan_entry, atr14  # noqa: E402
 
 CFG = os.path.join(HERE, "pool_us.json")
@@ -48,6 +50,14 @@ REPORTS = os.path.join(HERE, "reports")
 MAX_WORKERS = 4
 _QUOTE_CACHE = {}
 _QUOTE_LOCK = threading.Lock()
+
+# 取数策略（2026-09-21）：默认「本地快照 → 磁盘缓存 → Nasdaq/Yahoo/stooq」三级，见 bars_source.py。
+# ★ 美股特有的安全闸：**盘中/盘前的实时价绝不入缓存** —— 缓存只存已定稿的日线，
+#   命中缓存时 spot=None + session="Cache"，下游不会把昨天的价当今天的实时价。
+SNAP_DIRS = None            # None = 用 bars_source 默认目录（data/tdx、data/）
+USE_SNAP = True
+USE_CACHE = True
+_SRC_CNT = Counter()
 
 # 财报跳空经验幅度：INTC 历史次日 −7.89%/+23.60%/−17.03%，均值 ~12%。
 # 用途只有一个 —— 反推「跨财报时最多能拿几股」。
@@ -86,13 +96,24 @@ def load_cfg():
 
 
 def fetch_us(sym):
+    """三级取数：本地快照（含 Agent 用通达信落的盘）→ 磁盘缓存 → 网络。
+
+    进程内再叠一层 `_QUOTE_CACHE`，因为池子与温度计/指数可能撞同一标的。
+    """
     key = sym.upper()
     with _QUOTE_LOCK:
         quote = _QUOTE_CACHE.get(key)
     if quote is None:
-        quote = F.fetch_us(key)
+        quote, _notes = _bs_us_quote(key, fetch=F.fetch_us, snap_dirs=SNAP_DIRS,
+                                     use_snap=USE_SNAP, use_cache=USE_CACHE)
         with _QUOTE_LOCK:
             _QUOTE_CACHE[key] = quote
+            tag = ("快照" if quote.get("src") == "snapshot" else
+                   ("缓存" if quote.get("src") == "cache" else "网络"))
+            _SRC_CNT[tag] += 1
+            if tag == "快照" and _notes:
+                # 报告要能说清「这份数据是哪一刻取的」，否则分不清是新是旧
+                _SNAP_INFO[key] = _notes[0]
     return quote
 
 
@@ -315,7 +336,7 @@ def rpad(s, width):
 
 
 # ─────────────────────────── 渲染 ───────────────────────────
-def render(cfg, rows, watch_rows, senti, idx, manual):
+def render(cfg, rows, watch_rows, senti, idx, manual, src_stat=None, snap_info=None):
     L = []
     today = next((r["date"] for r in rows if r.get("date")), "?")
     holds = [r for r in rows if r.get("pos") and not r.get("err")]
@@ -326,6 +347,12 @@ def render(cfg, rows, watch_rows, senti, idx, manual):
              f"观察位 {len(watch_rows)} 只 · 持仓 {len(holds)} 只")
     L.append(f"账户 ${acct:,.2f}   单笔风险预算 {rp}% = ${acct * rp / 100:,.2f}"
              f"   跨财报预算 {GAP_BUDGET_PCT}% = ${acct * GAP_BUDGET_PCT / 100:,.2f}")
+    if src_stat:
+        L.append("取数：" + " · ".join(f"{k} {v} 只" for k, v in src_stat.items())
+                 + "（缓存命中时用已定稿日线，不带实时价）")
+    if snap_info:
+        L.append("快照时点：" + "；".join(f"{k} {v}" for k, v in list(snap_info.items())[:6])
+                 + ("…" if len(snap_info) > 6 else ""))
     L.append("=" * 96)
 
     warns = [r["live_warn"] for r in rows if r.get("live_warn")]
@@ -553,11 +580,21 @@ def render(cfg, rows, watch_rows, senti, idx, manual):
 
 # ─────────────────────────── 主流程 ───────────────────────────
 def main():
+    global SNAP_DIRS, USE_SNAP, USE_CACHE
     ap = argparse.ArgumentParser(description="美股股池收盘复盘")
     ap.add_argument("codes", nargs="*", help="临时指定代码（覆盖池子）")
     ap.add_argument("--save", action="store_true", help="存档到 reports/")
     ap.add_argument("--json", action="store_true", help="输出 JSON")
+    ap.add_argument("--snap-dir", action="append", default=None,
+                    help="本地快照目录（可多次；默认 data/tdx、data/）")
+    ap.add_argument("--no-snap", action="store_true", help="忽略本地快照")
+    ap.add_argument("--no-cache", action="store_true", help="禁用磁盘缓存")
     a = ap.parse_args()
+
+    if a.snap_dir:
+        SNAP_DIRS = [d if os.path.isabs(d) else os.path.join(HERE, d) for d in a.snap_dir]
+    USE_SNAP = not a.no_snap
+    USE_CACHE = not a.no_cache
 
     cfg = load_cfg()
     pool = cfg["pool"]
@@ -634,7 +671,9 @@ def main():
 
     day = (next((r["date"] for r in rows + watch_rows if r.get("date")), None)
            or datetime.date.today().isoformat())
-    txt = render(cfg, rows, watch_rows, senti, idx, cfg.get("manual", []))
+    stat = {k: _SRC_CNT[k] for k in ("快照", "缓存", "网络") if _SRC_CNT.get(k)}
+    txt = render(cfg, rows, watch_rows, senti, idx, cfg.get("manual", []),
+                 src_stat=stat, snap_info=dict(_SNAP_INFO))
     print(txt)
 
     if a.save:

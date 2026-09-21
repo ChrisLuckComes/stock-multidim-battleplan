@@ -11,12 +11,15 @@
   - 买区/止损/模式全部走 rule123.build_ev + plan_entry，与扫描器同一套引擎，不另立口径。
   - **情绪温度计（中际旭创/中国银行）单独一节，只读，不产生买卖信号**（用户 2026-09-19 定）。
   - 复盘的三个问题：①我持仓的今天破止损了吗？②我空仓的今天进买区了吗？③情绪朝哪边？
+  - 取数走 `bars_source` 三级链路：**本地快照（通达信落的盘）→ 磁盘缓存 → 网络**。
 
 用法：
   python watch_cn.py                 # 复盘（文本）
   python watch_cn.py --save          # 复盘 + 存档到 reports/cn_YYYY-MM-DD.md
   python watch_cn.py --json          # 只输出 JSON
   python watch_cn.py 688758 300759   # 临时指定代码
+  python watch_cn.py --no-cache      # 绕过缓存/快照，强制全部联网（怀疑数据旧了时用）
+  python watch_cn.py --snap-dir data/tdx   # 指定快照目录（默认 data/tdx + data/）
 """
 import argparse
 import concurrent.futures as cf
@@ -25,16 +28,14 @@ import json
 import os
 import sys
 import threading
+from collections import Counter
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
-SCAN = os.path.join(HERE, "scan_all")
-if SCAN not in sys.path:
-    sys.path.insert(0, SCAN)
 
-import scanner  # noqa: E402
+from bars_source import ash_bars  # noqa: E402
 from rule123 import build_ev, plan_entry, atr14  # noqa: E402
 
 CFG = os.path.join(HERE, "watch_cn.json")
@@ -42,6 +43,15 @@ REPORTS = os.path.join(HERE, "reports")
 MAX_WORKERS = 6
 _BARS_CACHE = {}
 _BARS_LOCK = threading.Lock()
+
+# 取数策略（2026-09-21）：默认「本地快照 → 磁盘缓存 → 网络」三级，见 bars_source.py。
+# 为什么默认开：Agent 已经用通达信把主标的的快照落过盘，复盘没理由再去新浪抓一遍；
+# 同日重跑更是连网络都不用碰。CLI 可用 --snap-dir / --no-snap / --no-cache 覆盖。
+SNAP_DIRS = None            # None = 用 bars_source 默认目录（data/tdx、data/）
+USE_SNAP = True
+USE_CACHE = True
+_SRC_CNT = Counter()        # 本次运行「快照/缓存/网络」各命中多少只
+_SNAP_INFO = {}             # code → 快照取数时刻说明（用快照时才填）
 
 
 # ─────────────────── 板块归并（板块共振分组用） ───────────────────
@@ -79,9 +89,16 @@ def get_bars(prefix, code, n=140):
         cached = _BARS_CACHE.get(key)
     if cached is not None and cached[0] >= n:
         return cached[1]
-    bars = scanner.sina_kline(prefix, code, n=n)
+    bars, src, _notes = ash_bars(prefix, code, n=n, snap_dirs=SNAP_DIRS,
+                                 use_snap=USE_SNAP, use_cache=USE_CACHE)
     if bars:
         with _BARS_LOCK:
+            tag = ("快照" if src.startswith("snapshot") else
+                   ("缓存" if src == "cache" else "网络"))
+            _SRC_CNT[tag] += 1
+            if tag == "快照" and _notes:
+                # 记下「这份快照是哪一刻取的」—— 报告里要看得见，否则没法判断价格新旧
+                _SNAP_INFO[code] = _notes[0]
             current = _BARS_CACHE.get(key)
             if current is None or current[0] < n:
                 _BARS_CACHE[key] = (n, bars)
@@ -234,7 +251,7 @@ def fmt(v, nd=2):
     return "n/a" if v is None else f"{v:.{nd}f}"
 
 
-def render(cfg, rows, senti, idx):
+def render(cfg, rows, senti, idx, src_stat=None, snap_info=None):
     L = []
     today = next((r["date"] for r in rows if r.get("date")), "?")
     holds = [r for r in rows if r.get("pos") and not r.get("err")]
@@ -244,6 +261,12 @@ def render(cfg, rows, senti, idx):
     if holds:
         used = sum(r["pos"]["qty"] * r["pos"]["cost"] for r in holds)
         L.append(f"账户 ¥{acct:,}（持仓占用 ¥{used:,.0f} = {used / acct * 100:.1f}%）")
+    if src_stat:
+        L.append("取数：" + " · ".join(f"{k} {v} 只" for k, v in src_stat.items())
+                 + "（快照/缓存命中越多越快，全部网络=当日首次跑）")
+    if snap_info:
+        L.append("快照时点：" + "；".join(f"{k} {v}" for k, v in list(snap_info.items())[:6])
+                 + ("…" if len(snap_info) > 6 else ""))
     L.append("=" * 92)
 
     # 一、市场温度
@@ -403,11 +426,21 @@ def render(cfg, rows, senti, idx):
 
 # ─────────────────────────── 主流程 ───────────────────────────
 def main():
+    global SNAP_DIRS, USE_SNAP, USE_CACHE
     ap = argparse.ArgumentParser(description="A股股池每日复盘")
     ap.add_argument("codes", nargs="*", help="临时指定代码（覆盖池子）")
     ap.add_argument("--save", action="store_true", help="存档到 reports/")
     ap.add_argument("--json", action="store_true", help="输出 JSON")
+    ap.add_argument("--snap-dir", action="append", default=None,
+                    help="本地快照目录（可多次；默认 data/tdx、data/）")
+    ap.add_argument("--no-snap", action="store_true", help="忽略本地快照，强制走缓存/网络")
+    ap.add_argument("--no-cache", action="store_true", help="禁用磁盘缓存")
     a = ap.parse_args()
+
+    if a.snap_dir:
+        SNAP_DIRS = [d if os.path.isabs(d) else os.path.join(HERE, d) for d in a.snap_dir]
+    USE_SNAP = not a.no_snap
+    USE_CACHE = not a.no_cache
 
     cfg = load_cfg()
     pool = cfg["pool"]
@@ -473,7 +506,8 @@ def main():
 
     day = (next((r["date"] for r in rows if r.get("date")), None)
            or datetime.date.today().isoformat())
-    txt = render(cfg, rows, senti, idx)
+    stat = {k: _SRC_CNT[k] for k in ("快照", "缓存", "网络") if _SRC_CNT.get(k)}
+    txt = render(cfg, rows, senti, idx, src_stat=stat, snap_info=dict(_SNAP_INFO))
     print(txt)
 
     if a.save:

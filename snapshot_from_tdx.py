@@ -10,6 +10,15 @@
     python rule123.py 301015 --data data/301015.json
     python probe_intraday.py 301015 --data data/301015.json
 
+批量（2026-09-21，为「批量复盘不再重复联网」新增）：
+    # 把一整段含多个 tdx_kline 返回的文本（或一个目录下的多个 raw json）一次性落盘
+    python snapshot_from_tdx.py --batch raw_multi.json          # 默认写到 data/tdx/
+    python snapshot_from_tdx.py --batch raw_dir/ --out-dir data/tdx
+    # 落完之后，watch_cn / pool_us 直接吃这些快照：
+    python watch_cn.py --snap-dir data/tdx
+    python pool_us.py --snap-dir data/tdx
+    # 落盘位置就是 bars_source 的默认快照目录之一，所以不传 --snap-dir 也会命中
+
 为什么需要它：tdx 的字段是 Data/Open/High/Low/Close/Volume，日期形如 20260921，
 直接喂给 rule123 会取不到 bars；手工拼容易错字段名、错日期格式、错量纲。
 本脚本把映射固定下来并做一致性校验，避免「静默算错」。
@@ -56,6 +65,47 @@ def extract_json(text):
     raise RuntimeError("JSON 对象未闭合（是不是被截断了？）")
 
 
+def extract_all_json(text):
+    """从任意文本里取出**全部**完整的 JSON 对象（用于一段文本含多个 tdx 返回）。"""
+    out = []
+    i = 0
+    while True:
+        start = text.find("{", i)
+        if start < 0:
+            break
+        depth = 0
+        in_str = False
+        esc = False
+        end = None
+        for j in range(start, len(text)):
+            ch = text[j]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = j
+                    break
+        if end is None:
+            break
+        try:
+            out.append(json.loads(text[start:end + 1]))
+        except Exception:
+            pass
+        i = end + 1
+    return out
+
+
 def to_iso(d):
     """20260921 / 2026-09-21 / 2026/09/21 → 2026-09-21"""
     s = str(d).strip()
@@ -91,7 +141,12 @@ def setcode_of(code):
     return None
 
 
-def build_snapshot(raw, code=None, min_bars_warn=60):
+def market_of(code, attach=None):
+    """代码 → 市场。6 位纯数字 = A 股；其余（字母代码）= 美股。"""
+    return "CN" if setcode_of(code) else "US"
+
+
+def build_snapshot(raw, code=None, min_bars_warn=60, market=None):
     """tdx_kline 原始返回 → 统一快照 dict。"""
     rows = raw.get("Rows") or raw.get("rows") or []
     if not rows:
@@ -134,7 +189,7 @@ def build_snapshot(raw, code=None, min_bars_warn=60):
     snap = {
         "ticker": code,
         "code": code,
-        "market": "CN",
+        "market": market or market_of(code, attach),
         "name": attach.get("Name") or code,
         "source": "tdx_mcp",
         "period": "day",
@@ -161,18 +216,93 @@ def build_snapshot(raw, code=None, min_bars_warn=60):
     return snap, warn
 
 
+DEFAULT_OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "tdx")
+
+
+def write_snapshot(snap, out_path):
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(snap, f, ensure_ascii=False)
+    return out_path
+
+
+def batch(path, out_dir, market=None):
+    """把「一段含多个 tdx_kline 返回的文本」或「一个目录下的多个 raw json」一次性落盘。
+
+    落盘目录就是 bars_source 的默认快照目录之一 → watch_cn / pool_us 无需额外参数即命中。
+    """
+    files = []
+    if os.path.isdir(path):
+        files = [os.path.join(path, f) for f in sorted(os.listdir(path))
+                 if f.lower().endswith(".json")]
+        if not files:
+            print(f"目录里没有 .json：{path}", file=sys.stderr)
+            return 1
+    else:
+        files = [path]
+
+    ok, bad, no_code = 0, [], []
+    for fp in files:
+        try:
+            text = open(fp, encoding="utf-8", errors="replace").read()
+        except OSError as e:
+            bad.append((fp, f"读不到（{e.__class__.__name__}）"))
+            continue
+        objs = [o for o in extract_all_json(text)
+                if isinstance(o, dict) and (o.get("Rows") or o.get("rows"))]
+        if not objs:
+            bad.append((fp, "没找到含 Rows 的 JSON（是不是 tdx_kline 的返回？）"))
+            continue
+        for k, raw in enumerate(objs):
+            try:
+                snap, warn = build_snapshot(raw, market=market)
+            except Exception as e:
+                bad.append((f"{os.path.basename(fp)}#{k}", f"{e.__class__.__name__}: {e}"))
+                continue
+            code = snap["ticker"]
+            if not code:
+                no_code.append(os.path.basename(fp))
+                continue
+            out = write_snapshot(snap, os.path.join(out_dir, f"{code}.json"))
+            last = snap["bars"][-1]
+            flag = ("  ⚠ " + "；".join(warn)) if warn else ""
+            print(f"  ok  {snap['name']:<10} {code:<8}{snap['market']}  "
+                  f"{len(snap['bars'])} 根 → {last['d']} 收 {last['c']}  →  {out}{flag}")
+            ok += 1
+
+    print(f"\n批量完成：{ok} 份快照 → {out_dir}")
+    if no_code:
+        print(f"  ⚠ {len(no_code)} 个对象取不到代码，已跳过（用 --code 或检查返回里的 Code 字段）："
+              f"{'、'.join(no_code[:5])}")
+    for fp, why in bad:
+        print(f"  ✗ {fp}：{why}")
+    if ok:
+        print(f"\n后续可离线跑复盘：\n  python watch_cn.py --snap-dir {out_dir}\n"
+              f"  python pool_us.py --snap-dir {out_dir}")
+    return 0 if ok else 1
+
+
 def main():
     ap = argparse.ArgumentParser(description="tdx_kline 返回 → rule123/probe 统一快照")
-    ap.add_argument("raw", help="tdx_kline 返回的 JSON（或含该 JSON 的整段文本）文件路径")
+    ap.add_argument("raw", nargs="?", help="tdx_kline 返回的 JSON（或含该 JSON 的整段文本）文件路径")
     ap.add_argument("--out", help="输出快照路径，如 data/301015.json（默认打印不写盘）")
     ap.add_argument("--code", help="覆盖代码（raw 里没有 Code 时用）")
+    ap.add_argument("--batch", help="批量：一段含多个 tdx 返回的文本，或一个装 raw json 的目录")
+    ap.add_argument("--out-dir", default=DEFAULT_OUT_DIR,
+                    help=f"批量输出目录（默认 {DEFAULT_OUT_DIR}）")
+    ap.add_argument("--market", help="强制市场（CN/US）；默认按代码自动判定")
     a = ap.parse_args()
+
+    if a.batch:
+        return batch(a.batch, os.path.abspath(a.out_dir), market=a.market)
+    if not a.raw:
+        ap.error("要么给 raw 文件路径，要么用 --batch")
 
     text = open(a.raw, encoding="utf-8", errors="replace").read()
     raw = extract_json(text)
-    snap, warn = build_snapshot(raw, code=a.code)
+    snap, warn = build_snapshot(raw, code=a.code, market=a.market)
 
-    print(f"{snap['name']} {snap['ticker']}  源={snap['source']}  "
+    print(f"{snap['name']} {snap['ticker']}  源={snap['source']}  市场={snap['market']}  "
           f"日线 {len(snap['bars'])} 根  {snap['bars'][0]['d']} → {snap['bars'][-1]['d']}")
     print(f"  最新 {snap['spot']}  昨收 {snap['prev_close']}  "
           f"开 {snap['open']} 高 {snap['high']} 低 {snap['low']}")
@@ -186,10 +316,7 @@ def main():
               f"period=\"4\", wantNum=140)")
 
     if a.out:
-        os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
-        with open(a.out, "w", encoding="utf-8") as f:
-            json.dump(snap, f, ensure_ascii=False)
-        print(f"  → 已写出 {a.out}")
+        print(f"  → 已写出 {write_snapshot(snap, a.out)}")
     return 0
 
 

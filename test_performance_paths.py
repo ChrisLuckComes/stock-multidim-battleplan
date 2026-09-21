@@ -82,32 +82,43 @@ def test_yahoo_proxy_is_remembered():
 
 def test_pool_us_quote_cache():
     calls = []
-    quote = {"bars": [{"c": 1}, {"c": 2}]}
+    quote = {"bars": [{"c": 1}, {"c": 2}], "src": "net"}
     pool_us._QUOTE_CACHE.clear()
+    old_dirs, old_snap, old_cache = pool_us.SNAP_DIRS, pool_us.USE_SNAP, pool_us.USE_CACHE
+    # 关掉快照/磁盘缓存，单独验进程内去重（否则会读到真实 data/ 下的快照）
+    pool_us.SNAP_DIRS, pool_us.USE_SNAP, pool_us.USE_CACHE = [], False, False
 
     def fake_fetch(sym):
         calls.append(sym)
         return quote
 
-    with patch.object(pool_us.F, "fetch_us", fake_fetch):
-        assert pool_us.fetch_us("mu") is quote
-        assert pool_us.fetch_us("MU") is quote
-    assert calls == ["MU"]
+    try:
+        with patch.object(pool_us.F, "fetch_us", fake_fetch):
+            assert pool_us.fetch_us("mu") is quote
+            assert pool_us.fetch_us("MU") is quote
+        assert calls == ["MU"]
+    finally:
+        pool_us.SNAP_DIRS, pool_us.USE_SNAP, pool_us.USE_CACHE = old_dirs, old_snap, old_cache
 
 
 def test_watch_cn_bars_cache():
     calls = []
     bars = [{"c": 1}, {"c": 2}]
     watch_cn._BARS_CACHE.clear()
+    old_dirs, old_snap, old_cache = watch_cn.SNAP_DIRS, watch_cn.USE_SNAP, watch_cn.USE_CACHE
+    watch_cn.SNAP_DIRS, watch_cn.USE_SNAP, watch_cn.USE_CACHE = [], False, False
 
-    def fake_kline(prefix, code, n=140):
+    def fake_ash(prefix, code, n=140, **_kw):
         calls.append((prefix, code, n))
-        return bars
+        return bars, "net", []
 
-    with patch.object(watch_cn.scanner, "sina_kline", fake_kline):
-        assert watch_cn.get_bars("sh", "600000") is bars
-        assert watch_cn.get_bars("sh", "600000") is bars
-    assert calls == [("sh", "600000", 140)]
+    try:
+        with patch.object(watch_cn, "ash_bars", fake_ash):
+            assert watch_cn.get_bars("sh", "600000") is bars
+            assert watch_cn.get_bars("sh", "600000") is bars
+        assert calls == [("sh", "600000", 140)]
+    finally:
+        watch_cn.SNAP_DIRS, watch_cn.USE_SNAP, watch_cn.USE_CACHE = old_dirs, old_snap, old_cache
 
 
 def test_fetch_ash_quote_and_kline_overlap():

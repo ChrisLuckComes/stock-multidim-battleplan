@@ -12,34 +12,33 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 from rule123 import build_ev, plan_entry, atr14, is_live_bar
+import bars_source as BS  # noqa: E402
 
 UA = "Mozilla/5.0"
 REF = "https://finance.sina.com.cn/"
 
 
-def sina_kline(prefix, code, n=140, tries=3):
-    sym = prefix + code
-    url = (f"https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
-           f"CN_MarketData.getKLineData?symbol={sym}&scale=240&ma=5&datalen={n}")
-    last = None
-    for t in range(tries):
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": UA, "Referer": REF})
-            with urllib.request.urlopen(req, timeout=15) as r:
-                arr = json.loads(r.read().decode("utf-8"))
-            if not arr:
-                return None
-            return [{"d": k["day"], "o": float(k["open"]), "c": float(k["close"]),
-                     "h": float(k["high"]), "l": float(k["low"]), "v": float(k["volume"])}
-                    for k in arr]
-        except Exception as e:
-            last = e
-            time.sleep(0.4 * (t + 1))
-    return None
+def sina_kline_full(prefix, code, n=140, tries=3, use_cache=True, use_snap=True):
+    """新浪日 K：实际走 `bars_source` 统一链路（本地快照 → 磁盘缓存 → 网络）。
+
+    返回 (bars, src, notes)。保留它是因为全市场扫描 / watch_cn 都从这里取数 ——
+    现在同日重复扫描（盘中重跑、复盘再跑一遍）直接吃磁盘缓存或 Agent 用通达信
+    落的快照，不再把新浪抓到 456 限流。
+    """
+    return BS.ash_bars(
+        prefix, code, n=n, use_cache=use_cache, use_snap=use_snap,
+        fetch=lambda p, c, nn: BS.sina_raw(p, c, n=nn, tries=tries))
+
+
+def sina_kline(prefix, code, n=140, tries=3, use_cache=True):
+    """老契约：只回 bars，失败返回 None。"""
+    bars, _src, _notes = sina_kline_full(prefix, code, n=n, tries=tries,
+                                         use_cache=use_cache)
+    return bars or None
 
 
 def analyze(code, name, prefix):
-    bars = sina_kline(prefix, code)
+    bars, src, _notes = sina_kline_full(prefix, code)
     if not bars or len(bars) < 60:
         return None
     # 盘中未收盘：不出票，避免半日量污染全市场表
@@ -132,6 +131,8 @@ def analyze(code, name, prefix):
         rvol=round(meta["rvol20"], 2) if meta.get("rvol20") else None,
         dd_from_high=round((spot / hi52 - 1) * 100, 1),
         candidate=candidate, market=prefix,
+        # 数据来源（snapshot:/cache/net）—— 排查「表是不是旧数据」时唯一的口径
+        src=src,
     )
 
 
