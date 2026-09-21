@@ -87,7 +87,12 @@ def _ash_snap_from_daily(code, market_data):
         "l": last["l"] if market_data.get("low") is None else market_data["low"],
         "v": last["v"] if market_data.get("volume") is None else market_data["volume"],
         "amt": market_data.get("turnover") or 0.0,
-        "date": datetime.date.today().isoformat(),
+        # ★ date 必须取「快照末根日线的日期」，不能用 today()：
+        #   in_ash_session(date_str) 的语义 =「date_str 是今天 且 现在在交易时段」，
+        #   硬编码 today 会让休市日 / 隔日复用的旧快照被误判成盘中（live=True），
+        #   报告随之按「未收盘」口径写，结论直接错。
+        "date": (str(last.get("d") or "")[:10]
+                 or datetime.date.today().isoformat()),
         "time": "",
     }
 
@@ -650,6 +655,9 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
             print(f"[{code}] 快照无日线")
             return None
         daily, snap = _ash_snap_from_daily(code, market_data)
+        if not asof and snap["date"] != datetime.date.today().isoformat():
+            print(f"  注：传入快照末根为 {snap['date']}（非今日）→ 按已收盘口径解读；"
+                  f"若要回放该日盘中，请加 --asof {snap['date']} --replay")
     else:
         daily = kline(sym, 240, 140)
         snap = snapshot(sym)

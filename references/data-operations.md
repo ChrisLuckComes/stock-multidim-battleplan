@@ -11,6 +11,7 @@ python fetch_market.py 601233 --out data/601233.json
 python fetch_ashare.py 688222 --out data/688222.json --n 300   # 东财被阻断时的 A 股备用源（新浪，不复权）
 python fetch_market.py CF --out data/cf.json
 python rule123.py CF --data data/cf.json
+python snapshot_from_tdx.py raw_tdx.json --out data/301015.json   # 通达信 tdx_kline 返回 → 统一快照（rule123/probe 都吃它）
 python rule123.py 300207 --data data/300207.json --eod --out out.json
 python probe_intraday.py 002961 --qty 1500                    # 收盘后：次日预案单 + 次级观察位
 python probe_intraday.py 002961 --asof 2026-09-16 --replay --until 10:25   # 盘中/回放：量能突变三档
@@ -97,7 +98,7 @@ ATR：Wilder ATR14。
 
 ## 运行加速（2026-09-21）
 
-1. **通达信连接器优先**：WorkBuddy 检测到通达信连接器可用时，行情与 K 线优先走 `tdx_lookup` / `tdx_quotes` / `tdx_kline`。`tdx_lookup`、全部标的 `tdx_quotes`、已知代码的 `tdx_kline` 相互独立时必须在同一条消息并行发出；只有确实依赖 lookup 返回的 code / setcode 时才串行。
+1. **通达信连接器优先**：WorkBuddy 检测到通达信连接器可用时，行情与 K 线优先走 `tdx_lookup` / `tdx_quotes` / `tdx_kline`；拿到返回后**必须**用 `snapshot_from_tdx.py` 落成统一快照（禁止手工拼 `bars`——字段名 `Data/Open/Close`、日期 `20260921`、量纲「手」任一处错都会静默算错或直接取不到 K 线），再喂 `rule123.py --data` 与 `probe_intraday.py --data` 共用。`tdx_lookup`、全部标的 `tdx_quotes`、已知代码的 `tdx_kline` 相互独立时必须在同一条消息并行发出；只有确实依赖 lookup 返回的 code / setcode 时才串行。
 2. **主标的只取一次**：通达信结果或 `fetch_market.py --out data/<code>.json` 落成统一快照，随后 `rule123.py --data data/<code>.json` 与 `probe_intraday.py --data data/<code>.json` 共用该快照。禁止 probe 再联网取日线。同一交易日且行情日期一致时复用快照；仅盘后刷新或用户明确要求实时刷新时重取。
 3. **同行先轻筛**：优先用一批报价或同一批日线快照计算 5/20/60 日涨幅、相对强度、MA20 方向和量价主动性，从候选中只保留 1–3 只龙头。默认到此为止，不跑同行 `rule123`、分钟线、完整基本面与逐项扫雷；用户显式要求同行完整分析时才升级。
 4. **分钟线按需且只取一次**：用户明确问盘中信号、分时量能、实时突破，或收盘报告需要「当日分钟走势复盘」时才取分钟线。`probe_intraday.py --data` 复用日线快照后，已拿到的分钟线必须直接用于当日高低点、分段路径、涨跌分钟量和尾盘量占比，禁止报告阶段再次联网取同一份分钟线。

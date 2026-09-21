@@ -8,7 +8,7 @@ disable-model-invocation: true
 
 > **何时用**：用户要求对某只股票做多维度分析、作战计划、买卖点、止损止盈。
 >
-> **取数**：WorkBuddy 已连接通达信时优先使用 `tdx_lookup` / `tdx_quotes` / `tdx_kline`；不可用时依次降级到 `wb-finance-skill`、`fetch_market.py`。结构判定只用 `rule123.py`。
+> **取数**：WorkBuddy 已连接通达信时优先使用 `tdx_lookup` / `tdx_quotes` / `tdx_kline`；不可用时依次降级到 `wb-finance-skill`、`fetch_market.py`。结构判定只用 `rule123.py`。通达信取数结果先用 `snapshot_from_tdx.py` 落成统一快照，再喂 `rule123.py --data` / `probe_intraday.py --data`（禁止手工拼 `bars`）。
 
 ## 执行原则
 

@@ -148,6 +148,10 @@ def main():
             r = analyze(item["c"], item["name"], item["prefix"])
         except Exception:
             r = None
+        # 只在失败时退避：新浪批量抓取约 180 只后返回 HTTP 456 限流，
+        # 10 并发无节流会成片失败且被静默计入 skipped。成功路径零等待，不拖慢整批。
+        if r is None:
+            time.sleep(0.5)
         return r
 
     with cf.ThreadPoolExecutor(max_workers=10) as ex:
@@ -165,7 +169,11 @@ def main():
                 done += 1
                 if done % 200 == 0:
                     print(f"进度 {done}/{len(codes)} 候选(t1/t2)={cands['tier1']}/{cands['tier2']} 跳过{skipped}", flush=True)
-    print(f"完成 扫描{done} 候选 tier1={cands['tier1']} tier2={cands['tier2']} 跳过{skipped}", flush=True)
+    rate = skipped / done if done else 0.0
+    warn = (f"   ⚠ 跳过率 {rate * 100:.1f}% → 多为新浪限流/停牌/数据不足，"
+            f"结果可能缺票，稍后重扫或换时段跑" if rate > 0.2 else "")
+    print(f"完成 扫描{done} 候选 tier1={cands['tier1']} tier2={cands['tier2']} 跳过{skipped}{warn}",
+          flush=True)
 
 
 if __name__ == "__main__":
