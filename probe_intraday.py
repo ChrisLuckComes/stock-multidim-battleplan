@@ -13,6 +13,7 @@
     python probe_intraday.py 002961
     python probe_intraday.py 002961 --qty 500 --account 50000
     python probe_intraday.py 002961 --min-scale 5 --asof 2026-09-16
+    python probe_intraday.py NET --data data/NET.json
 """
 import sys, os, json, argparse, urllib.request, datetime
 
@@ -52,6 +53,43 @@ def _get(url, gbk=False):
     with urllib.request.urlopen(req, timeout=15) as r:
         raw = r.read()
     return raw.decode("gbk", "ignore") if gbk else raw.decode("utf-8", "ignore")
+
+
+def load_daily_snapshot(data_file):
+    """读取 fetch_market.py --out 快照。无 bars 或带 error 则失败。"""
+    with open(data_file, encoding="utf-8") as f:
+        d = json.load(f)
+    if not isinstance(d, dict):
+        raise RuntimeError(f"快照格式错误：{data_file}")
+    if d.get("error"):
+        raise RuntimeError(d["error"])
+    if not d.get("bars"):
+        raise RuntimeError(f"快照无 bars：{data_file}")
+    return d
+
+
+def _ash_snap_from_daily(code, market_data):
+    """把 fetch_market A 股 JSON 转成 probe 用的日线 + 新浪快照字段。"""
+    daily = list(market_data.get("bars") or [])
+    last = daily[-1]
+    prev = market_data.get("prev_close")
+    if prev is None:
+        prev = daily[-2]["c"] if len(daily) > 1 else last["o"]
+    spot = market_data.get("spot")
+    if spot is None:
+        spot = last["c"]
+    return daily, {
+        "name": market_data.get("name") or code,
+        "o": last["o"] if market_data.get("open") is None else market_data["open"],
+        "prev": prev,
+        "spot": spot,
+        "h": last["h"] if market_data.get("high") is None else market_data["high"],
+        "l": last["l"] if market_data.get("low") is None else market_data["low"],
+        "v": last["v"] if market_data.get("volume") is None else market_data["volume"],
+        "amt": market_data.get("turnover") or 0.0,
+        "date": datetime.date.today().isoformat(),
+        "time": "",
+    }
 
 
 def prefix_of(code):
@@ -599,14 +637,22 @@ def _print_vp_regime(vp, section_no):
 
 
 def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
-          until=None, us_account=5000, date=None):
+          until=None, us_account=5000, date=None, data_file=None, market_data=None):
+    if market_data is None and data_file:
+        market_data = load_daily_snapshot(data_file)
     if not (code.isdigit() and len(code) == 6):
         # 非 6 位代码一律按美股处理（T+0 口径，账户口径独立）
         return probe_us(code, account=us_account, min_scale=min_scale, until=until,
-                        date=date)
+                        date=date, market_data=market_data)
     sym = prefix_of(code) + code
-    daily = kline(sym, 240, 140)
-    snap = snapshot(sym)
+    if market_data is not None:
+        if not market_data.get("bars"):
+            print(f"[{code}] 快照无日线")
+            return None
+        daily, snap = _ash_snap_from_daily(code, market_data)
+    else:
+        daily = kline(sym, 240, 140)
+        snap = snapshot(sym)
     if asof:
         daily = [b for b in daily if b["d"][:10] <= asof]
         live = bool(replay)          # --asof 默认=该日收盘后；加 --replay 则=该日盘中
@@ -1326,13 +1372,16 @@ def us_lots(account, entry, stop, risk_pct=US_RISK_PCT):
     return min(max(n, 1), cap)
 
 
-def probe_us(sym, account=None, min_scale=5, until=None, date=None):
+def probe_us(sym, account=None, min_scale=5, until=None, date=None,
+             data_file=None, market_data=None):
     """美股版：收盘后预案 + 盘前通道 + 盘中量能突变（T+0 口径）。"""
     if account is None:
         account = _CFG["us_account"]
     sym = sym.upper().strip()
     phase, ref_date = us_phase()
     minute_cache = {}
+    if market_data is None and data_file:
+        market_data = load_daily_snapshot(data_file)
 
     def fetch_live_minutes(ticker):
         if "bars" not in minute_cache:
@@ -1345,7 +1394,19 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None):
             minute_cache["source"] = "Yahoo（本地代理）"
         return minute_cache["bars"]
 
-    bars, spot, meta = bars_from_us(sym)
+    if market_data is not None:
+        bars = list(market_data.get("bars") or [])
+        if not bars:
+            print(f"[{sym}] 快照无日线")
+            return None
+        spot = market_data.get("spot")
+        meta = {
+            "session": market_data.get("session") or "",
+            "as_of": market_data.get("as_of"),
+            "prev_close": market_data.get("prev_close"),
+        }
+    else:
+        bars, spot, meta = bars_from_us(sym)
     meta = meta or {}
     if date:
         # 回放：只用 < date 的日线定结构，杜绝用到未来数据
@@ -1899,11 +1960,15 @@ if __name__ == "__main__":
                     help="美股账户美元（默认 US_ACCOUNT / .env / 5000）")
     ap.add_argument("--date", default=None,
                     help="回放指定交易日 YYYY-MM-DD（美股；只用该日之前的日线定结构）")
+    ap.add_argument("--data", default=None,
+                    help="复用 fetch_market.py --out 日线快照，不再联网取日线")
     a = ap.parse_args()
+    if a.data and len(a.codes) != 1:
+        ap.error("--data 只支持单票")
     for c in a.codes:
         try:
             probe(c, a.qty, a.account, a.asof, a.min_scale, a.replay, a.until,
-                  a.us_account, a.date)
+                  a.us_account, a.date, a.data)
         except Exception as e:
             print(f"[{c}] ERR {type(e).__name__}: {e}")
         print()

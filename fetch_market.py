@@ -22,6 +22,7 @@ wb-finance-skill 不可用，Agent 应改用本脚本取数。
   bars[{d,o,h,l,c,v}], source
 """
 import sys, json, re, urllib.request, datetime, time, os
+import concurrent.futures as cf
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
@@ -95,7 +96,18 @@ def fetch_ash(secid):
         f"?secid={secid}&ut=fa5fd1943c7b386f172d6893dbfba10b&invt=2&fltt=2"
         "&fields=f43,f44,f45,f46,f47,f48,f50,f57,f58,f60,f116,f117,f162,f167,f168,f184,f189,f190"
     )
-    q = fetch_json_fallback(quote_url).get("data", {})
+    # 日线历史（130 根约 6 个月）
+    kline_url = (
+        "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+        f"?secid={secid}&klt=101&fqt=1&end=20500101&lmt=130"
+        "&fields1=f1,f2,f3,f4,f5,f6"
+        "&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
+    )
+    with cf.ThreadPoolExecutor(max_workers=2) as ex:
+        quote_f = ex.submit(fetch_json_fallback, quote_url)
+        kline_f = ex.submit(fetch_json_fallback, kline_url)
+        q = quote_f.result().get("data", {})
+        kd = kline_f.result().get("data", {})
     if not q:
         raise RuntimeError(f"东方财富未返回 {secid} 行情")
 
@@ -127,14 +139,6 @@ def fetch_ash(secid):
         "source": "eastmoney",
     }
 
-    # 日线历史（130 根约 6 个月）
-    kline_url = (
-        "https://push2his.eastmoney.com/api/qt/stock/kline/get"
-        f"?secid={secid}&klt=101&fqt=1&end=20500101&lmt=130"
-        "&fields1=f1,f2,f3,f4,f5,f6"
-        "&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
-    )
-    kd = fetch_json_fallback(kline_url).get("data", {})
     bars = []
     for line in kd.get("klines", []):
         parts = line.split(",")
@@ -246,15 +250,17 @@ def fetch_us_nasdaq(symbol):
         免去自己判断夏令时/冬令时。
     """
     sym = symbol.upper()
-    bars = nasdaq_bars(sym)
-
     info = {}
-    try:
-        info = (_nasdaq_json(
-            f"https://api.nasdaq.com/api/quote/{sym}/info?assetclass=stocks"
-        ).get("data") or {})
-    except Exception:
-        info = {}
+    with cf.ThreadPoolExecutor(max_workers=2) as ex:
+        bars_f = ex.submit(nasdaq_bars, sym)
+        info_f = ex.submit(
+            _nasdaq_json,
+            f"https://api.nasdaq.com/api/quote/{sym}/info?assetclass=stocks")
+        bars = bars_f.result()
+        try:
+            info = (info_f.result().get("data") or {})
+        except Exception:
+            info = {}
     pdat = info.get("primaryData") or {}
     sdat = info.get("secondaryData") or {}
     mstatus = info.get("marketStatus") or ""

@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """取数去重与快速降级回归。"""
 import json
+import threading
+import time
 from unittest.mock import patch
 
 import fetch_market as F
@@ -108,10 +110,75 @@ def test_watch_cn_bars_cache():
     assert calls == [("sh", "600000", 140)]
 
 
+def test_fetch_ash_quote_and_kline_overlap():
+    inflight = []
+    max_inflight = [0]
+    lock = threading.Lock()
+
+    def fake_fallback(url, timeout=20, retries=2):
+        with lock:
+            inflight.append(1)
+            max_inflight[0] = max(max_inflight[0], len(inflight))
+        time.sleep(0.05)
+        with lock:
+            inflight.pop()
+        if "kline" in url:
+            return {"data": {"klines": ["2026-01-02,10,10.5,11,9.5,1000"]}}
+        return {"data": {
+            "f43": 10.5, "f44": 11, "f45": 9.5, "f46": 10, "f47": 1000,
+            "f48": 1, "f57": "600000", "f58": "TEST", "f60": 10,
+        }}
+
+    with patch.object(F, "fetch_json_fallback", fake_fallback):
+        q = F.fetch_ash("1.600000")
+    assert max_inflight[0] == 2
+    assert q["spot"] == 10.5
+    assert len(q["bars"]) == 1
+
+
+def test_fetch_us_nasdaq_bars_and_info_overlap():
+    inflight = []
+    max_inflight = [0]
+    lock = threading.Lock()
+
+    def fake_json(url):
+        with lock:
+            inflight.append(1)
+            max_inflight[0] = max(max_inflight[0], len(inflight))
+        time.sleep(0.05)
+        with lock:
+            inflight.pop()
+        if "historical" in url:
+            return {"data": {"tradesTable": {"rows": [{
+                "date": "09/18/2026", "open": "10", "high": "11", "low": "9",
+                "close": "10.5", "volume": "1000"}]}}}
+        if "/info?" in url:
+            return {"data": {
+                "companyName": "TEST", "exchange": "NASDAQ",
+                "marketStatus": "Closed",
+                "primaryData": {
+                    "lastSalePrice": "$10.50", "percentageChange": "5",
+                    "lastTradeTimestamp": "Closed", "isRealTime": False,
+                    "bidPrice": "10", "askPrice": "11",
+                },
+                "secondaryData": {"lastSalePrice": "$10.00"},
+            }}
+        raise AssertionError(url)
+
+    with patch.object(F, "_nasdaq_json", fake_json):
+        q = F.fetch_us_nasdaq("NET")
+    assert max_inflight[0] == 2
+    assert q["spot"] == 10.5
+    assert q["prev_close"] == 10.0
+    assert len(q["bars"]) == 1
+
+
 if __name__ == "__main__":
     test_eastmoney_http_first()
     test_eastmoney_https_is_single_fallback()
     test_yahoo_proxy_is_remembered()
     test_pool_us_quote_cache()
     test_watch_cn_bars_cache()
+    test_fetch_ash_quote_and_kline_overlap()
+    test_fetch_us_nasdaq_bars_and_info_overlap()
     print("ok")

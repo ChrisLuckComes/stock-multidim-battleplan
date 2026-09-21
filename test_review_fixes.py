@@ -1219,6 +1219,57 @@ def test_probe_us_runs_end_to_end():
         P.bars_from_us, P.bars_from_em_us, P.bars_from_yahoo_min = orig
 
 
+def test_probe_us_reuses_daily_snapshot():
+    """--data / market_data 必须跳过 bars_from_us，只再取分钟线。"""
+    import io, contextlib
+    import probe_intraday as P
+
+    bars, px = [], 100.0
+    for i in range(90):
+        px += 0.9 if i % 5 < 3 else -0.7
+        bars.append(_bar(f"2026-{i // 28 + 1:02d}-{i % 28 + 1:02d}",
+                         px - 0.3, px + 0.5, px - 0.6, px, 1e6))
+    orig = (P.bars_from_us, P.bars_from_em_us, P.bars_from_yahoo_min)
+    daily_calls = []
+    minute_calls = []
+    mins = [
+        _bar(f"2026-09-21 {21 + i // 6:02d}:{30 + i % 6 * 5:02d}",
+             bars[-1]["c"], bars[-1]["c"] + 0.5, bars[-1]["c"] - 0.4,
+             bars[-1]["c"] + 0.2, 10000 + i * 100)
+        for i in range(6)
+    ]
+
+    def _daily(*a, **k):
+        daily_calls.append((a, k))
+        raise RuntimeError("snapshot 路径不得再取日线")
+
+    def _boom(*a, **k):
+        raise RuntimeError("stubbed: no network in tests")
+
+    def _minutes(*a, **k):
+        minute_calls.append((a, k))
+        return mins, None, {}
+
+    P.bars_from_us = _daily
+    P.bars_from_em_us = _boom
+    P.bars_from_yahoo_min = _minutes
+    market_data = {
+        "ticker": "TEST", "market": "US", "name": "TEST",
+        "session": "Open", "as_of": "Sep 21, 2026 10:00 AM ET",
+        "spot": bars[-1]["c"], "prev_close": bars[-2]["c"], "bars": bars,
+    }
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            result = P.probe_us("TEST", market_data=market_data)
+        assert daily_calls == []
+        assert len(minute_calls) == 1
+        assert result["minute_review"]["trade_date"] == "2026-09-21"
+        assert "三·A、当日分钟量价复盘" in buf.getvalue()
+    finally:
+        P.bars_from_us, P.bars_from_em_us, P.bars_from_yahoo_min = orig
+
+
 def test_zone_position_is_not_derived_from_recommend():
     """类型标签必须说价位真话：43.72 在买区 43.32-46.09 内就不能写「未到位」。
 
@@ -1595,7 +1646,7 @@ def test_skill_requires_volume_price_report():
     for text in required:
         assert text in report, f"research-report.md 缺少量价报告约束：{text}"
     assert "research-report.md" in skill
-    assert "主标的行情只取一次" in skill
+    assert "主标的日线只取一次" in skill
 
 
 def test_skill_uses_progressive_disclosure():
@@ -1627,8 +1678,12 @@ def test_skill_uses_lightweight_peer_comparison_by_default():
     assert "不得对同行运行完整单票流程" in skill
     assert "不跑同行 `rule123`、分钟线、完整基本面与逐项扫雷" in data_ops
     assert "显式要求同行完整分析时才升级" in data_ops
+    assert "`probe_intraday.py --data`" in data_ops
+    assert "必须同时启动" in data_ops
+    assert "默认不对同行检索财报" in data_ops
     source = (root / "probe_intraday.py").read_text(encoding="utf-8")
     assert 'ap.add_argument("--us-account", type=float' in source
+    assert 'ap.add_argument("--data"' in source
 
 
 if __name__ == "__main__":
@@ -1685,6 +1740,7 @@ if __name__ == "__main__":
     test_channel_a_uses_ma_baseline()
     test_ash_portfolio_gate()
     test_probe_us_runs_end_to_end()
+    test_probe_us_reuses_daily_snapshot()
     test_zone_position_is_not_derived_from_recommend()
     test_in_ash_session_is_independent_of_daily_bar()
     test_ash_t1_struct_stop()
