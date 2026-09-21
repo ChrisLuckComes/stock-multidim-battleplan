@@ -58,6 +58,7 @@ SNAP_DIRS = None            # None = 用 bars_source 默认目录（data/tdx、d
 USE_SNAP = True
 USE_CACHE = True
 _SRC_CNT = Counter()
+_SNAP_INFO = {}             # sym → 快照取数时刻说明（用快照时才填；与 watch_cn.py 同构）
 
 # 财报跳空经验幅度：INTC 历史次日 −7.89%/+23.60%/−17.03%，均值 ~12%。
 # 用途只有一个 —— 反推「跨财报时最多能拿几股」。
