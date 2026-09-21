@@ -72,12 +72,13 @@ stock-multidim-battleplan/
 ├── test_breakout_modes.py
 ├── test_living_platform.py
 ├── test_review_fixes.py
+├── references/          # 按场景加载的策略、量价、风控与输出细则
 ├── scan_all/            # 全市场扫描（买区走 rule123.build_ev）
 ├── out_cn/              # A股运行输出（gitignore）：fetch_market/rule123 的 out_*.json 按市场自动归档于此
 └── out_us/              # 美股运行输出（gitignore）
 ```
 
-- **SKILL.md**：主技能的"大脑"，定义了全部分析维度、纪律框架与输出规范。Agent 通过它理解如何工作。
+- **SKILL.md**：精简入口与任务路由，保持在 500 行以内；详细策略按需读取 `references/`，避免每次调用加载全部案例与规则。
 - **fetch_market.py**：通用取数兜底。WorkBuddy 已连接通达信时优先走通达信连接器；否则再用 wb-finance-skill。两者都不可用时（如 Cursor / 通用 Agent）才运行本脚本。
 - **rule123.py**：输出 `mode`（platform_break / w_bottom_break / flag_tl_break / line_pullback / downtrend_tl_break / impulse_pause / wait）和 `priority`（1=优先T1，2=次优先T2），以及 `stop_plan` / `targets`。
 

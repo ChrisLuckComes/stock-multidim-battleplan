@@ -1580,17 +1580,41 @@ def test_report_renders_pre_breakout_and_two_tier_stop():
 
 
 def test_skill_requires_volume_price_report():
-    skill = (Path(__file__).resolve().parent / "SKILL.md").read_text(encoding="utf-8")
+    root = Path(__file__).resolve().parent
+    skill = (root / "SKILL.md").read_text(encoding="utf-8")
+    report = (root / "references" / "research-report.md").read_text(encoding="utf-8")
     required = (
         "## 量价分析（报告强制专章）",
         "### 一、当日分钟走势复盘",
         "### 二、近 20 日量价分析",
         "当日判定：派发 / 派发警告 / 趋势延续 / 中性 / 未收盘不定性",
         "近20日判定：派发 / 派发警告 / 趋势延续 / 中性",
-        "同一标的只取一次并复用",
     )
     for text in required:
-        assert text in skill, f"SKILL.md 缺少量价报告约束：{text}"
+        assert text in report, f"research-report.md 缺少量价报告约束：{text}"
+    assert "research-report.md" in skill
+    assert "每票行情只取一次" in skill
+
+
+def test_skill_uses_progressive_disclosure():
+    root = Path(__file__).resolve().parent
+    skill = (root / "SKILL.md").read_text(encoding="utf-8")
+    refs = (
+        "strategy-modes.md",
+        "entry-odds.md",
+        "research-report.md",
+        "intraday.md",
+        "risk-exit.md",
+        "data-operations.md",
+        "output-pitfalls.md",
+    )
+    assert len(skill.splitlines()) < 500
+    assert "不要预加载全部 references" in skill
+    for name in refs:
+        assert f"references/{name}" in skill
+        path = root / "references" / name
+        assert path.exists() and path.stat().st_size > 200
+        assert len(path.read_text(encoding="utf-8").splitlines()) < 500
 
 
 if __name__ == "__main__":
@@ -1657,6 +1681,7 @@ if __name__ == "__main__":
     test_vp_regime_ma5_reclaim()
     test_vp_regime_needs_full_window()
     test_skill_requires_volume_price_report()
+    test_skill_uses_progressive_disclosure()
     test_ma_anchor_trend_gate()
     test_us_lots_account_cap_only()
     test_account_config_env_override()
