@@ -242,6 +242,50 @@ class TestRender(unittest.TestCase):
         ok, _ = RR.check_html(html)
         self.assertTrue(ok)
 
+    def _exec_seg(self, html):
+        i = html.find("9 · 执行方案")
+        j = html.find("9.1 加仓")
+        self.assertGreater(i, -1)
+        self.assertGreater(j, i)
+        return html[i:j]
+
+    def test_exec_rows_override_engine_default(self):
+        """notes.exec_rows 必须替换引擎核心行 —— 而不是在后面再追加一套。
+
+        回归：300657 实测时两套并存（引擎 38.49/700 股 与 人工 37.65/600 股
+        同表），阅读者无法判断该执行哪一套。
+        """
+        notes = {"exec_rows": [["动作", "人工动作"],
+                              ["买入价", "<b>99.99</b>（人工覆盖档）"],
+                              ["数量", "1 股"]]}
+        html = RR.render(self._analysis(), notes, RR.DEFAULT_TMPL)
+        seg = self._exec_seg(html)
+        self.assertIn("99.99", seg)
+        self.assertIn("人工动作", seg)
+        # 核心行只允许出现一套：引擎默认行的特征串必须消失
+        self.assertEqual(seg.count("买入价"), 1, "执行表出现了多套买入价")
+        self.assertEqual(seg.count("数量"), 1, "执行表出现了多套数量")
+        self.assertNotIn("挂限价买单", seg, "引擎默认「动作」行没被覆盖")
+        self.assertNotIn("最小申报单位", seg, "引擎默认「数量」行没被覆盖")
+
+    def test_exec_rows_keep_fact_rows(self):
+        """覆盖核心行时，「目标 / 挂单有效期 / 预挂可行性」这些与档位无关的
+        事实行必须保留 —— 否则人工接管就等于把数据也一起删了。"""
+        notes = {"exec_rows": [["动作", "人工动作"]]}
+        html = RR.render(self._analysis(), notes, RR.DEFAULT_TMPL)
+        seg = self._exec_seg(html)
+        for k in ("目标1", "目标2 / 远端墙", "挂单有效期", "预挂可行性"):
+            self.assertIn(k, seg, "事实行 %s 被覆盖掉了" % k)
+        self.assertIn("人工动作", seg)
+
+    def test_exec_rows_absent_keeps_engine_default(self):
+        """不提供 exec_rows 时行为与旧版一致（引擎默认核心行 + 事实行）。"""
+        html = RR.render(self._analysis(), {}, RR.DEFAULT_TMPL)
+        seg = self._exec_seg(html)
+        for k in ("动作", "买入价", "止损（结构轨）", "止损（硬止损）",
+                  "数量", "金额", "单笔风险", "目标1", "预挂可行性"):
+            self.assertIn(k, seg)
+
     def test_warn_text_is_escaped(self):
         """warn 里的 '<0.35×ATR' 必须转义，否则浏览器会当标签吞掉后半句。"""
         a = self._analysis()

@@ -382,7 +382,8 @@ def build_exec(a, n):
         risk_amt = qty * (rec.get("risk") or 0)
     warn_amt = ((amt / account * 100) > 40) if account else False
     po = a.get("probe", {}).get("pre_order") or {}
-    out = [
+    # 核心行 = 随「买哪一档」变的判断；事实行 = 与档位无关的数据
+    core = [
         ("动作", "<b>挂限价买单</b>（不是市价）" if rec else "不做"),
         ("买入价", "<b>%s</b>（%s）" % (num(rec.get("entry")), esc(rec.get("entry_name")))),
         ("止损（结构轨）", "<b>%s</b> —— 收盘口径，不用盯盘" % num(rec.get("stop"))),
@@ -404,6 +405,9 @@ def build_exec(a, n):
             num(risk_pct * 100, 1),
             (" <span class='note'>%s</span>" % esc(rec["risk_warning"]))
             if rec.get("risk_warning") else "")),
+    ]
+    # 事实行：与买哪一档无关，notes 覆盖核心行时也照常保留
+    tail = [
         ("目标1", "<b>%s</b>（到达减 1/3~1/2，止损上移到成本或均线）" % num(a["targets"].get("t1"))),
         ("目标2 / 远端墙", "%s / %s" % (num(a["targets"].get("t2_engine")),
                                    num(a["targets"].get("wall_far")))),
@@ -412,9 +416,10 @@ def build_exec(a, n):
          if rec.get("prehang") else "✗ 买点在现价上方，不可预挂 → 需盯盘"),
     ]
     if n.get("exec_rows"):
-        for x in n["exec_rows"]:
-            out.append(tuple(x))
-    return kv_rows(out)
+        # notes 接管核心行：整体替换，而不是在引擎默认行后面再追加一套
+        # （追加会让同一个表里出现两套互相打架的买价/止损/股数）
+        core = [tuple(x) for x in n["exec_rows"]]
+    return kv_rows(core + tail)
 
 
 def build_summary(a, n):
