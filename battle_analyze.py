@@ -467,9 +467,49 @@ def peer_row(prefix, code, name=None, n=150):
 
 # ────────────────────────── 主流程 ──────────────────────────
 
+def tie_line_check(z, ma_info):
+    """贴线真伪（output-pitfalls #21，2026-09-21 固化成代码）。
+
+    真「价格沿均线走」= 近 8 根最低/收盘价**多次**落进该均线 ±1%，**且该均线方向不为负**。
+    两个反例都属于「视觉贴线、性质不同」：
+      · 方向为负（下行）—— 价格是在反弹**反超**一条下移的线（688152：EMA10 下行，
+        价格 9-16 还收盘破过线，9-18 才收回）；
+      · ±1% 命中不足、要放宽到 ±3% 才多次 —— 那只是「在均线附近运行」，不是沿均线走。
+    旧版这里写 `tie_line_verdict: None` 并注释「由渲染器判定」，但渲染器里根本没有
+    这段逻辑 ⇒ 最重要的那条警告被静默掉了（与「结构判不出买区」同类问题）。
+    """
+    if not z or not z.get("anchor"):
+        return None
+    key = {"ma5": "MA5", "ma10": "MA10", "ema10": "EMA10",
+           "ma20": "MA20", "ma50": "MA50"}.get(str(z["anchor"]).lower())
+    if not key:
+        return None
+    row = next((x for x in (ma_info or []) if x.get("name") == key), None)
+    if not row:
+        return None
+    h1, h2, h3 = row.get("hit1") or 0, row.get("hit2") or 0, row.get("hit3") or 0
+    d = row.get("dir") or 0
+    ok = (h1 >= 2 and d >= 0)
+    if ok:
+        note = ("%s 近 8 根 ±1%% 命中 <b>%d</b> 次、方向%s ⇒ 满足判据，贴线为真。"
+                % (key, h1, row.get("dir_txt")))
+    elif d < 0:
+        note = ("%s 近 8 根 ±1%% 命中 <b>%d</b> 次，但方向<b>%s</b> ⇒ 不满足判据"
+                "（需 ±1%% 多次命中<b>且方向不为负</b>）。价格只是「在均线附近运行」，"
+                "不是「沿均线走」—— 这条线<b>不是已确认的支撑</b>，而是一条正在下移、"
+                "被价格反超的线。" % (key, h1, row.get("dir_txt")))
+    else:
+        note = ("%s 近 8 根 ±1%% 只命中 <b>%d</b> 次（±2%% %d 次 / ±3%% %d 次）⇒ 不满足判据，"
+                "属「在均线上方运行」，不是沿均线走。" % (key, h1, h2, h3))
+    return {"anchor": z["anchor"], "name": key, "level": row.get("value"),
+            "hit1": h1, "hit2": h2, "hit3": h3,
+            "dir": d, "dir_txt": row.get("dir_txt"), "ok": ok,
+            "verdict": "真贴线" if ok else "存疑", "note": note}
+
+
 def analyze(code, account=50000, peers=None, data_file=None, n=330,
             intraday=True, min_scale=5, name=None, theme=None,
-            peer_names=None, no_cache=False):
+            peer_names=None, no_cache=False, cash=None):
     code = str(code).strip()
     if not (code.isdigit() and len(code) == 6):
         raise SystemExit("battle_analyze 目前只支持 A 股 6 位代码：%s" % code)
@@ -586,9 +626,15 @@ def analyze(code, account=50000, peers=None, data_file=None, n=330,
     #   它同时受「账户 × risk_pct / 每股风险」与「单笔金额硬顶 ash_single_cap」约束，
     #   并按最小申报单位取整（科创板 200 起 1 股递增）。自成一套迟早与引擎走偏。
     if rec:
-        rec["qty"] = P.ash_lots(account, rec["entry"], rec["stop"], code)
+        #   ★ cash（真实可用现金）传入时作为单笔金额上限：**账户总额 ≠ 能动用的钱**。
+        #     持续持仓的账户上两者能差一半（688152：账户 5 万，已持 21,574 元，
+        #     可用现金只有 28,426 元），不传就会算出「钱不够的股数」。
+        rec["qty"] = P.ash_lots(account, rec["entry"], rec["stop"], code,
+                                cap_amt=cash if cash else None)
         rec["amount"] = _f((rec["qty"] or 0) * rec["entry"], 0)
         rec["pct_account"] = _f(rec["amount"] / account * 100, 1) if account else None
+        rec["cash"] = cash
+        rec["pct_cash"] = _f(rec["amount"] / cash * 100, 1) if cash else None
         rec["risk_amt"] = _f((rec["qty"] or 0) * rec["risk"], 0)
         rec["risk_warning"] = P.ash_risk_warning(account, rec["entry"], rec["stop"],
                                                  rec["qty"]) if rec["qty"] else None
@@ -640,6 +686,7 @@ def analyze(code, account=50000, peers=None, data_file=None, n=330,
             "src": src, "bars": len(bars),
             "first_bar": bars[0]["d"], "last_bar": last["d"],
             "account": account,
+            "cash": cash,
             "risk_pct": P.ASH_RISK_PCT,
             "lot": P.first_lot_of(code),
             "fetch_notes": notes_all,
@@ -658,7 +705,7 @@ def analyze(code, account=50000, peers=None, data_file=None, n=330,
             "pivots_up": ups,
             "pivots_down": downs,
             "volprice20": vp20,
-            "tie_line_verdict": None,   # 由渲染器按 ±1% ≥2/8 与方向判定
+            "tie_line_verdict": tie_line_check(z, ma_info),
         },
         "targets": {"t1": _f(t1), "t2_engine": _f(t2_engine),
                     "wall_far": _f(wall_far), "ath": _f(ath)},
@@ -679,6 +726,8 @@ def main():
     ap = argparse.ArgumentParser(description="一键分析（A 股单票）")
     ap.add_argument("codes", nargs="+", help="6 位 A 股代码，可多个")
     ap.add_argument("--account", type=int, default=None, help="A 股账户资金")
+    ap.add_argument("--cash", type=int, default=None,
+                    help="可用现金（持仓后能动用的钱）；不传则按账户总额封顶")
     ap.add_argument("--peers", default=None,
                     help="同行代码，逗号分隔（如 600183,300476,603078）")
     ap.add_argument("--peer-names", default=None,
@@ -708,7 +757,7 @@ def main():
         res = analyze(code, account=account, peers=peers, data_file=a.data,
                       n=a.n, intraday=not a.no_intraday, min_scale=a.min_scale,
                       name=a.name, theme=a.theme, peer_names=pnames,
-                      no_cache=a.no_cache)
+                      no_cache=a.no_cache, cash=a.cash)
         out_path = a.out or os.path.join(HERE, "out_cn", "analysis_%s.json" % code)
         md = os.path.dirname(out_path)
         if md:

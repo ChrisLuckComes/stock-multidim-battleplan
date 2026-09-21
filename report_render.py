@@ -154,8 +154,16 @@ def build_best(a, n):
         ("R → t1", "<b>%s</b>" % num(rec["r1"])),
         ("R → 远端墙", "<b>%s</b>" % num(rec["r2"])),
         ("需回落", "<b>%s</b>" % pct_plain(rec["need_pct"])),
-        ("仓位", ("%s 股 / %s 元（账户 %s%%）" % (num(qty, 0), num(amt, 0),
-                                              num(amt / account * 100, 1)))
+        ("仓位", ("%s 股 / %s 元（账户 %s%%%s）%s"
+                 % (num(qty, 0), num(amt, 0),
+                    num(amt / account * 100, 1),
+                    ("，可用现金 %s%%" % num(rec.get("pct_cash"), 1))
+                    if rec.get("pct_cash") is not None else "",
+                    # 现金几乎打满时明确标注「这是引擎上限」——否则首屏股数会和
+                    # 执行方案里人工降级后的建议股数打架，读者不知道信哪个。
+                    ("　⚠ 引擎上限（占现金 %s%%），执行方案已按试错仓降级"
+                     % num(rec.get("pct_cash"), 1))
+                    if (rec.get("pct_cash") or 0) >= 95 else ""))
          if qty else "<b>不做</b>（1 手即超单笔硬顶）"),
     ]
     if n.get("best_kpi_extra"):
@@ -379,12 +387,17 @@ def build_exec(a, n):
         ("买入价", "<b>%s</b>（%s）" % (num(rec.get("entry")), esc(rec.get("entry_name")))),
         ("止损（结构轨）", "<b>%s</b> —— 收盘口径，不用盯盘" % num(rec.get("stop"))),
         ("止损（硬止损）", "%s（%s）—— 盘中口径，需盯盘" % (num(z.get("hard_stop")), esc(z.get("hard_anchor")))),
-        ("数量", ("<b>%s 股</b>（最小申报单位 %s 股）%s"
+        ("数量", ("<b>%s 股</b>（最小申报单位 %s 股）%s%s"
                 % (num(qty, 0), num(lot, 0),
-                   ' <span class="badge b-warn">超 40% 仓位习惯线</span>' if warn_amt else ""))
+                   ' <span class="badge b-warn">超 40% 仓位习惯线</span>' if warn_amt else "",
+                   ("　⚠ <b>这是引擎上限</b>（占可用现金 %s%%）—— 降级理由与建议股数见「口径问题」②"
+                    % num(rec.get("pct_cash"), 1))
+                   if (rec.get("pct_cash") or 0) >= 95 else ""))
          if qty else "<b>不做</b>（1 手即超单笔金额硬顶）"),
-        ("金额", "<b>%s 元</b>（账户 %s%%）"
-         % (num(amt, 0), num(amt / account * 100, 1) if account else "—")),
+        ("金额", "<b>%s 元</b>（账户 %s%%%s）"
+         % (num(amt, 0), num(amt / account * 100, 1) if account else "—",
+            ("，可用现金 %s%%" % num(rec.get("pct_cash"), 1))
+            if rec.get("pct_cash") is not None else "")),
         ("单笔风险", "%s 元（账户 %s%%；预算 %s%%）%s"
          % (num(risk_amt, 0),
             num(risk_amt / account * 100, 2) if account else "—",
@@ -454,22 +467,32 @@ def render(a, n, tmpl_path=DEFAULT_TMPL):
            esc(m["last_bar"]), num(m.get("account"), 0), num(m.get("lot"), 0),
            esc(m["generated_at"])))
 
-    caliber = list(n.get("caliber_notes") or [])
-    # 结构判不出买区是硬信息，不因为它来自数据（而非 notes）就被 notes 顶掉
+    # 来自数据的硬信息排在最前 —— 不因为它们不是 notes 写的就被顶掉。
+    # （688152：tie_line_verdict 长期是 None，因为注释说"由渲染器判定"而渲染器里没有这段逻辑，
+    #   结果「均线下行 ⇒ 贴线存疑」这条最重要的警告被静默掉。现在由 analyze 算好、这里必显示。）
+    caliber = []
     if m.get("plan_warning"):
-        caliber.insert(0, '<b class="up">★ 结构未判出可执行买区</b> —— %s'
+        caliber.append('<b class="up">★ 结构未判出可执行买区</b> —— %s'
                        % esc(m["plan_warning"]))
+    tie = (a.get("struct") or {}).get("tie_line_verdict") or {}
+    if tie and not tie.get("ok"):
+        caliber.append('<b class="up">★ 贴线真伪复核：%s（%s）</b> —— %s'
+                       % (esc(tie.get("name")), esc(tie.get("verdict")), tie.get("note")))
+    z = p.get("buy_zone") or {}
+    if z.get("hard_noise"):
+        caliber.append("<b>硬止损落在噪声带内</b>（hard_dist_atr=%s）—— 名义上有止损、等于没有，"
+                       "主风控只能用结构止损 %s（收盘轨）。"
+                       % (num(z.get("hard_dist_atr")), num(z.get("struct_stop"))))
+    if z.get("buy_lo_adjusted"):
+        caliber.append("<b>引擎把买区下沿上抬过</b>（合法止损锚与买区冲突）—— 记清这是"
+                       "「最低可买价」而不是自然支撑。")
+    if m.get("cash") and (m.get("account") or 0) > m["cash"]:
+        caliber.append("<b>仓位已受「可用现金」约束</b>（账户总额 ¥%s ＞ 可用现金 ¥%s）"
+                       "—— 股数按现金上限重算；账户总额只用于风险预算（1.5%%）。"
+                       % (num(m.get("account"), 0), num(m.get("cash"), 0)))
+    caliber += list(n.get("caliber_notes") or [])
     if not caliber:
-        z = p.get("buy_zone") or {}
-        if z.get("hard_noise"):
-            caliber.append("<b>硬止损落在噪声带内</b>（hard_dist_atr=%s）—— 名义上有止损、等于没有，"
-                           "主风控只能用结构止损 %s（收盘轨）。"
-                           % (num(z.get("hard_dist_atr")), num(z.get("struct_stop"))))
-        if z.get("buy_lo_adjusted"):
-            caliber.append("<b>引擎把买区下沿上抬过</b>（合法止损锚与买区冲突）—— 记清这是"
-                           "「最低可买价」而不是自然支撑。")
-        if not caliber:
-            caliber.append("本次引擎未报出口径冲突。")
+        caliber.append("本次引擎未报出口径冲突。")
 
     slots = {
         "TITLE": esc(n.get("title") or "%s %s · 多维度作战计划 · %s"

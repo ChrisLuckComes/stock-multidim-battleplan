@@ -344,5 +344,66 @@ class TestAnalyzeOffline(unittest.TestCase):
         self.assertIn("模式", txt)
 
 
+class TestTieLineAndCash(unittest.TestCase):
+    """2026-09-21 补：两条曾静默失败的判据（跑 688152 时暴露）。
+
+    ① `struct.tie_line_verdict` 恒为 None，注释写着「由渲染器判定」，而渲染器里
+       没有任何 tie_line 逻辑 ⇒「均线下行 ⇒ 贴线存疑」这条最重要的警告被静默掉。
+       现由 `battle_analyze.tie_line_check` 实算，并顶进报告「口径问题」第 1 条。
+    ② 仓位只按「账户总额」算。持续持仓的账户上账户总额 ≠ 能动用的钱
+       （688152：账户 5 万、已持 21,574 元、可用现金仅 28,426 元，引擎却给出
+       974 股 = 35,765 元 ⇒ 买不了）。现支持 `cash` / `--cash`。
+    """
+
+    SNAP = os.path.join(HERE, "data", "tdx", "601208.json")
+
+    def test_tie_line_flags_falling_ma(self):
+        """均线方向为负 ⇒ 必须判「存疑」。"""
+        z = {"anchor": "ema10"}
+        ma = [{"name": "EMA10", "value": 35.85, "dir": -1, "dir_txt": "下行",
+               "hit1": 2, "hit2": 3, "hit3": 7}]
+        r = BA.tie_line_check(z, ma)
+        self.assertIsNotNone(r)
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["verdict"], "存疑")
+        self.assertIn("下行", r["note"])
+
+    def test_tie_line_accepts_rising_ma_with_hits(self):
+        z = {"anchor": "ema10"}
+        ma = [{"name": "EMA10", "value": 50.56, "dir": 1, "dir_txt": "上行",
+               "hit1": 2, "hit2": 3, "hit3": 7}]
+        r = BA.tie_line_check(z, ma)
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["verdict"], "真贴线")
+
+    def test_tie_line_needs_hits_even_when_rising(self):
+        """方向为正但 ±1% 一次都没命中 ⇒ 仍不是贴线（只是在均线上方运行）。"""
+        z = {"anchor": "ma20"}
+        ma = [{"name": "MA20", "value": 50.0, "dir": 1, "dir_txt": "上行",
+               "hit1": 0, "hit2": 1, "hit3": 2}]
+        self.assertFalse(BA.tie_line_check(z, ma)["ok"])
+
+    def test_tie_line_returns_none_when_not_checkable(self):
+        self.assertIsNone(BA.tie_line_check({}, []))
+        self.assertIsNone(BA.tie_line_check({"anchor": "boll_up"}, []))
+        self.assertIsNone(BA.tie_line_check({"anchor": "ma5"}, []))
+
+    def test_cash_caps_position_size(self):
+        """cash 必须真的封顶，且进 meta 供报告标注；不传时行为与旧版一致。"""
+        if not os.path.exists(self.SNAP):
+            self.skipTest("缺少 data/tdx/601208.json 快照")
+        base = BA.analyze("601208", account=50000, data_file=self.SNAP,
+                          intraday=False)
+        capped = BA.analyze("601208", account=50000, cash=6000,
+                            data_file=self.SNAP, intraday=False)
+        b, c = base["odds_recommend"], capped["odds_recommend"]
+        self.assertGreater(b["amount"], c["amount"])
+        self.assertLessEqual(c["amount"], 6000)
+        self.assertEqual(capped["meta"]["cash"], 6000)
+        self.assertIsNone(base["meta"]["cash"])
+        self.assertIsNotNone(c["pct_cash"])
+        self.assertIsNone(b["pct_cash"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
