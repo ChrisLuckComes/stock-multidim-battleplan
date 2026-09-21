@@ -78,7 +78,7 @@ stock-multidim-battleplan/
 ```
 
 - **SKILL.md**：主技能的"大脑"，定义了全部分析维度、纪律框架与输出规范。Agent 通过它理解如何工作。
-- **fetch_market.py**：通用取数兜底。当运行环境**没有** wb-finance-skill 时使用（如 Cursor / 通用 Agent）；有 wb-finance-skill 的 WorkBuddy 环境可优先用前者，仍可用本脚本做结构判定。
+- **fetch_market.py**：通用取数兜底。WorkBuddy 已连接通达信时优先走通达信连接器；否则再用 wb-finance-skill。两者都不可用时（如 Cursor / 通用 Agent）才运行本脚本。
 - **rule123.py**：输出 `mode`（platform_break / w_bottom_break / flag_tl_break / line_pullback / downtrend_tl_break / impulse_pause / wait）和 `priority`（1=优先T1，2=次优先T2），以及 `stop_plan` / `targets`。
 
 ---
@@ -94,7 +94,7 @@ git clone https://github.com/ChrisLuckComes/stock-multidim-battleplan.git \
 ```
 
 重启 / 刷新 WorkBuddy 后，在对话中输入 `/stock-multidim-battleplan 贵州茅台`。
-> WorkBuddy 环境已装 `wb-finance-skill` 时，金融数据优先走 `agentic_search`（SKILL.md 已声明）；本仓库脚本作为结构判定兜底，两者皆可。
+> WorkBuddy 已连接通达信时，行情优先走 `tdx_lookup` / `tdx_quotes` / `tdx_kline`；连接器不可用时再走 `wb-finance-skill`。本仓库脚本作为结构判定兜底。
 
 ### B. Cursor
 Cursor 的 skills 目录为 `~/.cursor/skills/`。把整个仓库放进去即可（Cursor 通过 `disable-model-invocation: true` 字段确保仅显式 `/stock-multidim-battleplan` 触发，不自动误触发）：
@@ -121,7 +121,7 @@ python --version   # 需 3.8+
 
 - **Python 3.8+**（运行 `fetch_market.py` / `rule123.py`）。
 - **联网**（脚本实时抓取东方财富 / Nasdaq 公开行情，零密钥、零付费）。
-- **可选 · wb-finance-skill**：仅在 WorkBuddy 且已安装该技能时优先用于取数；**未安装不影响本仓库任何功能**——`fetch_market.py` 会自动接管。
+- **可选 · 通达信连接器 / wb-finance-skill**：WorkBuddy 中通达信连接器优先，wb-finance-skill 次之；两者不可用不影响本仓库功能，`fetch_market.py` 会接管。
 - **Node.js**：非必需。本仓库不提供、也不需要 Node 脚本；行情一律用 `fetch_market.py`。
 
 ---

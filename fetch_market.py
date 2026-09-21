@@ -26,7 +26,7 @@ import sys, json, re, urllib.request, datetime, time, os
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 
-def fetch_json(url, timeout=20, retries=3):
+def fetch_json(url, timeout=20, retries=2):
     last = None
     for n in range(retries):
         try:
@@ -35,22 +35,31 @@ def fetch_json(url, timeout=20, retries=3):
                 return json.loads(r.read().decode("utf-8"))
         except Exception as e:
             last = e
-            time.sleep(1.0 * (n + 1))
+            if n + 1 < retries:
+                time.sleep(0.3 * (n + 1))
     raise last
 
 
-def fetch_json_fallback(url, timeout=20, retries=3):
-    """https 握手被中间设备中断时自动降级 http 重试（东财实测：https 拒连、http 通）。"""
+def fetch_json_fallback(url, timeout=20, retries=2):
+    """东财优先走已验证可用的 HTTP，失败后再回退原协议。"""
+    primary = url
+    fallback = None
+    if url.startswith("https://") and ".eastmoney.com/" in url:
+        primary = "http://" + url[8:]
+        fallback = url
+    elif url.startswith("https://"):
+        fallback = "http://" + url[8:]
     try:
-        return fetch_json(url, timeout=timeout, retries=retries)
+        return fetch_json(primary, timeout=timeout, retries=retries)
     except Exception as e1:
-        if not url.startswith("https://"):
+        if fallback is None:
             raise
         try:
-            return fetch_json("http://" + url[8:], timeout=timeout, retries=retries)
+            return fetch_json(fallback, timeout=timeout, retries=1)
         except Exception as e2:
             raise RuntimeError(
-                f"https={type(e1).__name__}:{str(e1)[:50]} | http={type(e2).__name__}:{str(e2)[:50]}")
+                f"primary={type(e1).__name__}:{str(e1)[:50]} | "
+                f"fallback={type(e2).__name__}:{str(e2)[:50]}")
 
 
 def detect_market(ticker: str):

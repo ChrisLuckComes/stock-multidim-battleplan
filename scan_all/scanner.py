@@ -148,7 +148,6 @@ def main():
             r = analyze(item["c"], item["name"], item["prefix"])
         except Exception:
             r = None
-        time.sleep(0.03)
         return r
 
     with cf.ThreadPoolExecutor(max_workers=10) as ex:

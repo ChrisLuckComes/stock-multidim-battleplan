@@ -3,6 +3,7 @@
 """全市场 A 股 123 扫描报告生成器。
 读 scan_all/results.jsonl → 候选总表 + 重点候选内联SVG价格图 → output/全市场A股123扫描-YYYYMMDD.html
 """
+import concurrent.futures as cf
 import json, time, urllib.request, datetime, os, sys
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -28,6 +29,14 @@ def sina_kline(prefix, code, n=140):
         arr = json.loads(r.read().decode("utf-8"))
     return [{"d": k["day"], "o": float(k["open"]), "c": float(k["close"]),
              "h": float(k["high"]), "l": float(k["low"]), "v": float(k["volume"])} for k in arr]
+
+
+def fetch_chart_bars(r):
+    try:
+        return sina_kline(r["market"], r["code"]), None
+    except Exception as e:
+        return None, e
+
 
 def sma(a, w):
     return sum(a[-w:]) / w if len(a) >= w else None
@@ -165,10 +174,17 @@ def main():
 
     # 重点候选图（前 12）
     top = cands[:12]
+    workers = min(6, len(top))
+    if workers:
+        with cf.ThreadPoolExecutor(max_workers=workers) as ex:
+            chart_data = list(ex.map(fetch_chart_bars, top))
+    else:
+        chart_data = []
     charts = ""
-    for r in top:
+    for r, (bars, fetch_error) in zip(top, chart_data):
         try:
-            bars = sina_kline(r["market"], r["code"])
+            if fetch_error is not None:
+                raise fetch_error
             ha = r.get("hard_anchor") or "-"
             _da = r.get("hard_dist_atr")
             pb = r.get("pre_breakout") or {}

@@ -27,10 +27,12 @@
   python pool_us.py SNDK MU         # 临时指定代码
 """
 import argparse
+import concurrent.futures as cf
 import datetime
 import json
 import os
 import sys
+import threading
 import unicodedata
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -43,6 +45,9 @@ from rule123 import build_ev, plan_entry, atr14  # noqa: E402
 
 CFG = os.path.join(HERE, "pool_us.json")
 REPORTS = os.path.join(HERE, "reports")
+MAX_WORKERS = 4
+_QUOTE_CACHE = {}
+_QUOTE_LOCK = threading.Lock()
 
 # 财报跳空经验幅度：INTC 历史次日 −7.89%/+23.60%/−17.03%，均值 ~12%。
 # 用途只有一个 —— 反推「跨财报时最多能拿几股」。
@@ -80,6 +85,17 @@ def load_cfg():
         return json.load(f)
 
 
+def fetch_us(sym):
+    key = sym.upper()
+    with _QUOTE_LOCK:
+        quote = _QUOTE_CACHE.get(key)
+    if quote is None:
+        quote = F.fetch_us(key)
+        with _QUOTE_LOCK:
+            _QUOTE_CACHE[key] = quote
+    return quote
+
+
 # ─────────────────────────── 仓位反推 ───────────────────────────
 def size_plan(spot, atr, acct, risk_pct):
     """不能盯盘（= 硬止损失效）时的股数上限。
@@ -113,7 +129,7 @@ def analyze_one(item, cfg):
     r = {"sym": sym, "name": name, "theme": item.get("theme"),
          "pos": item.get("pos"), "flag": item.get("flag"), "err": None}
     try:
-        q = F.fetch_us(sym)
+        q = fetch_us(sym)
     except Exception as e:
         r["err"] = f"{type(e).__name__}: {str(e)[:160]}"
         return r
@@ -257,7 +273,7 @@ def quote_of(sym, bars=None):
     """单个报价（指数/温度计）。bars 可外部传入，避免重复抓取（Yahoo 源不稳）。"""
     try:
         if bars is None:
-            bars = F.fetch_us(sym).get("bars") or []
+            bars = fetch_us(sym).get("bars") or []
         if len(bars) < 2:
             return None
         return {"px": round(bars[-1]["c"], 2),
@@ -551,8 +567,15 @@ def main():
         pool = [p for p in pool if p["sym"].upper() in want]
         watch = [p for p in watch if p["sym"].upper() in want]
 
-    rows = [analyze_one(p, cfg) for p in pool]
-    watch_rows = [analyze_one(p, cfg) for p in watch]
+    items = [(p, cfg) for p in pool + watch]
+    workers = min(MAX_WORKERS, len(items))
+    if workers:
+        with cf.ThreadPoolExecutor(max_workers=workers) as ex:
+            analyzed = list(ex.map(lambda args: analyze_one(*args), items))
+    else:
+        analyzed = []
+    rows = analyzed[:len(pool)]
+    watch_rows = analyzed[len(pool):]
 
     # ★ 板块共振聚合（2026-09-20 从 watch_cn.py 移植）。用户：「对板块强度有要求，
     #   能提高胜率，大部分是同时启动的」。引擎单票判不了板块，故在批处理层统计：
@@ -583,25 +606,24 @@ def main():
             "强" if len(peers) >= 3 else ("中" if len(peers) == 2
                                           else ("弱" if len(peers) == 1 else None)))
 
-    # 指数/温度计复用池内已抓到的日线，减少一次网络往返（Yahoo 源尤其不稳）
-    have = {r["sym"]: None for r in (rows + watch_rows) if not r.get("err")}
-    for sym in list(have):
-        have[sym] = next((x for x in rows + watch_rows if x.get("sym") == sym), None)
+    sentiment_cfg = cfg.get("sentiment", [])
+    index_cfg = cfg.get("indices", [])
+    market_cfg = sentiment_cfg + index_cfg
+    market_workers = min(MAX_WORKERS, len(market_cfg))
+    if market_workers:
+        with cf.ThreadPoolExecutor(max_workers=market_workers) as ex:
+            market_quotes = list(ex.map(
+                lambda item: quote_of(item["sym"]), market_cfg))
+    else:
+        market_quotes = []
 
     senti = []
-    for s in cfg.get("sentiment", []):
-        q = quote_of(s["sym"])
+    for s, q in zip(sentiment_cfg, market_quotes[:len(sentiment_cfg)]):
         st = {**s, "px": q["px"] if q else None, "chg": q["chg"] if q else None}
         st["read_txt"] = read_sentiment(st)
         senti.append(st)
     idx = []
-    for i in cfg.get("indices", []):
-        cached = have.get(i["sym"])
-        q = ({"px": cached["spot"], "chg": cached["chg_pct"], "date": cached.get("date")}
-             if cached and cached.get("spot") and cached.get("date")
-             and cached.get("date") >= max(
-                 (r.get("date") or "" for r in rows + watch_rows), default="")
-             else quote_of(i["sym"]))
+    for i, q in zip(index_cfg, market_quotes[len(sentiment_cfg):]):
         idx.append({**i, "px": q["px"] if q else None, "chg": q["chg"] if q else None})
 
     if a.json:

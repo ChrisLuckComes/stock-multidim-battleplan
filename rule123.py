@@ -28,7 +28,7 @@ NASDAQ_HEADERS = {
 }
 
 
-def fetch_json_nasdaq(url, timeout=20, retries=3):
+def fetch_json_nasdaq(url, timeout=20, retries=2):
     """Nasdaq 官方 API 需要完整浏览器头 + Referer，否则 403。"""
     last = None
     for n in range(retries):
@@ -38,7 +38,8 @@ def fetch_json_nasdaq(url, timeout=20, retries=3):
                 return json.loads(r.read().decode("utf-8", "ignore"))
         except Exception as e:
             last = e
-            time.sleep(0.6 * (n + 1))
+            if n + 1 < retries:
+                time.sleep(0.3 * (n + 1))
     raise last
 
 
@@ -60,7 +61,7 @@ def is_ash(ticker: str) -> bool:
     return bool(re.fullmatch(r"\d{6}", ticker.strip()))
 
 
-def fetch_json(url, timeout=20, retries=3):
+def fetch_json(url, timeout=20, retries=2):
     last = None
     for n in range(retries):
         try:
@@ -69,22 +70,31 @@ def fetch_json(url, timeout=20, retries=3):
                 return json.loads(r.read().decode("utf-8"))
         except Exception as e:
             last = e
-            time.sleep(1.0 * (n + 1))
+            if n + 1 < retries:
+                time.sleep(0.3 * (n + 1))
     raise last
 
 
-def fetch_json_fallback(url, timeout=20, retries=3):
-    """https 握手被中间设备中断时自动降级 http 重试（东财实测：https 拒连、http 通）。"""
+def fetch_json_fallback(url, timeout=20, retries=2):
+    """东财优先走已验证可用的 HTTP，失败后再回退原协议。"""
+    primary = url
+    fallback = None
+    if url.startswith("https://") and ".eastmoney.com/" in url:
+        primary = "http://" + url[8:]
+        fallback = url
+    elif url.startswith("https://"):
+        fallback = "http://" + url[8:]
     try:
-        return fetch_json(url, timeout=timeout, retries=retries)
+        return fetch_json(primary, timeout=timeout, retries=retries)
     except Exception as e1:
-        if not url.startswith("https://"):
+        if fallback is None:
             raise
         try:
-            return fetch_json("http://" + url[8:], timeout=timeout, retries=retries)
+            return fetch_json(fallback, timeout=timeout, retries=1)
         except Exception as e2:
             raise RuntimeError(
-                f"https={type(e1).__name__}:{str(e1)[:50]} | http={type(e2).__name__}:{str(e2)[:50]}")
+                f"primary={type(e1).__name__}:{str(e1)[:50]} | "
+                f"fallback={type(e2).__name__}:{str(e2)[:50]}")
 
 
 def fetch_stooq_bars(sym):
@@ -226,6 +236,7 @@ def bars_from_nasdaq(sym, days=400):
 
 
 _EM_US_CACHE = {}
+_YAHOO_PROXY = None
 
 
 def em_us_secid(sym):
@@ -282,11 +293,15 @@ def _proxy_list():
     用显式的 WB_US_PROXY 覆盖，否则按常见客户端端口逐个探。
     """
     out = []
+    if _YAHOO_PROXY:
+        out.append(_YAHOO_PROXY)
     env = os.environ.get("WB_US_PROXY")
-    if env:
+    if env and env not in out:
         out.append(env)
     for p in (7897, 7890, 7891, 10809, 1080):
-        out.append(f"http://127.0.0.1:{p}")
+        proxy = f"http://127.0.0.1:{p}"
+        if proxy not in out:
+            out.append(proxy)
     return out
 
 
@@ -315,6 +330,7 @@ def bars_from_yahoo_min(sym, interval="5m", range_="1d"):
     """
     url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{sym.upper()}"
            f"?interval={interval}&range={range_}&includePrePost=false")
+    global _YAHOO_PROXY
     errs = []
     for proxy in _proxy_list():
         try:
@@ -352,6 +368,7 @@ def bars_from_yahoo_min(sym, interval="5m", range_="1d"):
         if not bars:
             errs.append(f"{proxy}=no_bars")
             continue
+        _YAHOO_PROXY = proxy
         return bars, None, {"session": "", "as_of": None, "prev_close": None,
                             "source": "yahoo_min", "proxy": proxy}
     raise RuntimeError(f"Yahoo 分钟线 {sym} 全部失败 → " + " | ".join(errs))

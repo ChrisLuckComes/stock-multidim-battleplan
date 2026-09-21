@@ -1332,6 +1332,19 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None):
         account = _CFG["us_account"]
     sym = sym.upper().strip()
     phase, ref_date = us_phase()
+    minute_cache = {}
+
+    def fetch_live_minutes(ticker):
+        if "bars" not in minute_cache:
+            try:
+                minute_cache["bars"] = bars_from_yahoo_min(
+                    ticker, interval=f"{min_scale}m", range_="1d")[0]
+            except Exception as e:
+                minute_cache["error"] = e
+                raise
+            minute_cache["source"] = "Yahoo（本地代理）"
+        return minute_cache["bars"]
+
     bars, spot, meta = bars_from_us(sym)
     meta = meta or {}
     if date:
@@ -1352,7 +1365,8 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None):
     # 盘中：先把今日未收盘 bar 并入再定结构。原实现只按昨收算 —— 突破当天
     # 模式/买区整体滞后一天（INTC 2026-09-17 已破 107.57，买区却还是 99.45~104.03
     # 的回踩位，三条盘中通道又全判「过期/不给」，输出只剩「一直等回踩」）。
-    bars, live_bar = merge_intraday_bar(sym, bars, meta, "US")
+    bars, live_bar = merge_intraday_bar(
+        sym, bars, meta, "US", fetch=fetch_live_minutes)
     last = bars[-1]
     atr_v = atr14(bars)
 
@@ -1573,19 +1587,26 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None):
     if US_BURST_DROP_TAIL:
         print(f"  注：北京 04:00（美东 16:00）收盘集合竞价根不参与判定"
               f"（制度性巨量，会误报为盘中启动）")
-    raw, src, errs = None, "", []
-    try:
-        raw = bars_from_em_us(sym, klt=min_scale, lmt=400)[0]
-        src = "东财 http"
-    except Exception as e:
-        errs.append(f"东财={type(e).__name__}")
+    raw = minute_cache.get("bars")
+    src = minute_cache.get("source", "")
+    errs = []
+    if not raw:
+        try:
+            raw = bars_from_em_us(sym, klt=min_scale, lmt=400)[0]
+            src = "东财 http"
+        except Exception as e:
+            errs.append(f"东财={type(e).__name__}")
     if not raw:
         # 东财是唯一提供美股分钟线的国内源，批量取数后会被整站限流 → 退 Yahoo(代理)
-        try:
-            raw = bars_from_yahoo_min(sym, interval=f"{min_scale}m", range_="5d")[0]
-            src = "Yahoo（本地代理）"
-        except Exception as e:
-            errs.append(f"yahoo={type(e).__name__}:{str(e)[:70]}")
+        cached_error = minute_cache.get("error")
+        if cached_error is not None:
+            errs.append(f"yahoo={type(cached_error).__name__}:{str(cached_error)[:70]}")
+        else:
+            try:
+                raw = bars_from_yahoo_min(sym, interval=f"{min_scale}m", range_="5d")[0]
+                src = "Yahoo（本地代理）"
+            except Exception as e:
+                errs.append(f"yahoo={type(e).__name__}:{str(e)[:70]}")
     if not raw:
         print(f"  分钟线取数失败：{' | '.join(errs)}")
         print("  → 盘中通道不可用（东财限流时依赖本地代理；可用 WB_US_PROXY 指定端口）")

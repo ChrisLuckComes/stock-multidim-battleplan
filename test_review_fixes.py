@@ -1185,20 +1185,34 @@ def test_probe_us_runs_end_to_end():
         bars.append(_bar(f"2026-{i // 28 + 1:02d}-{i % 28 + 1:02d}",
                          px - 0.3, px + 0.5, px - 0.6, px, 1e6))
     orig = (P.bars_from_us, P.bars_from_em_us, P.bars_from_yahoo_min)
+    minute_calls = []
+    mins = [
+        _bar(f"2026-09-21 {21 + i // 6:02d}:{30 + i % 6 * 5:02d}",
+             bars[-1]["c"], bars[-1]["c"] + 0.5, bars[-1]["c"] - 0.4,
+             bars[-1]["c"] + 0.2, 10000 + i * 100)
+        for i in range(6)
+    ]
 
     def _boom(*a, **k):
         raise RuntimeError("stubbed: no network in tests")
 
-    P.bars_from_us = lambda s: (bars, bars[-1]["c"], {"prev_close": bars[-2]["c"]})
+    P.bars_from_us = lambda s: (
+        bars, bars[-1]["c"],
+        {"prev_close": bars[-2]["c"], "session": "Open",
+         "as_of": "Sep 21, 2026 10:00 AM ET"})
     P.bars_from_em_us = _boom
-    P.bars_from_yahoo_min = _boom
+    def _minutes(*a, **k):
+        minute_calls.append((a, k))
+        return mins, None, {}
+    P.bars_from_yahoo_min = _minutes
     try:
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             P.probe_us("TEST")          # 崩了就是回归
         txt = buf.getvalue()
-        assert "一、预案单" in txt, txt
+        assert "一、盘中口径" in txt, txt
         assert "UnboundLocalError" not in txt
+        assert len(minute_calls) == 1, "盘中日 K 合成与后续分析应复用同一次分钟线"
     finally:
         P.bars_from_us, P.bars_from_em_us, P.bars_from_yahoo_min = orig
 

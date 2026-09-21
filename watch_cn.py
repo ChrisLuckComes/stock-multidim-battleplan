@@ -19,10 +19,12 @@
   python watch_cn.py 688758 300759   # 临时指定代码
 """
 import argparse
+import concurrent.futures as cf
 import datetime
 import json
 import os
 import sys
+import threading
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -37,6 +39,9 @@ from rule123 import build_ev, plan_entry, atr14  # noqa: E402
 
 CFG = os.path.join(HERE, "watch_cn.json")
 REPORTS = os.path.join(HERE, "reports")
+MAX_WORKERS = 6
+_BARS_CACHE = {}
+_BARS_LOCK = threading.Lock()
 
 
 # ─────────────────── 板块归并（板块共振分组用） ───────────────────
@@ -68,6 +73,21 @@ def load_cfg():
         return json.load(f)
 
 
+def get_bars(prefix, code, n=140):
+    key = (prefix, code)
+    with _BARS_LOCK:
+        cached = _BARS_CACHE.get(key)
+    if cached is not None and cached[0] >= n:
+        return cached[1]
+    bars = scanner.sina_kline(prefix, code, n=n)
+    if bars:
+        with _BARS_LOCK:
+            current = _BARS_CACHE.get(key)
+            if current is None or current[0] < n:
+                _BARS_CACHE[key] = (n, bars)
+    return bars
+
+
 # ─────────────────────────── 单票分析 ───────────────────────────
 def analyze_one(item):
     """返回 dict；err 非空表示失败。引擎口径与 scan_all/scanner.analyze 一致。"""
@@ -75,7 +95,7 @@ def analyze_one(item):
     r = {"code": code, "name": name, "prefix": prefix, "theme": item.get("theme"),
          "pos": item.get("pos"), "flag": item.get("flag"), "err": None}
     try:
-        bars = scanner.sina_kline(prefix, code, n=140)
+        bars = get_bars(prefix, code, n=140)
     except Exception as e:
         r["err"] = f"{type(e).__name__}: {e}"
         return r
@@ -179,7 +199,7 @@ def analyze_one(item):
 # ─────────────────────────── 温度计 / 指数 ───────────────────────────
 def quote_of(code, prefix):
     try:
-        bars = scanner.sina_kline(prefix, code, n=6)
+        bars = get_bars(prefix, code, n=6)
         if not bars or len(bars) < 2:
             return None
         return {"px": round(bars[-1]["c"], 2),
@@ -395,7 +415,12 @@ def main():
         want = set(a.codes)
         pool = [p for p in pool if p["code"] in want]
 
-    rows = [analyze_one(p) for p in pool]
+    workers = min(MAX_WORKERS, len(pool))
+    if workers:
+        with cf.ThreadPoolExecutor(max_workers=workers) as ex:
+            rows = list(ex.map(analyze_one, pool))
+    else:
+        rows = []
     # ★ 板块共振聚合（2026-09-20 用户指出：「对板块强度有要求，能提高胜率，
     #   大部分是同时启动的」）。引擎单票判定不了板块，故在批处理层统计：
     #   同一**粗粒度板块**内当日有多少只票同时给出 T0 信号 —— 该数值越高，共振越强。
@@ -419,16 +444,25 @@ def main():
         r["sector_resonance"] = (
             "强" if len(peers) >= 3 else ("中" if len(peers) == 2 else ("弱" if len(peers) == 1 else None))
         )
+    sentiment_cfg = cfg.get("sentiment", [])
+    index_cfg = cfg.get("indices", [])
+    market_cfg = sentiment_cfg + index_cfg
+    market_workers = min(MAX_WORKERS, len(market_cfg))
+    if market_workers:
+        with cf.ThreadPoolExecutor(max_workers=market_workers) as ex:
+            market_quotes = list(ex.map(
+                lambda item: quote_of(item["code"], item["prefix"]), market_cfg))
+    else:
+        market_quotes = []
+
     senti = []
-    for s in cfg.get("sentiment", []):
-        q = quote_of(s["code"], s["prefix"])
+    for s, q in zip(sentiment_cfg, market_quotes[:len(sentiment_cfg)]):
         st = {**s, "px": q["px"] if q else None,
               "chg": q["chg"] if q else None}
         st["read_txt"] = read_sentiment(st)
         senti.append(st)
     idx = []
-    for i in cfg.get("indices", []):
-        q = quote_of(i["code"], i["prefix"])
+    for i, q in zip(index_cfg, market_quotes[len(sentiment_cfg):]):
         idx.append({**i, "px": q["px"] if q else None,
                     "chg": q["chg"] if q else None})
 
