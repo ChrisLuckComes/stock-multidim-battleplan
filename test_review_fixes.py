@@ -1208,9 +1208,11 @@ def test_probe_us_runs_end_to_end():
     try:
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            P.probe_us("TEST")          # 崩了就是回归
+            result = P.probe_us("TEST")          # 崩了就是回归
         txt = buf.getvalue()
         assert "一、盘中口径" in txt, txt
+        assert "三·A、当日分钟量价复盘" in txt, txt
+        assert result["minute_review"]["trade_date"] == "2026-09-21"
         assert "UnboundLocalError" not in txt
         assert len(minute_calls) == 1, "盘中日 K 合成与后续分析应复用同一次分钟线"
     finally:
@@ -1593,7 +1595,7 @@ def test_skill_requires_volume_price_report():
     for text in required:
         assert text in report, f"research-report.md 缺少量价报告约束：{text}"
     assert "research-report.md" in skill
-    assert "每票行情只取一次" in skill
+    assert "主标的行情只取一次" in skill
 
 
 def test_skill_uses_progressive_disclosure():
@@ -1615,6 +1617,18 @@ def test_skill_uses_progressive_disclosure():
         path = root / "references" / name
         assert path.exists() and path.stat().st_size > 200
         assert len(path.read_text(encoding="utf-8").splitlines()) < 500
+
+
+def test_skill_uses_lightweight_peer_comparison_by_default():
+    root = Path(__file__).resolve().parent
+    skill = (root / "SKILL.md").read_text(encoding="utf-8")
+    data_ops = (root / "references" / "data-operations.md").read_text(encoding="utf-8")
+    assert "同行默认轻量对照" in skill
+    assert "不得对同行运行完整单票流程" in skill
+    assert "不跑同行 `rule123`、分钟线、完整基本面与逐项扫雷" in data_ops
+    assert "显式要求同行完整分析时才升级" in data_ops
+    source = (root / "probe_intraday.py").read_text(encoding="utf-8")
+    assert 'ap.add_argument("--us-account", type=float' in source
 
 
 if __name__ == "__main__":
@@ -1682,6 +1696,7 @@ if __name__ == "__main__":
     test_vp_regime_needs_full_window()
     test_skill_requires_volume_price_report()
     test_skill_uses_progressive_disclosure()
+    test_skill_uses_lightweight_peer_comparison_by_default()
     test_ma_anchor_trend_gate()
     test_us_lots_account_cap_only()
     test_account_config_env_override()

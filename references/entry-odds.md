@@ -185,7 +185,7 @@
 
    - **已建立的滚动页**：天元宠物 301335 vs 德邦科技 688035 优先级对比 → nodeId `hcrI9eYvHHzG6C8RSe3YMM`（kind=web）；`https://www.workbuddy.cn/space/d/hcrI9eYvHHzG6C8RSe3YMM`
    - **更新方式**：走资料库 page 编辑流程（开事务 → 拉产物 → 本地改 → **只上传改动文件** → 提交）。**禁止为同一对比新建重复页**；`pnid` 用被改元素的 `data-page-node-id`（改页脚即用页脚节点）。
-   - **本地 HTML 仍是工作底稿**（`C:\Users\luoyunlai\stock-reports\`），云端页是交付面；两者不一致时**以云端下载内容为编辑基线**。
+   - **本地 HTML 仍是工作底稿**（`$HOME\stock-reports\`），云端页是交付面；两者不一致时**以云端下载内容为编辑基线**。
 
 ### 与双轨打分
 

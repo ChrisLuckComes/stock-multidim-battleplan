@@ -1625,6 +1625,54 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None):
     print(f"  开盘 {op:.2f}   最新 {mins[-1]['c']:.2f}"
           f"（{(mins[-1]['c'] - op) / op * 100:+.2f}% vs 开盘，"
           f"距开盘 {off_now} 分钟）")
+    day_high = max(mins, key=lambda b: b["h"])
+    day_low = min(mins, key=lambda b: b["l"])
+    close_px = mins[-1]["c"]
+    day_range = day_high["h"] - day_low["l"]
+    close_loc = (close_px - day_low["l"]) / day_range if day_range else 0.5
+    up_volume = sum(b["v"] for b in mins if b["c"] >= b["o"])
+    down_volume = sum(b["v"] for b in mins if b["c"] < b["o"])
+    up_down_ratio = up_volume / down_volume if down_volume else None
+    tail_bars = max(1, 30 // min_scale)
+    total_volume = sum(b["v"] for b in mins)
+    tail_volume = sum(b["v"] for b in mins[-tail_bars:])
+    tail_share = tail_volume / total_volume if total_volume else 0
+    print()
+    print(f"── 三·A、当日分钟量价复盘（复用上述 {min_scale} 分钟线） ──")
+    print(f"  高点 {day_high['h']:.2f}@{day_high['d'][11:16]}  "
+          f"低点 {day_low['l']:.2f}@{day_low['d'][11:16]}  "
+          f"振幅 {day_range / op * 100:.2f}%  收盘位置 {close_loc * 100:.1f}%")
+    ratio_text = f"{up_down_ratio:.2f}" if up_down_ratio is not None else "∞"
+    print(f"  上涨分钟量/下跌分钟量 {ratio_text}  "
+          f"尾盘30分钟量占比 {tail_share * 100:.1f}%")
+    segments = []
+    if len(mins) > tail_bars * 2:
+        middle = (len(mins) + tail_bars) // 2
+        segments = [
+            ("前30分钟", mins[:tail_bars]),
+            ("盘中前段", mins[tail_bars:middle]),
+            ("盘中后段", mins[middle:-tail_bars]),
+            ("尾盘30分钟", mins[-tail_bars:]),
+        ]
+    for label, part in segments:
+        if part:
+            print(f"  {label}：{part[0]['o']:.2f}→{part[-1]['c']:.2f}  "
+                  f"高 {max(b['h'] for b in part):.2f} / "
+                  f"低 {min(b['l'] for b in part):.2f}  "
+                  f"量 {sum(b['v'] for b in part):,.0f}")
+    out["minute_review"] = {
+        "trade_date": td,
+        "open": op,
+        "high": day_high["h"],
+        "high_at": day_high["d"][11:16],
+        "low": day_low["l"],
+        "low_at": day_low["d"][11:16],
+        "close": close_px,
+        "amplitude_pct": round(day_range / op * 100, 2),
+        "close_location_pct": round(close_loc * 100, 1),
+        "up_down_volume_ratio": round(up_down_ratio, 2) if up_down_ratio is not None else None,
+        "tail_30m_volume_share_pct": round(tail_share * 100, 1),
+    }
     hits = vol_bursts(mins, drop_tail=US_BURST_DROP_TAIL)
     c1 = off_now >= US_BURST_OFFSET
     print(f"  [1 时间窗 ] {'✓' if c1 else '✗'} 当前距开盘 {off_now} 分钟"
@@ -1847,7 +1895,7 @@ if __name__ == "__main__":
     ap.add_argument("--min-scale", type=int, default=5)
     ap.add_argument("--replay", action="store_true", help="强制按盘中口径回放")
     ap.add_argument("--until", default=None, help="截断到 HH:MM（模拟当时时点）")
-    ap.add_argument("--us-account", type=int, default=_CFG["us_account"],
+    ap.add_argument("--us-account", type=float, default=_CFG["us_account"],
                     help="美股账户美元（默认 US_ACCOUNT / .env / 5000）")
     ap.add_argument("--date", default=None,
                     help="回放指定交易日 YYYY-MM-DD（美股；只用该日之前的日线定结构）")
