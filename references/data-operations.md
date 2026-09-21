@@ -124,3 +124,43 @@ ATR：Wilder ATR14。
     - 口径与耗时对照见 [report-generation.md](report-generation.md)。
 
 ---
+
+## 账户 / 仓位额度（env 驱动，2026-09-21）
+
+**单一真源 = `account_config.py`**，读取优先级 **进程 env > 仓库根 `.env` > 内置 `DEFAULTS`**。
+脚本里不许再出现 `account=50000`、`/ 50000`、`CAPITAL = 100000` 这类字面量。
+
+| env 键 | 含义 | 默认 |
+|---|---|---|
+| `ASH_PRIMARY` | A 股**主力**额度（常规信号可用） | 50000 |
+| `ASH_RESERVE` | A 股**后备**额度（只有「突破预案单」级信号够格动用） | 50000 |
+| `ASH_TOTAL` | A 股**总仓位上限**；可写可不写，写了**必须 = 主 + 后**，否则启动即报错 | 100000（推导） |
+| `ASH_SINGLE_ABS` | 单笔绝对额硬顶（与「总额度」是两回事：单笔封顶 5 万，组合可到 10 万） | 50000 |
+| `ASH_ACCOUNT` | 单票探测账户基数 = **1.5% 风险预算 / 股数计算的分母** | 50000 |
+| `ASH_RISK_PCT` | A 股单笔风险预算 | 0.015 |
+| `ASH_CASH` | 可用现金（可选）；填了就按「付掉持仓占用后的现金」再封顶一次股数 | 空 = 不限 |
+| `US_ACCOUNT` | 美股账户美元 | 4694.80 |
+| `US_RISK_PCT` | 美股单笔风险预算 | 0.015 |
+
+★ **两个口径别混**：`ASH_ACCOUNT` 是「风险预算 / 股数的分母」，**不是可动用资金**；
+能动的钱看 `ASH_PRIMARY + ASH_RESERVE`。报告里两个占比都要写（占总上限 / 占主力层）。
+
+**为什么不再写死在代码里**：旧写法 `ASH_PRIMARY = _CFG[...]` 是 import 时快照 ——
+配置改了以后，报告里印的数字变了、**闸门却还按旧值走**，两边悄悄分叉。
+现在 `probe_intraday` 用模块级 `__getattr__`：`P.ASH_PRIMARY` 每次读都取当前生效值。
+
+**改配置不用改代码、也不用重启**：`cfg()` 每次调用前先算一次「环境指纹」
+（相关 env 值 + `.env` 的 mtime/size，纯内存 + 一次 stat，微秒级），指纹变了就自动重建。
+所以改完 env 或存盘 `.env` 后**立即生效**。要强制重读用 `account_config.reload_cfg()`；
+`python account_config.py` 直接打印当前生效值与来源（`[env] / [dotenv] / [default]`）。
+
+- ⚠️ **函数体内不能裸用这些名字**（如 `print(f"{ASH_RISK_PCT}")`）：`__getattr__` 只对
+  **属性访问**生效，函数体里的是 `LOAD_GLOBAL`，不触发它 → `NameError`。函数内部用
+  `ash_risk_pct()` / `us_risk_pct()`（probe_intraday 提供）或 `_AC.cfg()["…"]`。
+  已用 AST 测试钉死（`test_no_bare_account_globals_in_probe`）。
+- 见到 `NameError: name 'ASH_XXX' is not defined` 就是这个原因，不是配置没读到。
+- 股池 json（`watch_cn.json` / `watch_us.json` / `pool_us.json`）**不再存 account / risk_pct**：
+  改口径请改 `.env`；json 里若临时写了 `account`，`pool_us` 会当作显式覆盖并打印不一致提醒。
+- CLI `--account` / `--us-account` / `--cash` 仍可单次覆盖（不落配置、不影响下一次）。
+
+---

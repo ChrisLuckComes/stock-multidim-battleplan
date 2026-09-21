@@ -23,7 +23,7 @@ from rule123 import (  # noqa: E402
     bars_from_us, bars_from_em_us, bars_from_yahoo_min, stop_plan, pivots,
     key_break_level, merge_intraday_bar, nasdaq_info,
 )
-from account_config import load_account_config  # noqa: E402
+import account_config as _AC  # noqa: E402
 import bars_source as _BS  # noqa: E402
 
 UA = {"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn/"}
@@ -36,17 +36,60 @@ ASH_LOT_MAIN = 100     # 主板 60/00、创业板 300/301
 ASH_LOT_STAR = 200     # 科创板 688/689
 
 # ── 账户 / 组合层仓位（人与钱 → env / .env；策略常数仍写死）──
-# 旧的「账户 × 30%」单笔仓位闸门已移除（老罗 2026-09-17：单笔不超过 5 万即可），
-# 单笔上限统一由绝对额 ASH_SINGLE_ABS 控制。注意代价：止损越紧，风险预算法给的
-# 股数越大，失去百分比闸门后仓位会显著变重（止损 0.46×ATR 的票可吃掉 ~88% 账户）。
+# 旧「账户 × 30%」单笔闸门已移除（老罗 2026-09-17：单笔不超过 5 万即可），单笔
+# 上限统一由绝对额 ASH_SINGLE_ABS 控制。代价要记住：风险预算法的股数与每股风险
+# 成反比，失去百分比闸门后止损越紧仓位越重（0.46×ATR 的止损可吃掉 ~88% 账户）。
 # 其上再叠一层「总仓位」约束：以前只约束单笔，多笔叠加无人管（4 笔各 28% = 112%）。
-_CFG = load_account_config()
-ASH_RISK_PCT = _CFG["ash_risk_pct"]
-ASH_PRIMARY = _CFG["ash_primary"]
-ASH_RESERVE = _CFG["ash_reserve"]
-ASH_TOTAL = _CFG["ash_total"]
-ASH_SINGLE_ABS = _CFG["ash_single_abs"]
+#
+# ★ 这些值一律从 account_config 取（env > .env > DEFAULTS），**不在本文件写死**；
+#   且做成「属性访问时才读」（模块级 __getattr__），所以改了 .env / env 之后
+#   调 reload_cfg() 或起新进程即生效，不必改代码。
+#   旧写法 `ASH_PRIMARY = _CFG[...]` 是 import 时快照，会和运行期真正生效的配置
+#   悄悄分叉（报告里印 5 万、实际闸门按 8 万走）—— 别再改回去。
 ASH_RESERVE_TIER = "突破预案单"   # 唯一够格动用备用的信号（策略档位，不进 env）
+
+_ASH_DYNAMIC = {
+    "ASH_ACCOUNT": "ash_account",
+    "ASH_PRIMARY": "ash_primary",
+    "ASH_RESERVE": "ash_reserve",
+    "ASH_TOTAL": "ash_total",
+    "ASH_SINGLE_ABS": "ash_single_abs",
+    "ASH_RISK_PCT": "ash_risk_pct",
+    "US_ACCOUNT": "us_account",
+    "US_RISK_PCT": "us_risk_pct",
+    "ASH_CASH": "ash_cash",
+}
+
+
+def __getattr__(name):
+    """模块级动态属性：`P.ASH_PRIMARY` 每次读都取**当前生效**的配置。
+
+    只在常规属性查找失败时被调用，所以 ASH_RESERVE_TIER 这类真常量照走 globals()。
+    """
+    if name == "_CFG":                 # 向后兼容旧的 P._CFG["ash_account"] 写法
+        return _AC.cfg()
+    key = _ASH_DYNAMIC.get(name)
+    if key is None:
+        raise AttributeError("module %r has no attribute %r" % (__name__, name))
+    return _AC.cfg()[key]
+
+
+def reload_cfg():
+    """重读 .env / env 并刷新缓存（长驻进程里改了配置时调）。"""
+    return _AC.reload_cfg()
+
+
+# ★ 函数体内**不能**裸用 ASH_RISK_PCT 这类名字：模块级 __getattr__ 只在属性访问
+#   （hash(P.ASH_RISK_PCT)）时被触发，函数体里的是 LOAD_GLOBAL，不走 __getattr__
+#   → 直接 NameError。所以函数内部统一走下面两个取值器（每次现取）。
+def ash_risk_pct():
+    """A 股单笔风险预算（ASH_RISK_PCT / .env），默认 1.5%。"""
+    return _AC.cfg()["ash_risk_pct"]
+
+
+def us_risk_pct():
+    """美股单笔风险预算（US_RISK_PCT / .env），默认 1.5%。"""
+    return _AC.cfg()["us_risk_pct"]
 
 
 def _get(url, gbk=False):
@@ -239,20 +282,25 @@ def ash_single_cap(account):
     """
     if not account:
         return None
-    return min(account, ASH_SINGLE_ABS)
+    return min(account, _AC.cfg()["ash_single_abs"])
 
 
 def ash_lots(account, entry, stop, code,
-             risk_pct=ASH_RISK_PCT, cap_amt=None):
+             risk_pct=None, cap_amt=None):
     """A 股风险预算法定股数（与美股 us_lots 同构，唯一差别是最小申报单位）。
 
     股数 = min(账户 × risk_pct / 每股风险, 单笔金额上限 / 价格)，
     再按 `ash_round_qty` 取整（科创板 200 起 1 股递增 / 其余 100 的整数倍）。
     单笔金额上限见 `ash_single_cap`（30% 闸门已移除，只剩 5 万绝对额）。
 
+    `risk_pct` 默认从配置读（ASH_RISK_PCT）——不写成默认参数，否则又变回
+    import 时快照。
+
     若 1 手即超单笔硬顶 → 返回 None（调用方须明确拒绝并说明是「钱不够」，
     不是拍脑袋的软规则）；这样「点位到了买不到」只可能因为硬约束。
     """
+    if risk_pct is None:
+        risk_pct = _AC.cfg()["ash_risk_pct"]
     lot = first_lot_of(code)
     if not account or not entry or not isinstance(stop, (int, float)):
         return None
@@ -266,7 +314,7 @@ def ash_lots(account, entry, stop, code,
     return n
 
 
-def ash_risk_warning(account, entry, stop, n, risk_pct=ASH_RISK_PCT):
+def ash_risk_warning(account, entry, stop, n, risk_pct=None):
     """本笔实际风险超出 1.5% 预算时的警告文案；未超返回 None。
 
     正常路径不会超（股数本就由预算算出再向下取整）。唯一的超预算来源是
@@ -274,6 +322,8 @@ def ash_risk_warning(account, entry, stop, n, risk_pct=ASH_RISK_PCT):
     建不了仓。旧的 30% 闸门会把这类票判成「结构性不可交易」挡掉，闸门移除后
     它们全部放行 —— 只剩这行提示。按老罗 2026-09-17 的口径：只警告，不拦。
     """
+    if risk_pct is None:
+        risk_pct = _AC.cfg()["ash_risk_pct"]
     if not account or not n or not isinstance(stop, (int, float)):
         return None
     if not entry or entry <= stop:
@@ -324,39 +374,43 @@ def ash_portfolio_gate(code, entry, lots, held_amt=0.0, use_reserve=False):
     （→ 可交易价上限随之抬高：主板/创业板 500 元、科创板 250 元，见 ash_price_ceiling）。
 
     规则（按顺序）：
-      1. 单笔金额 ≤ ASH_SINGLE_ABS（50,000）—— 绝对额硬顶
-      2. 主力层：已持 + 本笔 ≤ ASH_PRIMARY（50,000）
+      1. 单笔金额 ≤ ASH_SINGLE_ABS（默认为 50,000）—— 绝对额硬顶
+      2. 主力层：已持 + 本笔 ≤ ASH_PRIMARY（默认为 50,000）
       3. 超出主力层 → 只有 use_reserve=True（信号等级 = ASH_RESERVE_TIER）才动备用，
-         且已持 + 本笔 ≤ ASH_TOTAL（100,000）
+         且已持 + 本笔 ≤ ASH_TOTAL（默认为 100,000）
       4. 额度不够 1 手 → 明确拒绝，并说清是「额度」不够而不是规则不让买
 
+    额度每次调用现取（account_config / env / .env），改了配置不必改代码。
     lots 传 0/None = 只查额度（返回该笔最大可买股数）。
     返回 dict：allowed / lots / amt / layer / cap_amt / room / reason
     """
+    c = _AC.cfg()
+    single_abs, primary = c["ash_single_abs"], c["ash_primary"]
+    reserve, total = c["ash_reserve"], c["ash_total"]
     lot = first_lot_of(code)
     empty = {"allowed": False, "lots": 0, "amt": 0.0, "layer": None,
              "cap_amt": 0.0, "room": 0.0, "reason": ""}
     if not entry or entry <= 0:
         return dict(empty, reason="无有效价格")
-    total_cap = ASH_TOTAL if use_reserve else ASH_PRIMARY
+    total_cap = total if use_reserve else primary
     room = total_cap - (held_amt or 0.0)
     if room <= 0:
         if use_reserve:
-            return dict(empty, reason=f"总仓位 {ASH_TOTAL:,} 元已满，不再加")
+            return dict(empty, reason=f"总仓位 {total:,} 元已满，不再加")
         return dict(empty, reason=(
-            f"主力层 {ASH_PRIMARY:,} 元已满 —— 备用 {ASH_RESERVE:,} 元只在"
+            f"主力层 {primary:,} 元已满 —— 备用 {reserve:,} 元只在"
             f"「{ASH_RESERVE_TIER}」级信号上启用，本信号不够格"))
-    cap_amt = min(ASH_SINGLE_ABS, room)
+    cap_amt = min(single_abs, room)
     n = int(cap_amt // entry)
     if lots:
         n = min(n, int(lots))
     n = ash_round_qty(n, code)
     if n <= 0:
         return dict(empty, cap_amt=round(cap_amt, 2), room=round(room, 2), reason=(
-            f"剩余额度 {cap_amt:,.0f} 元（单笔硬顶 {ASH_SINGLE_ABS:,}）买不到 1 手："
+            f"剩余额度 {cap_amt:,.0f} 元（单笔硬顶 {single_abs:,}）买不到 1 手："
             f"{lot} × {entry:,.2f} = {lot * entry:,.0f} 元"))
     amt = round(n * entry, 2)
-    layer = "main" if (held_amt or 0.0) + amt <= ASH_PRIMARY else "reserve"
+    layer = "main" if (held_amt or 0.0) + amt <= primary else "reserve"
     return {"allowed": True, "lots": n, "amt": amt, "layer": layer,
             "cap_amt": round(cap_amt, 2), "room": round(room, 2), "reason": ""}
 
@@ -642,8 +696,13 @@ def _print_vp_regime(vp, section_no):
         print("  结论      : 中性（涨跌量比不极端）→ 仓位照旧，盯死证伪位")
 
 
-def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
-          until=None, us_account=5000, date=None, data_file=None, market_data=None):
+def probe(code, qty=None, account=None, asof=None, min_scale=5, replay=False,
+          until=None, us_account=None, date=None, data_file=None, market_data=None):
+    # ★ 默认值现取（不在签名里写 50000 / 5000）：配置改了不必改代码
+    if account is None:
+        account = _AC.cfg()["ash_account"]
+    if us_account is None:
+        us_account = _AC.cfg()["us_account"]
     if market_data is None and data_file:
         market_data = load_daily_snapshot(data_file)
     if not (code.isdigit() and len(code) == 6):
@@ -774,7 +833,7 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
         if cap is not None:
             print(f"  买入上限: {cap:.2f}   ← 高于此价，盈亏比跌破 {rc['rr']:.1f}:1，不挂")
         if n:
-            print(f"  数量    : {n} 股（风险预算法 {ASH_RISK_PCT * 100:.1f}%，"
+            print(f"  数量    : {n} 股（风险预算法 {ash_risk_pct() * 100:.1f}%，"
                   f"单笔硬顶 {ash_single_cap(account):,.0f} 元）")
             _w = ash_risk_warning(account, limit, hard, n)
             if _w:
@@ -859,7 +918,7 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
                     risk_amt = n * (bo["trigger"] - bo["stop"])
                     print(f"  数量    : {n} 股 = {n * bo['trigger']:,.0f} 元"
                           f"（账户 {account:,} 的 {n * bo['trigger'] / account * 100:.1f}%"
-                          f"，风险预算法 {ASH_RISK_PCT * 100:.1f}%）")
+                          f"，风险预算法 {ash_risk_pct() * 100:.1f}%）")
                     _w = ash_risk_warning(account, bo["trigger"], bo["stop"], n)
                     if _w:
                         print(f"  {_w}")
@@ -928,7 +987,7 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
                 if n:
                     print(f"     先手 {n} 股 = {n * trigger:,.0f} 元"
                           f"（账户 {account:,} 的 {n * trigger / account * 100:.1f}%"
-                          f"，风险预算法 {ASH_RISK_PCT * 100:.1f}%）")
+                          f"，风险预算法 {ash_risk_pct() * 100:.1f}%）")
                     print(f"     止损 {stop:.2f}（启动前低点 {pre_l:.2f} −0.10×ATR，"
                           f"距买入 {risk_pct:.1f}%），最大亏 {n * (trigger - stop):,.0f} 元")
                     _w = ash_risk_warning(account, trigger, stop, n)
@@ -1033,7 +1092,7 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
                     if n:
                         print(f"     先手 {n} 股 = {n * entry:,.0f} 元"
                               f"（账户 {account:,} 的 {n * entry / account * 100:.1f}%"
-                              f"，风险预算法 {ASH_RISK_PCT * 100:.1f}%）"
+                              f"，风险预算法 {ash_risk_pct() * 100:.1f}%）"
                               f"   最大亏 {n * risk:,.0f} 元"
                               f"（账户 {n * risk / account * 100:.2f}%）")
                         _w = ash_risk_warning(account, entry, stop_k, n)
@@ -1123,7 +1182,7 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
                 if n:
                     print(f"     先手 {n} 股 = {n * entry:,.0f} 元"
                           f"（账户 {account:,} 的 {n * entry / account * 100:.1f}%"
-                          f"，风险预算法 {ASH_RISK_PCT * 100:.1f}%）"
+                          f"，风险预算法 {ash_risk_pct() * 100:.1f}%）"
                           f"   最大亏 {n * risk:,.0f} 元"
                           f"（账户 {n * risk / account * 100:.2f}%）")
                     _w = ash_risk_warning(account, entry, stop_c, n)
@@ -1182,7 +1241,7 @@ def probe(code, qty=None, account=50000, asof=None, min_scale=5, replay=False,
 #   3. 时段错配  → 盘中 = 北京 21:30–04:00，盘前 = 北京 16:00–21:30（正好是白天）。
 #                 故美股多一条 A 股没有的「盘前通道」。
 # ============================================================
-US_RISK_PCT = _CFG["us_risk_pct"]
+# 美股风险预算 / 账户同样走 account_config（US_RISK_PCT / US_ACCOUNT = 动态属性）。
 US_PRE_BJ = 16 * 60        # 北京 16:00 = 美东 04:00（盘前开始，夏令时）
 US_OPEN_BJ = 21 * 60 + 30  # 北京 21:30 = 美东 09:30
 US_CLOSE_BJ = 4 * 60       # 北京 04:00 = 美东 16:00
@@ -1366,12 +1425,15 @@ def bo_gap_cancel(open_px, bo, atr_v):
     return None
 
 
-def us_lots(account, entry, stop, risk_pct=US_RISK_PCT):
+def us_lots(account, entry, stop, risk_pct=None):
     """T+0 风险预算法定股数（美股最小 1 股，无 100 股整手约束）。
 
     股数 = 账户 × risk_pct / 每股风险，再用「账户 / 价格」夹上限。
     无额外单笔比例闸门：只要买得起（不超过账户全额）即可。
+    risk_pct 默认从配置现取（US_RISK_PCT），不写成默认参数（那是 import 时快照）。
     """
+    if risk_pct is None:
+        risk_pct = _AC.cfg()["us_risk_pct"]
     if not account or not entry or stop is None or entry <= stop:
         return None
     cap = int(account / entry)
@@ -1445,7 +1507,7 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None,
              data_file=None, market_data=None):
     """美股版：收盘后预案 + 盘前通道 + 盘中量能突变（T+0 口径）。"""
     if account is None:
-        account = _CFG["us_account"]
+        account = _AC.cfg()["us_account"]
     sym = sym.upper().strip()
     phase, ref_date = us_phase()
     minute_cache = {}
@@ -1562,7 +1624,7 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None,
     if plan.get("note"):
         print(f" note       : {plan['note']}")
     print(f" 口径       : T+0 可当日进出 ｜ 无涨跌停（硬止损兜底）｜ 单笔风险预算"
-          f" {US_RISK_PCT * 100:.1f}%（${account * US_RISK_PCT:,.0f}）｜ 仓位上限"
+          f" {us_risk_pct() * 100:.1f}%（${account * us_risk_pct():,.0f}）｜ 仓位上限"
           f" 账户全额 ${account:,.0f}（无额外比例闸门）")
 
     out = {"code": sym, "market": "US", "session": sess or phase,
@@ -1616,7 +1678,7 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None,
             if hard is not None:
                 print(f"  最大亏损: ${n * (limit - hard):,.0f}"
                       f"（账户 {n * (limit - hard) / account * 100:.2f}%，"
-                      f"预算 {US_RISK_PCT * 100:.1f}%）")
+                      f"预算 {us_risk_pct() * 100:.1f}%）")
         print(f"  止损    : 结构={defend}（收盘破 · 不用盯盘） / 硬={hard}（盘中触价 · 需盯盘或券商条件单）")
         if z.get("hard_note"):
             print(f"  止损锚  : {z['hard_note']}")
@@ -1940,7 +2002,7 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None,
                           f"（账户 ${account:,} 的 {n * entry / account * 100:.1f}%）"
                           f"   最大亏 ${n * risk:,.0f}"
                           f"（账户 {n * risk / account * 100:.2f}%，预算"
-                          f" {US_RISK_PCT * 100:.1f}%）")
+                          f" {us_risk_pct() * 100:.1f}%）")
                 out["level_break"] = {"anchor": K, "kind": kb["kind"],
                                       "at": b["d"][11:16], "entry": entry,
                                       "stop": stop_k, "risk": round(risk, 2),
@@ -2011,7 +2073,7 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None,
                           f"（账户 ${account:,} 的 {n * entry / account * 100:.1f}%）"
                           f"   最大亏 ${n * risk:,.0f}"
                           f"（账户 {n * risk / account * 100:.2f}%，预算"
-                          f" {US_RISK_PCT * 100:.1f}%）")
+                          f" {us_risk_pct() * 100:.1f}%）")
                 print("     T+0：破位即走，不必留到次日")
                 out["pullback"] = {"state": "ok", "at": pc["at"], "S": S,
                                    "entry": entry, "stop": stop_c, "low": low,
@@ -2033,14 +2095,14 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("codes", nargs="+")
     ap.add_argument("--qty", type=int, default=None, help="计划总股数")
-    ap.add_argument("--account", type=int, default=_CFG["ash_account"],
-                    help="A 股账户（默认 ASH_ACCOUNT / .env / 50000）")
+    ap.add_argument("--account", type=int, default=_AC.cfg()["ash_account"],
+                    help="A 股账户（默认 ASH_ACCOUNT / .env，见 account_config.py）")
     ap.add_argument("--asof", default=None, help="回放日期 YYYY-MM-DD")
     ap.add_argument("--min-scale", type=int, default=5)
     ap.add_argument("--replay", action="store_true", help="强制按盘中口径回放")
     ap.add_argument("--until", default=None, help="截断到 HH:MM（模拟当时时点）")
-    ap.add_argument("--us-account", type=float, default=_CFG["us_account"],
-                    help="美股账户美元（默认 US_ACCOUNT / .env / 5000）")
+    ap.add_argument("--us-account", type=float, default=_AC.cfg()["us_account"],
+                    help="美股账户美元（默认 US_ACCOUNT / .env，见 account_config.py）")
     ap.add_argument("--date", default=None,
                     help="回放指定交易日 YYYY-MM-DD（美股；只用该日之前的日线定结构）")
     ap.add_argument("--data", default=None,

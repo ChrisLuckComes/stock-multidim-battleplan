@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 """A股仓位闸门诊断 v2（修正绑定判断 + 结构性门槛）。"""
-import sys, io
+import io
+import os
+import sys
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
-sys.path.insert(0, r"D:\code\stock-multidim-battleplan")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import probe_intraday as P
 
-ACC = 50000
+ACC = P.ASH_ACCOUNT          # 从 account_config 取（env / .env），不写死
 BUDGET = ACC * P.ASH_RISK_PCT
 CAP_AMT = P.ash_single_cap(ACC)
 

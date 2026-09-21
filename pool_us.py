@@ -41,6 +41,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
+import account_config as _AC  # noqa: E402
 import fetch_market as F  # noqa: E402
 from bars_source import us_quote as _bs_us_quote  # noqa: E402
 from rule123 import build_ev, plan_entry, atr14  # noqa: E402
@@ -119,6 +120,27 @@ def fetch_us(sym):
 
 
 # ─────────────────────────── 仓位反推 ───────────────────────────
+def us_account(cfg):
+    """美股账户美元：account_config（env / .env）为真源。
+
+    json 里若仍有 `account` 字段则视为**显式覆盖**，但与本配置不一致时会打印
+    一行提醒 —— 两个源并存时必须让分叉可见（2026-09-21 的教训）。
+    """
+    v = cfg.get("account")
+    conf = _AC.cfg()["us_account"]
+    if v and float(v) != float(conf):
+        print(f"[warn] pool_us.json 的 account={v} 与 .env 的 US_ACCOUNT={conf} 不一致"
+              f" —— 本次以 json 为准；要统一请删掉 json 里的 account")
+        return float(v)
+    return float(conf)
+
+
+def us_risk_pct(cfg):
+    """美股单笔风险预算（%）：json 的 risk_pct 优先，否则取配置 US_RISK_PCT×100。"""
+    v = cfg.get("risk_pct")
+    return float(v) if v else _AC.cfg()["us_risk_pct"] * 100
+
+
 def size_plan(spot, atr, acct, risk_pct):
     """不能盯盘（= 硬止损失效）时的股数上限。
 
@@ -271,8 +293,8 @@ def analyze_one(item, cfg):
             f"—— 下一个交易日开盘就可能触发。「不追」与「突破买」互斥，须二选一。")
 
     # 仓位反推（不能盯盘时的唯一防线）
-    acct = cfg.get("account", 4694.80)
-    rp = cfg.get("risk_pct", 1.5)
+    acct = us_account(cfg)
+    rp = us_risk_pct(cfg)
     r["size"] = size_plan(spot, atr, acct, rp)
 
     # 持仓
@@ -341,8 +363,8 @@ def render(cfg, rows, watch_rows, senti, idx, manual, src_stat=None, snap_info=N
     L = []
     today = next((r["date"] for r in rows if r.get("date")), "?")
     holds = [r for r in rows if r.get("pos") and not r.get("err")]
-    acct = cfg.get("account", 4694.80)
-    rp = cfg.get("risk_pct", 1.5)
+    acct = us_account(cfg)
+    rp = us_risk_pct(cfg)
     L.append("=" * 96)
     L.append(f"美股股池复盘 · {today} 收盘   ｜   交易候选 {len(rows)} 只 · "
              f"观察位 {len(watch_rows)} 只 · 持仓 {len(holds)} 只")

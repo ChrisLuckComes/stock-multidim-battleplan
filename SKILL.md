@@ -19,6 +19,7 @@ disable-model-invocation: true
 5. `recommend=False` 时不得给可执行下单指令；离买位大于 2×ATR 不追。
 6. 止损必须分结构止损与硬止损两档，禁止合成一个价格。
 7. **出报告走两步，不要手写 HTML**：`battle_analyze.py`（取数 → 结构 → 量价 → 全档赔率 → 同行 → 分时，一次算完出 `analysis.json`）→ `report_render.py`（模板 `templates/battle_report.html` + `notes.json` 渲染）。版式与表格由脚本生成，**模型只写判断与叙述**（`notes.json`，≈2K token）。细节见 [report-generation.md](references/report-generation.md)。
+8. **账户与仓位额度一律从 `account_config` 读**（env > `.env` > DEFAULTS），脚本里不许出现 `account=50000`、`/ 50000`、`CAPITAL = 100000` 这类字面量。A 股**总仓位上限 100,000 = 主力 50,000 + 后备 50,000**（`ASH_PRIMARY` / `ASH_RESERVE` / `ASH_TOTAL`），单笔绝对额硬顶 50,000；`ASH_ACCOUNT` 只是**风险预算的分母**、不等于可动用资金。报告仓位要同时给「占总上限 %」与「占主力层 %」。见 [data-operations.md](references/data-operations.md)。
 
 ## 按需读取
 

@@ -40,7 +40,8 @@ except Exception:
 import probe_intraday as P  # noqa: E402
 
 CFG = os.path.join(HERE, "watch_us.json")
-DEFAULT_CFG = {"symbols": [], "account": 5000, "interval_sec": 60}
+# 账户美元默认取 account_config（env / .env）——不在代码里写 5000。
+DEFAULT_CFG = {"symbols": [], "account": P.US_ACCOUNT, "interval_sec": 60}
 
 
 # ────────────────────────────── 基础 ──────────────────────────────

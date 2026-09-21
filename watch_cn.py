@@ -35,6 +35,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
+import account_config as _AC  # noqa: E402
 from bars_source import ash_bars  # noqa: E402
 from rule123 import build_ev, plan_entry, atr14  # noqa: E402
 
@@ -204,7 +205,7 @@ def analyze_one(item):
         q, cost, stop = pos["qty"], pos["cost"], pos["stop"]
         r["pnl"] = round((spot - cost) * q, 2)
         r["pnl_pct"] = round((spot / cost - 1) * 100, 2)
-        r["pnl_amt_pct"] = round((spot - cost) * q / 50000 * 100, 2)
+        r["pnl_amt_pct"] = round((spot - cost) * q / account_denom() * 100, 2)
         r["stop_dist"] = round(spot - stop, 2)
         r["stop_dist_pct"] = round((spot / stop - 1) * 100, 2)
         r["stop_broken"] = bool(spot < stop)
@@ -251,16 +252,33 @@ def fmt(v, nd=2):
     return "n/a" if v is None else f"{v:.{nd}f}"
 
 
+def account_denom():
+    """持仓盈亏的分母 = A 股**总仓位上限**（主力 + 后备）。
+
+    2026-09-21 用户定稿：仓位上限十万 = 主仓位五万 + 后备五万。分母用总量而不是
+    主力额度 —— 占比问的是「占总资产多少」，不是「占常规额度多少」。
+    真源在 account_config（env / .env），本文件不再写 50000。
+    """
+    return _AC.cfg()["ash_total"]
+
+
 def render(cfg, rows, senti, idx, src_stat=None, snap_info=None):
     L = []
     today = next((r["date"] for r in rows if r.get("date")), "?")
     holds = [r for r in rows if r.get("pos") and not r.get("err")]
-    acct = cfg.get("account", 50000)
+    c = _AC.cfg()
+    acct = c["ash_total"]
     L.append("=" * 92)
     L.append(f"A股股池复盘 · {today} 收盘   ｜   池内 {len(rows)} 只 · 持仓 {len(holds)} 只")
+    L.append(f"仓位额度 ¥{acct:,} = 主力 {c['ash_primary']:,} + 后备 {c['ash_reserve']:,}"
+             f"（单笔硬顶 {c['ash_single_abs']:,}）"
+             + (f"   可用现金 ¥{c['ash_cash']:,.0f}" if c["ash_cash"] else ""))
     if holds:
         used = sum(r["pos"]["qty"] * r["pos"]["cost"] for r in holds)
-        L.append(f"账户 ¥{acct:,}（持仓占用 ¥{used:,.0f} = {used / acct * 100:.1f}%）")
+        resv = used > c["ash_primary"]
+        L.append(f"持仓占用 ¥{used:,.0f} = 总上限 {used / acct * 100:.1f}%"
+                 + (f"（已动用后备 —— 超出主力 {c['ash_primary']:,}）" if resv else
+                    f"（主力层 {used / c['ash_primary'] * 100:.1f}%）"))
     if src_stat:
         L.append("取数：" + " · ".join(f"{k} {v} 只" for k, v in src_stat.items())
                  + "（快照/缓存命中越多越快，全部网络=当日首次跑）")

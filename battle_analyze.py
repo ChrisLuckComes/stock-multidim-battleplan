@@ -36,6 +36,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
+import account_config as _AC            # noqa: E402
 import rule123 as R                     # noqa: E402
 import probe_intraday as P              # noqa: E402
 import bars_source as BS                # noqa: E402
@@ -507,9 +508,13 @@ def tie_line_check(z, ma_info):
             "verdict": "真贴线" if ok else "存疑", "note": note}
 
 
-def analyze(code, account=50000, peers=None, data_file=None, n=330,
+def analyze(code, account=None, peers=None, data_file=None, n=330,
             intraday=True, min_scale=5, name=None, theme=None,
             peer_names=None, no_cache=False, cash=None):
+    # ★ 账户 / 现金口径一律从 account_config 现取（env > .env > DEFAULTS），
+    #   不在签名里写 50000 —— 那是「代码写死」，改配置还得改代码。
+    if account is None:
+        account = _AC.cfg()["ash_account"]
     code = str(code).strip()
     if not (code.isdigit() and len(code) == 6):
         raise SystemExit("battle_analyze 目前只支持 A 股 6 位代码：%s" % code)
@@ -726,7 +731,7 @@ def main():
     ap = argparse.ArgumentParser(description="一键分析（A 股单票）")
     ap.add_argument("codes", nargs="+", help="6 位 A 股代码，可多个")
     ap.add_argument("--account", type=int, default=None, help="A 股账户资金")
-    ap.add_argument("--cash", type=int, default=None,
+    ap.add_argument("--cash", type=int, default=_AC.cfg()["ash_cash"],
                     help="可用现金（持仓后能动用的钱）；不传则按账户总额封顶")
     ap.add_argument("--peers", default=None,
                     help="同行代码，逗号分隔（如 600183,300476,603078）")
@@ -745,7 +750,7 @@ def main():
 
     if a.data and len(a.codes) != 1:
         ap.error("--data 只支持单票")
-    account = a.account or P._CFG["ash_account"]
+    account = a.account or _AC.cfg()["ash_account"]
     peers = [x.strip() for x in (a.peers or "").split(",") if x.strip()]
     pnames = {}
     for kv in (a.peer_names or "").split(","):

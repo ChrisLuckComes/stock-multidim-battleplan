@@ -48,8 +48,12 @@ MIN_SCALE = 5
 FULL_DAY_BARS = 40          # 少于 40 根视为半日/停牌，不计入
 MIN_DAILY_BARS = 25         # D 之前至少要有 25 根日线才够算结构
 T1_MAX_HOLD = 5             # 结构口径的最长持有日数（挂单/持有有效期的老口径是 5 日）
-ACCOUNT = 50000             # 主力额度口径（单笔 30% 闸门与 1.5% 风险预算的基数）
-CAPITAL = 100000            # 总资金（主力 5 万 + 备用 5 万，老罗 2026-09-17 定）
+# 账户口径走 account_config（env > .env > DEFAULTS），回测不另立一套。
+#   ACCOUNT = 单票基数（1.5% 风险预算与 ash_lots 股数的分母）
+#   CAPITAL = 总仓位上限（主力 + 后备）
+# 回测是一次性进程，启动时取一次即可；要改口径改 .env。
+ACCOUNT = P.ASH_ACCOUNT
+CAPITAL = P.ASH_TOTAL
 COST_RT = 0.0012            # A股双边成本率（佣金万2.5×2 + 卖出印花税0.05% + 过户费）
 
 # 信号池：流动性 / 持仓池（先于结果确定，**不按涨跌挑**）

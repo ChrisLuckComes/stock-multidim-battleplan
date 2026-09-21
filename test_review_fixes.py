@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """审查修复回归：P0/P1 买卖点专项。"""
 import datetime
+import os
 import sys
 from pathlib import Path
 
@@ -1412,26 +1413,146 @@ def test_us_lots_account_cap_only():
     assert n2 == 37, n2
 
 
+_CONF_KEYS = ("ASH_ACCOUNT", "US_ACCOUNT", "ASH_PRIMARY", "ASH_RESERVE",
+              "ASH_TOTAL", "ASH_SINGLE_ABS", "ASH_RISK_PCT", "US_RISK_PCT", "ASH_CASH")
+
+
+def _conf_ctx():
+    """临时清掉相关 env，退出时原样还回去。"""
+    class _Ctx:
+        def __enter__(self):
+            self.saved = {k: os.environ.get(k) for k in _CONF_KEYS}
+            for k in _CONF_KEYS:
+                os.environ.pop(k, None)
+            from account_config import _reset_for_tests
+            _reset_for_tests()
+            return self
+
+        def __exit__(self, *exc):
+            for k, v in self.saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            from account_config import _reset_for_tests
+            _reset_for_tests()
+            return False
+    return _Ctx()
+
+
 def test_account_config_env_override():
-    """人与钱走 env；未设时回落到 DEFAULTS。"""
-    import os
+    """人与钱走 env；未设时回落到 DEFAULTS；总上限可推导也可显式声明。
+
+    2026-09-21 口径：A 股 总上限 100,000 = 主力 50,000 + 后备 50,000。
+    """
     from account_config import DEFAULTS, load_account_config
 
-    c0 = load_account_config(dotenv=False)
-    assert c0["ash_primary"] == DEFAULTS["ash_primary"]
-    assert c0["ash_total"] == c0["ash_primary"] + c0["ash_reserve"]
+    with _conf_ctx():
+        c0 = load_account_config(dotenv=False)
+        assert c0["ash_primary"] == DEFAULTS["ash_primary"]
+        assert c0["ash_reserve"] == DEFAULTS["ash_reserve"]
+        assert c0["ash_total"] == c0["ash_primary"] + c0["ash_reserve"]
+        assert c0["ash_total_source"] == "derived"
 
-    old = os.environ.get("ASH_PRIMARY")
-    try:
+        # ① 只改主力 → 总上限自动跟着变（后备不动）
         os.environ["ASH_PRIMARY"] = "80000"
         c1 = load_account_config(dotenv=False)
         assert c1["ash_primary"] == 80000
         assert c1["ash_total"] == 80000 + c1["ash_reserve"]
-    finally:
-        if old is None:
-            os.environ.pop("ASH_PRIMARY", None)
-        else:
-            os.environ["ASH_PRIMARY"] = old
+
+        # ② 显式声明总上限且自洽 → 用它，来源标 env
+        os.environ["ASH_RESERVE"] = "60000"
+        os.environ["ASH_TOTAL"] = "140000"
+        c2 = load_account_config(dotenv=False)
+        assert c2["ash_total"] == 140000 and c2["ash_total_source"] == "env"
+
+
+def test_ash_total_mismatch_is_loud():
+    """显式总上限与「主力 + 后备」矛盾时必须**报错**，不许静默取一个。
+
+    静默取值的代价：.env 里写着 10 万、实际闸门按 13 万走，而报告里印的是
+    「上限 10 万」—— 配置与行为分叉且无人知道。
+    """
+    from account_config import load_account_config
+
+    with _conf_ctx():
+        os.environ.update(ASH_PRIMARY="40000", ASH_RESERVE="40000", ASH_TOTAL="100000")
+        try:
+            load_account_config(dotenv=False)
+            raise AssertionError("矛盾配置必须报错")
+        except ValueError as e:
+            assert "ASH_TOTAL" in str(e) and "ASH_PRIMARY" in str(e), e
+
+        # 改对（或干脆删掉 ASH_TOTAL 让它推导）就正常
+        os.environ["ASH_TOTAL"] = "80000"
+        assert load_account_config(dotenv=False)["ash_total"] == 80000
+        os.environ.pop("ASH_TOTAL")
+        c = load_account_config(dotenv=False)
+        assert c["ash_total"] == 80000 and c["ash_total_source"] == "derived"
+
+
+def test_config_is_read_dynamically():
+    """改进程 env 后**不 reload** 也要生效 —— 这是「不写死在代码里」的判据。
+
+    旧实现 `P.ASH_PRIMARY = _CFG[...]` 是 import 时快照：配置改了，报告里印的
+    数变了、闸门却还按旧值走。
+    """
+    import probe_intraday as PI
+
+    with _conf_ctx():
+        os.environ.update(ASH_PRIMARY="60000", ASH_RESERVE="30000", ASH_TOTAL="90000")
+        assert PI.ASH_PRIMARY == 60000, PI.ASH_PRIMARY
+        assert PI.ASH_RESERVE == 30000
+        assert PI.ASH_TOTAL == 90000
+        # 闸门必须用**新**额度：主力层 6 万，已持 5.5 万 + 本笔 0.2 万 → 放行
+        g = PI.ash_portfolio_gate("600519", 20.0, 100, held_amt=55000.0)
+        assert g["allowed"] is True, g
+        # 已持 5.9 万 → 主力层 6 万只剩 1000 元，买不到 1 手（100 股 × 20 元 = 2000）
+        g2 = PI.ash_portfolio_gate("600519", 20.0, 100, held_amt=59000.0)
+        assert g2["allowed"] is False and "买不到 1 手" in g2["reason"], g2
+        # 主力层正好打满 → 明确说「主力层已满 + 备用只在突破预案单启用」
+        g3 = PI.ash_portfolio_gate("600519", 20.0, 100, held_amt=60000.0)
+        assert g3["allowed"] is False and "主力层" in g3["reason"], g3
+        assert "突破预案单" in g3["reason"], g3
+        # 同价位换成「突破预案单」级信号 → 动后备（总 9 万 − 已持 6 万 = 3 万额度）
+        g4 = PI.ash_portfolio_gate("600519", 20.0, 100, held_amt=60000.0,
+                                   use_reserve=True)
+        assert g4["allowed"] is True and g4["layer"] == "reserve", g4
+
+        os.environ.update(ASH_PRIMARY="50000", ASH_RESERVE="50000", ASH_TOTAL="100000")
+        assert PI.ASH_PRIMARY == 50000 and PI.ASH_TOTAL == 100000
+
+
+def test_no_bare_account_globals_in_probe():
+    """probe_intraday 里不得**裸用** ASH_*/US_* 配置名。
+
+    模块级 __getattr__ 只对属性访问（P.ASH_X）生效；函数体里的裸名是
+    LOAD_GLOBAL，不触发它 → NameError。2026-09-21 改成动态属性时就是这么把
+    probe / probe_us 全线打挂的（test_battle_report 立刻报 4 个 error）。
+    用 AST 钉死：只允许属性访问与 _ASH_DYNAMIC 表里的**字符串**。
+    """
+    import ast
+    import inspect
+    import probe_intraday as PI
+
+    names = {k for k in _CONF_KEYS}
+    tree = ast.parse(inspect.getsource(PI))
+    bad = [(n.lineno, n.id) for n in ast.walk(tree)
+           if isinstance(n, ast.Name) and n.id in names]
+    assert not bad, "函数体内裸用配置名（会 NameError）：%s" % bad
+
+
+def test_probe_module_attrs_are_dynamic():
+    """P.ASH_* / P._CFG 仍可按属性读（向后兼容），但每次取的是当前配置。"""
+    import probe_intraday as PI
+    from account_config import cfg
+
+    assert PI.ASH_TOTAL == cfg()["ash_total"]
+    assert PI.ASH_PRIMARY == cfg()["ash_primary"]
+    assert PI.ASH_SINGLE_ABS == cfg()["ash_single_abs"]
+    assert PI._CFG["ash_account"] == cfg()["ash_account"]
+    # 真常量（策略档位）不受影响
+    assert PI.ASH_RESERVE_TIER == "突破预案单"
 
 
 def _intraday_fixture():
@@ -1756,4 +1877,8 @@ if __name__ == "__main__":
     test_ma_anchor_trend_gate()
     test_us_lots_account_cap_only()
     test_account_config_env_override()
+    test_ash_total_mismatch_is_loud()
+    test_config_is_read_dynamically()
+    test_no_bare_account_globals_in_probe()
+    test_probe_module_attrs_are_dynamic()
     print("ok")
