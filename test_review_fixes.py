@@ -1579,6 +1579,20 @@ def test_report_renders_pre_breakout_and_two_tier_stop():
     assert "预案单 挂 106.30" in svg, svg[-400:]
 
 
+def test_skill_requires_volume_price_report():
+    skill = (Path(__file__).resolve().parent / "SKILL.md").read_text(encoding="utf-8")
+    required = (
+        "## 量价分析（报告强制专章）",
+        "### 一、当日分钟走势复盘",
+        "### 二、近 20 日量价分析",
+        "当日判定：派发 / 派发警告 / 趋势延续 / 中性 / 未收盘不定性",
+        "近20日判定：派发 / 派发警告 / 趋势延续 / 中性",
+        "同一标的只取一次并复用",
+    )
+    for text in required:
+        assert text in skill, f"SKILL.md 缺少量价报告约束：{text}"
+
+
 if __name__ == "__main__":
     test_yizi_not_gap_yang()
     test_true_yizi_uses_prev_close()
@@ -1642,6 +1656,7 @@ if __name__ == "__main__":
     test_vp_regime_distribute()
     test_vp_regime_ma5_reclaim()
     test_vp_regime_needs_full_window()
+    test_skill_requires_volume_price_report()
     test_ma_anchor_trend_gate()
     test_us_lots_account_cap_only()
     test_account_config_env_override()
