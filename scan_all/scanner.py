@@ -27,7 +27,7 @@ def sina_kline_full(prefix, code, n=140, tries=3, use_cache=True, use_snap=True)
     """
     return BS.ash_bars(
         prefix, code, n=n, use_cache=use_cache, use_snap=use_snap,
-        fetch=lambda p, c, nn: BS.sina_raw(p, c, n=nn, tries=tries))
+        fetch=lambda p, c, n: BS.sina_raw(p, c, n=n, tries=tries))
 
 
 def sina_kline(prefix, code, n=140, tries=3, use_cache=True):
