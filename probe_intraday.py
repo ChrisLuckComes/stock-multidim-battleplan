@@ -21,9 +21,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from rule123 import (  # noqa: E402
     build_ev, plan_entry, atr14, is_live_bar, in_ash_session,
     bars_from_us, bars_from_em_us, bars_from_yahoo_min, stop_plan, pivots,
-    key_break_level, merge_intraday_bar,
+    key_break_level, merge_intraday_bar, nasdaq_info,
 )
 from account_config import load_account_config  # noqa: E402
+import bars_source as _BS  # noqa: E402
 
 UA = {"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn/"}
 BURST_MA_BARS = 5      # 量能突变基准 = 前 N 根均量（老罗 2026-09-17 改定义）
@@ -1380,6 +1381,66 @@ def us_lots(account, entry, stop, risk_pct=US_RISK_PCT):
     return min(max(n, 1), cap)
 
 
+# ── 美股日线取数：与 watch_cn / pool_us 共用 bars_source 三级链路 ──
+# 本地快照 → 磁盘缓存 → 网络（见 bars_source.py）。2026-09-21。
+# 为什么盯盘也要接：`watch_us --watch` 每 60s 一轮重问日线，原实现每轮都拉一次
+# 300 根历史（约 6s/只），而日线在一个交易日内根本不变。
+SNAP_DIRS = None            # None = 用 bars_source 默认目录（data/tdx、data/）
+USE_SNAP = True
+USE_CACHE = True
+US_MIN_BARS = 140           # 日线复用门槛：与扫描器/结构判定同口径
+_SRC_TXT = {"snapshot": "本地快照", "cache": "缓存", "net": "网络", "file": "指定快照"}
+_WARN_MARKS = ("失败", "回退", "不可用", "过期", "早于", "空")
+
+
+def _us_net_fetch(sym):
+    """网络档：保持 probe 原有链路（rule123.bars_from_us：Nasdaq→东财→Yahoo）。
+
+    刻意不换 `fetch_market.fetch_us`（Nasdaq→Yahoo→stooq）—— 换链路＝悄悄换数据口径。
+    """
+    bars, spot, meta = bars_from_us(sym)
+    meta = meta or {}
+    return {"ticker": sym.upper(), "name": sym.upper(), "market": "US",
+            "bars": bars, "spot": spot,
+            "session": meta.get("session") or "",
+            "as_of": meta.get("as_of"), "prev_close": meta.get("prev_close"),
+            "source": "rule123.bars_from_us"}
+
+
+def _us_daily_live(sym):
+    """美股日线 + 实时口径 → (bars, spot, meta, src, notes)。
+
+    日线走 bars_source（本地快照 → 磁盘缓存 → 网络，跨进程复用）；
+    **实时价必须现取**：离线档命中时只补一发 Nasdaq /info（实测 2–4s），
+    不再重复拉 300 根历史日线。marketStatus/as_of 是 `intraday_bar()` 合成盘中
+    bar 的前置条件（缺了就退回昨收口径），所以这一发不能省。
+    """
+    notes = []
+    q, n0 = _BS.us_quote(sym, fetch=_us_net_fetch, snap_dirs=SNAP_DIRS,
+                         use_snap=USE_SNAP, use_cache=USE_CACHE,
+                         min_bars=US_MIN_BARS)
+    notes += list(n0 or [])
+    src = q.get("src") or "net"
+    bars = list(q.get("bars") or [])
+    spot = q.get("spot")
+    meta = {"session": q.get("session") or "", "as_of": q.get("as_of"),
+            "prev_close": q.get("prev_close")}
+    if src != "net":
+        label = _SRC_TXT.get(src, src)
+        try:
+            spot, meta = nasdaq_info(sym)
+            meta = meta or {}
+            notes.append(f"日线取自{label}（末根 {bars[-1]['d'] if bars else '?'}）；"
+                         f"实时口径由 Nasdaq /info 单发补齐")
+        except Exception as e:
+            notes.append(f"日线取自{label}，但 /info 失败"
+                         f"（{type(e).__name__}: {str(e)[:60]}）→ 回退全量取数")
+            bars, spot, meta = bars_from_us(sym)
+            meta = meta or {}
+            src = "net"
+    return bars, spot, meta, src, notes
+
+
 def probe_us(sym, account=None, min_scale=5, until=None, date=None,
              data_file=None, market_data=None):
     """美股版：收盘后预案 + 盘前通道 + 盘中量能突变（T+0 口径）。"""
@@ -1402,6 +1463,7 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None,
             minute_cache["source"] = "Yahoo（本地代理）"
         return minute_cache["bars"]
 
+    src, src_notes = "file", []
     if market_data is not None:
         bars = list(market_data.get("bars") or [])
         if not bars:
@@ -1414,7 +1476,7 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None,
             "prev_close": market_data.get("prev_close"),
         }
     else:
-        bars, spot, meta = bars_from_us(sym)
+        bars, spot, meta, src, src_notes = _us_daily_live(sym)
     meta = meta or {}
     if date:
         # 回放：只用 < date 的日线定结构，杜绝用到未来数据
@@ -1458,6 +1520,11 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None,
     print("=" * 70)
     print(f" {sym}  美股   时段 {sess or phase}   {meta.get('as_of') or ''}")
     print("=" * 70)
+    _show = [n for n in src_notes
+             if ("快照" in n or any(mk in n for mk in _WARN_MARKS))]
+    print(f" 取数       : {_SRC_TXT.get(src, src)}"
+          f"（日线 {len(bars)} 根 · 末根 {last_closed['d']}）"
+          + ("   ⚠ " + "；".join(_show) if _show else ""))
     print(f" 最近收盘   : {last_closed['d']}  {last_closed['c']:.2f}")
     if live_bar is not None:
         print(f" 盘中口径   : 已并入今日未收盘 K 线 "
@@ -1499,7 +1566,8 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None,
            "as_of": meta.get("as_of"), "last_date": last["d"], "last": last["c"],
            "spot": spot, "atr": round(atr_v, 3), "mode": plan["mode"],
            "recommend": plan["recommend"], "zone_lo": z.get("primary_lo"),
-           "zone_hi": z.get("primary_hi"), "defend": z.get("invalidation")}
+           "zone_hi": z.get("primary_hi"), "defend": z.get("invalidation"),
+           "src": src, "src_notes": src_notes}
 
     # ---------- 1) 预案单 ----------
     print()
@@ -1666,19 +1734,23 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None,
         except Exception as e:
             errs.append(f"东财={type(e).__name__}")
     if not raw:
-        # 东财是唯一提供美股分钟线的国内源，批量取数后会被整站限流 → 退 Yahoo(代理)
+        # 东财是唯一提供美股分钟线的国内源，批量取数后会被整站限流 → 退 Yahoo
         cached_error = minute_cache.get("error")
         if cached_error is not None:
             errs.append(f"yahoo={type(cached_error).__name__}:{str(cached_error)[:70]}")
         else:
             try:
-                raw = bars_from_yahoo_min(sym, interval=f"{min_scale}m", range_="5d")[0]
-                src = "Yahoo（本地代理）"
+                yb, _sp, ymeta = bars_from_yahoo_min(sym, interval=f"{min_scale}m",
+                                                    range_="5d")
+                raw = yb
+                src = ("Yahoo（经 " + str((ymeta or {}).get("proxy") or "直连") + "）")
             except Exception as e:
                 errs.append(f"yahoo={type(e).__name__}:{str(e)[:70]}")
     if not raw:
         print(f"  分钟线取数失败：{' | '.join(errs)}")
-        print("  → 盘中通道不可用（东财限流时依赖本地代理；可用 WB_US_PROXY 指定端口）")
+        print("  → 盘中通道不可用。Yahoo 直连 403 属正常；**不会自动探测本机代理端口**"
+              "（避免干扰你正在用的代理客户端）——"
+              "要用就设 WB_US_PROXY=http://127.0.0.1:<端口> 或写 us_proxy.txt")
         return out
     print(f"  数据源 {src}")
     td = date or us_trade_date(raw[-1]["d"])
@@ -1970,9 +2042,20 @@ if __name__ == "__main__":
                     help="回放指定交易日 YYYY-MM-DD（美股；只用该日之前的日线定结构）")
     ap.add_argument("--data", default=None,
                     help="复用 fetch_market.py --out 日线快照，不再联网取日线")
+    ap.add_argument("--snap-dir", action="append", default=None,
+                    help="额外快照目录（美股日线复用；默认 data/tdx、data/）")
+    ap.add_argument("--no-snap", action="store_true", help="美股日线不复用本地快照")
+    ap.add_argument("--no-cache", action="store_true",
+                    help="美股日线不用磁盘/进程缓存（强制回网络）")
     a = ap.parse_args()
     if a.data and len(a.codes) != 1:
         ap.error("--data 只支持单票")
+    # 模块级代码，直接赋值即改全局（不能用 global：上面已赋值过）
+    if a.snap_dir:
+        SNAP_DIRS = [d if os.path.isabs(d) else os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), d) for d in a.snap_dir]
+    USE_SNAP = not a.no_snap
+    USE_CACHE = not a.no_cache
     for c in a.codes:
         try:
             probe(c, a.qty, a.account, a.asof, a.min_scale, a.replay, a.until,

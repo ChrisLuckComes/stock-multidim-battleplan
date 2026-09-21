@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """取数去重与快速降级回归。"""
 import json
+import os
+import tempfile
 import threading
 import time
 from unittest.mock import patch
@@ -78,6 +80,45 @@ def test_yahoo_proxy_is_remembered():
         assert R._proxy_list()[0] == second
     finally:
         R._YAHOO_PROXY = old_proxy
+
+
+def test_proxy_never_probes_local_ports_by_default():
+    """默认必须只直连 —— 绝不能去连本机常见代理端口。
+
+    背景（2026-09-21 用户反馈「干扰到了我的 clash verge 代理」）：原实现硬编码去连
+    127.0.0.1:{7897,7890,7891,10809,1080}，而 7897/7890 正是 Clash / Clash Verge 的
+    默认端口，且没有直连兜底 —— 等于脚本反复去连用户自己的代理客户端，每次都等
+    20s 超时。这条测试钉死：默认候选里不许出现任何 127.0.0.1 端口。
+    """
+    keys = ("WB_US_PROXY", "WB_NO_PROXY", "WB_US_PROXY_AUTOPROBE")
+    saved = {k: os.environ.pop(k, None) for k in keys}
+    saved_file = R.PROXY_FILE
+    old_proxy = R._YAHOO_PROXY
+    R._YAHOO_PROXY = None
+    R.PROXY_FILE = os.path.join(tempfile.gettempdir(), "_no_such_proxy_file.txt")
+    try:
+        assert R._proxy_list() == [None], "默认必须是「只直连」"
+        assert not any("127.0.0.1" in (p or "") for p in R._proxy_list()), \
+            "默认候选里不许出现任何本机端口（会干扰用户的代理客户端）"
+        os.environ["WB_US_PROXY"] = "http://127.0.0.1:9999"
+        assert R._proxy_list() == ["http://127.0.0.1:9999", None], "显式配置要生效且带直连兜底"
+        os.environ["WB_US_PROXY"] = "off"
+        assert R._proxy_list() == [None], "WB_US_PROXY=off = 强制直连"
+        del os.environ["WB_US_PROXY"]
+        os.environ["WB_NO_PROXY"] = "1"
+        assert R._proxy_list() == [None], "WB_NO_PROXY=1 = 强制直连"
+        del os.environ["WB_NO_PROXY"]
+        os.environ["WB_US_PROXY_AUTOPROBE"] = "1"
+        assert any("127.0.0.1" in p for p in R._proxy_list() if p), \
+            "显式开 AUTOPROBE 才允许探端口"
+    finally:
+        R._YAHOO_PROXY = old_proxy
+        R.PROXY_FILE = saved_file
+        for k, v in saved.items():
+            if v is not None:
+                os.environ[k] = v
+            else:
+                os.environ.pop(k, None)
 
 
 def test_pool_us_quote_cache():
@@ -188,6 +229,7 @@ if __name__ == "__main__":
     test_eastmoney_http_first()
     test_eastmoney_https_is_single_fallback()
     test_yahoo_proxy_is_remembered()
+    test_proxy_never_probes_local_ports_by_default()
     test_pool_us_quote_cache()
     test_watch_cn_bars_cache()
     test_fetch_ash_quote_and_kline_overlap()

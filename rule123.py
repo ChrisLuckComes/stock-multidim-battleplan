@@ -183,8 +183,31 @@ def secid_of(ticker: str):
     return f"0.{ticker}"
 
 
+def nasdaq_info(sym):
+    """Nasdaq /info 单发 → (spot, meta)。
+
+    meta = {"session": marketStatus, "as_of": lastTradeTimestamp, "prev_close": 昨收}。
+
+    为什么单独拆出来（2026-09-21）：日线可以走 `bars_source` 从快照/缓存复用，
+    但「实时价 + marketStatus + 成交时刻」**只能现取** —— 而 `intraday_bar()` 的
+    盘中合成正是靠 session=="Open" 与 as_of 推美东交易日，缺了就退回昨收口径
+    （即 INTC 2026-09-17「突破了平台却让我买 104.03」那个坑）。
+    单发实测 2–4s，比整条历史链路（约 6s）便宜一半，且不动 bars。
+    """
+    s = sym.upper()
+    info = (fetch_json_nasdaq(
+        f"https://api.nasdaq.com/api/quote/{s}/info?assetclass=stocks").get("data") or {})
+    pdat = info.get("primaryData") or {}
+    sdat = info.get("secondaryData") or {}
+    return _num_q(pdat.get("lastSalePrice")), {
+        "session": info.get("marketStatus") or "",
+        "as_of": pdat.get("lastTradeTimestamp"),
+        "prev_close": _num_q(sdat.get("lastSalePrice")),      # ← 唯一可靠昨收
+    }
+
+
 def bars_from_nasdaq(sym, days=400):
-    """Nasdaq 官方 API：历史日线 + 实时/盘前快照 → (bars, spot)。
+    """Nasdaq 官方 API：历史日线 + 实时/盘前快照 → (bars, spot, meta)。
 
     实测要点（2026-09-16）：
       · historical 只含「已收盘交易日」，盘中不会出现当日 bar；
@@ -219,24 +242,13 @@ def bars_from_nasdaq(sym, days=400):
 
     spot, meta = None, {"session": "", "as_of": None, "prev_close": None}
     try:
-        info = (fetch_json_nasdaq(
-            f"https://api.nasdaq.com/api/quote/{s}/info?assetclass=stocks"
-        ).get("data") or {})
-        pdat = info.get("primaryData") or {}
-        sdat = info.get("secondaryData") or {}
-        spot = _num_q(pdat.get("lastSalePrice"))
-        meta = {
-            "session": info.get("marketStatus") or "",
-            "as_of": pdat.get("lastTradeTimestamp"),
-            "prev_close": _num_q(sdat.get("lastSalePrice")),
-        }
+        spot, meta = nasdaq_info(s)
     except Exception:
         pass
     return bars, (spot if spot is not None else bars[-1]["c"]), meta
 
 
 _EM_US_CACHE = {}
-_YAHOO_PROXY = None
 
 
 def em_us_secid(sym):
@@ -286,27 +298,69 @@ def bars_from_em_us(sym, klt=101, lmt=130):
     return bars, None, {"session": "", "as_of": None, "prev_close": None}
 
 
-def _proxy_list():
-    """美股分钟线的代理候选。Yahoo 直连 403，实测需走本地代理。
+# ── 代理（2026-09-21 重写：默认不探、不用）──
+# ★ 原实现在 _proxy_list() 里硬编码去连 127.0.0.1:7897 / 7890 / 7891 / 10809 / 1080，
+#   **且没有直连兜底**。这等于脚本反复去连代理客户端（Clash / Clash Verge 的默认端口
+#   就是 7897 / 7890）自己的端口，每次都带 20s 超时 —— 用户 2026-09-21 反馈「干扰到了
+#   我的 clash verge 代理」。现在改成：**只有显式配置才走代理，候选中恒有直连兜底**，
+#   想恢复自动探端口得显式开 WB_US_PROXY_AUTOPROBE=1。
+PROXY_ENV = "WB_US_PROXY"
+PROXY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "us_proxy.txt")
+PROXY_OFF = ("off", "none", "direct", "0", "false", "no")
+_YAHOO_PROXY = None
 
-    不读 HTTP_PROXY/HTTPS_PROXY —— 沙箱会注入一个假代理（实测 57189 返回 502），
-    用显式的 WB_US_PROXY 覆盖，否则按常见客户端端口逐个探。
+
+def _proxy_list():
+    """美股分钟线的代理候选。**默认 [None] = 只直连，绝不探测本机端口。**
+
+    显式配置（按优先级）：
+      1. 环境变量 `WB_US_PROXY=http://127.0.0.1:7897`（也可写多个，逗号分隔）
+      2. 仓库根目录 `us_proxy.txt`：一行一个代理 URL，`#` 开头为注释
+    关闭：`WB_US_PROXY=off` 或 `WB_NO_PROXY=1`（有配置文件也不读）。
+    退回旧行为（会去连本机常见代理端口，可能干扰你的代理客户端）：
+      `WB_US_PROXY_AUTOPROBE=1`
+
+    返回的候选**最后一项恒为 None（直连兜底）**。
     """
+    if os.environ.get("WB_NO_PROXY"):
+        return [None]
+    env = str(os.environ.get(PROXY_ENV) or "").strip()
+    if env.lower() in PROXY_OFF:
+        return [None]
     out = []
-    if _YAHOO_PROXY:
-        out.append(_YAHOO_PROXY)
-    env = os.environ.get("WB_US_PROXY")
-    if env and env not in out:
-        out.append(env)
-    for p in (7897, 7890, 7891, 10809, 1080):
-        proxy = f"http://127.0.0.1:{p}"
-        if proxy not in out:
-            out.append(proxy)
+
+    def add(p):
+        p = (p or "").strip()
+        if p and p not in out:
+            out.append(p)
+
+    add(_YAHOO_PROXY)
+    for part in env.split(","):
+        add(part)
+    if not env and os.path.isfile(PROXY_FILE):
+        try:
+            with open(PROXY_FILE, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        add(line)
+        except OSError:
+            pass
+    if os.environ.get("WB_US_PROXY_AUTOPROBE"):
+        for p in (7897, 7890, 7891, 10809, 1080):
+            add(f"http://127.0.0.1:{p}")
+    out.append(None)                       # 直连兜底
     return out
 
 
 def fetch_json_proxy(url, proxy=None, timeout=20):
-    """经代理（或直连）取 JSON。"""
+    """经代理（或直连）取 JSON。
+
+    注意：`proxy=None` 时用默认 opener，**仍会读本机 HTTP_PROXY/HTTPS_PROXY 环境变量**
+    （本沙箱注入了 127.0.0.1:5892 = sandbox-cli.exe 自己的代理，不是用户的代理客户端）。
+    这里不改这个行为 —— 它是本机能出网的通道；要「彻底不走任何代理」请用 `WB_NO_PROXY`
+    配合显式空代理，或在宿主侧清掉这两个变量。
+    """
     if proxy:
         op = urllib.request.build_opener(
             urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
@@ -320,10 +374,12 @@ def fetch_json_proxy(url, proxy=None, timeout=20):
 def bars_from_yahoo_min(sym, interval="5m", range_="1d"):
     """Yahoo 美股分钟线（带量）——美股盘中的**第二源**。
 
-    实测（2026-09-16）：直连 query1.finance.yahoo.com 返回 403；
-    经本地代理（Clash 类 7897）可通，返回带量 OHLC（5 分钟 78/79 根带量）。
-    东财美股分钟线是唯一另一源，一旦被限流（批量取数后实测整站拒连）就没得用，
-    故此处保留降级链。
+    实测（2026-09-16）：直连 query1.finance.yahoo.com 返回 403；经代理可通，
+    返回带量 OHLC（5 分钟 78/79 根带量）。东财美股分钟线是唯一另一源，一旦被限流
+    （批量取数后实测整站拒连）就没得用，故此处保留降级链。
+
+    ★ 代理**不自动探测**（2026-09-21 改，见 _proxy_list 注释）：默认只直连。
+    要用代理请显式设 `WB_US_PROXY=http://127.0.0.1:<端口>`，或写 `us_proxy.txt`。
 
     时间戳统一转成**北京时间**字符串 "YYYY-MM-DD HH:MM"，与东财口径一致，
     以便 us_trade_date / us_offset_min 通用。
@@ -332,7 +388,8 @@ def bars_from_yahoo_min(sym, interval="5m", range_="1d"):
            f"?interval={interval}&range={range_}&includePrePost=false")
     global _YAHOO_PROXY
     errs = []
-    for proxy in _proxy_list():
+    cand = _proxy_list()
+    for proxy in cand:
         try:
             j = fetch_json_proxy(url, proxy if proxy else None)
         except Exception as e:
@@ -340,12 +397,12 @@ def bars_from_yahoo_min(sym, interval="5m", range_="1d"):
             continue
         res = ((j.get("chart") or {}).get("result") or [])
         if not res:
-            errs.append(f"{proxy}=empty")
+            errs.append(f"{proxy or 'direct'}=empty")
             continue
         r0 = res[0]
         ts = r0.get("timestamp") or []
         if not ts:
-            errs.append(f"{proxy}=no_ts")
+            errs.append(f"{proxy or 'direct'}=no_ts")
             continue
         q = ((r0.get("indicators") or {}).get("quote") or [{}])[0]
         o_, h_, l_, c_, v_ = (q.get("open") or [], q.get("high") or [],
@@ -366,12 +423,15 @@ def bars_from_yahoo_min(sym, interval="5m", range_="1d"):
                 "v": float(v_[i] if i < len(v_) and v_[i] else 0),
             })
         if not bars:
-            errs.append(f"{proxy}=no_bars")
+            errs.append(f"{proxy or 'direct'}=no_bars")
             continue
         _YAHOO_PROXY = proxy
         return bars, None, {"session": "", "as_of": None, "prev_close": None,
                             "source": "yahoo_min", "proxy": proxy}
-    raise RuntimeError(f"Yahoo 分钟线 {sym} 全部失败 → " + " | ".join(errs))
+    hint = ("（未配置代理 → 只试了直连，Yahoo 直连 403 属正常；"
+            "要用代理设 WB_US_PROXY=http://127.0.0.1:<你的端口> 或写 us_proxy.txt）"
+            if cand == [None] else "")
+    raise RuntimeError(f"Yahoo 分钟线 {sym} 全部失败 → " + " | ".join(errs) + hint)
 
 
 def bars_from_us(sym):

@@ -7,10 +7,15 @@
   关键位突破的窗口只有 5–10 分钟（ILMN 9/15 是北京 21:40–21:45），
   靠"想起来看一眼"必然踏空。这个脚本替你盯着，出信号就响铃。
 
+取数（2026-09-21 起）：日线走 `bars_source` 三级链路（本地快照 → 磁盘缓存 → 网络），
+与 `pool_us` / `watch_cn` 共用同一份缓存；**实时价与 marketStatus 仍每轮现取**
+（离线档命中时只补一发 Nasdaq /info，约 2–4s）。分钟线单独取，不走缓存。
+
 用法：
   python watch_us.py --pre      # 盘前（北京 16:00–21:30）打印今日预案数字
   python watch_us.py --watch    # 盘中常驻盯盘，出信号响铃（Ctrl+C 退出）
   python watch_us.py            # 单次快照
+  python watch_us.py --no-cache --no-snap MDB   # 怀疑日线旧了：强制回网络
 
 自选池 watch_us.json：
   {"symbols": ["ILMN"], "account": 5000, "interval_sec": 60}
@@ -64,6 +69,16 @@ def beep():
     except Exception:
         sys.stdout.write("\a")
         sys.stdout.flush()
+
+
+SRC_TXT = {"snapshot": "快照", "cache": "缓存", "net": "网络", "file": "指定"}
+
+
+def src_txt(out):
+    """取数来源短标签（快照/缓存/网络）+ 日线末根日期。"""
+    s = SRC_TXT.get(out.get("src") or "?", out.get("src") or "?")
+    d = out.get("last_date") or "?"
+    return f"{s}·{d}"
 
 
 def run_one(sym, account):
@@ -136,7 +151,7 @@ def line_of(out):
     bo = out.get("breakout_preorder") or {}
     st.append("可挂✓" if bo.get("grade") == "normal" else "可挂✗")
     return (f"[{now_str()}] {sess:<8} {sym:<6} {spot if spot else 'n/a':>9} "
-            f"({dev})  " + "  ".join(st))
+            f"({dev})  " + "  ".join(st) + f"  [{src_txt(out)}]")
 
 
 def card_of(sym, out, text, sigs):
@@ -193,7 +208,7 @@ def mode_pre(cfg, codes):
             continue
         print(f"\n【{sym}】session={out.get('session')}  "
               f"昨收 {out.get('last')}  实时/盘前 {out.get('spot')}  "
-              f"ATR {out.get('atr')}")
+              f"ATR {out.get('atr')}  取数 {src_txt(out)}")
         po = out.get("pre_order") or {}
         if po:
             print(f"  预案单  {po.get('kind')}  挂 {po.get('limit')}  "
@@ -280,10 +295,20 @@ def main():
     ap.add_argument("--pre", action="store_true", help="盘前预案模式")
     ap.add_argument("--watch", action="store_true", help="盘中常驻盯盘")
     ap.add_argument("--interval", type=int, help="盯盘间隔秒数（覆盖配置）")
+    ap.add_argument("--snap-dir", action="append", default=None,
+                    help="额外快照目录（日线复用；默认 data/tdx、data/）")
+    ap.add_argument("--no-snap", action="store_true", help="日线不复用本地快照")
+    ap.add_argument("--no-cache", action="store_true",
+                    help="日线不用磁盘/进程缓存（强制回网络）")
     a = ap.parse_args()
     cfg = load_cfg()
     if a.interval:
         cfg["interval_sec"] = a.interval
+    if a.snap_dir:
+        P.SNAP_DIRS = [d if os.path.isabs(d) else os.path.join(HERE, d)
+                       for d in a.snap_dir]
+    P.USE_SNAP = not a.no_snap
+    P.USE_CACHE = not a.no_cache
     if a.pre:
         mode_pre(cfg, a.codes)
     elif a.watch:

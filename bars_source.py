@@ -21,12 +21,17 @@
 用法（脚本侧）：
     from bars_source import ash_bars, us_quote
     bars, src, notes = ash_bars("sh", "600872", n=140)
-    quote          = us_quote("CF")
+    quote          = us_quote("CF")          # quote["spot"] 为 None = 日线来自离线档
 
 用法（CLI）：
     python bars_source.py --stat              # 看缓存命中情况
     python bars_source.py --clear             # 清空缓存
     python bars_source.py --clear --market US
+
+复用分三层（2026-09-21 补了最里面那层）：
+    **进程内记忆 → 磁盘缓存 → 本地快照**，三层的有效性判据都是 `_check_rules` 同一份实现。
+    进程内记忆是给常驻进程（`watch_us --watch`，每 60s 一轮重问同一只票）准备的：
+    日线在一个交易日内不变，记住即可；跨进程复用仍靠磁盘缓存。
 """
 import argparse
 import datetime as dt
@@ -34,6 +39,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 import urllib.request
 
@@ -151,41 +157,120 @@ def _min_bars(n):
     return max(min(60, n), n)
 
 
-def cache_check(market, code, n, now=None):
+def market_tag(market):
+    """市场名归一化成缓存键用的标签。"""
+    return "ASH" if is_ash(market) else "US"
+
+
+def _check_rules(bars, saved, market, n, now, trim=True):
+    """**复用判据只有这两条**，磁盘缓存与进程内记忆共用同一份实现。
+
+    ① 末根日期 >= 最近已完成交易日；
+    ② 存盘时刻在该日定稿之后（否则是盘中半日 bar）。
+
+    盘中：
+      · A 股（新浪）日线**含当日未收盘 bar**，源本身在变 → 再叠 IN_SESSION_TTL 短有效期；
+      · 美股日线不含当日（Nasdaq historical 只给已收盘交易日；东财/Yahoo 若返回当日
+        半日 bar，会被 ② 直接拦掉）→ 序列在盘中与「收盘后」等价，故**不设 TTL**。
+        2026-09-21 改：原来一股脑套 120s TTL，导致盯盘每轮都重拉 300 根历史日线
+        （`watch_us --watch` 60s 一轮的浪费就在这），而那条数据其实一整天都没变。
+
+    `trim=True` 只回末 n 根（A 股用：三个档位对齐到同一深度）；
+    `trim=False` 原样回全部（美股用：网络档本来就有 270+ 根，若离线档只回 60/140 根，
+    `build_ev`/`pivots` 看到的历史深度变了 → 同一只票换条取数路径结构就不同，属静默口径漂移）。
+
+    返回 (bars|None, 原因)；原因既是命中说明也是失效说明。
+    """
+    if not bars:
+        return None, "无 bars"
+    if len(bars) < _min_bars(n):
+        return None, f"根数不足（{len(bars)} < {_min_bars(n)}）"
+    out = bars[-n:] if trim else bars
+    last = bars[-1]["d"]
+    last_d = dt.date.fromisoformat(last)
+    need = last_completed_session(market, now)
+    if in_session(market, now):
+        if is_ash(market):
+            age = (now - saved).total_seconds()
+            if age > IN_SESSION_TTL:
+                return None, f"盘中已过期（{age:.0f}s > {IN_SESSION_TTL}s）"
+            if last_d < need:
+                return None, f"盘中末根 {last} 早于最近完整交易日 {need}"
+            return out, f"盘中·{age:.0f}s 内"
+        # 美股：源给的日线不含当日（Nasdaq historical 只到已收盘交易日），序列在盘中
+        # 与「收盘后」等价 → 不设 TTL，改由定稿检查兜「源突然返回当日半日 bar」。
+        if last_d < need:
+            return None, f"盘中末根 {last} 早于最近完整交易日 {need}"
+        if saved < settled_dt(market, last_d):
+            return None, f"存盘 {saved:%m-%d %H:%M} 早于 {last} 定稿时刻（疑为半日 bar）"
+        return out, f"盘中·美股末日线 {last} 已定稿"
+    if last_d < need:
+        return None, f"末根 {last} < 最近已完成交易日 {need}"
+    if saved < settled_dt(market, last_d):
+        return None, f"存盘 {saved:%m-%d %H:%M} 早于 {last} 定稿时刻（疑为半日 bar）"
+    return out, f"收盘后完成日线（{last} 已定稿）"
+
+
+def cache_check(market, code, n, now=None, trim=True):
     """返回 (bars|None, 原因)。原因既是命中说明也是失效说明。"""
     now = now or now_bj()
     meta = _read_meta(_cache_path(market, code))
     if not meta:
         return None, "无缓存"
     bars = meta.get("bars") or []
-    if len(bars) < _min_bars(n):
-        return None, f"缓存根数不足（{len(bars)} < {_min_bars(n)}）"
+    if not bars:
+        return None, "缓存无 bars"
     try:
         saved = dt.datetime.fromisoformat(str(meta.get("saved_at")))
     except Exception:
         return None, "缓存无存盘时间"
     if saved.tzinfo:
         saved = saved.astimezone().replace(tzinfo=None)
-    last = bars[-1]["d"]
-    need = last_completed_session(market, now)
-    if in_session(market, now):
-        age = (now - saved).total_seconds()
-        if age > IN_SESSION_TTL:
-            return None, f"盘中缓存已过期（{age:.0f}s > {IN_SESSION_TTL}s）"
-        if dt.date.fromisoformat(last) < need:
-            return None, f"盘中缓存末根 {last} 早于最近完整交易日 {need}"
-        return bars[-n:], f"盘中·{age:.0f}s 内"
-    if dt.date.fromisoformat(last) < need:
-        return None, f"末根 {last} < 最近已完成交易日 {need}"
-    if saved < settled_dt(market, dt.date.fromisoformat(last)):
-        return None, f"存盘 {saved:%m-%d %H:%M} 早于 {last} 定稿时刻（疑为半日 bar）"
-    return bars[-n:], f"收盘后完成日线（{last} 已定稿）"
+    return _check_rules(bars, saved, market, n, now, trim=trim)
 
 
-def cache_save(market, code, bars, source, now=None, min_len=60):
+# ── 进程内记忆 ──
+# 为什么还要这一层（2026-09-21）：`watch_us --watch` 是**常驻进程**，每 60s 一轮
+# 反复问同一只票的日线；磁盘缓存能跨进程复用，但盘中 TTL 只有 120s，每轮都要
+# 重新解析 JSON。日线本身在一个交易日内是不变的，进程内记住即可零成本复用。
+# 判据与磁盘缓存**完全一致**（同一个 _check_rules），所以不会放宽任何口径。
+# 显式传 `now` 时（回放/测试）跳过记忆，保证可复现。
+_MEMO = {}
+_MEMO_LOCK = threading.Lock()
+
+
+def memo_clear():
+    """清空进程内记忆（改过数据源口径、或测试里要强制重新取数时调用）。"""
+    with _MEMO_LOCK:
+        _MEMO.clear()
+
+
+def _memo_get(market, code, n, now, enabled=True, trim=True):
+    if not enabled:
+        return None, "已禁用进程内记忆"
+    with _MEMO_LOCK:
+        e = _MEMO.get((market_tag(market), str(code)))
+    if not e:
+        return None, "无进程内记忆"
+    bars, why = _check_rules(e["bars"], e["saved"], market, n, now, trim=trim)
+    if bars is None:
+        return None, f"进程内记忆失效（{why}）"
+    return bars, f"进程内记忆·{why}"
+
+
+def _memo_put(market, code, bars, saved):
+    if not bars:
+        return
+    with _MEMO_LOCK:
+        _MEMO[(market_tag(market), str(code))] = {"bars": bars, "saved": saved}
+
+
+def cache_save(market, code, bars, source, now=None, min_len=60, memo=True):
     if not bars or len(bars) < min_len:
         return None
     now = now or now_bj()
+    if memo:
+        _memo_put(market, code, bars, now)
     path = _cache_path(market, code)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
@@ -287,10 +372,12 @@ def snapshot_stale(snap, market, now=None):
 # ─────────────────────────── 统一入口 ───────────────────────────
 def ash_bars(prefix, code, n=140, *, fetch=sina_raw, snap_dirs=None,
              use_cache=True, use_snap=True, now=None):
-    """A 股日线：本地快照 → 磁盘缓存 → 网络。
+    """A 股日线：本地快照 → 进程内记忆 → 磁盘缓存 → 网络。
 
     返回 (bars, src, notes)。bars 为空 = 三条路全失败。src ∈ snapshot:/cache/net。
+    显式传 `now`（回放/测试）时跳过进程内记忆，保证同一输入同一结果。
     """
+    explicit = now is not None
     now = now or now_bj()
     notes = []
     if use_snap:
@@ -308,6 +395,10 @@ def ash_bars(prefix, code, n=140, *, fetch=sina_raw, snap_dirs=None,
                     notes.append(tag + (f" · {note}" if note else ""))
                     return snap["bars"][-n:], "snapshot:" + os.path.basename(p), notes
     if use_cache:
+        if not explicit:
+            bars, why = _memo_get("ASH", code, n, now_bj())
+            if bars:
+                return bars, "cache", notes + [why]
         bars, why = cache_check("ASH", code, n, now=now)
         if bars:
             return bars, "cache", notes
@@ -316,23 +407,31 @@ def ash_bars(prefix, code, n=140, *, fetch=sina_raw, snap_dirs=None,
     if not bars:
         return [], "net", notes + ["网络源返回空"]
     if use_cache:
-        cache_save("ASH", code, bars, "sina", now=now, min_len=_min_bars(n))
+        cache_save("ASH", code, bars, "sina", now=now, min_len=_min_bars(n),
+                   memo=not explicit)
     return bars, "net", notes
 
 
-def us_quote(sym, *, fetch=None, snap_dirs=None, use_cache=True, use_snap=True, now=None):
+def us_quote(sym, *, fetch=None, snap_dirs=None, use_cache=True, use_snap=True,
+             now=None, min_bars=60):
     """美股报价+日线：本地快照 → 磁盘缓存 → fetch_market.fetch_us。
 
     返回 quote dict（多带 `src` 字段）。磁盘缓存命中时 `spot=None`+`session="Cache"`：
     缓存只存日线（收盘后才有效），绝不能让下游以为那是实时价。
+
+    `min_bars`：日线复用所需的最少根数。默认 60（够 ATR/pivot），
+    `probe_intraday` 走 140（结构判定与扫描器同一口径）。
+    调用方需要「实时价 + marketStatus」时，离线档命中后要**自己去取**（见 probe_intraday
+    的 `_us_daily_live`）—— 这里给不出实时价，给了就是骗人。
     """
+    explicit = now is not None
     now = now or now_bj()
     key = str(sym).upper()
     notes = []
     if use_snap:
         p = find_snapshot(key, snap_dirs)
         if p:
-            snap, why = load_snapshot(p)
+            snap, why = load_snapshot(p, min_bars=min_bars)
             if snap is None:
                 notes.append(f"快照 {os.path.basename(p)} 不可用（{why}）")
             else:
@@ -345,16 +444,19 @@ def us_quote(sym, *, fetch=None, snap_dirs=None, use_cache=True, use_snap=True, 
                     return {"ticker": key, "name": snap.get("name") or key,
                             "market": "US", "bars": snap["bars"],
                             "spot": None, "session": "Snapshot",
+                            "as_of": snap.get("as_of"),
                             "prev_close": snap.get("prev_close"),
                             "source": "snapshot:" + os.path.basename(p),
                             "src": "snapshot", "notes": notes}, notes
     if use_cache:
-        bars, why = cache_check("US", key, 60, now=now)
+        if not explicit:
+            bars, why = _memo_get("US", key, min_bars, now_bj(), trim=False)
+            if bars:
+                notes.append(why)
+                return _offline_quote(key, bars, "cache", None, notes), notes
+        bars, why = cache_check("US", key, min_bars, now=now, trim=False)
         if bars:
-            return {"ticker": key, "name": key, "market": "US", "bars": bars,
-                    "spot": None, "session": "Cache",
-                    "prev_close": bars[-2]["c"] if len(bars) >= 2 else bars[-1]["c"],
-                    "source": "cache", "src": "cache", "notes": notes}, notes
+            return _offline_quote(key, bars, "cache", None, notes), notes
         notes.append(f"缓存未命中（{why}）")
     if fetch is None:
         _ensure_root_on_path()
@@ -363,13 +465,27 @@ def us_quote(sym, *, fetch=None, snap_dirs=None, use_cache=True, use_snap=True, 
     q = fetch(key)
     bars = q.get("bars") or []
     sess = str(q.get("session") or "")
-    # 只在「日线已定稿」的时段落盘：盘中/盘前的 spot 会变，缓存了就是骗人
+    # 进程内记忆：**不受「已定稿才能落盘」那条限制**。它只活在当前进程里
+    #（盯盘常驻进程一退就没了），不会像磁盘缓存那样把半日 bar 带到下一次复盘；
+    # 能不能用仍由同一个 _check_rules 判（盘中美股要求「末日线已定稿」）。
+    if use_cache and bars and not explicit:
+        _memo_put("US", key, bars, now)
+    # 落盘则保守：只在「日线已定稿」的时段：盘中/盘前的 spot 会变，缓存了就是骗人
     if use_cache and bars and sess in ("Closed", "", "After-Hours") \
             and not in_session("US", now):
-        cache_save("US", key, bars, q.get("source") or "fetch_us", now=now)
+        cache_save("US", key, bars, q.get("source") or "fetch_us", now=now,
+                   memo=False)
     q["src"] = "net"
     q["notes"] = notes
     return q, notes
+
+
+def _offline_quote(key, bars, src, as_of, notes):
+    """离线档（快照/缓存）的 quote 形状。spot=None 是**刻意的**：没有实时价。"""
+    return {"ticker": key, "name": key, "market": "US", "bars": bars,
+            "spot": None, "session": "Cache", "as_of": as_of,
+            "prev_close": bars[-2]["c"] if len(bars) >= 2 else bars[-1]["c"],
+            "source": src, "src": src, "notes": notes}
 
 
 def _ensure_root_on_path():
