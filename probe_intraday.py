@@ -1460,7 +1460,10 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None,
             except Exception as e:
                 minute_cache["error"] = e
                 raise
-            minute_cache["source"] = "Yahoo（本地代理）"
+            # ★ 2026-09-21：原写死「Yahoo（本地代理）」是**陈旧文案** —— 代理默认已不探测
+            #   （_proxy_list() 默认 [None] 直连），实测直连可用。写成「本地代理」会误导
+            #   代理事故取证（会让人以为脚本又在连本机端口）。改为如实描述取数通道。
+            minute_cache["source"] = "Yahoo 5 分钟线（直连；如设了 WB_US_PROXY / us_proxy.txt 则经其代理）"
         return minute_cache["bars"]
 
     src, src_notes = "file", []
