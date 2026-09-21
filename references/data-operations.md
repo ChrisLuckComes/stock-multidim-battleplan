@@ -119,5 +119,8 @@ ATR：Wilder ATR14。
 9. **批量复盘离线化**：`snapshot_from_tdx.py --batch <文本|目录>` 一次把多个 `tdx_kline` 返回落成 `data/tdx/<code>.json`（同一段文本里的多个 JSON 都会处理，非 K 线对象自动跳过），随后 `watch_cn.py --snap-dir data/tdx` / `pool_us.py --snap-dir data/tdx`（不传也在默认查找目录内）**全程不联网**。报告首部会打「取数：快照 N · 缓存 M · 网络 K」与「快照时点：<代码> 取数时刻 …」，据此判断数据新旧。
    - 边界：`data/` 里旧课残留的快照（如 09-17 盘中取的）会在收盘复盘时被自动拒用，不会静默当成当日数据；`data/cache` 与 `data/tdx` 都是可再生文件，怀疑数据不对时直接 `bars_source.py --clear` + 删 `data/tdx`。
    - **刻意不做**：`probe_intraday.kline()` 保持自己联网（它取分钟线，盘中每根都在变，「收盘定稿」判据不成立；复用口就是它已有的 `--data` 日线快照）。
+10. **出报告不再手写 HTML（2026-09-21 加）**：`battle_analyze.py` 一条命令完成「取数 → rule123 → probe → 结构核验 → 全档赔率枚举 → 同行 → 分时」并落 `analysis.json`，再由 `report_render.py` 套 `templates/battle_report.html` 渲染（模型只写 `notes.json` 的判断文字）。版式与表格由脚本生成，**别再手写 40KB HTML**。
+    - ★ **单票日线不再走 `tdx_kline`**：它单次返回 14 万字符、会超 token 上限被强制落盘再读，链路又长又慢；`battle_analyze.py` 改走 `bars_source` 三级链路（新浪实测 0.2~0.7s）。`tdx_kline` 仍保留给「需要当日盘中快照」或新浪取不到的票，但拿到后**仍必须**经 `snapshot_from_tdx.py` 落盘再喂引擎（第 1、8 条的规矩不变）。
+    - 口径与耗时对照见 [report-generation.md](report-generation.md)。
 
 ---

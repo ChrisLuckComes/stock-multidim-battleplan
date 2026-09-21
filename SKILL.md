@@ -18,17 +18,18 @@ disable-model-invocation: true
 4. 报告必须包含量价分析、双轨打分和龙头对照；未收盘不得下全天派发结论。
 5. `recommend=False` 时不得给可执行下单指令；离买位大于 2×ATR 不追。
 6. 止损必须分结构止损与硬止损两档，禁止合成一个价格。
+7. **出报告走两步，不要手写 HTML**：`battle_analyze.py`（取数 → 结构 → 量价 → 全档赔率 → 同行 → 分时，一次算完出 `analysis.json`）→ `report_render.py`（模板 `templates/battle_report.html` + `notes.json` 渲染）。版式与表格由脚本生成，**模型只写判断与叙述**（`notes.json`，≈2K token）。细节见 [report-generation.md](references/report-generation.md)。
 
 ## 按需读取
 
 只读取当前任务所需文件，不要预加载全部 references：
 
-- **完整单票报告**：读取 [research-report.md](references/research-report.md)、[strategy-modes.md](references/strategy-modes.md)、[entry-odds.md](references/entry-odds.md)、[risk-exit.md](references/risk-exit.md)、[data-operations.md](references/data-operations.md)、[output-pitfalls.md](references/output-pitfalls.md)。
+- **完整单票报告**：读取 [research-report.md](references/research-report.md)、[strategy-modes.md](references/strategy-modes.md)、[entry-odds.md](references/entry-odds.md)、[risk-exit.md](references/risk-exit.md)、[data-operations.md](references/data-operations.md)、[output-pitfalls.md](references/output-pitfalls.md)、[report-generation.md](references/report-generation.md)。
 - **只问买点/止损/持仓处置**：读取 [strategy-modes.md](references/strategy-modes.md)、[entry-odds.md](references/entry-odds.md)、[risk-exit.md](references/risk-exit.md)。
 - **盘中信号/分钟复盘**：读取 [intraday.md](references/intraday.md)、[risk-exit.md](references/risk-exit.md)、[data-operations.md](references/data-operations.md)；生成正式报告时再读 [research-report.md](references/research-report.md)。
 - **股池扫描/批量复盘**：读取 [strategy-modes.md](references/strategy-modes.md)、[risk-exit.md](references/risk-exit.md)、[data-operations.md](references/data-operations.md)。
 - **只问基本面/估值/扫雷**：读取 [research-report.md](references/research-report.md)、[risk-exit.md](references/risk-exit.md)。
-- **生成或更新报告**：额外读取 [output-pitfalls.md](references/output-pitfalls.md)。
+- **生成或更新报告**：额外读取 [output-pitfalls.md](references/output-pitfalls.md)、[report-generation.md](references/report-generation.md)。
 
 ## 不可省略的核心规则
 

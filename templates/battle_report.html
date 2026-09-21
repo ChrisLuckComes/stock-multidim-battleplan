@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}}</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#fff; --line:#e3e6ea; --txt:#1c2024; --dim:#5d6670; --dim2:#8a939c;
+    --up:#d32f2f; --dn:#12855a; --warn:#b26a00; --hi:#fff8e1; --hi-b:#f0c14b;
+    --accent:#1f4e79; --accent2:#eef4fa;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);
+    font:14px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;}
+  .wrap{max-width:1080px;margin:0 auto;padding:22px 18px 60px}
+  header{border-bottom:2px solid var(--accent);padding-bottom:14px;margin-bottom:18px}
+  h1{margin:0 0 6px;font-size:23px;letter-spacing:.3px}
+  h2{font-size:17px;margin:26px 0 10px;padding-left:10px;border-left:4px solid var(--accent)}
+  h3{font-size:14.5px;margin:16px 0 8px;color:var(--accent)}
+  .meta{color:var(--dim);font-size:12.5px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:12px 0}
+  .grid{display:grid;gap:12px}
+  .g2{grid-template-columns:1fr 1fr}
+  .g3{grid-template-columns:repeat(3,1fr)}
+  .g4{grid-template-columns:repeat(4,1fr)}
+  @media(max-width:760px){.g2,.g3,.g4{grid-template-columns:1fr}}
+  table{width:100%;border-collapse:collapse;font-size:13px;margin:8px 0}
+  th,td{border:1px solid var(--line);padding:6px 8px;text-align:right}
+  th{background:#f0f3f6;text-align:center;font-weight:600;color:#37424d}
+  td:first-child,th:first-child{text-align:left}
+  .up{color:var(--up);font-weight:600}
+  .dn{color:var(--dn);font-weight:600}
+  .flat{color:var(--dim)}
+  .bestbox{background:var(--hi);border:2px solid var(--hi-b);border-radius:10px;padding:14px 16px;margin:12px 0}
+  .bestbox .ttl{font-weight:700;color:#8a5a00;font-size:15px;margin-bottom:8px}
+  .kpis{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}
+  .kpi{background:var(--accent2);border:1px solid #d3e2f0;border-radius:8px;padding:7px 11px;font-size:12.5px}
+  .kpi b{color:var(--accent);font-size:14px}
+  .badge{display:inline-block;border-radius:5px;padding:1px 7px;font-size:11.5px;font-weight:600;margin-right:5px}
+  .b-t1{background:#e8f5e9;color:#1b5e20;border:1px solid #a5d6a7}
+  .b-warn{background:#fff4e5;color:#8a5a00;border:1px solid #ffd699}
+  .b-no{background:#fdecea;color:#b3261e;border:1px solid #f5b7b1}
+  .b-ok{background:#e8f0fb;color:#1f4e79;border:1px solid #b6cde8}
+  ul{margin:6px 0 6px 20px;padding:0}
+  li{margin:3px 0}
+  .note{font-size:12.5px;color:var(--dim)}
+  .disc{background:#fbfbfc;border:1px dashed var(--line);border-radius:8px;padding:12px 14px;
+    font-size:11.5px;color:var(--dim);margin-top:26px;line-height:1.6}
+  code{background:#f0f3f6;padding:1px 5px;border-radius:4px;font-size:12px}
+  .sec-no{color:var(--dim2);font-weight:400;font-size:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>{{H1}} <span class="sec-no">{{CODE_LABEL}}</span> · 多维度作战计划</h1>
+  <div class="meta">{{META_LINE}}</div>
+</header>
+
+<!-- ================= 首屏 ================= -->
+<div class="card">
+  <div class="kpis">{{KPI_ITEMS}}</div>
+  <p style="margin:10px 0 0">{{KPI_BADGES}}</p>
+  <p style="margin:10px 0 0;font-size:14.5px">{{THESIS}}</p>
+</div>
+
+<div class="bestbox">
+  <div class="ttl">★ 最高盈亏比路径（强制高亮）—— {{BEST_TITLE}}</div>
+  <div class="kpis">{{BEST_KPIS}}</div>
+  <p class="note" style="margin:8px 0 0">{{BEST_NOTE}}</p>
+</div>
+
+<!-- ================= 1. 模式卡 ================= -->
+<h2>1 · 模式卡与执行口径</h2>
+<div class="grid g2">
+  <div class="card">
+    <h3>引擎判定（rule123.py · {{BASIS_DATE}} 口径）</h3>
+    <table>
+      <tr><th>项</th><th>值</th></tr>
+      {{MODE_ROWS}}
+    </table>
+    <p class="note">{{MODE_NOTE}}</p>
+  </div>
+  <div class="card">
+    <h3>止损 / 目标 / 仓位（probe_intraday.py）</h3>
+    <table>
+      <tr><th>项</th><th>值</th></tr>
+      {{PLAN_ROWS}}
+    </table>
+    <p class="note">{{PLAN_NOTE}}</p>
+  </div>
+</div>
+<div class="card">
+  <h3>⚠ 必须知道的口径问题</h3>
+  {{CALIBER_NOTES}}
+</div>
+
+<!-- ================= 2. 全档赔率枚举 ================= -->
+<h2>2 · 全档赔率枚举（止损统一取结构锚）</h2>
+<div class="card">
+  <table>
+    <tr><th>档位</th><th>买价</th><th>需回落/上涨</th><th>结构止损</th><th>每股风险</th>
+        <th>×ATR</th><th>R→{{T1}}</th><th>R→{{T2}}</th><th>可预挂</th><th>判定</th></tr>
+    {{ODDS_ROWS}}
+  </table>
+  <p class="note">{{ODDS_NOTE}}</p>
+  {{ODDS_APPENDIX}}
+</div>
+
+<!-- ================= 3. 量价分析 ================= -->
+<h2>3 · 量价分析（当日分钟复盘 + 近 20 日）</h2>
+<div class="grid g2">
+  <div class="card">
+    <h3>3.1 当日（{{BASIS_DATE}}）分钟复盘</h3>
+    <table>
+      <tr><th>项</th><th>值</th></tr>
+      {{INTRADAY_ROWS}}
+    </table>
+    <p class="note" style="margin-top:6px">{{INTRADAY_NOTE}}</p>
+  </div>
+  <div class="card">
+    <h3>3.2 近 20 日量价节奏</h3>
+    <table>
+      <tr><th>项</th><th>值</th></tr>
+      {{VP_ROWS}}
+    </table>
+    <p class="note">{{VP_NOTE}}</p>
+  </div>
+</div>
+<div class="card">
+  <h3>3.3 量价结论（强制：当日 + 近 20 日分别判定）</h3>
+  <table>
+    <tr><th>维度</th><th>判定</th><th>依据</th></tr>
+    {{VP_VERDICT_ROWS}}
+  </table>
+  <p class="note">{{VP_VERDICT_NOTE}}</p>
+</div>
+
+<!-- ================= 4. 六维研究 ================= -->
+<h2>4 · 六维研究（基本面 / 估值 / 技术 / 资金 / 催化）</h2>
+<div class="grid g2">
+  <div class="card">
+    <h3>4.1 公司是什么（业务与主线）</h3>
+    {{FUND_BODY}}
+  </div>
+  <div class="card">
+    <h3>4.2 财务与经营节奏</h3>
+    <table>
+      <tr><th>项</th><th>值</th></tr>
+      {{FIN_ROWS}}
+    </table>
+  </div>
+</div>
+<div class="grid g2">
+  <div class="card">
+    <h3>4.3 估值水位</h3>
+    <table>
+      <tr><th>口径</th><th>值</th></tr>
+      {{VALUATION_ROWS}}
+    </table>
+    <p class="note">{{VALUATION_NOTE}}</p>
+  </div>
+  <div class="card">
+    <h3>4.4 催化 / 事件</h3>
+    {{CATALYST_LIST}}
+  </div>
+</div>
+
+<!-- ================= 5. 扫雷 ================= -->
+<h2>5 · 扫雷（解禁 / 减持 / 立案 / 重大利空）</h2>
+<div class="card">
+  {{MINESWEEP_LIST}}
+  <p class="note">{{MINESWEEP_NOTE}}</p>
+</div>
+
+<!-- ================= 6. 大结构与总否决 ================= -->
+<h2>6 · 大结构与标的总否决（三道）</h2>
+<div class="grid g2">
+  <div class="card">
+    <h3>6.1 大结构（多周期视角）</h3>
+    <table>
+      <tr><th>阶段</th><th>价格</th><th>日期</th><th>幅度</th></tr>
+      {{BIGSTRUCT_ROWS}}
+    </table>
+    <p class="note">{{BIGSTRUCT_NOTE}}</p>
+  </div>
+  <div class="card">
+    <h3>6.2 总否决（任一成立即不参与）</h3>
+    <table>
+      <tr><th>#</th><th>否决项</th><th>判据</th><th>结论</th></tr>
+      {{VETO_ROWS}}
+    </table>
+    <p class="note">{{VETO_NOTE}}</p>
+  </div>
+</div>
+
+<!-- ================= 7. 龙头对照 ================= -->
+<h2>7 · 同板块 / 概念龙头对照（轻量）</h2>
+<div class="card">
+  <table>
+    <tr><th>标的</th><th>收盘</th><th>3 日%</th><th>5 日%</th><th>10 日%</th><th>20 日%</th>
+        <th>60 日%</th><th>距年内高</th><th>距 MA20</th><th>ATR%</th></tr>
+    {{PEER_ROWS}}
+  </table>
+  <p class="note">{{PEER_NOTE}}</p>
+</div>
+
+<!-- ================= 8. 双轨打分 ================= -->
+<h2>8 · 双轨打分（禁止合成总分）</h2>
+<div class="grid g2">
+  <div class="card">
+    <h3>投资价值 <span class="sec-no">{{SCORE_INVEST}} / 10</span></h3>
+    <ul>{{SCORE_INVEST_LI}}</ul>
+  </div>
+  <div class="card">
+    <h3>短线博弈 <span class="sec-no">{{SCORE_TRADE}} / 10</span></h3>
+    <ul>{{SCORE_TRADE_LI}}</ul>
+  </div>
+</div>
+
+<!-- ================= 9. 执行方案 ================= -->
+<h2>9 · 执行方案（可下单动作）</h2>
+<div class="card">
+  <table>
+    <tr><th>项</th><th>值</th><th>备注</th></tr>
+    {{EXEC_ROWS}}
+  </table>
+  <h3 style="margin-top:14px">9.1 加仓 / 减仓节奏</h3>
+  <ul>{{EXEC_RHYTHM}}</ul>
+  <h3 style="margin-top:14px">9.2 失效条件（任一触发即作废本计划）</h3>
+  <ul>{{EXEC_INVALID}}</ul>
+</div>
+
+<!-- ================= 10. 一页汇总 ================= -->
+<h2>10 · 一页汇总</h2>
+<div class="card">
+  <table>
+    <tr><th>项</th><th>结论</th></tr>
+    {{SUMMARY_ROWS}}
+  </table>
+</div>
+
+<div class="disc">
+  <b>免责声明</b>：本报告由 <code>stock-multidim-battleplan</code> skill 自动生成（数据来自公开行情接口与公开信息），
+  仅用于记录分析过程与纪律约束，<b>不构成任何投资建议</b>。所有价位（买入 / 止损 / 目标）均为基于历史波动的
+  计算值，不代表未来收益，也不保证成交。集合竞价、涨跌停、停牌、除权除息、突发公告都可能使价位失效。
+  交易决策与盈亏后果由账户持有人自行承担。<br>
+  <b>执行约束</b>：{{DISC_CONSTRAINTS}}<br>
+  <b>数据口径</b>：{{DISC_DATA}}<br>
+  生成时间 {{GENERATED_AT}} · 渲染器 report_render.py（模板 templates/battle_report.html）
+</div>
+
+</div>
+</body>
+</html>
