@@ -64,6 +64,16 @@ def snap_of(bars, name="合成票", code="600000"):
             "volume": bars[-1]["v"], "turnover": 0.0, "bars": bars}
 
 
+def num_of(x):
+    """与 report_render.num 同口径的极简版（测试用）。"""
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return str(x)
+    s = "%.2f" % v
+    return s.rstrip("0").rstrip(".") if "." in s else s
+
+
 class TestOdds(unittest.TestCase):
     def setUp(self):
         self.bars = synth_bars()
@@ -241,6 +251,39 @@ class TestRender(unittest.TestCase):
         self.assertIn("雷一", html)
         ok, _ = RR.check_html(html)
         self.assertTrue(ok)
+
+    def _best_seg(self, html):
+        i = html.find("最高盈亏比路径")
+        j = html.find("1 · 模式卡")
+        self.assertGreater(i, -1)
+        self.assertGreater(j, i)
+        return html[i:j]
+
+    def test_best_rows_override_engine_kpi(self):
+        """notes.best_rows 必须整体替换「最高 R 卡」的 KPI —— 否则标题写人工选的档、
+        KPI 却是引擎推的薄止损档，同一张卡片里两个买价（300657 实测）。"""
+        notes = {"best_title": "人工选档",
+                 "best_rows": [["买入", "<b>88.88</b>（人工档）"],
+                               ["每股风险", "<b>9.99</b>"]]}
+        html = RR.render(self._analysis(), notes, RR.DEFAULT_TMPL)
+        seg = self._best_seg(html)
+        self.assertIn("88.88", seg)
+        self.assertIn("9.99", seg)
+        self.assertNotIn("R → t1", seg, "引擎默认 KPI 行没被覆盖")
+        self.assertNotIn("需回落", seg, "引擎默认 KPI 行没被覆盖")
+
+    def test_worst_row_uses_primary_table(self):
+        """「最差档」对照必须取主表口径（odds_primary）—— 用全矩阵最差会得到
+        与报告正文完全脱节的值（300657：主表最差 R 1.00，全矩阵最差 R 0.26）。"""
+        a = self._analysis()
+        bad = dict(a["odds"][-1])
+        bad["entry"] = 999.0
+        bad["r1"] = 0.01
+        a["odds"] = list(a["odds"]) + [bad]
+        html = RR.render(a, {}, RR.DEFAULT_TMPL)
+        seg = self._best_seg(html)
+        self.assertNotIn("999.00", seg, "最差档取了全矩阵口径")
+        self.assertIn(num_of(a["odds_primary"][-1]["entry"]), seg)
 
     def _exec_seg(self, html):
         i = html.find("9 · 执行方案")

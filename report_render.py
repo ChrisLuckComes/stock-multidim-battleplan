@@ -166,6 +166,11 @@ def build_best(a, n):
                     if (rec.get("pct_cash") or 0) >= 95 else ""))
          if qty else "<b>不做</b>（1 手即超单笔硬顶）"),
     ]
+    if n.get("best_rows"):
+        # notes 接管这张卡片的 KPI 行（与 exec_rows 同语义：整体替换，不追加）。
+        # 不接管时会自相矛盾 —— 标题写人工选的档（37.65），KPI 却是引擎推的
+        # 薄止损档（38.49 / 700 股），同一张卡片里两个买价。
+        kpis = [tuple(x) for x in n["best_rows"]]
     if n.get("best_kpi_extra"):
         for x in n["best_kpi_extra"]:
             kpis.append(tuple(x))
@@ -174,7 +179,10 @@ def build_best(a, n):
     # 对照：全档最高 R（不一定可执行）与最差档
     rows_all = a.get("odds") or []
     top = rows_all[0] if rows_all else None
-    worst = rows_all[-1] if rows_all else None
+    # 最差档取「主表口径」（odds_primary）—— 全矩阵（78 组）里最差的那个
+    # 与报告正文完全脱节（300657 实测：主表最差 R 1.00，全矩阵最差 R 0.26）。
+    rows_primary = a.get("odds_primary") or rows_all
+    worst = rows_primary[-1] if rows_primary else None
     parts = []
     if top and top is not rec:
         parts.append("名义最高 R 是 <b>%s 买 %s / %s 止损 %s</b> → <b>R %s</b>，但它 %s，"
