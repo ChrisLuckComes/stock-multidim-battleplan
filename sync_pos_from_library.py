@@ -27,6 +27,12 @@
 
     # 只同步美股
     python sync_pos_from_library.py --token-stdin --market us
+
+★ 2026-09-22 补美股支持：以前只认「标的」列里的 6 位数字（A 股代码），
+  美股行（`MRVL 迈威尔科技`）解析不出代码 → **静默跳过**，然后照样打印
+  「本地池与资料库一致」。后果是 MRVL 买了 6 股、库里写着持仓，本地
+  `pool_us.json` 里 `pos` 仍是 null —— 「资料库=真源」在美股侧整条断链。
+  现在按 `--market us` 走 ticker 解析（与 sync_library.split_target_us 同源逻辑）。
 """
 
 from __future__ import annotations
@@ -68,7 +74,25 @@ NAME_ALIASES = {
 }
 
 CODE_RE = re.compile(r"(\d{6})")
+# 美股 ticker：`MRVL 迈威尔科技` / `SNDK 闪迪` / `000660 SK海力士(韩)`。
+# 与 sync_library.split_target_us 同一口径（首个空白前的那个 token），
+# 只是额外容忍括号/破折号等分隔符。**不校验字符集** —— SKHY/BE 这类短票、
+# 带 `.` 的 ADR 都要能过，宁可把怪 token 打出来给人看，也不要静默丢掉一行持仓。
+US_TICKER_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9.\-]{0,9})")
 HOLD_STATUS = "持仓"
+
+
+def split_us_target(raw: str):
+    """`MRVL 迈威尔科技` -> ("MRVL", "迈威尔科技")；名字缺失时名字回退成 ticker。"""
+    t = (raw or "").strip()
+    if not t:
+        return "", ""
+    m = US_TICKER_RE.match(t)
+    if not m:
+        return "", t
+    ticker = m.group(1).upper()
+    name = t[m.end():].strip().lstrip("-—–·:：()（） ").strip()
+    return ticker, (name or ticker)
 
 
 def _library_script(name: str) -> str:
@@ -107,12 +131,16 @@ def fetch_csv_from_library(token: str, db_id: str) -> str:
     return content
 
 
-def parse_positions(csv_text: str) -> list[dict]:
+def parse_positions(csv_text: str, market: str = "cn") -> list[dict]:
     """从股池配置 CSV 里解析「状态 = 持仓」的行。
 
-    返回 [{"code","name","qty","cost","stop","stop_exec","flag","theme"}]，
-    代码取自「标的」列里的 6 位数字（如 "688758 赛分科技"）；
-    没有代码的（如 "星宸科技"）走 FALLBACK_META 或由调用方自行补。
+    返回 [{"key","code","sym","name","qty","cost","stop","stop_exec","flag","theme"}]
+    + 快照字段。`key` = 该市场的池主键（A 股 6 位代码 / 美股 ticker），
+    调用方只需认这一个字段，不用分市场判断。
+
+    代码取自：
+      · A 股：`标的` 列里的 6 位数字（如 "688758 赛分科技"），没有的走 NAME_ALIASES；
+      · 美股：`标的` 列的首个 token（如 "MRVL 迈威尔科技" → MRVL）。
     ★ theme 直接取资料库的「板块主题」列 —— 资料库是唯一真源，
       池里没有的新票不必再往 FALLBACK_META 手工登记板块（那张表只留 prefix 兜底）。
     """
@@ -125,15 +153,19 @@ def parse_positions(csv_text: str) -> list[dict]:
         raw = (r.get("标的") or "").strip()
         if not raw:
             continue
-        m = CODE_RE.search(raw)
-        code = m.group(1) if m else ""
-        name = CODE_RE.sub("", raw).strip() or raw
         alias_hit = False
-        if not code:
-            code = NAME_ALIASES.get(name, "")
-            alias_hit = bool(code)
-        def num(key):
-            v = (r.get(key) or "").strip()
+        if market == "us":
+            key, name = split_us_target(raw)
+        else:
+            m = CODE_RE.search(raw)
+            key = m.group(1) if m else ""
+            name = CODE_RE.sub("", raw).strip() or raw
+            if not key:
+                key = NAME_ALIASES.get(name, "")
+                alias_hit = bool(key)
+
+        def num(k):
+            v = (r.get(k) or "").strip()
             if not v:
                 return None
             try:
@@ -144,7 +176,9 @@ def parse_positions(csv_text: str) -> list[dict]:
         cost = num("成本")
         stop = num("止损价")
         out.append({
-            "code": code,
+            "key": key,
+            "code": key if market == "cn" else "",
+            "sym": key if market == "us" else "",
             "name": name,
             "qty": int(qty) if qty is not None else None,
             "cost": cost,
@@ -165,23 +199,38 @@ def load_pool(path: str) -> dict:
 
 
 def save_pool(path: str, data: dict) -> None:
-    with io.open(path, "w", encoding="utf-8", newline="\n") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-        f.write("\n")
+    """写回池 json，**保持该文件原有的行尾符**。
+
+    DEV 仓库约定 CRLF、INST 副本约定 LF（见 pool-sync-and-feature-port §3）。
+    统一写 `\n` 会让 DEV 侧整个文件在 git 里「全文件替换」，用户根本没法 review。
+    """
+    with io.open(path, "rb") as f:
+        raw = f.read()
+    nl = "\r\n" if b"\r\n" in raw else "\n"
+    txt = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+    if nl == "\r\n":
+        txt = txt.replace("\n", "\r\n")
+    with io.open(path, "wb") as f:
+        f.write(txt.encode("utf-8"))
 
 
-def sync(positions: list[dict], pool: dict, check_only: bool) -> dict:
-    """把持仓写回 pool（就地修改）。返回变更摘要。"""
-    by_code = {p.get("code"): p for p in pool.get("pool") or [] if p.get("code")}
-    report = {"updated": [], "added": [], "cleared": [], "hold_codes": []}
+def sync(positions: list[dict], pool: dict, check_only: bool,
+         market: str = "cn") -> dict:
+    """把持仓写回 pool（就地修改）。返回变更摘要。
+
+    `market` 决定池主键：A 股 `code`（带 prefix/theme），美股 `sym`（只有 name/theme）。
+    """
+    id_key = "sym" if market == "us" else "code"
+    by_id = {p.get(id_key): p for p in pool.get("pool") or [] if p.get(id_key)}
+    report = {"updated": [], "added": [], "cleared": [], "hold_ids": []}
 
     for pos in positions:
-        code = pos["code"]
-        if not code:
-            report.setdefault("no_code", []).append(pos["name"])
+        pid = pos["key"]
+        if not pid:
+            report.setdefault("no_id", []).append(pos["name"])
             continue
-        report["hold_codes"].append(code)
-        entry = by_code.get(code)
+        report["hold_ids"].append(pid)
+        entry = by_id.get(pid)
         new_pos = {
             "qty": pos["qty"],
             "cost": pos["cost"],
@@ -189,38 +238,47 @@ def sync(positions: list[dict], pool: dict, check_only: bool) -> dict:
             "stop_exec": pos["stop_exec"] or "收盘破",
         }
         if entry is None:
-            meta = FALLBACK_META.get(code, {})
-            entry = {
-                "code": code,
-                "name": pos["name"],
-                "prefix": meta.get("prefix") or ("sh" if code.startswith(("6", "9")) else "sz"),
-                # 板块优先取资料库「板块主题」，再退手工登记表
-                "theme": pos.get("theme") or meta.get("theme", ""),
-                "pos": new_pos,
-            }
+            if market == "us":
+                entry = {
+                    "sym": pid,
+                    "name": pos["name"],
+                    # 板块优先取资料库「板块主题」，再退手工登记表（美股无 FALLBACK_META）
+                    "theme": pos.get("theme") or "",
+                    "pos": new_pos,
+                }
+            else:
+                meta = FALLBACK_META.get(pid, {})
+                entry = {
+                    "code": pid,
+                    "name": pos["name"],
+                    "prefix": meta.get("prefix") or ("sh" if pid.startswith(("6", "9")) else "sz"),
+                    # 板块优先取资料库「板块主题」，再退手工登记表
+                    "theme": pos.get("theme") or meta.get("theme", ""),
+                    "pos": new_pos,
+                }
             if pos["flag"]:
                 entry["flag"] = pos["flag"]
             pool.setdefault("pool", []).append(entry)
-            by_code[code] = entry
-            report["added"].append("%s %s %s股@%s" % (code, pos["name"], pos["qty"], pos["cost"]))
+            by_id[pid] = entry
+            report["added"].append("%s %s %s股@%s" % (pid, pos["name"], pos["qty"], pos["cost"]))
         else:
             before = entry.get("pos")
             if before != new_pos:
                 report["updated"].append(
-                    "%s %s %s -> %s股@%s" % (code, pos["name"], before, pos["qty"], pos["cost"])
+                    "%s %s %s -> %s股@%s" % (pid, pos["name"], before, pos["qty"], pos["cost"])
                 )
             entry["pos"] = new_pos
             # 老条目 theme 空（早期版本从资料库同步时漏了板块）→ 用资料库补上，别留空
             if pos.get("theme") and not (entry.get("theme") or "").strip():
                 entry["theme"] = pos["theme"]
                 report.setdefault("meta_filled", []).append(
-                    "%s %s theme=%s" % (code, pos["name"], pos["theme"])
+                    "%s %s theme=%s" % (pid, pos["name"], pos["theme"])
                 )
 
     # 池里 pos 非空、资料库却已不持有的 → 清空（提示防漏）
-    for code, entry in by_code.items():
-        if entry.get("pos") and code not in report["hold_codes"]:
-            report["cleared"].append("%s %s" % (code, entry.get("name")))
+    for pid, entry in by_id.items():
+        if entry.get("pos") and pid not in report["hold_ids"]:
+            report["cleared"].append("%s %s" % (pid, entry.get("name")))
             entry["pos"] = None
 
     if not check_only:
@@ -257,36 +315,47 @@ def main() -> int:
         db_id = CN_DB_ID if args.market == "cn" else US_DB_ID
         csv_text = fetch_csv_from_library(token, db_id)
 
-    positions = parse_positions(csv_text)
+    positions = parse_positions(csv_text, args.market)
     pool = load_pool(pool_path)
-    rep = sync(positions, pool, args.check)
+    rep = sync(positions, pool, args.check, args.market)
     if not args.check:
         save_pool(pool_path, pool)
 
-    # ---- 占用与可用现金（口径与 account_config.py 一致）----
+    # ---- 占用与可用现金 ----
     import account_config as ac
     conf = ac.cfg()
     used = sum((p["qty"] or 0) * (p["cost"] or 0) for p in positions)
-    prim, resv = conf["ash_primary"], conf["ash_reserve"]
-    risk_pct = conf["ash_risk_pct"]
 
     print("=== 资料库持仓（%s）===" % ("A股" if args.market == "cn" else "美股"))
     for p in positions:
         print("  %-8s %-10s %5s股 @%-8s 止损 %-8s %s" % (
-            p["code"], p["name"], money(p["qty"]), p["cost"], p["stop"], p["snap_date"]))
+            p["key"], p["name"], money(p["qty"]), p["cost"], p["stop"], p["snap_date"]))
     print()
-    print("  占用 %s 元 ｜ 主力层 %s 元已用 %.1f%%" % (money(used), money(prim), used / prim * 100))
-    print("  可用现金 = 主力层剩余 %s 元（+后备 %s 元 = %s 元）" % (
-        money(prim - used), money(resv), money(prim + resv - used)))
-    print("  持仓笔数 %d 笔 ｜ 单笔风险预算 %.0f 元（%.1f%% × %s）" % (
-        len(positions), prim * risk_pct, risk_pct * 100, money(prim)))
+    if args.market == "us":
+        # ★ 美股口径（2026-09-22 补）：以前这里无条件套 A 股「主力层 / 后备层」，
+        #   跑 --market us 会打出一堆和账户无关的 A 股额度。
+        acct, risk_pct = conf["us_account"], conf["us_risk_pct"]
+        print("  占用 $%s ｜ 美股账户 $%s（已用 %.1f%%）" % (
+            money(used), money(acct), used / acct * 100 if acct else 0.0))
+        print("  可用现金 = $%s" % money(acct - used))
+        print("  持仓笔数 %d 笔 ｜ 单笔风险预算 $%.2f（%.1f%% × $%s）" % (
+            len(positions), acct * risk_pct, risk_pct * 100, money(acct)))
+    else:
+        prim, resv = conf["ash_primary"], conf["ash_reserve"]
+        risk_pct = conf["ash_risk_pct"]
+        print("  占用 %s 元 ｜ 主力层 %s 元已用 %.1f%%" % (money(used), money(prim), used / prim * 100))
+        print("  可用现金 = 主力层剩余 %s 元（+后备 %s 元 = %s 元）" % (
+            money(prim - used), money(resv), money(prim + resv - used)))
+        print("  持仓笔数 %d 笔 ｜ 单笔风险预算 %.0f 元（%.1f%% × %s）" % (
+            len(positions), prim * risk_pct, risk_pct * 100, money(prim)))
     print()
-    print("=== 本地池变更 ===")
+    print("=== 本地池变更（%s）===" % pool_name)
     for k in ("added", "updated", "cleared", "meta_filled"):
         for line in rep.get(k) or []:
             print("  %-11s %s" % (k, line))
-    if rep.get("no_code"):
-        print("   无代码  %s（请手工补 6 位代码）" % "、".join(rep["no_code"]))
+    if rep.get("no_id"):
+        hint = ("请手工补 ticker" if args.market == "us" else "请手工补 6 位代码")
+        print("   无标识  %s（%s）" % ("、".join(rep["no_id"]), hint))
     aliased = [p["name"] for p in positions if p.get("alias_hit")]
     if aliased:
         print("   ⚠ 别名兜底 %s —— 资料库表里这几行没写代码，建议回去补上"
