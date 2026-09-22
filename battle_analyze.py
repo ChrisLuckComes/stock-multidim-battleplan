@@ -384,6 +384,45 @@ def annotate_odds(rows, z, atr_v, last_c):
     return rows
 
 
+def sizing_stop_of(rec, z):
+    """★ 仓位分母 = 这笔单**实际会执行**的那条止损腿（2026-09-22 统一口径）。
+
+    为什么必须统一：`stop_anchor_candidates()` 取的是**原始结构价**（基准日最低 / 均线 /
+    大阳中点…），而计划里可执行的止损是「锚 − gap」并分两条轨（结构轨 / 硬止损轨）。
+    拿矩阵的账面止损去算股数会**系统性超配** —— 688428 实测：矩阵止损 30.09（基准日最低）
+    vs 计划硬止损 29.91（同锚 − gap），每股风险 0.81 vs 0.99 ⇒ 925 股 vs 预案单 757 股，
+    报告里同屏出现两个数字（用户 2026-09-22 提出，要求引擎侧统一）。
+
+    规则：**取两者中更低的那条**（止损更低 = 每股风险更大 = 股数更少 = 保守），
+    并要求它落在买价之下（否则是「开仓即止损」，不参与仓位计算）。
+
+    返回 (stop, basis_txt)；拿不到计划腿时退回矩阵止损。
+    """
+    entry = rec.get("entry")
+    stop = rec.get("stop")
+    hard = z.get("hard_stop")
+    if isinstance(hard, (int, float)) and entry is not None and hard < entry:
+        if not isinstance(stop, (int, float)) or hard < stop:
+            return hard, "计划硬止损 %s（%s · 盘中触价）" % (
+                round(hard, 2), z.get("hard_anchor") or "引擎")
+    if isinstance(stop, (int, float)):
+        return stop, "矩阵结构止损 %s（%s）" % (round(stop, 2), rec.get("stop_name") or "锚")
+    return stop, "矩阵结构止损（%s）" % (rec.get("stop_name") or "锚")
+
+
+def single_cap_with_cash(account, cash=None):
+    """单笔金额上限 = **min(单笔绝对额硬顶, 真实可用现金)**（2026-09-22 修）。
+
+    原来是 `cap_amt=cash` 直接传下去，而 `ash_lots` 里是 `cap = cap_amt or ash_single_cap(...)`
+    ⇒ 只要「可用现金 > 单笔硬顶」，硬顶就被整个顶掉（cap 变成现金本身）。
+    5 万硬顶是**绝对额**，不能被「账户里恰好有钱」豁免。
+    """
+    cap = P.ash_single_cap(account)
+    if cash:
+        return min(cash, cap) if cap else cash
+    return cap
+
+
 def pick_recommend(rows, z):
     """从全档里挑「可执行且赔率最高」的一条。
 
@@ -710,26 +749,75 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
     #   它同时受「账户 × risk_pct / 每股风险」与「单笔金额硬顶 ash_single_cap」约束，
     #   并按最小申报单位取整（科创板 200 起 1 股递增）。自成一套迟早与引擎走偏。
     if rec:
+        # ★ 仓位分母统一到「实际执行的止损腿」（见 sizing_stop_of 的注释）。
+        #   原来直接用 `rec["stop"]`（矩阵原始锚），与 probe 预案单口径不同 → 两个股数。
+        _sz_stop, _sz_basis = sizing_stop_of(rec, z)
+        rec["stop_sizing"] = _f(_sz_stop)
+        rec["stop_sizing_basis"] = _sz_basis
+        rec["risk_sizing"] = (_f(rec["entry"] - _sz_stop, 2)
+                              if isinstance(_sz_stop, (int, float)) else None)
+        if (rec["risk_sizing"] is not None and rec.get("stop") is not None
+                and abs(_sz_stop - rec["stop"]) > 1e-9):
+            rec["qty_note"] = (
+                "股数按 %s 计（每股风险 %s）；赔率列的账面止损 %s 未计 gap/噪声带，"
+                "只用于排序、不用来算股数（否则超配）。"
+                % (_sz_basis, rec["risk_sizing"], rec["stop"]))
+        _rp = P.US_RISK_PCT if is_us else P.ASH_RISK_PCT
         if is_us:
             # ★ 美股：1 股起（无整手约束）、T+0。股数走 probe_intraday.us_lots
             #   （账户 × US_RISK_PCT ÷ 每股风险，再用「账户 / 价格」夹上限）。
             #   传了 cash 再用真实可用现金夹一次 —— 账户总额 ≠ 能动用的钱。
-            rec["qty"] = P.us_lots(account, rec["entry"], rec["stop"])
+            rec["qty"] = P.us_lots(account, rec["entry"], _sz_stop)
             if rec["qty"] and cash:
                 rec["qty"] = max(1, min(rec["qty"], int(cash / rec["entry"])))
         else:
             #   ★ cash（真实可用现金）传入时作为单笔金额上限：**账户总额 ≠ 能动用的钱**。
             #     持续持仓的账户上两者能差一半（688152：账户 5 万，已持 21,574 元，
             #     可用现金只有 28,426 元），不传就会算出「钱不够的股数」。
-            rec["qty"] = P.ash_lots(account, rec["entry"], rec["stop"], code,
-                                    cap_amt=cash if cash else None)
+            #   ★ 2026-09-22 修：原来直接 `cap_amt=cash` —— 现金 > 单笔绝对额硬顶时
+            #    会把 5 万硬顶整个顶掉（_cap 变成现金本身）。必须「现金与硬顶取小」。
+            _cap = single_cap_with_cash(account, cash)
+            rec["qty"] = P.ash_lots(account, rec["entry"], _sz_stop, code,
+                                    cap_amt=_cap)
         rec["amount"] = _f((rec["qty"] or 0) * rec["entry"], 0)
         rec["pct_account"] = _f(rec["amount"] / account * 100, 1) if account else None
         rec["cash"] = cash
         rec["pct_cash"] = _f(rec["amount"] / cash * 100, 1) if cash else None
-        rec["risk_amt"] = _f((rec["qty"] or 0) * rec["risk"], 0)
-        rec["risk_warning"] = P.ash_risk_warning(account, rec["entry"], rec["stop"],
-                                                 rec["qty"]) if rec["qty"] else None
+        rec["risk_amt"] = _f((rec["qty"] or 0) * (rec["risk_sizing"] or rec["risk"]), 0)
+        rec["risk_warning"] = P.ash_risk_warning(account, rec["entry"], _sz_stop,
+                                                 rec["qty"], risk_pct=_rp) if rec["qty"] else None
+        # ★ 与 probe 预案单对账：同价位 + 同止损腿 ⇒ 必须同股数。不一致就地报出来，
+        #   别让报告里出现两个数字（2026-09-22 用户提出的口径问题）。
+        _po = (probe_out or {}).get("pre_order") or {}
+        if (rec["qty"] and _po.get("qty") and _po.get("limit") is not None
+                and abs(_po["limit"] - rec["entry"]) < 0.005):
+            rec["qty_probe"] = _po["qty"]
+            if int(_po["qty"]) != int(rec["qty"]):
+                notes_all.append(
+                    "⚠ 仓位口径不一致：赔率档 %s 股 vs 预案单 %s 股（同一入场 %s）"
+                    % (rec["qty"], _po["qty"], rec["entry"]))
+        # ★ 分母落在噪声带内时，**把「按收盘轨实亏」的口径也算出来**（只标注，不静默改口径）。
+        #   硬止损距买区下沿 <0.3×ATR（hard_noise）时，它更像是「报警线」而不是可执行的
+        #   离场线：688428 实测硬止损 29.91 距买区下沿仅 0.05×ATR，而当天振幅 2.23 元
+        #   ⇒ 757 股按 29.91 算风险正好 749 元（=预算），但若真按收盘轨 29.14 走，
+        #   同样 757 股要亏 1,332 元（1.8×预算）。报告里那句「925 股已放弃」就是
+        #   人工替引擎兜的这一段。现在引擎直接给出「按收盘轨应降到几股」。
+        _st = z.get("struct_stop")
+        if (z.get("hard_noise") and rec.get("qty") and isinstance(_st, (int, float))
+                and _sz_stop is not None and _st < _sz_stop and rec["entry"] > _st):
+            rec["qty_if_struct"] = (
+                P.us_lots(account, rec["entry"], _st) if is_us else
+                P.ash_lots(account, rec["entry"], _st, code,
+                           cap_amt=single_cap_with_cash(account, cash)))
+            if rec["qty_if_struct"] and rec["qty_if_struct"] < rec["qty"]:
+                _loss = (rec["entry"] - _st) * rec["qty"]
+                rec["qty_note"] = (rec.get("qty_note") or "") + (
+                    " ⚠ 但硬止损 %s 落在噪声带内（距买区下沿 %s×ATR，等于没有）："
+                    "若改按收盘轨 %s 结算，同样 %s 股会亏 %s 元 ≈ 预算的 %.1f 倍 "
+                    "⇒ 建议降到 %s 股。"
+                    % (round(_sz_stop, 2), z.get("hard_dist_atr"), round(_st, 2),
+                       rec["qty"], "%d" % _loss,
+                       (_loss / (account * _rp)) if account else 0, rec["qty_if_struct"]))
     # ★ 主表口径：止损统一取引擎结构锚（与原报告的「止损统一取结构锚 EMA10」一致）——
     #   全矩阵 70+ 行走附录，主表只留「一个入场一行」，否则表格没法读。
     struct_stop = z.get("struct_stop")

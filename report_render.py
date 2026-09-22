@@ -123,6 +123,14 @@ def build_kpis(a, n):
                   % ("b-ok" if p.get("recommend") else "b-no", p.get("recommend")))
     if p.get("regime"):
         badges.append('<span class="badge b-warn">regime = %s</span>' % esc(p["regime"]))
+    # ★ T0 并行入口（2026-09-22）：`plan_entry` 一直有算 ma_reclaim，但报告以前拿不到
+    #   （evaluate 重建 out 时漏键）→ 用户看到「均线收复 + 过昨高」的票却只有 T2 回踩单，
+    #   会直接反问「为什么像 T0 的变种」。这里把它显式挂到首屏徽标上。
+    _t0 = p.get("ma_reclaim") or {}
+    if _t0 and p.get("mode") != "ma_reclaim_break":
+        badges.append('<span class="badge b-t1">T0 并行入口：过昨高 %s / 止损 %s（%s）</span>'
+                      % (num(_t0.get("trigger")), num(_t0.get("hard_stop")),
+                         esc(_t0.get("stop_anchor") or "锚")))
     for x in (n.get("badges") or []):
         if isinstance(x, dict):
             badges.append('<span class="badge %s">%s</span>' % (x.get("cls", "b-ok"), x.get("txt", "")))
@@ -201,6 +209,14 @@ def build_best(a, n):
     else:
         parts.append("本档在「买点在下方可隔夜预挂 + 不追高 + 不贴着止损线买 + 风险≥0.25×ATR」"
                      "四条约束下 R 最高。")
+    # ★ 股数口径（2026-09-22）：赔率列的「每股风险」是**矩阵账面止损**算的（用于排序），
+    #   股数用的是**计划可执行的止损腿**。两者不同时必须说明，否则首屏 925 股会和
+    #   执行方案的 预案单 757 股打架。
+    if rec.get("qty_note"):
+        parts.append(esc(rec["qty_note"]))
+    if rec.get("qty_probe") and rec["qty"] and int(rec["qty_probe"]) == int(rec["qty"]):
+        parts.append("已与执行方案「预案单数量 %s 股」对齐（同入场 + 同止损腿）。"
+                     % num(rec["qty_probe"], 0))
     return title, html, "<br>".join(parts)
 
 
@@ -229,19 +245,63 @@ def build_mode_rows(a):
     return kv_rows(out)
 
 
+def target_display(a):
+    """目标位取值（2026-09-22）。
+
+    T0（`ma_reclaim_break`）等**趋势单**分支下引擎不给固定目标：`plan["targets"]`
+    恒为 None、顶层 `targets.t1` / `t2_engine` 也为 None。旧写法会打印
+    「目标1 —（到达减 1/3~1/2…）」与「— / 114.30」，读者拿到的是一个空格子 ——
+    而「什么价卖、卖多少」是作战计划的硬要求（东微半导 688261 是首个暴露样本）。
+
+    ★ 这里**不硬塞目标价**：用户 2026-09-06 已明确纠正「拿前高/量度当目标位 = 框架错配」，
+    T0 的纪律是「不设固定目标、用移动止损让利润奔跑」。故只把可用的值取出来，
+    措辞由调用方决定（plan 目标优先，缺失时回退顶层 targets 的同义键）。
+    """
+    p = a.get("plan") or {}
+    t = p.get("targets") or {}
+    top = a.get("targets") or {}
+    v1 = t.get("target1")
+    v2 = t.get("target2")
+    if v1 is None:
+        v1 = top.get("t1")
+    if v2 is None:
+        v2 = top.get("t2_engine")
+    return v1, v2, top.get("wall_far"), top.get("ath")
+
+
 def build_plan_rows(a):
     p, s = a["plan"], a["struct"]
     z = p.get("buy_zone") or {}
     t = p.get("targets") or {}
     po = a.get("probe", {}).get("pre_order") or {}
+    # ★ 目标行（2026-09-22 修）：T0（ma_reclaim_break）分支下 plan["targets"] 恒为 null，
+    #   旧写法无条件打印「目标1 — / —」，既空白又违反「报告必须能回答什么价卖」这条硬要求
+    #   （东微半导 688261 是首个暴露此问题的样本：T0 成立但 plan.targets = null）。
+    #   T0 的框架是「不设固定目标、用移动止损让利润奔跑」（用户 2026-09-06 已纠正过：
+    #   拿前高/量度当目标位 = 框架错配），所以这里**不硬塞目标价**，而是如实说明，
+    #   并回退到顶层 targets 的远端墙 / ATH 作参考阻力。
+    _t1, _t2, _wall, _ath = target_display(a)
+    if _t1 is not None or _t2 is not None:
+        tgt_row = ("目标1 / 目标2", "<b>%s</b> / %s" % (num(_t1), num(_t2)))
+        rr_row = ("rr_target1（引擎）", num(t.get("rr_target1")))
+    else:
+        _ref = []
+        if _wall:
+            _ref.append("远端墙 <b>%s</b>" % num(_wall))
+        if _ath and _ath != _wall:
+            _ref.append("ATH <b>%s</b>" % num(_ath))
+        tgt_row = ("目标（趋势单·引擎不设固定目标）",
+                   "用移动止损（MA5 / 大阳中点）管理，<b>不设固定目标</b>"
+                   + ("<br>上方参考阻力：" + " ｜ ".join(_ref) if _ref else ""))
+        rr_row = ("rr_target1（引擎）", "—（趋势单不设目标）")
     out = [
         ("结构止损", "<b>%s</b>（%s · 收盘破）" % (num(z.get("struct_stop")), esc(z.get("struct_anchor")))),
         ("硬止损", "<b>%s</b>（%s · 盘中触价）" % (num(z.get("hard_stop")), esc(z.get("hard_anchor")))),
         ("硬止损噪声度", "%s×ATR %s" % (num(z.get("hard_dist_atr")),
                                     '<span class="badge b-no">噪声带内</span>'
                                     if z.get("hard_noise") else "")),
-        ("目标1 / 目标2", "<b>%s</b> / %s" % (num(t.get("target1")), num(t.get("target2")))),
-        ("rr_target1（引擎）", num(t.get("rr_target1"))),
+        tgt_row,
+        rr_row,
         ("预案单类型", esc(po.get("kind") or "—")),
         ("预案单挂价", "<b>%s</b>%s" % (num(po.get("limit")),
                                     "（上限 %s）" % num(po.get("cap")) if po.get("cap") else "")),
@@ -253,6 +313,29 @@ def build_plan_rows(a):
     vp = a.get("probe", {}).get("vp") or {}
     if vp:
         out.append(("量价研判（引擎）", esc(json.dumps(vp, ensure_ascii=False)[:220])))
+    # ★ T0 并行入口（2026-09-22）：均线收复 + 过昨高，与当日买点**并存、先到先做**。
+    #   以前这里没有这一段（evaluate 重建 out 时漏了 ma_reclaim），于是「昨天收复均线、
+    #   今天继续涨」的票在报告里只剩一条回踩单 —— 用户当场反问「为什么像 T0 的变种」。
+    t0 = p.get("ma_reclaim") or {}
+    if t0 and p.get("mode") != "ma_reclaim_break":
+        _c = (a.get("meta") or {}).get("basis_close") or 0
+        _trig = t0.get("trigger")
+        if _c and _trig:
+            _dist = "现价%s %s%%" % ("上方" if _trig > _c else "下方",
+                                    num(abs(_trig / _c - 1) * 100))
+        else:
+            _dist = "—"
+        out.insert(5, ("T0 并行入口", (
+            "过昨高 <b>%s</b>（D0 最高价 · %s）· 止损 <b>%s</b>（%s）· "
+            "每股风险 %s（%s%%）<br>"
+            "阻力墙 %s（%s）距 %s%% ｜ 档位 %s ｜ 「收复全部均线」那根 = <b>%s</b><br>"
+            "↑ 与当日买点<b>先到先做</b>；T0 是趋势单：用移动止损（MA5 / 大阳中点）管理，"
+            "不设固定目标。"
+            % (num(_trig), esc(_dist), num(t0.get("hard_stop")),
+               esc(t0.get("stop_anchor") or "锚"), num(t0.get("risk_per_share")),
+               num(t0.get("risk_pct")), num(t0.get("resistance")),
+               esc(t0.get("resistance_from") or "—"), num(t0.get("dist_to_wall_pct")),
+               esc(t0.get("grade") or "—"), esc(t0.get("kanchor_date") or "—")))))
     return kv_rows(out)
 
 
@@ -424,10 +507,27 @@ def build_exec(a, n):
             if rec.get("risk_warning") else "")),
     ]
     # 事实行：与买哪一档无关，notes 覆盖核心行时也照常保留
+    # ★ 目标行（2026-09-22 修）：趋势单（T0 等）分支下引擎不给固定目标，旧写法会打印
+    #   「目标1 —（到达减 1/3~1/2…）」这种自相矛盾的空行。改为如实说明 + 回退远端墙。
+    _t1, _t2, _wall, _ath = target_display(a)
+    if _t1 is not None or _t2 is not None:
+        _tgt1 = ("目标1", "<b>%s</b>（到达减 1/3~1/2，止损上移到成本或均线）" % num(_t1))
+        _tgt2 = ("目标2 / 远端墙", "%s / %s" % (num(_t2), num(_wall)))
+    else:
+        _ref = []
+        if _wall:
+            _ref.append("远端墙 <b>%s</b>" % num(_wall))
+        if _ath and _ath != _wall:
+            _ref.append("ATH <b>%s</b>" % num(_ath))
+        _tgt1 = ("目标1（趋势单·不设固定目标）",
+                 "本模式按 <b>移动止损</b>（MA5 / 大阳中点）管理，<b>不设固定目标位</b>"
+                 + ("<br>上方参考阻力：" + " ｜ ".join(_ref) if _ref else ""))
+        _tgt2 = ("目标2 / 远端墙", "%s / %s%s" % (
+            num(_t2), num(_wall),
+            "（仅供参考阻力，<b>不作为目标位</b>）" if _wall else ""))
     tail = [
-        ("目标1", "<b>%s</b>（到达减 1/3~1/2，止损上移到成本或均线）" % num(a["targets"].get("t1"))),
-        ("目标2 / 远端墙", "%s / %s" % (num(a["targets"].get("t2_engine")),
-                                   num(a["targets"].get("wall_far")))),
+        _tgt1,
+        _tgt2,
         ("挂单有效期", "次日开盘前挂，3 个交易日内有效；未成交 = 没回落到位，不追"),
         ("预挂可行性", (("✓ 买点在现价下方，可隔夜预挂（GTC 限价单）" if is_us
                      else "✓ 买点在现价下方，可隔夜预挂（A 股限价单）"))
@@ -436,8 +536,10 @@ def build_exec(a, n):
     if n.get("exec_rows"):
         # notes 接管核心行：整体替换，而不是在引擎默认行后面再追加一套
         # （追加会让同一个表里出现两套互相打架的买价/止损/股数）
+        # ★ 2026-09-22：改用 rows() 而不是 kv_rows() —— 表头是「项 / 值 / 备注」三列，
+        #   notes 需要能给「两方向预案」这类行补第三列说明；kv_rows 只接受 2 元组，会直接报错。
         core = [tuple(x) for x in n["exec_rows"]]
-    return kv_rows(core + tail)
+    return rows(core + tail)
 
 
 def build_summary(a, n):
