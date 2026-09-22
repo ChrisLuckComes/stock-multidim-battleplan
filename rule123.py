@@ -1928,7 +1928,9 @@ def stop_plan(bars, mode, z, atr_v):
             "struct_exec": STRUCT_EXEC,
             "hard_exec": HARD_EXEC,
             "hard_dist_atr": z.get("hard_dist_atr"),
-            "hard_noise": False,
+            # ★ 2026-09-23：原来是硬编码 False。T0 的硬止损在新增第 6 条锚后会收窄
+            #   （东微 1.18 → 0.58×ATR），贴进噪声带必须报警，故真算。
+            "hard_noise": bool((z.get("hard_dist_atr") or 9) < NOISE_ROOM_ATR),
             "stop_basis": z.get("stop_basis"),
             "t0": True,
         }
@@ -2375,8 +2377,21 @@ def ma_reclaim_break(bars, ev, atr_v, last_c, res_win=25):
                       不是把「昨高」定义成收盘价 —— 两个 close 是不同的东西，别混。
 
     止损锚 ★ 2026-09-20 口径扩展（用户定：「取全部锚中离触发价最近」）：
-      候选 = { MA5, MA10, MA20, **突破日均K** 实体中点 (o+c)/2, 突破日低点 }
+      候选 = { MA5, MA10, MA20, **突破日均K** 实体中点 (o+c)/2, 突破日低点,
+               **触发日前一根K低点** }
       取 **低于触发价且离触发价最近** 的一条。
+      ★★ 2026-09-23 新增第 6 条（东微半导 688261 案例，用户定「修」）：
+        前五条在 `kanchor_back ≥ 1` 时**全部落在突破日那根或均线上**，
+        离触发价可能极远（东微：突破日 09-17 低点 67.41 / MA5 75.68，
+        D0 触发 80.79 ⇒ 最近的 MA5 风险 **6.33%**、R→近端墙仅 **0.78**）
+        ⇒ 报告给出「形式合规、实际不可执行」的 T0 方案。
+        而突破前**最后一道支撑**其实是 D0（触发日前一根 K）的低点
+        （东微 09-22 低 78.27，与 09-21 低 78.09 构成双底带；跌破＝突破失败）
+        ⇒ 补入后同一张票：每股风险 2.52（3.12%）、R→84.79 = **1.59**，**变成可执行**。
+        ⚠ 噪声带兜底：D0 低点离触发价 < `NOISE_ROOM_ATR`×ATR（一次正常波动即扫掉）时
+          不纳入候选、回落到原五条，避免把止损设进噪声里。
+        ⚠ `kanchor_back == 0`（当日即突破日）不加：那时 D0.low 与「大阳低点」同值，
+          加了也是重复 ⇒ **八案例回归逐字不变**。
       ★★ 2026-09-20 二次修正（德邦科技 688035 案例，用户定）：
         K 线锚的**取K对象**从「最后一根 bars[-1]」改为「**最近的突破均线的日K**」
         （= 当前「收盘站上全部均线」连续段的启动根，见 `find_ma_reclaim_bar`）。
@@ -2552,14 +2567,36 @@ def ma_reclaim_break(bars, ev, atr_v, last_c, res_win=25):
     _mid_nm = "实体中点" if kb_back == 0 else "突破日实体中点"
     _low_nm = "大阳低点" if kb_back == 0 else "突破日低点"
     _body_atr_kb = abs(kb["c"] - kb["o"]) / atr_v if atr_v else None
-    for _nm, v in (("MA5", ma5), ("MA10", ma10), ("MA20", ma20),
-                   (_mid_nm, _mid), (_low_nm, kb["l"])):
+    _cands = [("MA5", ma5), ("MA10", ma10), ("MA20", ma20),
+              (_mid_nm, _mid), (_low_nm, kb["l"])]
+    # ★★ 第 6 条候选「触发日前一根K低点」（2026-09-23 新增，东微半导 688261）：
+    #   触发日 = D1（次日），「触发日前一根 K」= D0 = bars[-1]。
+    #   前五条在 kanchor_back ≥ 1 时全落在突破日那根或均线上，离触发价可能极远
+    #   （东微：MA5 75.68 ⇒ 风险 6.33%、R→墙 0.78 = 不可执行），而真正「突破前
+    #   最后的支撑」是 D0 低点 78.27（与 09-21 低 78.09 构成双底带）⇒ 补入后
+    #   风险降到 3.12%、R→84.79 = 1.59，T0 从「形式合规」变成「可执行」。
+    #   ⚠ 两道护栏（都不改变 kanchor_back == 0 的输出）：
+    #     ① 只在 kb_back ≥ 1 时补入 —— back == 0 时 D0.low 与「大阳低点」同值；
+    #     ② D0 低点离触发价不足 NOISE_ROOM_ATR×ATR 时**不补**（那是一次正常波动
+    #        就能扫掉的噪声带止损），回落到原五条。
+    _pk_low = d0.get("l")
+    _pk_low_atr = None
+    _pk_low_skip = None
+    if kb_back >= 1 and atr_v and _pk_low is not None:
+        _pk_low_atr = round((trigger - _pk_low) / atr_v, 2)
+        if (trigger - _pk_low) / atr_v >= NOISE_ROOM_ATR:
+            _cands.append(("触发日前一根K低点", _pk_low))
+        else:
+            _pk_low_skip = ("D0 低点 %s 距触发价仅 %s×ATR（< %s 噪声带）⇒ 不纳入候选"
+                            % (round(_pk_low, 2), _pk_low_atr, NOISE_ROOM_ATR))
+    for _nm, v in _cands:
         if v is None or v >= trigger:
             continue
         if st is None or v > st:
             st, st_name = v, _nm
     if st is None:
         return None
+    _pk_low_used = (st_name == "触发日前一根K低点")
     hard = round(st, 2)
     risk_pct_v = (trigger - hard) / trigger * 100
     # 风险闸门：超 8% 的止损在小账户上做不了仓位管理（用户「小亏」框架）。
@@ -2571,6 +2608,12 @@ def ma_reclaim_break(bars, ev, atr_v, last_c, res_win=25):
     tier = "T0" if close_to_wall else "T0"
     grade = "贴墙" if close_to_wall else "半路"
     dist_atr = (resistance - last_c) / atr_v
+    # ★ 2026-09-23：**近端阻力位赔率**（T0 是趋势单、不设固定目标，但这个数才是
+    #   「这单能不能做」的判据 —— 用户口径 R≥1.5）。之前只有矩阵按「远端墙」算的
+    #   R，与近端墙差一个数量级，导致决策全靠手算。东微实测：锚 MA5 75.68 ⇒ 0.78
+    #   （不可执行）；换锚 D0 低点 78.27 ⇒ 1.59（可执行）。显式给出，不让人手算。
+    _rr_nw = (round((resistance - trigger) / (trigger - hard), 2)
+              if trigger > hard else None)
 
     # 买点前置幅度：过昨高买 vs 现价
     prem_pct = (trigger - last_c) / last_c * 100
@@ -2605,10 +2648,19 @@ def ma_reclaim_break(bars, ev, atr_v, last_c, res_win=25):
         "kanchor_low": round(kb["l"], 2),
         "kanchor_body_atr": round(_body_atr_kb, 2) if _body_atr_kb is not None else None,
         "last_bar_body_atr": round(abs(d0["c"] - d0["o"]) / atr_v, 2) if atr_v else None,
+        # ★ 触发日前一根 K（D0）低点 —— 第 6 条止损锚候选的溯源（2026-09-23 新增）。
+        #   消费方（报表/复盘）据此判断「这个追突破单的止损是不是贴住了突破前最后的支撑」。
+        "prior_k_low": round(_pk_low, 2) if _pk_low is not None else None,
+        "prior_k_low_atr": _pk_low_atr,
+        "prior_k_low_used": _pk_low_used,
+        "prior_k_low_skip": _pk_low_skip,
         "risk_over_limit": risk_over,
         "resistance": round(resistance, 2),
         "resistance_from": res_from,
         "resistance_kind": res_kind,          # 枢轴高 / 窗口最高（双锚取近者）
+        # ★ 近端墙赔率（2026-09-23 新增）：锚定「上方第一道墙」而非 250 日远端墙。
+        "near_wall": round(resistance, 2),
+        "rr_near_wall": _rr_nw,
         "resistance_alt": round(resistance_alt, 2) if resistance_alt else None,
         "resistance_alt_from": resistance_alt_from,
         # ★ 左侧平台质量（2026-09-20 新增，联瑞新材案例）：< 50% 直接不出 T0
@@ -2671,7 +2723,16 @@ def ma_reclaim_break(bars, ev, atr_v, last_c, res_win=25):
                "不过则【收盘前定夺】（美股无尾盘 14:57；按用户口径不熬夜——"
                "睡前处理完或次日补判）。")
             + f"止损锚 {st_name} {hard}"
-            f"（风险 {risk_pct_v:.2f}%）。"
+            f"（风险 {risk_pct_v:.2f}%"
+            + (f"，R→近端墙 {round(resistance, 2)} = {_rr_nw:.2f}"
+               if _rr_nw is not None else "")
+            + "）。"
+            + (f" ★ 止损锚取自**触发日前一根K低点 {round(_pk_low, 2)}**"
+               f"（{d0['d']} 低点，距触发价 {_pk_low_atr}×ATR）—— "
+               f"它才是突破前最后一道支撑；前五条锚（均线/突破日）离触发价更远，"
+               f"会把 T0 做成「形式合规、实际不可执行」。"
+               if _pk_low_used else "")
+            + (f" ⚠ {_pk_low_skip}" if _pk_low_skip else "")
             + (f" ★ K线锚取自**突破均线那天 {kb['d']}**"
                f"（实体中点 {round(_mid, 2)} / 低点 {round(kb['l'], 2)}，"
                f"实体 {_body_atr_kb:.2f}×ATR），不是最后一根 —— 突破日之后第 {kb_back} 根"
@@ -2970,11 +3031,17 @@ def plan_entry(bars, ev):
             "hard": t0["hard_stop"],
             # ★ 2026-09-20 口径同步（同上）：不再是「MA10/MA20 排除 MA5」。
             "stop_basis": (
-                "{MA5, MA10, MA20, 突破日均K 实体中点, 突破日低点} 中"
+                "{MA5, MA10, MA20, 突破日均K 实体中点, 突破日低点, 触发日前一根K低点} 中"
                 "「< 触发价且离触发价最近」的一条"
-                "（K 线锚取「最近的突破均线的日K」，非最后一根）"
+                "（K 线锚取「最近的突破均线的日K」，非最后一根；"
+                "触发日前一根K低点仅在 kanchor_back≥1 且不落在噪声带内时参与）"
             ),
             "struct_exec": STRUCT_EXEC,
+            # ★ 2026-09-23：把「硬止损距触发价几个 ATR」带进 buy_zone —— 新增第 6 条
+            #   止损锚后它会明显收窄（东微 1.18 → 0.58），而渲染层/摘要读的是 z，
+            #   不补就显示 None、也看不出是否落进噪声带。
+            "hard_dist_atr": t0.get("risk_atr"),
+            "hard_noise": bool((t0.get("risk_atr") or 9) < NOISE_ROOM_ATR),
         }
 
     plat_txt = f"{round(plat_p, 2)}" if plat_p is not None else "N/A"
@@ -3302,11 +3369,17 @@ def _t0_takeover(result, t0):
         #   「{MA5, MA10, MA20, 实体中点, D0.low} 中 < 触发价且最近者」。
         #   此处原为旧口径文本，会让渲染层与 t0["stop_anchor"] 自相矛盾（正帆/成都实测踩到）。
         "stop_basis": (
-            "{MA5, MA10, MA20, 突破日均K 实体中点, 突破日低点} 中"
+            "{MA5, MA10, MA20, 突破日均K 实体中点, 突破日低点, 触发日前一根K低点} 中"
             "「< 触发价且离触发价最近」的一条"
-            "（K 线锚取「最近的突破均线的日K」，非最后一根）"
+            "（K 线锚取「最近的突破均线的日K」，非最后一根；"
+            "触发日前一根K低点仅在 kanchor_back≥1 且不落在噪声带内时参与）"
         ),
         "struct_exec": STRUCT_EXEC,
+        # ★ 2026-09-23 与 plan_entry 的 _t0z 保持同一口径：把「硬止损距触发价几个 ATR」
+        #   和噪声带标记带进 buy_zone（新增第 6 条止损锚后该距离明显收窄：
+        #   东微 1.18 → 0.58×ATR），否则摘要/报表这一行是 None。
+        "hard_dist_atr": t0.get("risk_atr"),
+        "hard_noise": bool((t0.get("risk_atr") or 9) < NOISE_ROOM_ATR),
     }
     # ★ 保留被接管路径的元数据（不丢信息）：原「反转态大阳」「大阳后未满三日」等
     #   判定仍是事实，只是执行方案换成 T0。report/scanner 若按旧 key 读取不会 KeyError。
@@ -3341,7 +3414,9 @@ def _t0_takeover(result, t0):
         "struct_exec": STRUCT_EXEC,
         "hard_exec": HARD_EXEC,
         "hard_dist_atr": t0.get("risk_atr"),
-        "hard_noise": False,
+        # ★ 2026-09-23：原来是硬编码 False —— 新增第 6 条止损锚（触发日前一根K低点）
+        #   会显著收窄硬止损距离（东微 1.18 → 0.58×ATR），必须真算，否则贴进噪声带也不报警。
+        "hard_noise": bool((t0.get("risk_atr") or 9) < NOISE_ROOM_ATR),
         "stop_basis": z["stop_basis"],
         "t0": True,
     }

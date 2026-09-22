@@ -179,8 +179,22 @@ def percentile(bars, last_c):
 # ────────────────────────── 止损锚候选 ──────────────────────────
 
 def stop_anchor_candidates(bars, plan, atr_v):
-    """结构止损锚候选（只放真实结构位，不放硬止损那种噪声带锚）。"""
+    """结构止损锚候选（只放真实结构位，不放硬止损那种噪声带锚）。
+
+    ★ 2026-09-23 对齐 T0 口径（东微半导 688261 案例，用户定「修」）：
+      T0 的 K 线锚是「**最近的突破均线的日K**」（`find_ma_reclaim_bar`），
+      当 `kanchor_back ≥ 1` 时它**不是最后一根**，于是锚表与引擎计划会各说一套：
+        ① 最后一根在**执行语义**上 = 「**触发日前一根 K**」（触发日 = D1，
+           前一根 = D0 = bars[-1]）⇒ 有 kanchor_back 时按此命名，与 rule123 第 6 条
+           止损锚候选同名，报表和计划才读得通；
+        ② 补入**突破日**的实体中点 / 低点 —— 它们本来就在引擎 `stop_basis` 的
+           候选集里，却从未出现在锚表 ⇒ 同屏两套口径（东微：计划锚在 09-17，
+           锚表只给 MA5 75.68 / 基准日 78.27）。
+      `kanchor_back == 0` 时行为**逐字不变**（那时最后一根就是突破日）。
+    """
     z = plan.get("buy_zone") or {}
+    t0 = plan.get("ma_reclaim") or {}
+    kb_back = t0.get("kanchor_back") or 0
     c0 = bars[-1]["c"]
     last = bars[-1]
     prev = bars[-2] if len(bars) > 1 else last
@@ -193,12 +207,18 @@ def stop_anchor_candidates(bars, plan, atr_v):
                       "dist_pct": _pct(price, c0), "note": note})
 
     add("引擎结构止损", z.get("struct_stop"), z.get("struct_anchor") or "")
+    if kb_back:
+        add("突破日实体中点", t0.get("kanchor_mid"),
+            "K线锚 %s" % (t0.get("kanchor_date") or ""))
+        add("突破日低点", t0.get("kanchor_low"),
+            "K线锚 %s" % (t0.get("kanchor_date") or ""))
     closes = [b["c"] for b in bars]
     add("EMA10", R.ema(closes, 10), "回踩锚候选")
     add("MA5", R.sma(closes, 5), "")
     add("MA20", R.sma(closes, 20), "")
     add("基准日实体中点", (last["o"] + last["c"]) / 2, "断头铡刀位")
-    add("基准日最低", last["l"], "")
+    add("触发日前一根K低点" if kb_back else "基准日最低", last["l"],
+        "T0 突破前最后支撑" if kb_back else "")
     add("前一日最低", prev["l"], "")
     # 最近一根大阳（实体 ≥ 0.8×ATR）
     for i in range(len(bars) - 1, max(0, len(bars) - 25), -1):
