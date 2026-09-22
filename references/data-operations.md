@@ -94,6 +94,12 @@ ATR：Wilder ATR14。
 - 合成 bar 的 `v` 是**量比口径**（盘中累计量按已走时段折算成预计全日量），`v_raw` 才是当日累计量 —— 半天量直接比整日均量会把放量突破误读成「缩量」。
 - `spot_quote` 仍是 Nasdaq 原始实时价，可与合成 bar 的收盘价互相校验（差值为 5 分钟线最后一根的滞后）。
 - **分钟线的代理默认不探、不用（2026-09-21，用户反馈驱动）**：Yahoo 直连 403，经代理才通；但旧实现会在 `rule123._proxy_list()` 里硬编码去连 `127.0.0.1:7897 / 7890 / 7891 / 10809 / 1080`，而 7897 / 7890 正是 Clash / Clash Verge 的默认端口，且没有直连兜底、每次等 20s 超时 —— 等于脚本反复去连**用户自己的代理客户端**，用户反馈「干扰到了我的 clash verge 代理」。现在默认只直连，代理只能显式配置：`WB_US_PROXY=http://127.0.0.1:<端口>`（可逗号分隔多个）或仓库根目录 `us_proxy.txt`（一行一个 URL，`#` 为注释）；关闭用 `WB_US_PROXY=off` / `WB_NO_PROXY=1`；旧的自动探端口行为需显式 `WB_US_PROXY_AUTOPROBE=1` 才开启，**不要默认打开**。回归测试 `test_performance_paths.test_proxy_never_probes_local_ports_by_default` 钉死这条。
+- ★ **今日真实高低只能靠分钟线；`/info` 根本不带它（2026-09-22 实测）**：`rule123.nasdaq_info()` 只取 `primaryData.lastSalePrice`（实时价）/ `secondaryData.lastSalePrice`（昨收）/ `marketStatus`，**没有今日高低**；而 Nasdaq 日线盘中又不含当日 bar。两者一叠加 ⇒ **分钟线一断，当日区间就整个缺失**。此时 `bars_source.us_quote()` 返回的 `open/high/low` 仍是**上一交易日**的值（实测 2026-09-22 盘中给的是 09-21 的 `251.4/261.18/244.985`），拿它当今日高低会直接得出「今天只回踩到 X」这类**错误结论**。本环境（`https_proxy` 指向沙箱代理）实测 Yahoo 5m 报 `Tunnel connection failed: 502`，而默认直连又是 403 ⇒ 两头不通时必须有兜底源：
+  - `GET https://api.nasdaq.com/api/quote/<SYM>/realtime-trades?assetclass=stocks&limit=20` → `data.topTable.rows[0].todayHighLow`（形如 `"$264.25/$254.00"`，同表 `nlsVolume` 为当日累计量）。该接口 `description` 明文：**仅常规时段更新，不含盘前盘后**。
+  - `GET https://api.nasdaq.com/api/quote/<SYM>/info?assetclass=stocks` → `data.keyStats.dayrange.value`（同值，便于单发）。
+  - ⚠️ 别用 `/chart` 的 `previousClose`（滞后一整天，见 `bars_from_nasdaq` docstring），也别把 `/info` 的 `primaryData` 当区间源（它**没有当日开盘价**）。
+  - ★ **已修（2026-09-22，`fetch_market.fetch_us_nasdaq` + 新增 `_nasdaq_day_range()`）**：盘中单发 realtime-trades，把 `open/high/low/volume` 换成**当日**口径，并新增 `day_high` / `day_low` / `ohlc_basis` 三字段（`today` / `unavailable` / `last_closed`）。Nasdaq 无当日开盘价 ⇒ `open=None`（宁缺勿假）；当日区间取不到时四个字段**一律 None**，不再沿用昨天的值冒充。同时修掉昨收 fallback 的 off-by-one：Nasdaq 已把 `secondaryData` 改为 `null` ⇒ 旧代码退到 `bars[-2]`，把**前天**的收盘当昨收（实测交出 244.25，真值 257.38，误差 −2.8%）。**盘中 `bars[-1]` 才是昨收**。
+  - 下游注意：`open/high/low` 读到 `None` 时**不要退到 `bars[-1]`**（那是上一交易日）；先看 `ohlc_basis` 判断口径。回归钉在 `test_fetch_market_us.py`（19 项断言，自带 `main`，无需 pytest）。
 - 美股盘中时段 = 北京时间 21:30–04:00（夏令时）。
 
 取数优先级：WorkBuddy 通达信连接器 → wb-finance-skill → `fetch_market.py` → 网页检索（并标注来源）。连接器调用成功后不得再调用后面的慢源做同字段重复取数；仅缺字段或返回失败时按缺口降级。

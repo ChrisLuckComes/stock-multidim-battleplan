@@ -237,17 +237,54 @@ def nasdaq_bars(sym, days=400):
     return bars
 
 
+def _nasdaq_day_range(sym):
+    """Nasdaq `realtime-trades` → 当日区间 + 昨收（★ 仅常规时段，不含盘前盘后）。
+
+    为什么必须单发（2026-09-22 实测）：
+      · `/historical` 盘中不含当日 bar；
+      · `/info` 的 `primaryData` 只有实时价（**没有当日开盘价**），
+        且 `secondaryData` 已改为返回 `null` —— 旧代码依赖的
+        `secondaryData.lastSalePrice`（昨收）**从此取不到**；
+      ⇒ Nasdaq 链路里**当日 open/high/low/volume 整体缺失**。旧实现由 `bars[-1]`
+        （= 上一交易日）顶上，等于把**昨天的区间当今天**用：实测 2026-09-22 盘中
+        MRVL 交出 `o251.4/h261.18/l244.985`（全是 09-21 的），且昨收被 `bars[-2]`
+        错算成 244.25（真值 257.38，误差 −2.8%）。
+    返回 {high, low, volume, prev_close}；该接口没有当日开盘价，故不返回 open。
+    取不到（无行/字段异常）返回 None。
+    """
+    j = _nasdaq_json(f"https://api.nasdaq.com/api/quote/{sym}/realtime-trades"
+                     f"?assetclass=stocks&limit=1")
+    rows = (((j.get("data") or {}).get("topTable") or {}).get("rows") or [])
+    if not rows:
+        return None
+    r0 = rows[0]
+    parts = str(r0.get("todayHighLow") or "").replace("$", "").split("/")
+    if len(parts) != 2:
+        return None
+    hi, lo = _num(parts[0].strip()), _num(parts[1].strip())
+    if hi is None or lo is None:
+        return None
+    return {"high": hi, "low": lo,
+            "volume": _num(r0.get("nlsVolume")),
+            "prev_close": _num(r0.get("previousClose"))}
+
+
 def fetch_us_nasdaq(symbol):
     """Nasdaq 官方 API 主源：历史日线 + 实时/盘前快照。
 
-    坑位（实测 2026-09-16）：
+    坑位（实测 2026-09-16 / 2026-09-22）：
       · /chart 的 previousClose 会滞后一整天（本例停在 9/14 的 382.29），
-        昨收必须取 secondaryData.lastSalePrice（= 上一完整交易日收盘）。
-      · historical 只含已收盘交易日，盘中不会出现当日 bar；
-        故 open/high/low/volume 是「最近一个已收盘交易日」的口径，
-        盘中真实价以 spot + session + as_of 三个字段表达。
+        昨收必须取 secondaryData.lastSalePrice（= 上一完整交易日收盘）；
+        ★ 但 2026-09-22 起该字段已变为 `null` → 改由 `_nasdaq_day_range()` 的
+        previousClose 兜底，最后才退到日线（**盘中 bars[-1] 才是昨收**，见下）。
+      · historical 只含已收盘交易日，盘中不会出现当日 bar ⇒ 当日 open/high/low/volume
+        必须另取（`_nasdaq_day_range()`，realtime-trades）。**禁止再用 bars[-1] 顶替**：
+        它是上一交易日的区间，而 `open/high/low` 与 A 股（fetch_ash）**同名同义**，
+        下游按「今日」读是合理的，拿昨天的值冒充就是静默算错。
       · marketStatus 由 Nasdaq 直接给出（Pre-Market/Open/Closed/After-Hours），
         免去自己判断夏令时/冬令时。
+      · 当日区间取不到时，`open/high/low/volume` 一律置 None 并标
+        `ohlc_basis="unavailable"`，**绝不用昨天的值冒充**。
     """
     sym = symbol.upper()
     info = {}
@@ -266,9 +303,29 @@ def fetch_us_nasdaq(symbol):
     mstatus = info.get("marketStatus") or ""
 
     spot = _num(pdat.get("lastSalePrice"))
-    prev_close = _num(sdat.get("lastSalePrice"))          # ← 唯一可靠昨收
+    prev_close = _num(sdat.get("lastSalePrice"))          # ← 唯一可靠昨收（2026-09-22 起可能为 null）
+
+    # 当日真实区间：/historical 盘中无当日 bar、/info 不带区间 ⇒ 单发 realtime-trades。
+    #   ★ 只在有明确交易时段时取（session="Cache" 属离线口径，不许当实时）。
+    active = mstatus in ("Open", "Pre-Market", "After-Hours")
+    day = None
+    if active:
+        try:
+            day = _nasdaq_day_range(sym)
+        except Exception:
+            day = None
+
+    if prev_close is None and day:
+        prev_close = day.get("prev_close")
     if prev_close is None:
-        prev_close = bars[-2]["c"] if len(bars) > 1 else bars[-1]["o"]
+        # 盘中：bars[-1] 就是上一交易日；已收盘：bars[-1] 是当天 ⇒ 昨收取 bars[-2]
+        #   （原实现无条件用 bars[-2]，盘中等于把前天的收盘当昨收）
+        if active and bars:
+            prev_close = bars[-1]["c"]
+        elif len(bars) > 1:
+            prev_close = bars[-2]["c"]
+        else:
+            prev_close = bars[-1]["o"]
     if spot is None:                                      # 接口降级 → 退化为末根收盘
         spot = bars[-1]["c"]
         mstatus = mstatus or "Closed"
@@ -278,6 +335,16 @@ def fetch_us_nasdaq(symbol):
         change_pct = round((spot - prev_close) / prev_close * 100, 2)
 
     last = bars[-1]                                       # 最近一个已收盘交易日
+    o, h, l, v = last["o"], last["h"], last["l"], last["v"]
+    if day:                                               # 当日区间到手 → 用当日的
+        o, h, l = None, day["high"], day["low"]           # （Nasdaq 无当日开盘价，宁缺勿假）
+        v = day.get("volume")
+        basis = "today"
+    elif active:                                          # 盘中但取不到 → 明确留空
+        o = h = l = v = None
+        basis = "unavailable"
+    else:                                                 # Closed / 未知口径 → 末根已收盘 bar
+        basis = "last_closed"
     quote = {
         "ticker": sym,
         "market": "US",
@@ -290,7 +357,10 @@ def fetch_us_nasdaq(symbol):
         "prev_close": prev_close,
         "bid": _num(pdat.get("bidPrice")),
         "ask": _num(pdat.get("askPrice")),
-        "open": last["o"], "high": last["h"], "low": last["l"], "volume": last["v"],
+        "open": o, "high": h, "low": l, "volume": v,
+        "day_high": (day or {}).get("high"),
+        "day_low": (day or {}).get("low"),
+        "ohlc_basis": basis,                              # today / unavailable / last_closed
         "turnover": None,
         "change_pct": change_pct,
         "pe_ttm": None, "pb": None, "market_cap": None, "float_cap": None,
