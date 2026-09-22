@@ -2254,6 +2254,43 @@ def find_ma_reclaim_bar(bars):
     return j
 
 
+def _near_wall_above(bars, trigger, win=250):
+    """触发价之上、**未被超越**的最近枢轴高（供 rr_near_wall 使用）。
+
+    ⚠ 为什么必须单列这个函数（2026-09-23 修）：
+      `ma_reclaim_break()` 里的 `resistance` 是相对**收盘价**找的墙
+      （`seg = bars[-(res_win+1):-1]`，刻意排除 D0），而 `rr_near_wall`
+      要的是「**触发价之上**的第一道墙」。当 **D0 自己创了窗口新高**
+      （D0.high > 窗口最高）时两者错位：
+        德邦 688035：trigger 86.0 > resistance 85.5（09-21 高）
+        ⇒ R = (85.5 − 86.0) / (86.0 − 81.44) = **−0.11**
+        ⇒ 把「刚过 1.5 门槛、勉强可做」误判成「R = 0、不可做」。
+      **被自己超越的旧高不是墙**（85.5 已在 09-22 被 86.0 踩在脚下）。
+      正确做法：顺延到更长历史里找「**≥ trigger 且价格最低**」的枢轴高，
+      即触发价之上第一道**未被超越**的墙。
+        德邦 → **92.87**（05-18 高，距触发价 2.01×ATR）⇒ R = (92.87−86.0)/4.56 = **1.51** ✓
+
+    窗口内确实找不到（次新股刚上市、上方无历史高点）时返回 None，
+    由调用方保留原 resistance 并靠 `near_wall_extended=False` 留痕。
+
+    返回 (price, date) 或 None。
+    """
+    seg = bars[:-1]                       # 排除 D0
+    if len(seg) > win:
+        seg = seg[-win:]
+    best = None
+    for i in range(2, len(seg) - 2):
+        b = seg[i]
+        if b["h"] < trigger:
+            continue
+        # 枢轴高：左右各 2 根的最高价都不高于它
+        if (seg[i - 1]["h"] <= b["h"] and seg[i - 2]["h"] <= b["h"]
+                and seg[i + 1]["h"] <= b["h"] and seg[i + 2]["h"] <= b["h"]):
+            if best is None or b["h"] < best[0]:   # 取 ≥ trigger 中**最低**的
+                best = (b["h"], b["d"])
+    return best
+
+
 def ma_reclaim_break(bars, ev, atr_v, last_c, res_win=25):
     """★ T0 买法：均线收复后「过昨高」买（2026-09-20 用户定稿，优先级高于 T1 买突破）。
 
@@ -2612,7 +2649,15 @@ def ma_reclaim_break(bars, ev, atr_v, last_c, res_win=25):
     #   「这单能不能做」的判据 —— 用户口径 R≥1.5）。之前只有矩阵按「远端墙」算的
     #   R，与近端墙差一个数量级，导致决策全靠手算。东微实测：锚 MA5 75.68 ⇒ 0.78
     #   （不可执行）；换锚 D0 低点 78.27 ⇒ 1.59（可执行）。显式给出，不让人手算。
-    _rr_nw = (round((resistance - trigger) / (trigger - hard), 2)
+    #   ★ 2026-09-23 口径修：墙必须相对 **trigger** 找，不能沿用「相对收盘价」的 resistance
+    #   —— 否则 D0 创窗口新高时 R 会算成负数（德邦 85.5 vs 86.0 ⇒ −0.11 ⇒ 误判「不可做」）。
+    #   详见 `_near_wall_above()` 的 docstring。
+    _nw_price, _nw_from, _nw_kind, _nw_ext = resistance, res_from, res_kind, False
+    if _nw_price < trigger:
+        _nw = _near_wall_above(bars, trigger)
+        if _nw is not None:
+            _nw_price, _nw_from, _nw_kind, _nw_ext = _nw[0], _nw[1], "顺延枢轴高", True
+    _rr_nw = (round((_nw_price - trigger) / (trigger - hard), 2)
               if trigger > hard else None)
 
     # 买点前置幅度：过昨高买 vs 现价
@@ -2659,7 +2704,11 @@ def ma_reclaim_break(bars, ev, atr_v, last_c, res_win=25):
         "resistance_from": res_from,
         "resistance_kind": res_kind,          # 枢轴高 / 窗口最高（双锚取近者）
         # ★ 近端墙赔率（2026-09-23 新增）：锚定「上方第一道墙」而非 250 日远端墙。
-        "near_wall": round(resistance, 2),
+        "near_wall": round(_nw_price, 2),
+        # ★ 顺延留痕（2026-09-23 新增）：触发价之上窗口内无阻力时，已顺延到更长历史的枢轴高
+        "near_wall_from": _nw_from,
+        "near_wall_kind": _nw_kind,           # 枢轴高 / 窗口最高 / 顺延枢轴高
+        "near_wall_extended": _nw_ext,
         "rr_near_wall": _rr_nw,
         "resistance_alt": round(resistance_alt, 2) if resistance_alt else None,
         "resistance_alt_from": resistance_alt_from,
@@ -2724,7 +2773,9 @@ def ma_reclaim_break(bars, ev, atr_v, last_c, res_win=25):
                "睡前处理完或次日补判）。")
             + f"止损锚 {st_name} {hard}"
             f"（风险 {risk_pct_v:.2f}%"
-            + (f"，R→近端墙 {round(resistance, 2)} = {_rr_nw:.2f}"
+            + (f"，R→近端墙 {round(_nw_price, 2)} = {_rr_nw:.2f}"
+               + (f"（触发价之上窗口内无阻力，已顺延至 {_nw_from} 枢轴）"
+                  if _nw_ext else "")
                if _rr_nw is not None else "")
             + "）。"
             + (f" ★ 止损锚取自**触发日前一根K低点 {round(_pk_low, 2)}**"
