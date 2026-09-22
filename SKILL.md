@@ -33,6 +33,7 @@ disable-model-invocation: true
 - **股池扫描/批量复盘**：读取 [strategy-modes.md](references/strategy-modes.md)、[risk-exit.md](references/risk-exit.md)、[data-operations.md](references/data-operations.md)。
 - **只问基本面/估值/扫雷**：读取 [research-report.md](references/research-report.md)、[risk-exit.md](references/risk-exit.md)。
 - **生成或更新报告**：额外读取 [output-pitfalls.md](references/output-pitfalls.md)、[report-generation.md](references/report-generation.md)。
+- **读写资料库持仓（真相源）**：读取 [library-writeback.md](references/library-writeback.md)。持仓/止损/状态的**真相源是资料库「股池配置」表**，本地池只是缓存 —— 跑票前先 `sync_pos_from_library.py`（读），要改库用 `library_pos.py`（写，支持 list/find/set/note/add，`--dry-run` 预览）。
 
 ## 不可省略的核心规则
 
