@@ -138,6 +138,9 @@ def build_best(a, n):
     m = a["meta"]
     z = a["plan"].get("buy_zone") or {}
     account = m.get("account") or 50000
+    _mak = (m.get("market") or "CN").upper()
+    cur = "$" if _mak == "US" else "¥"
+    is_us = _mak == "US"
     qty = rec.get("qty")
     if qty is None:                      # 老数据兜底（新数据由 analyze 用 ash_lots 算好）
         lot = m.get("lot") or 100
@@ -154,8 +157,8 @@ def build_best(a, n):
         ("R → t1", "<b>%s</b>" % num(rec["r1"])),
         ("R → 远端墙", "<b>%s</b>" % num(rec["r2"])),
         ("需回落", "<b>%s</b>" % pct_plain(rec["need_pct"])),
-        ("仓位", ("%s 股 / %s 元（账户 %s%%%s）%s"
-                 % (num(qty, 0), num(amt, 0),
+        ("仓位", ("%s 股 / %s%s（账户 %s%%%s）%s"
+                 % (num(qty, 0), cur, num(amt, 0),
                     num(amt / account * 100, 1),
                     ("，可用现金 %s%%" % num(rec.get("pct_cash"), 1))
                     if rec.get("pct_cash") is not None else "",
@@ -164,7 +167,7 @@ def build_best(a, n):
                     ("　⚠ 引擎上限（占现金 %s%%），执行方案已按试错仓降级"
                      % num(rec.get("pct_cash"), 1))
                     if (rec.get("pct_cash") or 0) >= 95 else ""))
-         if qty else "<b>不做</b>（1 手即超单笔硬顶）"),
+         if qty else ("<b>不做</b>（买不起 1 股）" if is_us else "<b>不做</b>（1 手即超单笔硬顶）")),
     ]
     if n.get("best_rows"):
         # notes 接管这张卡片的 KPI 行（与 exec_rows 同语义：整体替换，不追加）。
@@ -379,6 +382,9 @@ def build_exec(a, n):
     lot = m.get("lot") or 100
     account = m.get("account") or 50000
     risk_pct = m.get("risk_pct") or 0.015
+    _mak = (m.get("market") or "CN").upper()
+    cur = "$" if _mak == "US" else "¥"
+    is_us = _mak == "US"
     qty = rec.get("qty")
     if qty is None:
         qty = int(account * risk_pct // rec["risk"]) if rec.get("risk") else 0
@@ -388,7 +394,9 @@ def build_exec(a, n):
     risk_amt = rec.get("risk_amt")
     if risk_amt is None:
         risk_amt = qty * (rec.get("risk") or 0)
-    warn_amt = ((amt / account * 100) > 40) if account else False
+    # 「超 40% 仓位习惯线」是 A 股口径（30%×跌停 10% 倒推）；美股 T+0 + 无涨跌停，
+    # 两条前提都不成立 → 美股不启用该提示。
+    warn_amt = (False if is_us else ((amt / account * 100) > 40)) if account else False
     po = a.get("probe", {}).get("pre_order") or {}
     # 核心行 = 随「买哪一档」变的判断；事实行 = 与档位无关的数据
     core = [
@@ -396,19 +404,20 @@ def build_exec(a, n):
         ("买入价", "<b>%s</b>（%s）" % (num(rec.get("entry")), esc(rec.get("entry_name")))),
         ("止损（结构轨）", "<b>%s</b> —— 收盘口径，不用盯盘" % num(rec.get("stop"))),
         ("止损（硬止损）", "%s（%s）—— 盘中口径，需盯盘" % (num(z.get("hard_stop")), esc(z.get("hard_anchor")))),
-        ("数量", ("<b>%s 股</b>（最小申报单位 %s 股）%s%s"
-                % (num(qty, 0), num(lot, 0),
+        ("数量", ("<b>%s 股</b>（%s）%s%s"
+                % (num(qty, 0),
+                   "1 股起（美股无整手）" if is_us else "最小申报单位 %s 股" % num(lot, 0),
                    ' <span class="badge b-warn">超 40% 仓位习惯线</span>' if warn_amt else "",
                    ("　⚠ <b>这是引擎上限</b>（占可用现金 %s%%）—— 降级理由与建议股数见「口径问题」②"
                     % num(rec.get("pct_cash"), 1))
                    if (rec.get("pct_cash") or 0) >= 95 else ""))
-         if qty else "<b>不做</b>（1 手即超单笔金额硬顶）"),
-        ("金额", "<b>%s 元</b>（账户 %s%%%s）"
-         % (num(amt, 0), num(amt / account * 100, 1) if account else "—",
+         if qty else ("<b>不做</b>（买不起 1 股）" if is_us else "<b>不做</b>（1 手即超单笔金额硬顶）")),
+        ("金额", "<b>%s%s</b>（账户 %s%%%s）"
+         % (cur, num(amt, 0), num(amt / account * 100, 1) if account else "—",
             ("，可用现金 %s%%" % num(rec.get("pct_cash"), 1))
             if rec.get("pct_cash") is not None else "")),
-        ("单笔风险", "%s 元（账户 %s%%；预算 %s%%）%s"
-         % (num(risk_amt, 0),
+        ("单笔风险", "%s%s（账户 %s%%；预算 %s%%）%s"
+         % (cur, num(risk_amt, 0),
             num(risk_amt / account * 100, 2) if account else "—",
             num(risk_pct * 100, 1),
             (" <span class='note'>%s</span>" % esc(rec["risk_warning"]))
@@ -420,7 +429,8 @@ def build_exec(a, n):
         ("目标2 / 远端墙", "%s / %s" % (num(a["targets"].get("t2_engine")),
                                    num(a["targets"].get("wall_far")))),
         ("挂单有效期", "次日开盘前挂，3 个交易日内有效；未成交 = 没回落到位，不追"),
-        ("预挂可行性", "✓ 买点在现价下方，可隔夜预挂（A 股限价单）"
+        ("预挂可行性", (("✓ 买点在现价下方，可隔夜预挂（GTC 限价单）" if is_us
+                     else "✓ 买点在现价下方，可隔夜预挂（A 股限价单）"))
          if rec.get("prehang") else "✗ 买点在现价上方，不可预挂 → 需盯盘"),
     ]
     if n.get("exec_rows"):
@@ -472,13 +482,24 @@ def render(a, n, tmpl_path=DEFAULT_TMPL):
     kpi_items, kpi_badges = build_kpis(a, n)
     best_title, best_kpis, best_note = build_best(a, n)
     rec = a.get("odds_recommend") or a.get("odds_top") or {}
+    # ★ 市场口径（2026-09-22 加）：美股报告过去根本出不来（battle_analyze 只收 A 股），
+    #   现在分流后币种/交易制度文案必须跟着走，否则美股报告会写「元 / T+1 / 最小申报 100 股」。
+    _mak = (m.get("market") or "CN").upper()
+    _cur = "$" if _mak == "US" else "¥"
+    _is_us = _mak == "US"
 
     meta_line = n.get("meta_line") or (
-        "基准日 <b>%s 收盘</b> · 数据源：%s（%d 根 %s → %s）· 账户口径：A 股 ¥%s"
-        "（无原生止损单，T+1，最小申报 %s 股）· 生成 %s"
-        % (esc(m["basis_date"]), esc(m["src"]), m["bars"], esc(m["first_bar"]),
-           esc(m["last_bar"]), num(m.get("account"), 0), num(m.get("lot"), 0),
-           esc(m["generated_at"])))
+        ("基准日 <b>%s 收盘</b> · 数据源：%s（%d 根 %s → %s）· 账户口径：美股 $%s"
+         "（T+0，1 股起，无原生止损单）· 生成 %s"
+         % (esc(m["basis_date"]), esc(m["src"]), m["bars"], esc(m["first_bar"]),
+            esc(m["last_bar"]), num(m.get("account"), 0),
+            esc(m["generated_at"])))
+        if _is_us else
+        ("基准日 <b>%s 收盘</b> · 数据源：%s（%d 根 %s → %s）· 账户口径：A 股 ¥%s"
+         "（无原生止损单，T+1，最小申报 %s 股）· 生成 %s"
+         % (esc(m["basis_date"]), esc(m["src"]), m["bars"], esc(m["first_bar"]),
+            esc(m["last_bar"]), num(m.get("account"), 0), num(m.get("lot"), 0),
+            esc(m["generated_at"]))))
 
     # 来自数据的硬信息排在最前 —— 不因为它们不是 notes 写的就被顶掉。
     # （688152：tie_line_verdict 长期是 None，因为注释说"由渲染器判定"而渲染器里没有这段逻辑，
@@ -500,9 +521,9 @@ def render(a, n, tmpl_path=DEFAULT_TMPL):
         caliber.append("<b>引擎把买区下沿上抬过</b>（合法止损锚与买区冲突）—— 记清这是"
                        "「最低可买价」而不是自然支撑。")
     if m.get("cash") and (m.get("account") or 0) > m["cash"]:
-        caliber.append("<b>仓位已受「可用现金」约束</b>（账户总额 ¥%s ＞ 可用现金 ¥%s）"
-                       "—— 股数按现金上限重算；账户总额只用于风险预算（1.5%%）。"
-                       % (num(m.get("account"), 0), num(m.get("cash"), 0)))
+        caliber.append("<b>仓位已受「可用现金」约束</b>（账户总额 %s%s ＞ 可用现金 %s%s）"
+                       % (_cur, num(m.get("account"), 0), _cur, num(m.get("cash"), 0))
+                       + "—— 股数按现金上限重算；账户总额只用于风险预算（1.5%%）。")
     caliber += list(n.get("caliber_notes") or [])
     if not caliber:
         caliber.append("本次引擎未报出口径冲突。")
@@ -511,7 +532,7 @@ def render(a, n, tmpl_path=DEFAULT_TMPL):
         "TITLE": esc(n.get("title") or "%s %s · 多维度作战计划 · %s"
                      % (m["name"], m["code"], m["basis_date"])),
         "H1": esc(n.get("h1") or m["name"]),
-        "CODE_LABEL": esc(n.get("code_label") or "%s.SH" % m["code"]),
+        "CODE_LABEL": esc(n.get("code_label") or (m["code"] if _is_us else "%s.SH" % m["code"])),
         "META_LINE": meta_line,
         "KPI_ITEMS": kpi_items,
         "KPI_BADGES": kpi_badges,
@@ -559,10 +580,13 @@ def render(a, n, tmpl_path=DEFAULT_TMPL):
         "EXEC_INVALID": lis(n.get("exec_invalid")),
         "SUMMARY_ROWS": build_summary(a, n),
         "DISC_CONSTRAINTS": esc(n.get("disc_constraints")
-                                or "A 股 T+1；券商无原生止损单（只能用更低限价单替代止损 + 仓位替代）"),
+                                or ("美股 T+0、无涨跌停、1 股起；券商无原生 buy-stop / 止损单"
+                                    "（止损只能用更低限价单替代 + 仓位替代）" if _is_us else
+                                    "A 股 T+1；券商无原生止损单（只能用更低限价单替代止损 + 仓位替代）")),
         "DISC_DATA": esc(n.get("disc_data") or
-                         "%s（%d 根 %s → %s），结构判定 rule123.py，量价 probe_intraday.py"
-                         % (m["src"], m["bars"], m["first_bar"], m["last_bar"])),
+                         "%s（%d 根 %s → %s），结构判定 rule123.py，量价 %s"
+                         % (m["src"], m["bars"], m["first_bar"], m["last_bar"],
+                            "probe_intraday.probe_us" if _is_us else "probe_intraday.py")),
         "GENERATED_AT": esc(m["generated_at"]),
     }
 

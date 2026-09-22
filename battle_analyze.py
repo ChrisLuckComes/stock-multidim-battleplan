@@ -466,6 +466,39 @@ def peer_row(prefix, code, name=None, n=150):
     return row
 
 
+def peer_row_us(code, name=None, n=150):
+    """美股同行行：与 peer_row 同口径，日线走 bars_source.us_quote。
+
+    2026-09-22 加。为什么要这个：美股 pool 里「同线对照」过去靠临时脚本手摇，
+    口径与 A 股那份不一致（有的用盘前价、有的用收盘价，ALAB 一度写错成 +30.8%）。
+    统一走这里 = 一律「末根已收盘日线」，与主标的同源。
+    """
+    q, notes = BS.us_quote(str(code).upper(), min_bars=max(n, 140))
+    bars = list(q.get("bars") or [])
+    if not bars or len(bars) < 25:
+        return {"code": code, "name": name or code, "error": "日线不足",
+                "src": q.get("src")}
+    c = bars[-1]["c"]
+    atr = R.atr14(bars)
+    ma20 = R.sma([b["c"] for b in bars], 20)
+    ytd_hi = max(b["h"] for b in bars[-250:]) if len(bars) >= 250 else max(b["h"] for b in bars)
+    row = {
+        "code": code, "name": name or q.get("name") or code, "src": q.get("src"),
+        "close": _f(c), "atr_pct": _f(atr / c * 100) if atr else None,
+        "d3": _pct(c, bars[-4]["c"]) if len(bars) > 4 else None,
+        "d5": _pct(c, bars[-6]["c"]) if len(bars) > 6 else None,
+        "d10": _pct(c, bars[-11]["c"]) if len(bars) > 11 else None,
+        "d20": _pct(c, bars[-21]["c"]) if len(bars) > 21 else None,
+        "d60": _pct(c, bars[-61]["c"]) if len(bars) > 61 else None,
+        "gap_ytd_hi": _pct(ytd_hi, c),
+        "dist_ma20": _pct(c, ma20) if ma20 else None,
+        "bars": len(bars),
+    }
+    if notes:
+        row["notes"] = notes[:2]
+    return row
+
+
 # ────────────────────────── 主流程 ──────────────────────────
 
 def tie_line_check(z, ma_info):
@@ -508,18 +541,40 @@ def tie_line_check(z, ma_info):
             "verdict": "真贴线" if ok else "存疑", "note": note}
 
 
+def is_us_code(code):
+    """市场判定（2026-09-22 抽成函数，便于单测）。
+
+    6 位纯数字 = A 股；其余按美股 ticker 处理（1~8 位字母数字，可含 `-` / `.`）。
+    非法输入直接 SystemExit —— 不静默当成美股，否则会拿一个错 ticker 去联网。
+
+    ★ 历史：这里原本是「非 6 位数字一律 SystemExit」，导致美股<b>永远出不了 HTML 报告</b>
+      （只能拿 rule123 CLI 的 JSON 手搓）。美股通道（bars_source.us_quote /
+      probe_intraday.probe_us / probe_intraday.us_lots）一直都在，缺的只是入口。
+    """
+    c = str(code).strip()
+    if c.isdigit() and len(c) == 6:
+        return False
+    if c.isdigit():
+        raise SystemExit("无法识别的代码：%s（A 股须为 6 位数字）" % code)
+    if not (1 <= len(c) <= 8 and c.replace("-", "").replace(".", "").isalnum()):
+        raise SystemExit("无法识别的代码 / ticker：%s" % code)
+    return True
+
+
 def analyze(code, account=None, peers=None, data_file=None, n=330,
             intraday=True, min_scale=5, name=None, theme=None,
             peer_names=None, no_cache=False, cash=None):
     # ★ 账户 / 现金口径一律从 account_config 现取（env > .env > DEFAULTS），
     #   不在签名里写 50000 —— 那是「代码写死」，改配置还得改代码。
-    if account is None:
-        account = _AC.cfg()["ash_account"]
     code = str(code).strip()
-    if not (code.isdigit() and len(code) == 6):
-        raise SystemExit("battle_analyze 目前只支持 A 股 6 位代码：%s" % code)
-    prefix = P.prefix_of(code)
-    sym = prefix + code
+    # ★ 2026-09-22：市场分流（见 is_us_code）。
+    is_us = is_us_code(code)
+    if is_us:
+        code = code.upper()
+    if account is None:
+        account = _AC.cfg()["us_account"] if is_us else _AC.cfg()["ash_account"]
+    prefix = None if is_us else P.prefix_of(code)
+    sym = code if is_us else prefix + code
     peer_names = peer_names or {}
     notes_all = []
 
@@ -529,27 +584,46 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
         bars = list(market_data.get("bars") or [])
         src = "file:" + os.path.basename(data_file)
     else:
-        bars, src, notes = BS.ash_bars(prefix, code, n=n,
-                                       use_cache=not no_cache)
-        notes_all += notes
-        # 快照/缓存里常带 spot/prev/name，尽量复用
-        snap = {}
-        p = BS.find_snapshot(code)
-        if p:
-            try:
-                with open(p, encoding="utf-8") as f:
-                    snap = json.load(f)
-            except Exception:
-                snap = {}
-        market_data = {
-            "ticker": code, "code": code, "market": "CN",
-            "name": name or snap.get("name") or code,
-            "source": src, "period": "day",
-            "spot": snap.get("spot") if snap.get("bars") else None,
-            "prev_close": None, "open": None, "high": None, "low": None,
-            "volume": None, "turnover": snap.get("turnover"),
-            "bars": bars,
-        }
+        if is_us:
+            # 美股日线走 bars_source 三级链路（快照 → 缓存 → 网络），
+            # 与 rule123 CLI / probe_us / 扫描器同一口径。
+            q, notes = BS.us_quote(code, min_bars=max(n, 140),
+                                   use_cache=not no_cache)
+            notes_all += notes
+            bars = list(q.get("bars") or [])
+            src = q.get("src") or q.get("source") or "net"
+            market_data = {
+                "ticker": code, "code": code, "market": "US",
+                "name": name or q.get("name") or code,
+                "source": q.get("source") or src, "period": "day",
+                "spot": q.get("spot"), "prev_close": q.get("prev_close"),
+                "open": q.get("open"), "high": q.get("high"),
+                "low": q.get("low"), "volume": q.get("volume"),
+                "session": q.get("session"), "as_of": q.get("as_of"),
+                "bars": bars,
+            }
+        else:
+            bars, src, notes = BS.ash_bars(prefix, code, n=n,
+                                           use_cache=not no_cache)
+            notes_all += notes
+            # 快照/缓存里常带 spot/prev/name，尽量复用
+            snap = {}
+            p = BS.find_snapshot(code)
+            if p:
+                try:
+                    with open(p, encoding="utf-8") as f:
+                        snap = json.load(f)
+                except Exception:
+                    snap = {}
+            market_data = {
+                "ticker": code, "code": code, "market": "CN",
+                "name": name or snap.get("name") or code,
+                "source": src, "period": "day",
+                "spot": snap.get("spot") if snap.get("bars") else None,
+                "prev_close": None, "open": None, "high": None, "low": None,
+                "volume": None, "turnover": snap.get("turnover"),
+                "bars": bars,
+            }
     if not bars or len(bars) < 60:
         raise SystemExit("日线不足（拿到 %d 根）→ 无法定结构" % len(bars))
 
@@ -573,8 +647,13 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
     # 3) probe（量价研判 / 预案单 / 盘中通道）；只留返回 dict，文本丢弃
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        probe_out = P.probe(code, account=account, min_scale=min_scale,
-                            market_data=market_data) or {}
+        if is_us:
+            # 美股版：T+0 口径、盘前通道、盘中量能突变（probe_intraday.probe_us）
+            probe_out = P.probe_us(code, account=account, min_scale=min_scale,
+                                   market_data=market_data) or {}
+        else:
+            probe_out = P.probe(code, account=account, min_scale=min_scale,
+                                market_data=market_data) or {}
     probe_txt = buf.getvalue()
 
     # 4) 补算
@@ -631,11 +710,19 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
     #   它同时受「账户 × risk_pct / 每股风险」与「单笔金额硬顶 ash_single_cap」约束，
     #   并按最小申报单位取整（科创板 200 起 1 股递增）。自成一套迟早与引擎走偏。
     if rec:
-        #   ★ cash（真实可用现金）传入时作为单笔金额上限：**账户总额 ≠ 能动用的钱**。
-        #     持续持仓的账户上两者能差一半（688152：账户 5 万，已持 21,574 元，
-        #     可用现金只有 28,426 元），不传就会算出「钱不够的股数」。
-        rec["qty"] = P.ash_lots(account, rec["entry"], rec["stop"], code,
-                                cap_amt=cash if cash else None)
+        if is_us:
+            # ★ 美股：1 股起（无整手约束）、T+0。股数走 probe_intraday.us_lots
+            #   （账户 × US_RISK_PCT ÷ 每股风险，再用「账户 / 价格」夹上限）。
+            #   传了 cash 再用真实可用现金夹一次 —— 账户总额 ≠ 能动用的钱。
+            rec["qty"] = P.us_lots(account, rec["entry"], rec["stop"])
+            if rec["qty"] and cash:
+                rec["qty"] = max(1, min(rec["qty"], int(cash / rec["entry"])))
+        else:
+            #   ★ cash（真实可用现金）传入时作为单笔金额上限：**账户总额 ≠ 能动用的钱**。
+            #     持续持仓的账户上两者能差一半（688152：账户 5 万，已持 21,574 元，
+            #     可用现金只有 28,426 元），不传就会算出「钱不够的股数」。
+            rec["qty"] = P.ash_lots(account, rec["entry"], rec["stop"], code,
+                                    cap_amt=cash if cash else None)
         rec["amount"] = _f((rec["qty"] or 0) * rec["entry"], 0)
         rec["pct_account"] = _f(rec["amount"] / account * 100, 1) if account else None
         rec["cash"] = cash
@@ -653,7 +740,7 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
     # 5) 分时
     intra = None
     mint = []
-    if intraday:
+    if intraday and not is_us:
         try:
             # 取 3 个交易日的分钟线（5 分钟粒度 = 144 根），复盘时只取最后一日的段
             mint = P.kline(sym, min_scale, 144)
@@ -668,6 +755,12 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
     for pc in (peers or []):
         pcode = pc if isinstance(pc, str) else pc.get("code")
         pname = peer_names.get(pcode) or (pc.get("name") if isinstance(pc, dict) else None)
+        if is_us:
+            try:
+                peer_rows.append(peer_row_us(str(pcode).upper(), pname))
+            except Exception as e:
+                peer_rows.append({"code": pcode, "name": pname or pcode, "error": str(e)})
+            continue
         if not (str(pcode).isdigit() and len(str(pcode)) == 6):
             continue
         try:
@@ -682,7 +775,7 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
         "meta": {
             "generator": "battle_analyze.py v%s" % VERSION,
             "generated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "code": code, "sym": sym, "market": "CN",
+            "code": code, "sym": sym, "market": "US" if is_us else "CN",
             "name": name or market_data.get("name") or code,
             "theme": theme,
             "basis_date": last["d"],
@@ -692,8 +785,8 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
             "first_bar": bars[0]["d"], "last_bar": last["d"],
             "account": account,
             "cash": cash,
-            "risk_pct": P.ASH_RISK_PCT,
-            "lot": P.first_lot_of(code),
+            "risk_pct": P.US_RISK_PCT if is_us else P.ASH_RISK_PCT,
+            "lot": 1 if is_us else P.first_lot_of(code),
             "fetch_notes": notes_all,
             "plan_ok": plan_warn is None,
             "plan_warning": plan_warn,
@@ -729,10 +822,11 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
 
 def main():
     ap = argparse.ArgumentParser(description="一键分析（A 股单票）")
-    ap.add_argument("codes", nargs="+", help="6 位 A 股代码，可多个")
-    ap.add_argument("--account", type=int, default=None, help="A 股账户资金")
-    ap.add_argument("--cash", type=int, default=_AC.cfg()["ash_cash"],
-                    help="可用现金（持仓后能动用的钱）；不传则按账户总额封顶")
+    ap.add_argument("codes", nargs="+", help="6 位 A 股代码，或美股 ticker（如 ALAB），可多个")
+    ap.add_argument("--account", type=float, default=None, help="账户资金（A 股 ¥ / 美股 $）")
+    ap.add_argument("--cash", type=float, default=None,
+                    help="可用现金（持仓后能动用的钱）；不传则按账户总额封顶"
+                         "（A 股不传时回落到 ASH_CASH 配置）")
     ap.add_argument("--peers", default=None,
                     help="同行代码，逗号分隔（如 600183,300476,603078）")
     ap.add_argument("--peer-names", default=None,
@@ -750,7 +844,6 @@ def main():
 
     if a.data and len(a.codes) != 1:
         ap.error("--data 只支持单票")
-    account = a.account or _AC.cfg()["ash_account"]
     peers = [x.strip() for x in (a.peers or "").split(",") if x.strip()]
     pnames = {}
     for kv in (a.peer_names or "").split(","):
@@ -759,11 +852,19 @@ def main():
             pnames[k.strip()] = v.strip()
 
     for code in a.codes:
+        # 账户/现金按每只票自己的市场取：一次跑多票混市场时不能被第一只锁定
+        _c = str(code).strip()
+        _is_us = not (_c.isdigit() and len(_c) == 6)
+        account = a.account if a.account is not None else (
+            _AC.cfg()["us_account"] if _is_us else _AC.cfg()["ash_account"])
+        cash = a.cash if a.cash is not None else (
+            None if _is_us else _AC.cfg()["ash_cash"])
         res = analyze(code, account=account, peers=peers, data_file=a.data,
                       n=a.n, intraday=not a.no_intraday, min_scale=a.min_scale,
                       name=a.name, theme=a.theme, peer_names=pnames,
-                      no_cache=a.no_cache, cash=a.cash)
-        out_path = a.out or os.path.join(HERE, "out_cn", "analysis_%s.json" % code)
+                      no_cache=a.no_cache, cash=cash)
+        out_path = a.out or os.path.join(HERE, "out_us" if _is_us else "out_cn",
+                                        "analysis_%s.json" % _c.upper())
         md = os.path.dirname(out_path)
         if md:
             os.makedirs(md, exist_ok=True)

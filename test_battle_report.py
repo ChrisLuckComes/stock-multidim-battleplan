@@ -419,9 +419,27 @@ class TestAnalyzeOffline(unittest.TestCase):
         self.assertLessEqual(rec["amount"], P.ash_single_cap(50000))
         self.assertAlmostEqual(rec["amount"], rec["qty"] * rec["entry"], places=0)
 
+    def test_market_split_us_vs_ashare(self):
+        """2026-09-22 改：原断言「美股必须被拒」已作废。
+
+        那条限制让美股永远出不了 HTML 报告（battle_analyze 只产 analysis.json →
+        只能拿 rule123 CLI 的 JSON 手搓）。美股通道本就齐备
+        （bars_source.us_quote / probe_intraday.probe_us / us_lots），缺的只是入口。
+        现在：6 位纯数字 = A 股，其余按 ticker；非法输入仍必须被挡。
+        """
+        self.assertFalse(BA.is_us_code("601208"))
+        self.assertFalse(BA.is_us_code("301511"))
+        self.assertTrue(BA.is_us_code("AAPL"))
+        self.assertTrue(BA.is_us_code("ALAB"))
+        self.assertTrue(BA.is_us_code("brk.b"))          # 小写 + 点号
+        for bad in ("AAPL US", "TOOLONGTICKER", "", "12345", "6000000"):
+            with self.assertRaises(SystemExit, msg="必须拒绝：%r" % bad):
+                BA.is_us_code(bad)
+
     def test_analyze_rejects_non_ashare(self):
+        """非法输入仍然被市场校验挡住（不再针对「美股」这个概念）。"""
         with self.assertRaises(SystemExit):
-            BA.analyze("AAPL")
+            BA.analyze("AAPL US")
 
     def test_summarize_runs(self):
         res = BA.analyze("600000", account=50000, data_file=self.tmp,
