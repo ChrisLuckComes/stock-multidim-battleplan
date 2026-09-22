@@ -24,6 +24,7 @@ LLM 只需要另外写一份很小的 `notes.json`（判断与叙述）。
 """
 
 import argparse
+import concurrent.futures as cf
 import contextlib
 import datetime as dt
 import io
@@ -47,6 +48,7 @@ VERSION = "1.0"
 MIN_RISK_ATR = 0.25          # 风险低于 0.25×ATR 的组合 = 纸面赔率，剔除
 BIG_YANG_BODY_ATR = 0.80     # 大阳判定：实体 ≥ 0.8×ATR
 TIE_LINE_LOOK = 8            # 贴线命中统计回看根数（output-pitfalls #21：±1% ≥2/8）
+PEER_WORKERS = 12            # 同行日线是网络 I/O；与 scan_all/enum.py 同上限，口径不变
 
 
 # ────────────────────────────── 小工具 ──────────────────────────────
@@ -750,23 +752,31 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
         if mint:
             intra = intraday_review(mint, bars, atr_v)
 
-    # 6) 同行
-    peer_rows = []
-    for pc in (peers or []):
+    # 6) 同行（并发取日线；非法 A 股代码仍跳过；完成后按 d20 排序，与串行结果一致）
+    def _peer_one(pc):
         pcode = pc if isinstance(pc, str) else pc.get("code")
-        pname = peer_names.get(pcode) or (pc.get("name") if isinstance(pc, dict) else None)
+        pname = (peer_names or {}).get(pcode) or (
+            pc.get("name") if isinstance(pc, dict) else None)
         if is_us:
             try:
-                peer_rows.append(peer_row_us(str(pcode).upper(), pname))
+                return peer_row_us(str(pcode).upper(), pname)
             except Exception as e:
-                peer_rows.append({"code": pcode, "name": pname or pcode, "error": str(e)})
-            continue
+                return {"code": pcode, "name": pname or pcode, "error": str(e)}
         if not (str(pcode).isdigit() and len(str(pcode)) == 6):
-            continue
+            return None
         try:
-            peer_rows.append(peer_row(P.prefix_of(str(pcode)), str(pcode), pname))
+            return peer_row(P.prefix_of(str(pcode)), str(pcode), pname)
         except Exception as e:
-            peer_rows.append({"code": pcode, "name": pname or pcode, "error": str(e)})
+            return {"code": pcode, "name": pname or pcode, "error": str(e)}
+
+    peer_list = list(peers or [])
+    peer_rows = []
+    if peer_list:
+        workers = min(PEER_WORKERS, len(peer_list))
+        with cf.ThreadPoolExecutor(max_workers=workers) as ex:
+            for row in ex.map(_peer_one, peer_list):
+                if row:
+                    peer_rows.append(row)
     peer_rows.sort(key=lambda r: -(r.get("d20") or -999))
 
     vp20 = volprice_20d(bars)

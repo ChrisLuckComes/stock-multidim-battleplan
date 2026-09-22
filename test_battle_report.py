@@ -383,6 +383,30 @@ class TestAnalyzeOffline(unittest.TestCase):
         self.assertTrue(res["struct"]["range_change"])
         self.assertTrue(res["struct"]["ma"][0]["hit1"] >= 0)
 
+    def test_peers_parallel_keeps_filter_and_d20_order(self):
+        """同行并发只改取数方式：非法代码跳过，结果仍按 d20 降序。"""
+        d20 = {"600183": 1.0, "300476": 5.0, "603078": -2.0}
+
+        def fake_peer(prefix, code, name=None, n=150):
+            return {"code": code, "name": name or code, "d20": d20[code],
+                    "prefix": prefix}
+
+        orig = BA.peer_row
+        BA.peer_row = fake_peer
+        try:
+            res = BA.analyze(
+                "600000", account=50000, data_file=self.tmp, intraday=False,
+                n=len(self.bars),
+                peers=["600183", "300476", "not-a-code", "603078"],
+                peer_names={"600183": "生益科技"},
+            )
+        finally:
+            BA.peer_row = orig
+        self.assertEqual(
+            [(r["code"], r["name"]) for r in res["peers"]],
+            [("300476", "300476"), ("600183", "生益科技"), ("603078", "603078")],
+        )
+
     def test_real_snapshot_regression(self):
         """有真实快照时，钉死 2026-09-21 东材科技那一轮的关键结论。
 
