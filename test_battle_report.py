@@ -321,6 +321,35 @@ class TestRender(unittest.TestCase):
             self.assertIn(k, seg, "事实行 %s 被覆盖掉了" % k)
         self.assertIn("人工动作", seg)
 
+    def test_trend_only_target_row_is_not_blank(self):
+        """T0（趋势单）分支：引擎不给固定目标时，目标行必须说明「不设固定目标」，
+        并回退到顶层 targets 的远端墙 / ATH —— 而不是打印「目标1 —」。
+
+        回归：东微半导 688261（2026-09-22）判 T0，plan["targets"] 恒为 None，
+        第 9 节印出「目标1 —（到达减 1/3~1/2…）」与「— / 114.30」的空行。
+        """
+        a = self._analysis()
+        a["plan"]["targets"] = None
+        a["targets"] = {"t1": None, "t2_engine": None, "wall_far": 114.3, "ath": 114.5}
+        seg = self._exec_seg(RR.render(a, {}, RR.DEFAULT_TMPL))
+        self.assertIn("不设固定目标", seg, "趋势单没有说明「不设固定目标」")
+        self.assertIn("114.30", seg, "远端墙没被回退读出")
+        self.assertIn("114.50", seg, "ATH 没被回退读出")
+        self.assertNotIn("<b>—</b>（到达减", seg, "目标1 仍打印空值")
+
+    def test_target_falls_back_to_top_level_keys(self):
+        """plan.targets 缺失时，目标必须回退读顶层 targets 的 t1 / t2_engine。
+
+        顶层用 t1/t2_engine、plan 里用 target1/target2 —— 两套键名不一致，
+        回退漏一个就会让趋势单的目标行整个空掉。
+        """
+        a = self._analysis()
+        a["plan"]["targets"] = None
+        a["targets"] = {"t1": 60.0, "t2_engine": 70.0, "wall_far": 72.0}
+        seg = self._exec_seg(RR.render(a, {}, RR.DEFAULT_TMPL))
+        self.assertIn("60.00", seg)
+        self.assertIn("70.00", seg)
+
     def test_exec_rows_absent_keeps_engine_default(self):
         """不提供 exec_rows 时行为与旧版一致（引擎默认核心行 + 事实行）。"""
         html = RR.render(self._analysis(), {}, RR.DEFAULT_TMPL)
@@ -328,6 +357,32 @@ class TestRender(unittest.TestCase):
         for k in ("动作", "买入价", "止损（结构轨）", "止损（硬止损）",
                   "数量", "金额", "单笔风险", "目标1", "预挂可行性"):
             self.assertIn(k, seg)
+
+    def test_exec_rows_accepts_three_columns(self):
+        """exec_rows 允许 3 元组 [[名, 值, 备注]] —— 表头本来就是「项/值/备注」三列。
+
+        回归：2026-09-22 写「两方向预案」时 notes 给了 3 元组，
+        build_exec 走 kv_rows()（只吃 2 元组）⇒ ValueError: too many values to unpack，
+        三份报告全部渲染失败。
+        """
+        notes = {"exec_rows": [
+            ["方向一 · 回踩", "限价买 <b>30.90</b> × 200 股", "止损 29.14（收盘破）"],
+            ["方向二 · 突破", "打 <b>32.65</b> × 400 股", "止损 31.94（假突破线）"],
+            ["两方向关系", "<b>互斥 · 先到先做</b>", "不叠加"],
+            ["动作", "2 元组行也必须照常工作"],
+        ]}
+        html = RR.render(self._analysis(), notes, RR.DEFAULT_TMPL)
+        seg = self._exec_seg(html)
+        self.assertIn("方向一 · 回踩", seg)
+        self.assertIn("方向二 · 突破", seg)
+        self.assertIn("止损 29.14（收盘破）", seg)   # 第三列真的落在 <td> 里
+        self.assertIn("止损 31.94（假突破线）", seg)
+        self.assertIn("2 元组行也必须照常工作", seg)
+        # 每行 3 个 td（含表头行）
+        for row in (seg.split("<tr>")):
+            n_td = row.count("<td>")
+            if n_td:
+                self.assertIn(n_td, (2, 3), "出现了既非 2 也非 3 列的格子数：%s" % n_td)
 
     def test_warn_text_is_escaped(self):
         """warn 里的 '<0.35×ATR' 必须转义，否则浏览器会当标签吞掉后半句。"""

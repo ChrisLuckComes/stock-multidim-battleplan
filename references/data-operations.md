@@ -94,6 +94,12 @@ ATR：Wilder ATR14。
 - 合成 bar 的 `v` 是**量比口径**（盘中累计量按已走时段折算成预计全日量），`v_raw` 才是当日累计量 —— 半天量直接比整日均量会把放量突破误读成「缩量」。
 - `spot_quote` 仍是 Nasdaq 原始实时价，可与合成 bar 的收盘价互相校验（差值为 5 分钟线最后一根的滞后）。
 - **分钟线的代理默认不探、不用（2026-09-21，用户反馈驱动）**：Yahoo 直连 403，经代理才通；但旧实现会在 `rule123._proxy_list()` 里硬编码去连 `127.0.0.1:7897 / 7890 / 7891 / 10809 / 1080`，而 7897 / 7890 正是 Clash / Clash Verge 的默认端口，且没有直连兜底、每次等 20s 超时 —— 等于脚本反复去连**用户自己的代理客户端**，用户反馈「干扰到了我的 clash verge 代理」。现在默认只直连，代理只能显式配置：`WB_US_PROXY=http://127.0.0.1:<端口>`（可逗号分隔多个）或仓库根目录 `us_proxy.txt`（一行一个 URL，`#` 为注释）；关闭用 `WB_US_PROXY=off` / `WB_NO_PROXY=1`；旧的自动探端口行为需显式 `WB_US_PROXY_AUTOPROBE=1` 才开启，**不要默认打开**。回归测试 `test_performance_paths.test_proxy_never_probes_local_ports_by_default` 钉死这条。
+- ★ **今日真实高低只能靠分钟线；`/info` 根本不带它（2026-09-22 实测）**：`rule123.nasdaq_info()` 只取 `primaryData.lastSalePrice`（实时价）/ `secondaryData.lastSalePrice`（昨收）/ `marketStatus`，**没有今日高低**；而 Nasdaq 日线盘中又不含当日 bar。两者一叠加 ⇒ **分钟线一断，当日区间就整个缺失**。此时 `bars_source.us_quote()` 返回的 `open/high/low` 仍是**上一交易日**的值（实测 2026-09-22 盘中给的是 09-21 的 `251.4/261.18/244.985`），拿它当今日高低会直接得出「今天只回踩到 X」这类**错误结论**。本环境（`https_proxy` 指向沙箱代理）实测 Yahoo 5m 报 `Tunnel connection failed: 502`，而默认直连又是 403 ⇒ 两头不通时必须有兜底源：
+  - `GET https://api.nasdaq.com/api/quote/<SYM>/realtime-trades?assetclass=stocks&limit=20` → `data.topTable.rows[0].todayHighLow`（形如 `"$264.25/$254.00"`，同表 `nlsVolume` 为当日累计量）。该接口 `description` 明文：**仅常规时段更新，不含盘前盘后**。
+  - `GET https://api.nasdaq.com/api/quote/<SYM>/info?assetclass=stocks` → `data.keyStats.dayrange.value`（同值，便于单发）。
+  - ⚠️ 别用 `/chart` 的 `previousClose`（滞后一整天，见 `bars_from_nasdaq` docstring），也别把 `/info` 的 `primaryData` 当区间源（它**没有当日开盘价**）。
+  - ★ **已修（2026-09-22，`fetch_market.fetch_us_nasdaq` + 新增 `_nasdaq_day_range()`）**：盘中单发 realtime-trades，把 `open/high/low/volume` 换成**当日**口径，并新增 `day_high` / `day_low` / `ohlc_basis` 三字段（`today` / `unavailable` / `last_closed`）。Nasdaq 无当日开盘价 ⇒ `open=None`（宁缺勿假）；当日区间取不到时四个字段**一律 None**，不再沿用昨天的值冒充。同时修掉昨收 fallback 的 off-by-one：Nasdaq 已把 `secondaryData` 改为 `null` ⇒ 旧代码退到 `bars[-2]`，把**前天**的收盘当昨收（实测交出 244.25，真值 257.38，误差 −2.8%）。**盘中 `bars[-1]` 才是昨收**。
+  - 下游注意：`open/high/low` 读到 `None` 时**不要退到 `bars[-1]`**（那是上一交易日）；先看 `ohlc_basis` 判断口径。回归钉在 `test_fetch_market_us.py`（19 项断言，自带 `main`，无需 pytest）。
 - 美股盘中时段 = 北京时间 21:30–04:00（夏令时）。
 
 取数优先级：WorkBuddy 通达信连接器 → wb-finance-skill → `fetch_market.py` → 网页检索（并标注来源）。连接器调用成功后不得再调用后面的慢源做同字段重复取数；仅缺字段或返回失败时按缺口降级。
@@ -122,6 +128,37 @@ ATR：Wilder ATR14。
 10. **出报告不再手写 HTML（2026-09-21 加）**：`battle_analyze.py` 一条命令完成「取数 → rule123 → probe → 结构核验 → 全档赔率枚举 → 同行 → 分时」并落 `analysis.json`，再由 `report_render.py` 套 `templates/battle_report.html` 渲染（模型只写 `notes.json` 的判断文字）。版式与表格由脚本生成，**别再手写 40KB HTML**。
     - ★ **单票日线不再走 `tdx_kline`**：它单次返回 14 万字符、会超 token 上限被强制落盘再读，链路又长又慢；`battle_analyze.py` 改走 `bars_source` 三级链路（新浪实测 0.2~0.7s）。`tdx_kline` 仍保留给「需要当日盘中快照」或新浪取不到的票，但拿到后**仍必须**经 `snapshot_from_tdx.py` 落盘再喂引擎（第 1、8 条的规矩不变）。
     - 口径与耗时对照见 [report-generation.md](report-generation.md)。
+11. **基本面/财务取数（`tdx_security_deep_info`）**：它一次规划 3 个子查询（财务摘要 / 估值分析 / 成长能力），
+    返回体很大（80–110KB），会**超 token 上限被强制落盘**再读。落盘文件的格式是
+    `查询: …\n实体类型: …\n状态: executed\n命中工具: …\n参数: {}\n说明: …\n详细结果:\n{...json...}`，
+    **`json.loads()` 会 `Extra data`**（`详细结果:` 的 JSON 后面还跟着额外内容）⇒ 用
+    `json.JSONDecoder().raw_decode(txt[txt.find("详细结果:")+len("详细结果:"):].lstrip())` 解析。
+    取数要点：`executions[]` 每项含 `tool_id` + `data.result_sets[]`（`columns[].name` 是**中文列名**，`rows[]` 是值）。
+    - ⚠ ★ **两个「财务摘要」接口的期间口径不同，不能一概当累计读**（2026-09-22 跑 688192/688046 发现）：
+      · `f9_ashare_cwsj_cwzydjd`（迪哲 688192 用的）返回的是**单季度**值 —— Q1 2.53 亿 + Q2 2.70 亿 = H1 5.23 亿；
+      · `f9_ashare_sl_001_sl_cwzy`（药康 688046 用的）返回的是**累计**值 —— 2026-06-30 = 4.60 亿就是半年报口径。
+      **判据（必做）**：拿 `f9_ashare_key_statistics` 的「营业总收入 / 归母净利润 / EPS」去反查 ——
+      它能和哪一套对得上，那一套就是累计口径。写进 `fin_rows` 前必须过这一步，否则「同比」会算成两倍或一半。
+    - `f9_ashare_key_statistics` 是**全市场通用**的估值快照口：总市值 / 总股本 / PE_TTM / PE年度+预测PE /
+      EPS / 预测EPS均值 / BPS / PB_MRQ / PS_TTM / Beta_100周 / 一致目标价 —— 一张表够填 `valuation_rows`。
+      亏损股 `PE_TTM` 为负、`一致目标价` 常为 null，属正常，别当取数失败。
+    - `f9_ashare_cwfx_cznl`（成长能力）给的是各期**同比增速**（营收 / 营业利润 / 归母净利 / 扣非 / EPS / 经营现金流），
+      同样要先按上面的判据确认它是单季同比还是累计同比。
+    - ⚠ ★ **`rows[]` 的排序方向不固定，绝不能假定 `rows[0]` / `rows[-1]` 是哪一端**（2026-09-22 跑 688136/300016 发现）：
+      科兴 688136 的利润表**末尾**是最新期（旧→新），北陆 300016 的**开头**是最新期（新→旧）。
+      同一份脚本对两票取 `rows[-6:]`，一票拿到最新 6 期、另一票拿到 2017 年的老数据。
+      ⇒ **一律先按「报告期」字符串排序**（`YYYY-MM-DD` 可直接字典序），再取尾部。
+    - ⚠ ★ **同一报告期会出现重复行**：接口把同一期用两种「报表类型」（`071001` / `071002`，
+      = 合并/母公司 或 调整前后）各返回一遍。不去重时末 N 期会被重复行挤占、把真正的历史期顶掉。
+      ⇒ 排序后**按报告期去重**（保留首次出现）。
+    - ★ **固化工具 `tdx_deep_fin.py`（2026-09-22 加）**：把上面全部坑一次处理完，不必再现场写 `python -c`。
+      ```
+      python tdx_deep_fin.py <落盘文件>              # 概览：有哪些 result_set / 列名 / 样例行
+      python tdx_deep_fin.py <落盘文件> --fin        # 财务摘要：key_statistics + 利润表(按报告期排序去重) + 成长能力
+      python tdx_deep_fin.py <落盘文件> --dump o.json
+      ```
+      它会**自动做口径反查**：拿利润表最新一期营收 ÷ key_statistics 的「营业总收入」，
+      比值 ≈1.000 即判定「同一期、累计口径」，并打印该结论 —— 这一步以前靠人工比，现在自动出。
 
 ---
 

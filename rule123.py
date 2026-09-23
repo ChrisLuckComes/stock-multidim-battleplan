@@ -3640,6 +3640,16 @@ def evaluate(sym, data_file=None, eod=False):
     if h_a and h_b:
         out["trendline_at_last"] = rnd(line_val(h_b, h_a, meta["last_i"]))
     out["buy_zone"] = plan["buy_zone"]
+    # ★ T0 并行入口必须透传（2026-09-22 修）。
+    #   plan_entry() 一直在算 `ma_reclaim` / `tier_t0`，但本函数是**重建** out（只挑字段），
+    #   漏了这两个键 —— 于是 watch_cn / pool_us（直接调 plan_entry）看得到 T0，
+    #   而 battle_analyze（调 evaluate）写出的报告**看不到**。实测 688428 诺诚健华：
+    #   09-21 收复全部均线、09-22 过昨高，T0 早已成立，报告里却只有 T2 回踩单，
+    #   用户直接反问「为什么我觉得像 T0 的变种」。
+    #   纯透传，不改 mode / recommend 语义（T0 是并行执行方案，先到先做）。
+    for _k in ("ma_reclaim", "tier_t0"):
+        if plan.get(_k) is not None:
+            out[_k] = plan[_k]
 
     # ---- 盘中（未收盘）口径 -------------------------------------------------
     # live_bar 非空 = 今日未收盘 K 线已并入结构。买区/模式随之刷到突破位，

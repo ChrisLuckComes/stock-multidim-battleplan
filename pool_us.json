@@ -27,7 +27,12 @@
       "sym": "MRVL",
       "name": "迈威尔科技",
       "theme": "定制ASIC·光互联",
-      "pos": null
+      "pos": {
+        "qty": 6,
+        "cost": 261.18,
+        "stop": 254.6,
+        "stop_exec": "收盘破"
+      }
     },
     {
       "sym": "INTC",

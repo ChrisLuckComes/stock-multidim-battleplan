@@ -9,6 +9,8 @@ disable-model-invocation: true
 > **何时用**：用户要求对某只股票做多维度分析、作战计划、买卖点、止损止盈。
 >
 > **取数**：WorkBuddy 已连接通达信时优先使用 `tdx_lookup` / `tdx_quotes` / `tdx_kline`；不可用时依次降级到 `wb-finance-skill`、`fetch_market.py`。结构判定只用 `rule123.py`。通达信取数结果先用 `snapshot_from_tdx.py` 落成统一快照（**当日多只票一次取完**时用 `--batch <一段含多个返回的文本|目录>`，默认落到 `data/tdx/`），再喂 `rule123.py --data` / `probe_intraday.py --data`（禁止手工拼 `bars`）。所有日线取数（`scanner` / `watch_cn` / `pool_us`）已统一走 `bars_source.py` 三级链路 **本地快照 → 磁盘缓存 → 网络**，所以 `watch_cn.py --snap-dir data/tdx` / `pool_us.py --snap-dir data/tdx` 可**全离线**出复盘；报告首部会把「快照/缓存/网络各多少只」打出来。缓存状态与清理：`python bars_source.py --stat|--clear`。
+>
+> **基本面取数**：`tdx_security_deep_info` 返回 80–160KB，**必然超 token 落盘** ⇒ 拿到落盘路径后直接 `python tdx_deep_fin.py <落盘文件> --fin`（自动解析 + 按报告期排序去重 + 单位换算 + **单季/累计口径反查**），不要再手写 `python -c` 逐字段试。坑与口径细节见 [data-operations.md](references/data-operations.md) 第 11 条。
 
 ## 执行原则
 
@@ -33,6 +35,7 @@ disable-model-invocation: true
 - **股池扫描/批量复盘**：读取 [strategy-modes.md](references/strategy-modes.md)、[risk-exit.md](references/risk-exit.md)、[data-operations.md](references/data-operations.md)。
 - **只问基本面/估值/扫雷**：读取 [research-report.md](references/research-report.md)、[risk-exit.md](references/risk-exit.md)。
 - **生成或更新报告**：额外读取 [output-pitfalls.md](references/output-pitfalls.md)、[report-generation.md](references/report-generation.md)。
+- **读写资料库持仓（真相源）**：读取 [library-writeback.md](references/library-writeback.md)。持仓/止损/状态的**真相源是资料库「股池配置」表**，本地池只是缓存 —— 跑票前先 `sync_pos_from_library.py`（读），要改库用 `library_pos.py`（写，支持 list/find/set/note/add，`--dry-run` 预览）。
 
 ## 不可省略的核心规则
 
