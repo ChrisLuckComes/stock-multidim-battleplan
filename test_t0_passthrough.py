@@ -18,6 +18,11 @@
 每股风险 0.81 vs 0.99 ⇒ 925 股 vs 757 股，同屏出现两个数字。
 另：`cap_amt=cash` 会把「单笔绝对额硬顶 5 万」顶掉（现金 > 硬顶时）。
 
+### 缺陷 3 —— T0 止损锚候选集缺「触发日前一根 K 低点」（2026-09-23）
+`kanchor_back ≥ 1` 时前五条锚全落在突破日那根或均线上，离触发价可能极远
+（东微 688261：MA5 75.68 ⇒ 风险 6.33%、R→近端墙 0.78 = 不可执行）。
+补入 D0 低点（突破前最后一道支撑）后风险降到 3.12%、R = 1.59 ⇒ 可执行。
+
 跑法：`python -m unittest test_t0_passthrough`（或 `python test_t0_passthrough.py`）。
 """
 from __future__ import annotations
@@ -63,6 +68,22 @@ def t0_series():
     # 末根：收复全部均线 + 贴着左墙
     bars.append({"d": d.isoformat(), "o": 10.40, "h": 11.00, "l": 10.35,
                  "c": 10.92, "v": 1.6e6})
+    return bars
+
+
+def t0_series_kback2(d0=None):
+    """在 `t0_series()` 后再跟 2 根跟涨 K ⇒ 「突破均线那根」退到 `kanchor_back=2`。
+
+    东微半导 688261 的实际形态（突破日 09-17，之后又走了 09-18/09-21/09-22 三根）：
+    触发价（D0 最高）已经远离突破日低点，旧候选集只能给出很远的止损。
+    `d0` 可覆盖末根，用来构造「D0 低点贴近触发价」的噪声带场景。
+    """
+    bars = t0_series()
+    d = datetime.date.fromisoformat(bars[-1]["d"])
+    bars.append({"d": (d + datetime.timedelta(days=1)).isoformat(),
+                 "o": 10.95, "h": 11.20, "l": 10.90, "c": 11.15, "v": 1.2e6})
+    d0 = d0 or {"o": 11.15, "h": 11.45, "l": 11.05, "c": 11.20, "v": 1.1e6}
+    bars.append(dict(d0, d=(d + datetime.timedelta(days=2)).isoformat()))
     return bars
 
 
@@ -163,6 +184,47 @@ class TestSingleCapWithCash(unittest.TestCase):
 
     def test_no_cash_uses_hard_cap(self):
         self.assertEqual(BA.single_cap_with_cash(50000, None), 50000)
+
+
+class TestPriorKLowAnchor(unittest.TestCase):
+    """缺陷 3：第 6 条止损锚「触发日前一根 K 低点」（东微半导 688261，用户「修」）。"""
+
+    def _t0(self, bars):
+        ev, b2, _ = R.build_ev(bars, drop_live=False, ticker="688999")
+        plan = R.plan_entry(b2, ev)
+        self.assertIsNotNone(plan.get("ma_reclaim"), "合成序列必须仍满足 T0 判据")
+        return plan["ma_reclaim"]
+
+    def test_back0_output_unchanged(self):
+        """kanchor_back == 0（信号日当天即突破日）⇒ 第 6 条锚不参与（八案例回归不变）。"""
+        t0 = self._t0(t0_series())
+        self.assertEqual(t0["kanchor_back"], 0)
+        self.assertFalse(t0["prior_k_low_used"])
+        self.assertIsNone(t0["prior_k_low_skip"])
+
+    def test_back2_picks_prior_k_low(self):
+        """back=2 ⇒ 离触发价最近的是 D0 低点，止损必须落在它上面（同东微 78.27）。"""
+        bars = t0_series_kback2()
+        t0 = self._t0(bars)
+        self.assertGreaterEqual(t0["kanchor_back"], 1)
+        self.assertEqual(t0["prior_k_low"], round(bars[-1]["l"], 2))
+        cands = [t0["ma_state"]["ma5"], t0["ma_state"]["ma10"], t0["ma_state"]["ma20"],
+                 t0["kanchor_mid"], t0["kanchor_low"], t0["prior_k_low"]]
+        exp = max(v for v in cands if v is not None and v < t0["trigger"])
+        self.assertAlmostEqual(t0["hard_stop"], round(exp, 2), places=2)
+        self.assertTrue(t0["prior_k_low_used"],
+                        "D0 低点比全部旧锚都近 ⇒ 引擎必须选它（否则 T0 形同不可执行）")
+        self.assertGreater(t0["risk_atr"] or 0, 0)
+
+    def test_noise_band_guard(self):
+        """D0 低点离触发价 < 0.25×ATR ⇒ 不纳入（一次正常波动就能扫掉的止损）。"""
+        bars = t0_series_kback2(
+            d0={"o": 11.15, "h": 11.45, "l": 11.42, "c": 11.44, "v": 1.1e6})
+        t0 = self._t0(bars)
+        self.assertIsNotNone(t0["prior_k_low_skip"], "噪声带内必须留痕说明为何没用它")
+        self.assertFalse(t0["prior_k_low_used"])
+        self.assertLess(t0["prior_k_low_atr"], R.NOISE_ROOM_ATR)
+        self.assertNotAlmostEqual(t0["hard_stop"], t0["prior_k_low"], places=2)
 
 
 if __name__ == "__main__":
