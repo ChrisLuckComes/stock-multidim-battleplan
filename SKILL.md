@@ -54,6 +54,8 @@ disable-model-invocation: true
 13. **美股日内做空先跑作战卡**（`python us_short.py <ticker> [--entry … --stop …]`，2026-09-24 SNDK 定稿）：做空只做**反抽空点**（跌破的 MA5 / 昨低回抽），**禁止开盘追跌**。核心是 **RR 临界入场价** `min_entry(RR) = (RR×止损锚 + T1)/(1+RR)` —— 止损锚与目标固定时入场越低 RR 单调递减，**RR<1.5 = 负期望区禁开空**；止损距离 <0.25×ATR 的档位是噪声带假赔率（脚本自动打标）。**反向 ETF 方向互锁：买入 SOXS/MUZ/SNDQ/SKDD = 做空标的，券商 `sell short` = 双倍做多**；MU/SNDK/SKHY 同属存储（相关性>0.9）只做一个。止损出局后同板块反手风险减半；日内收盘平（2x 衰减隔夜起算）。指标只走引擎口径（Wilder ATR，手算简单均值已废弃——差 9.5%）。**每次输出「多空转换地图」**：上方压力位（均线/昨高/20/60日高）= 做空参考（RSI14≥70 超买加分、≤30 超卖禁追空），下方支撑位 = 平空档、**收盘站稳 → 反多候选**（需 rule123 买法确认、均线之上才做多；贴噪声带需两日确认）——多空转换一律收盘确认，盘中触碰不算数。细则见 [us-short.md](references/us-short.md)；回归 `python test_us_short.py`。
 14. **多空参考位是独立模块 `levels.py`**（2026-09-24 从 us_short.py 抽出，A 股美股通吃）：压力位/支撑位分区 + Wilder RSI14 超买超卖 + 多空转换地图，任何市场同一套判据（收盘确认、贴噪声带两日确认、超卖禁追空）。**T0 / 缩量回调模式下支撑档=回踩低吸买区参考、收盘破位=结构止损锚；做空时压力档=反抽空点参考。** CLI：`python levels.py 300404`（A股）/ `python levels.py SNDK --us`（美股）；模块调用 `from levels import levels_from_bars, resistance_levels, support_levels, rsi_stance, flex_map`（us_short.py re-export 保持旧名）。回归 `python test_levels.py`。
 
+15. **压力位突破前瞻 `breakout_edge.py`**（2026-09-24 老罗提出：「临近压力位时压力位是拿来突破的，提前算突破盈亏比和概率」；A 股美股通吃）：临近带 ≤0.5×ATR 的压力位逐档给「突破买 RR」（entry=位、stop=−0.30×ATR、T1=上方下一压力位，无参照位 +2×ATR 估），并做**单票对称回测**（无未来函数：i 日只用截至 i 日的层）——3 日内收盘突破率（体系口径：一律收盘确认）、盘中触及率、放量日（≥1.3×前5日均量）/非放量拆分、真实突破样本 5 日先到先得均R/胜率。**样本 <10 = 样本不足仅供参考**；突破率 ≠ 突破买入赚钱（反例博济 300404 突破率 54% 但均 −0.40R；正例 SNDK 69%/+0.27R）——RR 与均R 双读数缺一不可。维度声明：板块强度、个股历史主力净额无稳定数据源未接入。CLI：`python breakout_edge.py 300404` / `SNDK --us`；回归 `python test_breakout_edge.py`。与 stock_character.py 突破后行为体检互补。
+
 ## 按需读取
 
 只读取当前任务所需文件，不要预加载全部 references：
