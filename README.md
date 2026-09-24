@@ -70,10 +70,12 @@ stock-multidim-battleplan/
 ├── backtest_yang_pullback.py  # 大阳回踩买区成交率统计
 ├── calc_ash_position.py # A 股仓位闸门全量扫描（结构性能否交易）
 ├── pre_runup.py         # 公告前「抢跑涨幅」检查（消息驱动型标的的否决型判据）
+├── stock_character.py   # 股性体检：突破加速型 vs 拉高消化型（决定用哪种买法）
 ├── test_breakout_modes.py
 ├── test_living_platform.py
 ├── test_pre_runup.py
 ├── test_review_fixes.py
+├── test_stock_character.py  # 股性体检回归（15 项）
 ├── references/          # 按场景加载的策略、量价、风控与输出细则
 ├── scan_all/            # 全市场扫描（买区走 rule123.build_ev）
 ├── out_cn/              # A股运行输出（gitignore）：fetch_market/rule123 的 out_*.json 按市场自动归档于此
