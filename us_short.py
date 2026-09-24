@@ -19,11 +19,18 @@
   1.93~1.95x / SOXS 3.11x），可用 --beta 修正。
 
 用法：
-  python us_short.py SNDK                     # 结构 + 空点候选 + 临界价表 + ETF 换算
+  python us_short.py SNDK                     # 结构 + 空点候选 + 临界价表 + 多空地图 + ETF 换算
   python us_short.py SNDK --entry 1761 --stop 1805
                                               # 已持仓：算这笔的 RR / 股数 / 最大亏损
   python us_short.py MU --etf MUZ             # 指定反向工具（默认按映射表）
   python us_short.py SNDK --beta 1.95         # 用实测 beta 替代名义杠杆
+
+多空转换（2026-09-24 老罗追加需求）：
+  「在压力位/非常超买处做空，到支撑位平空，站稳支撑则建议做多」→ 输出
+  「多空转换地图」：上方压力位=做空参考（反抽站不上才空，RSI≥70 加分），
+  下方支撑位=平空档（持空单到该位主动减/平）；**支撑位反多的前提是收盘站稳
+  （贴均线 <0.25×ATR 需两日确认）**，盘中触碰不算数——与「均线之上才做多」
+  同一口径，禁止接下跌中的刀。
 
 返回码：0 正常；2 = 数据不可用。
 """
@@ -51,9 +58,27 @@ REVERSE_ETF = {
 RR_LADDER = (3.0, 2.5, 2.0, 1.5, 1.0)   # 门槛 = 1.5
 STOP_ATR_MULT = 0.30                    # 止损锚 = MA5 + 0.30×ATR（9/24 定稿）
 NOISE_ATR = 0.25                        # 止损距离 <0.25×ATR = 噪声带
+RSI_OB, RSI_OS = 70.0, 30.0             # 超买 / 超卖线（Wilder RSI14）
 
 
 # ────────────────────────────── 纯函数（回归覆盖） ──────────────────────────────
+def rsi14(closes, n=14):
+    """Wilder RSI。全平 → 50；序列长度 < n+1 → None。"""
+    if len(closes) < n + 1:
+        return None
+    gains, losses = [], []
+    for i in range(1, len(closes)):
+        ch = closes[i] - closes[i - 1]
+        gains.append(max(ch, 0.0))
+        losses.append(max(-ch, 0.0))
+    ag = sum(gains[:n]) / n
+    al = sum(losses[:n]) / n
+    for i in range(n, len(gains)):
+        ag = (ag * (n - 1) + gains[i]) / n
+        al = (al * (n - 1) + losses[i]) / n
+    if al == 0:
+        return 100.0 if ag > 0 else 50.0
+    return 100.0 * ag / (ag + al)
 def rr_ratio(entry, t1, stop):
     """做空盈亏比 = (entry − T1) / (stop − entry)。entry≥stop 或 ≤T1 → None。"""
     if entry is None or t1 is None or stop is None:
@@ -83,7 +108,7 @@ def levels_from_bars(bars):
     closes = [b["c"] for b in bars]
     if len(closes) < 21:
         raise ValueError(f"日线不足 21 根（got {len(closes)}），不给出结构位")
-    return {
+    lv = {
         "last_close": closes[-1],
         "last_date": bars[-1]["d"],
         "prev_high": bars[-1]["h"],
@@ -91,8 +116,87 @@ def levels_from_bars(bars):
         "ma5": R.sma(closes, 5),
         "ma10": R.sma(closes, 10),
         "ma20": R.sma(closes, 20),
+        "ma50": R.sma(closes, 50) if len(closes) >= 50 else None,
         "atr14": R.atr14(bars),          # Wilder，禁用简单均值
+        "rsi14": rsi14(closes),          # Wilder 平滑
+        "hi20": max(b["h"] for b in bars[-20:]),
+        "lo20": min(b["l"] for b in bars[-20:]),
+        "hi60": max(b["h"] for b in bars[-60:]) if len(bars) >= 60 else None,
+        "lo60": min(b["l"] for b in bars[-60:]) if len(bars) >= 60 else None,
     }
+    return lv
+
+
+def _dedup_sorted(levels, above, spot):
+    """[(label, px)] 去重并按离现价排序：above=True 近→远（升序），False 近→远（降序）。"""
+    seen, out = set(), []
+    for lbl, px in levels:
+        if px is None:
+            continue
+        key = round(px, 2)
+        if key in seen:
+            continue
+        seen.add(key)
+        if (above and px > spot) or (not above and px < spot):
+            out.append((lbl, px))
+    out.sort(key=lambda x: x[1], reverse=not above)
+    return out
+
+
+def resistance_levels(lv, spot):
+    """现价上方的压力位（近→远）：均线/昨高/20日高/60日高。"""
+    cands = [("MA5", lv["ma5"]), ("MA10", lv["ma10"]), ("MA20", lv["ma20"]),
+             ("MA50", lv.get("ma50")), ("昨高", lv["prev_high"]),
+             ("20日高", lv["hi20"]), ("60日高", lv.get("hi60"))]
+    return _dedup_sorted(cands, above=True, spot=spot)
+
+
+def support_levels(lv, spot):
+    """现价下方的支撑位（近→远）：均线/昨低/20日低/60日低。"""
+    cands = [("MA5", lv["ma5"]), ("MA10", lv["ma10"]), ("MA20", lv["ma20"]),
+             ("MA50", lv.get("ma50")), ("昨低", lv["prev_low"]),
+             ("20日低", lv["lo20"]), ("60日低", lv.get("lo60"))]
+    return _dedup_sorted(cands, above=False, spot=spot)
+
+
+def rsi_stance(rsi):
+    """RSI → (区间标签, 做空含义)。"""
+    if rsi is None:
+        return "n/a", ""
+    if rsi >= RSI_OB:
+        return "超买", "超买加分：压力位反抽不破的空单质量更高"
+    if rsi <= RSI_OS:
+        return "超卖", "超卖禁追空：随时 V 反，等反抽"
+    return "中性", ""
+
+
+def flex_map(spot, lv, ref_close):
+    """多空转换地图文本行。压力=空档，支撑=平空档+反多前提。"""
+    atr = lv["atr14"]
+    rsi = lv.get("rsi14")
+    stance, note = rsi_stance(rsi)
+    lines = []
+    rtxt = f"{rsi:.1f}" if rsi is not None else "n/a"
+    head = f"RSI14 {rtxt}（{stance}）" + (f"  {note}" if note else "")
+    lines.append(("head", head))
+    res = resistance_levels(lv, spot)
+    sup = support_levels(lv, spot)
+    lines.append(("res_title", f"▲ 压力位 {len(res)} 档（做空参考：反抽到位站不上 + 缩量才空"
+                            f"{'；当前' + stance + '，空单质量加分' if stance == '超买' else ''}）"))
+    for lbl, px in res:
+        dist = (px / spot - 1) * 100
+        lines.append(("res", f"{px:9.2f}  {lbl:<6} 距现价 {dist:+.2f}%"))
+    lines.append(("sup_title",
+                  "▼ 支撑位 %d 档（平空参考：持空单到该位主动减/平；"
+                  "**收盘站稳 → 反多候选**，需 rule123 买法确认、均线之上才做多）" % len(sup)))
+    for lbl, px in sup:
+        dist = (px / spot - 1) * 100
+        near = abs(spot - px) < NOISE_ATR * atr
+        tag = "  ⚠ 贴噪声带，需两日收盘确认" if near else ""
+        lines.append(("sup", f"{px:9.2f}  {lbl:<6} 距现价 {dist:+.2f}%{tag}"))
+    lines.append(("rule", "转换规则：压力位做空 / 支撑位平空 / 支撑位收盘站稳反多 —— "
+                  "一律以收盘确认，盘中触碰不算数；超卖区禁追空，反多不接下跌中的刀"))
+    return lines
 
 
 def short_candidates(lv):
@@ -183,6 +287,9 @@ def main():
     else:
         print(f"MA5 {lv['ma5']:.2f}  MA10 {t1:.2f}  MA20 {t2:.2f}")
     print(f"昨高 {lv['prev_high']:.2f}  昨低 {lv['prev_low']:.2f}  "
+          f"ATR14(Wilder·引擎口径) {lv['atr14']:.2f}  "
+          f"RSI14 {lv['rsi14']:.1f}" if lv.get("rsi14") is not None else
+          f"昨高 {lv['prev_high']:.2f}  昨低 {lv['prev_low']:.2f}  "
           f"ATR14(Wilder·引擎口径) {lv['atr14']:.2f}")
     print()
     print("── 空点候选（等反抽，禁止开盘追跌）──")
@@ -198,6 +305,12 @@ def main():
         e = min_entry_for_rr(rr, t1, stop)
         tag = " ← 门槛线" if rr == 1.5 else (" ← 原空点档" if rr == 3.0 else "")
         print(f"  RR≥{rr:.1f}  ⇔  入场价 ≥ {e:.2f}{tag}")
+    print()
+    print("── 多空转换地图（压力做空 · 支撑平空 · 收盘站稳反多）──")
+    anchor = spot if spot else ref
+    for kind, txt in flex_map(anchor, lv, ref):
+        print(f"  {txt}" if kind in ("head", "res_title", "sup_title", "rule")
+              else f"    {txt}")
     print()
     print("── 反向 ETF 换算（买入 = 做空；sell short = 双倍做多）──")
     etf, lev_default = REVERSE_ETF.get(sym, (a.etf, None))

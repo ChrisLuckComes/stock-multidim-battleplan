@@ -116,6 +116,54 @@ chk("止损无效返回 None", U.position_rows(1807, 1807, 1680.53, 1636.43, 500
 for und, (etf, lev) in U.REVERSE_ETF.items():
     chk(f"映射 {und}->{etf} 杠杆合理", lev in (2.0, 3.0), f"lev={lev}")
 
+# ── 9. rsi14（Wilder 口径）──
+eq("rsi 手算锚 n=5", U.rsi14([2, 2.5, 2.2, 2.8, 2.4, 3.0], n=5), 100 * 0.34 / 0.48, tol=1e-9)
+eq("rsi 全平 → 50", U.rsi14([5.0] * 20), 50.0)
+eq("rsi 单边涨 → 100", U.rsi14([100.0 + i for i in range(30)]), 100.0)
+eq("rsi 单边跌 → 0", U.rsi14([100.0 - i for i in range(30)]), 0.0)
+chk("rsi 序列不足 → None", U.rsi14([1.0] * 10) is None)
+midx = [10, 10.6, 10.2, 10.9, 10.4, 11.2, 10.7, 11.5, 10.9, 11.8,
+        11.1, 12.0, 11.4, 12.3, 11.8, 12.6, 12.0, 12.9, 12.3, 13.2]
+r_mid = U.rsi14(midx)
+chk("rsi 震荡上行在 50~100", 50 < r_mid <= 100, f"got {r_mid}")
+
+# ── 10. 压力/支撑位分区与排序 ──
+bars_up = []
+px = 100.0
+for i in range(70):                      # 单边上行：现价应在所有旧均线/旧高低之上
+    o = px
+    c = px * 1.01
+    bars_up.append({"d": f"x{i}", "o": o, "h": c * 1.002, "l": o * 0.998, "c": c})
+    px = c
+lv_up = U.levels_from_bars(bars_up)
+spot_up = lv_up["last_close"]
+res = U.resistance_levels(lv_up, spot_up)
+sup = U.support_levels(lv_up, spot_up)
+chk("上行趋势：现价上方只剩结构高/昨高（或空）",
+    all(px > spot_up for _, px in res) and all(lbl in ("20日高", "60日高", "昨高") for lbl, _ in res),
+    str(res))
+chk("上行趋势：支撑含 MA5/10/20", any(lbl == "MA5" for lbl, _ in sup), str(sup))
+chk("支撑全部在现价下方", all(px < spot_up for _, px in sup))
+chk("压力近→远升序", [px for _, px in res] == sorted(px for _, px in res))
+chk("支撑近→远降序", [px for _, px in sup] == sorted((px for _, px in sup), reverse=True))
+
+# ── 11. flex_map 输出互锁 ──
+lv_fx = dict(lv_up)
+lv_fx["rsi14"] = 74.0
+lines = U.flex_map(spot_up, lv_fx, spot_up)
+kinds = [k for k, _ in lines]
+chk("地图含 头/压力标题/支撑标题/规则", {"head", "res_title", "sup_title", "rule"} <= set(kinds))
+chk("超买时标题带加分提示", any("加分" in t for k, t in lines if k == "res_title"))
+lv_fx["rsi14"] = 22.0
+lines2 = U.flex_map(spot_up, lv_fx, spot_up)
+chk("超卖时头部含禁追空", any("禁追空" in t for k, t in lines2 if k == "head"))
+
+# ── 12. levels 新增字段接线 ──
+eq("hi20 接线", lv_up["hi20"], max(b["h"] for b in bars_up[-20:]))
+eq("lo20 接线", lv_up["lo20"], min(b["l"] for b in bars_up[-20:]))
+eq("hi60 接线", lv_up["hi60"], max(b["h"] for b in bars_up[-60:]))
+eq("levels rsi = rsi14()", lv_up["rsi14"], U.rsi14([b["c"] for b in bars_up]))
+
 
 print(f"test_us_short: {len(FAILS)} failed" if FAILS else "test_us_short: ALL PASS")
 for f in FAILS:
