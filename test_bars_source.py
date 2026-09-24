@@ -243,6 +243,17 @@ def test_ash_bars_chain(tmpdir):
                                          now=cur["now"])
         eq(bars6, [], "网络返回空 → 空 list（不抛）")
         ck(any("返回空" in x for x in notes6), f"空返回有说明（{notes6}）")
+        # 快照根数不足 n → 必须降级，不能「问 140 根只给 100 根」
+        # （2026-09-24 stock_character 688428 踩到：data/688428.json 只有 160 根，
+        #   问 300 根静默拿到 160 根，公告习惯统计样本被人为砍掉一半）
+        # 注：load_snapshot 另有「< 60 根」的硬门槛，这里要测的是 60 ~ n 之间的缺口。
+        with open(os.path.join(sd, "301335.json"), "w", encoding="utf-8") as f:
+            json.dump({"ticker": "301335", "name": "天元宠物",
+                       "bars": bars_upto(FRI)[-100:]}, f, ensure_ascii=False)
+        bars7, src7, notes7 = B.ash_bars("sz", "301335", n=140, fetch=fake_fetch,
+                                         snap_dirs=[sd], now=cur["now"])
+        ck(len(bars7) >= 140, f"快照根数不足 → 仍取够 140 根（实得 {len(bars7)}，src={src7}）")
+        ck(any("根数不足" in x for x in notes7), f"根数不足被记录（{notes7}）")
 
 
 def test_us_quote(tmpdir):

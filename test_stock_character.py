@@ -143,6 +143,181 @@ def test_render_smoke():
     assert "股性体检" in txt and "股性判定" in txt
 
 
+# ─────────────── 第二层：利好兑现习惯 ───────────────
+def gen_dates(n):
+    out, m, d = [], 1, 1
+    for _ in range(n):
+        out.append("2026-%02d-%02d" % (m, d))
+        d += 1
+        if d > 28:
+            d, m = 1, m + 1
+    return out
+
+
+def flat(n, c=10.0, v=100.0):
+    ds = gen_dates(n)
+    return [{"d": ds[i], "o": c, "h": c * 1.01, "l": c * 0.99, "c": c, "v": v}
+            for i in range(n)]
+
+
+def test_is_good_news_positive():
+    assert sc.is_good_news("诺诚健华:关于子公司与礼来公司签署研发合作及授权许可协议的公告")
+    assert sc.is_good_news("睿创微纳:2026年半年度业绩预增的自愿性披露公告")
+    assert sc.is_good_news("某某:关于中标重大合同的公告")
+    assert sc.is_good_news("某某:关于奥布替尼获得澳大利亚药品管理局批准上市的公告")
+
+
+def test_is_good_news_negative():
+    # 月报表 / 变更 / 进展 / 激励 / 监管协议 均不得算利好
+    assert not sc.is_good_news("诺诚健华:港股公告:证券变动月报表")
+    assert not sc.is_good_news("某某:关于变更回购股份用途并注销暨减少注册资本的公告")
+    assert not sc.is_good_news("某某:关于收购控股子公司剩余股权的进展公告")
+    assert not sc.is_good_news("某某:2026年限制性股票激励计划预留授予部分归属结果暨股份上市的公告")
+    assert not sc.is_good_news(
+        "某某:关于开立募集资金临时补流专项账户并签署募集资金专户存储四方监管协议的公告")
+    assert not sc.is_good_news("诺诚健华:港股公告:公司秘书、授权代表及法律程序代理人变更")
+
+
+def test_pick_events_bounds_and_dedup():
+    anns = [
+        ("2026-09-24", "关于签署授权许可协议的公告"),
+        ("2026-09-24", "关于签署授权许可协议的公告"),   # 同一日重复
+        ("2026-01-05", "2026年半年度业绩预增的自愿性披露公告"),
+        ("2025-01-01", "关于中标重大合同的公告"),        # 早于 after
+        ("2026-03-01", "证券变动月报表"),                 # 非利好
+    ]
+    days = sc.pick_events(anns, after="2026-01-01", before="2026-12-31")
+    assert days == ["2026-01-05", "2026-09-24"], days
+
+
+def test_locate_reaction_same_day():
+    bars = flat(20)
+    bars[6]["o"] = bars[5]["c"] * 1.02
+    bars[6]["c"] = bars[5]["c"] * 1.06          # 当日 +6% ≥ 触发阈值
+    bars[6]["h"] = bars[6]["c"]
+    assert sc.locate_reaction(bars, bars[6]["d"]) == 6
+
+
+def test_locate_reaction_by_volume():
+    bars = flat(20)
+    bars[6]["v"] = 300.0                        # 量比 3.0 ≥ 1.5
+    assert sc.locate_reaction(bars, bars[6]["d"]) == 6
+
+
+def test_locate_reaction_next_day():
+    bars = flat(20)                             # 公告日全无异常 → 反应在次日
+    assert sc.locate_reaction(bars, bars[6]["d"]) == 7
+
+
+def test_locate_reaction_last_bar_not_dropped():
+    """今日公告（末根）不得被丢弃 —— 这正是最需要看到的那一次。"""
+    bars = flat(20)
+    assert sc.locate_reaction(bars, bars[-1]["d"]) == len(bars) - 1
+
+
+def test_locate_reaction_out_of_range():
+    bars = flat(20)
+    assert sc.locate_reaction(bars, "2030-01-01") is None
+
+
+def test_vol_ratio():
+    bars = flat(20, v=100.0)
+    bars[10]["v"] = 300.0
+    assert abs(sc.vol_ratio(bars, 10) - 3.0) < 1e-9
+    assert sc.vol_ratio(bars, 3) is None        # 回看窗口不足
+
+
+def test_event_metrics():
+    bars = flat(20)
+    bars[6]["o"] = 10.5
+    bars[6]["c"] = 10.2
+    bars[6]["h"] = 10.6
+    bars[6]["l"] = 10.0                          # prev close = 10.0
+    m = sc.event_metrics(bars, 6)
+    assert abs(m["gap"] - 5.0) < 1e-6
+    assert abs(m["ret"] - 2.0) < 1e-6
+    assert m["close_lt_open"] is True
+    assert abs(m["fwd5"] - (10.0 / 10.2 - 1) * 100) < 1e-6
+    assert m["t1"] is not None
+
+
+def test_event_metrics_guards():
+    bars = flat(20)
+    assert sc.event_metrics(bars, None) is None
+    assert sc.event_metrics(bars, 0) is None
+
+
+def test_classify_news_spike():
+    k, label, advice = sc.classify_news({"n": 8, "chase_exp": -3.79, "win5": 0.25})
+    assert k == "spike" and "出消息即顶" in label
+    assert "禁止追入" in advice
+
+
+def test_classify_news_effective():
+    k, label, _ = sc.classify_news({"n": 8, "chase_exp": 2.4, "win5": 0.6})
+    assert k == "effective" and "有效" in label
+
+
+def test_classify_news_mixed():
+    k, _, _ = sc.classify_news({"n": 8, "chase_exp": 0.5, "win5": 0.45})
+    assert k == "mixed"
+
+
+def test_classify_news_insufficient():
+    assert sc.classify_news({"n": 0, "chase_exp": None, "win5": None})[0] == "unknown"
+    # 样本 < 3 必须带「仅供参考」标注
+    assert "仅供参考" in sc.classify_news({"n": 2, "chase_exp": -1.0, "win5": 0.0})[1]
+
+
+def _news_spike_bars():
+    """造 3 次「公告日放量大涨 → 后 5 日连跌」的样本。"""
+    bars = flat(60)
+    anns = []
+    for day_i in (20, 35, 50):
+        bars[day_i]["o"] = bars[day_i - 1]["c"] * 1.03
+        bars[day_i]["c"] = bars[day_i - 1]["c"] * 1.05
+        bars[day_i]["h"] = bars[day_i]["c"]
+        bars[day_i]["v"] = 200.0                 # 量比 2.0 → 反应日 = 当日
+        for j in range(day_i + 1, day_i + 6):
+            bars[j]["c"] = bars[day_i]["c"] * 0.97
+            bars[j]["o"] = bars[j]["c"]
+            bars[j]["h"] = bars[j]["c"] * 1.005
+            bars[j]["l"] = bars[j]["c"] * 0.995
+        anns.append((bars[day_i]["d"], "关于签署授权许可协议的公告"))
+    return bars, anns
+
+
+def test_news_habit_spike_synthetic():
+    bars, anns = _news_spike_bars()
+    h = sc.news_habit(bars, anns)
+    assert h["available"] is True
+    assert h["n"] == 3, h["n"]
+    assert h["chase_exp"] < 0
+    assert h["win5"] == 0.0
+    assert h["news_class"] == "spike"
+    assert h["avg_vr"] is not None and h["avg_vr"] > 1.5
+
+
+def test_news_habit_dedup_by_reaction_day():
+    """同一消息的多份公告（不同公告日、同一反应日）只计一次。"""
+    bars, _ = _news_spike_bars()
+    anns = [(bars[19]["d"], "关于签署授权许可协议的公告"),   # 平稳 → 反应在 20
+            (bars[20]["d"], "关于签署授权许可协议的公告")]   # 放量 → 反应在 20
+    h = sc.news_habit(bars, anns)
+    assert h["n"] == 1, h["n"]
+
+
+def test_news_habit_no_anns():
+    h = sc.news_habit(flat(60), None)
+    assert h["available"] is False and h["n"] == 0
+
+
+def test_news_habit_no_events():
+    h = sc.news_habit(flat(60), [("2026-02-01", "证券变动月报表")])
+    assert h["available"] is True and h["n"] == 0
+    assert "样本不足" in h["label"]
+
+
 def test_real_ruichuang_regression():
     """睿创微纳 688002 回归：应为拉高消化型（网络不可用时跳过）。"""
     try:

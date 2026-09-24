@@ -387,13 +387,20 @@ def ash_bars(prefix, code, n=140, *, fetch=sina_raw, snap_dirs=None,
             if snap is None:
                 notes.append(f"快照 {os.path.basename(p)} 不可用（{why}）")
             else:
-                hard, note = snapshot_stale(snap, "ASH", now)
+                sbars = snap.get("bars") or []
                 tag = f"快照 {os.path.basename(p)}（取数时刻 {snap.get('as_of') or '未标注'}）"
-                if hard:
-                    notes.append(f"{tag} 不可用：{note} → 改走实时源")
+                # 快照根数不足也降级：调用方问 n 根就是要 n 根（结构判定 / 统计的深度口径）。
+                # 与磁盘缓存的 `_check_rules` 同一条判据，此前只有缓存侧校验、快照侧漏了，
+                # 结果「问 300 根拿到 160 根」静默发生（2026-09-24 stock_character 688428 踩到）。
+                if len(sbars) < _min_bars(n):
+                    notes.append(f"{tag} 根数不足（{len(sbars)} < {_min_bars(n)}） → 改走缓存/实时源")
                 else:
-                    notes.append(tag + (f" · {note}" if note else ""))
-                    return snap["bars"][-n:], "snapshot:" + os.path.basename(p), notes
+                    hard, note = snapshot_stale(snap, "ASH", now)
+                    if hard:
+                        notes.append(f"{tag} 不可用：{note} → 改走实时源")
+                    else:
+                        notes.append(tag + (f" · {note}" if note else ""))
+                        return sbars[-n:], "snapshot:" + os.path.basename(p), notes
     if use_cache:
         if not explicit:
             bars, why = _memo_get("ASH", code, n, now_bj())
