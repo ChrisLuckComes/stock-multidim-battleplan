@@ -30,6 +30,7 @@
 import argparse
 import datetime
 import json
+import os
 import sys
 import urllib.request
 
@@ -327,6 +328,7 @@ def analyze(now=None, force_minutes=None):
         "traded_minutes": mins if session_live else 0,
         "pre_open": not session_live,
         "limit_pool_date": qdate,
+        "score_date": score_date,
         "score": round(score, 1),
         "level": level,
         "action": action,
@@ -404,13 +406,28 @@ def main():
     ap = argparse.ArgumentParser(description="A股大盘情绪量化打分")
     ap.add_argument("--json", action="store_true", help="输出 JSON")
     ap.add_argument("--out", help="另存 JSON 到文件")
+    ap.add_argument("--out-dir",
+                    help="按**行情日**落盘到 DIR/sentiment_<YYYYMMDD>.json（收盘后自动落盘用）")
     ap.add_argument("--minutes", type=int, default=None,
                     help="手工指定已交易分钟（0-240），默认按北京时间自动推算")
     a = ap.parse_args()
     r = analyze(force_minutes=a.minutes)
+
+    paths = []
     if a.out:
-        with open(a.out, "w", encoding="utf-8") as f:
+        paths.append(a.out)
+    if a.out_dir:
+        # 用**行情日**而非系统日命名：周末/节假日跑会覆盖最近交易日那份，
+        # 不会产生「日期是周六、内容是周五」的假样本污染校准。
+        sd = str(r.get("score_date") or r["asof"][:10]).replace("-", "")
+        paths.append(os.path.join(a.out_dir, f"sentiment_{sd}.json"))
+    for p in paths:
+        d = os.path.dirname(p)
+        if d and not os.path.isdir(d):
+            os.makedirs(d, exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
             json.dump(r, f, ensure_ascii=False, indent=2)
+        print(f"# 落盘 {p}", file=sys.stderr)
     if a.json:
         print(json.dumps(r, ensure_ascii=False, indent=2))
     else:
