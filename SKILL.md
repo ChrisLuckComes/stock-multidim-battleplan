@@ -35,7 +35,7 @@ disable-model-invocation: true
 只读取当前任务所需文件，不要预加载全部 references：
 
 - **准备追消息 / 抢开盘 / 回补卖出前**：必读 [trade-lessons.md](references/trade-lessons.md)。
-- **选股 / 建股池 / 有人在问"这票值不值得看"**：读取 [stock-selection.md](references/stock-selection.md)（三因子前置过滤：自由流通市值 → 股东户数 → 距 52 周高点；**用总市值判断弹性会误判**）。
+- **选股 / 建股池 / 有人在问"这票值不值得看"**：读取 [stock-selection.md](references/stock-selection.md)（三因子**参考清单**：总市值 ≤1000 亿 → 股东户数 → 距 52 周高点；**均为参考，非门禁，趋势为准**）。
 
 - **完整单票报告**：读取 [research-report.md](references/research-report.md)、[strategy-modes.md](references/strategy-modes.md)、[entry-odds.md](references/entry-odds.md)、[risk-exit.md](references/risk-exit.md)、[data-operations.md](references/data-operations.md)、[output-pitfalls.md](references/output-pitfalls.md)、[report-generation.md](references/report-generation.md)。
 - **只问买点/止损/持仓处置**：读取 [strategy-modes.md](references/strategy-modes.md)、[entry-odds.md](references/entry-odds.md)、[risk-exit.md](references/risk-exit.md)。
@@ -53,7 +53,7 @@ disable-model-invocation: true
 - 报告量价结论分别输出“当日判定”和“近20日判定”，并给综合结论与证伪位。
 - 主标的（以及用户明确要求完整分析的同行）必须扫大额解禁、减持、立案调查、**标的自身的「利好公告反应史」**（上次同类公告当日是否高开低走 / 放量收阴）及重大利空。
 - 双轨打分固定为投资价值与短线博弈各 0–10 分，禁止合成总分。
-- **选股前置过滤（三因子：只做排序与一票否决，不是买入依据）**：① **自由流通市值** = `ExtInfo.FreeLtgb × 现价` —— **禁止用总市值判断"拉不拉得动"**（锐捷 301165 总市值 1,249 亿，浮筹仅 149.9 亿 = 12.0%）；② **股东户数**（`tdx_security_deep_info`）—— 最近 2 期连续增加或累计 ≥ **+15%** ⇒ **排除**（筹码由主力分散到散户 = 派发中，比任何技术指标都硬）；③ **距 52 周高点 ≤ 15%** ⇒ 上方套牢盘薄。细则与实测样本见 [stock-selection.md](references/stock-selection.md)。
+- **选股参考清单（三因子：以趋势为准，仅作排序与风险提示，**均非门禁**）**：① **市值** —— 粗筛用**总市值 ≤ 1000 亿**（老罗口径「大票」= 超 1000 亿，超了只是**不优先**，非禁买）；`ExtInfo.FreeLtgb × 现价` = 自由流通市值仅作**弹性细看**的补充视角（锐捷 301165 总市值 1,249 亿属大票，但浮筹仅 149.9 亿 = 12.0%）。② **股东户数**（`tdx_security_deep_info`）—— **必须叠趋势读，单看增减无意义**：上升趋势中户数增加是常态（锐捷 2025 主升段股价 +54% 而户数 +83%）；只有**横盘/下跌 + 户数增**才偏派发，且只作**警惕项**不作否决。③ **距 52 周高点 ≤ 15%** ⇒ 上方套牢盘偏薄（**同样仅参考**：套牢盘是**动态量**，会被下跌换手消解 —— 静态看会让「下跌过一段的票永远涨不起来」，与突破类买法自相矛盾；只要放量站上关键位，套牢区被吃掉反而是买点）。**三条均为参考，任一不通过都不构成否决**，能否决交易的只有硬约束（钱不够 / 涨停买不到 / 结构已坏）。细则与实测样本见 [stock-selection.md](references/stock-selection.md)。
 - 用户点名个股时必须找 1–3 只同板块龙头做轻量对照；除非用户显式要求，不得对同行运行完整单票流程。
 
 ## 同板块 / 概念龙头对照（强制）
