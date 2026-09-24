@@ -451,6 +451,12 @@ def news_habit(bars, anns, hold=NEWS_HOLD, meta=None):
                   "label": "无利好事件", "advice": "本项不适用 —— 该股近期没有可统计的利好公告"})
         return h
     n = len(evs)
+    # ★ 2026-09-24 修：`fwd5` / `fwd10` 对**最近 hold 日内**的公告事件必然为 None
+    #   （诺诚健华 688428 09-24 礼来合作公告即此类）。旧代码直接 `e["fwd5"] > 0`
+    #   与 `mean(None)` ⇒ TypeError，整个股性体检直接崩掉 —— 恰恰在「消息驱动」这只票上崩。
+    #   凡 None 一律排除出分子分母；全为 None 时给 None（下游 classify_news 判「样本不足」）。
+    _f5 = [e["fwd5"] for e in evs if e["fwd5"] is not None]
+    _f10 = [e["fwd10"] for e in evs if e["fwd10"] is not None]
     h.update({
         "spike_rate": sum(1 for e in evs if e["ret"] < 0) / n,
         "hi_open_rate": sum(1 for e in evs if e["hi_open"]) / n,
@@ -458,11 +464,10 @@ def news_habit(bars, anns, hold=NEWS_HOLD, meta=None):
         "avg_ret": mean([e["ret"] for e in evs]),
         "avg_gap": mean([e["gap"] for e in evs]),
         "avg_vr": mean([e["vr"] for e in evs]),
-        "tmp5": mean([e["fwd5"] for e in evs]),
-        "win5": (sum(1 for e in evs if e["fwd5"] > 0)
-                 / max(1, sum(1 for e in evs if e["fwd5"] is not None))),
-        "win10": (sum(1 for e in evs if e["fwd10"] is not None and e["fwd10"] > 0)
-                  / max(1, sum(1 for e in evs if e["fwd10"] is not None))),
+        "tmp5": (sum(_f5) / len(_f5)) if _f5 else None,
+        "win5": (sum(1 for x in _f5 if x > 0) / len(_f5)) if _f5 else None,
+        "win10": (sum(1 for x in _f10 if x > 0) / len(_f10)) if _f10 else None,
+        "n_fwd": len(_f5),
     })
     # 核心指标：假设「消息反应日收盘买入」，后 hold 日的期望收益。
     # 它同时覆盖两种兑现形态：反应日直接砸绿，以及反应日大涨/涨停后连跌
@@ -491,6 +496,46 @@ def classify_news(h):
             "消息反应不一致 —— 公告日只做 ≥5 分钟后的第二结构，仓位减半，止损前置")
 
 
+# ──────────────── 人读结论（2026-09-24 老罗：「我要的是结论」）────────────────
+# 老罗原话：「冲击率这个指标我看不懂啊，打出来没意义，我要的是结论。」
+# ⇒ 顶部先给两句可直接执行的话，明细（赔率 / 延续率 / 各事件）放后面当依据。
+BREAK_CONCL = {
+    "breakout": "可做突破买 —— 突破当日就能追，止损用「大阳中点 / 前一日低点」",
+    "grind": "**别做突破买** —— 突破当日禁止追入，只在回踩 MA10 / MA20 接",
+    "mixed": "突破买要打折 —— 能做，但仓位减半、止损收紧；优先等回踩",
+    "unknown": "样本不足，不下结论",
+}
+NEWS_CONCL = {
+    "spike": "**出消息即顶** —— 公告日不要追；利好只作减仓 / 离场参考",
+    "effective": "利好有效 —— 可按常规买法参与（仍须先过 `pre_runup.py` 抢跑检查）",
+    "mixed": "兑现不一致 —— 公告日只做 5 分钟后的第二结构，仓位减半",
+    "unknown": None,
+}
+
+
+def render_conclusion(a):
+    """把两层的判定翻成「能不能做」的一句话，并附上支撑数字。"""
+    def n(v, suf="", nd=2):
+        return "n/a" if v is None else ("%." + str(nd) + "f%s") % (v, suf)
+
+    k = a.get("class") or "unknown"
+    L = ["【结论 · 突破买】%s" % BREAK_CONCL.get(k, BREAK_CONCL["unknown"])]
+    nb = a.get("news") or {}
+    if NEWS_CONCL.get(nb.get("news_class")):
+        L.append("【结论 · 出消息】%s"
+                 % NEWS_CONCL[nb["news_class"]])
+    if a.get("big_count"):
+        L.append("        依据：大阳 %d 根 ／ 后 %s 日赔率 %s（上 %s / 下 %s）、延续率 %s、"
+                 "收盘为正 %s"
+                 % (a["big_count"], a.get("hold"), n(a.get("odds")),
+                    n(a.get("h_mean"), "%", 2), n(a.get("l_mean"), "%", 2),
+                    n((a.get("cont_rate") or 0) * 100, "%", 0),
+                    n((a.get("win5") or 0) * 100, "%", 0)))
+    else:
+        L.append("        依据：无大阳样本 —— 用 --big 降阈值或拉更长历史再判")
+    return L
+
+
 def render(a):
     def pf(x):
         return "   n/a" if x is None else "%+7.2f%%" % x
@@ -503,20 +548,29 @@ def render(a):
     L.append("股性体检 · %s" % a["code"])
     L.append("样本：%d 个交易日（%s）   现价 %.2f"
              % (a["n_bars"], a["span"], a["close"]))
-    L.append("-" * 66)
+    L.append("=" * 66)
+    L.extend(render_conclusion(a))
+    L.append("=" * 66)
     L.append("一、突破后行为（单日涨幅 >= %.0f%% 的大阳 %d 根，以大阳当日收盘为买点 = 突破追入）"
              % (a["big_thresh"], a["big_count"]))
     if a["big_count"]:
         odds_s = "n/a" if a["odds"] is None else "%.2f" % a["odds"]
         win5 = "n/a" if a["win5"] is None else "%.0f%%" % (a["win5"] * 100)
         win10 = "n/a" if a["win10"] is None else "%.0f%%" % (a["win10"] * 100)
-        L.append("    后%d日最高价均值      %s" % (a["hold"], pf(a["h_mean"])))
-        L.append("    后%d日最低价均值      %s" % (a["hold"], pf(a["l_mean"])))
+        L.append("    后%d日上行空间均值    %s   （大阳后最高能摸到多少）"
+                 % (a["hold"], pf(a["h_mean"])))
+        L.append("    后%d日下行空间均值    %s   （大阳后最低会回撤多少）"
+                 % (a["hold"], pf(a["l_mean"])))
         L.append("    赔率（上/下）         %-6s  <- >= %.1f 加速型 / < %.1f 消化型"
                  % (odds_s, ODDS_BREAKOUT, ODDS_GRIND))
-        L.append("    延续率（后%d日摸到 +3%%）  %5.0f%%" % (a["hold"], a["cont_rate"] * 100))
-        L.append("    冲击率（后%d日摸到 -3%%）  %5.0f%%" % (a["hold"], a["shock_rate"] * 100))
-        L.append("    收盘为正  后%d日 %-5s   后10日 %s" % (a["hold"], win5, win10))
+        L.append("    延续率（后%d日摸到 +3%%）  %5.0f%%     <- 突破能不能接着走"
+                 % (a["hold"], a["cont_rate"] * 100))
+        L.append("    收盘为正  后%d日 %-5s   后10日 %s"
+                 % (a["hold"], win5, win10))
+        # ★ 2026-09-24 老罗：「冲击率这个指标我看不懂啊，打出来没意义，我要的是结论」。
+        #   该指标既不是 published 判据（赔率 / 延续率才是），也不单独改类
+        #   （见 classify() 注释）⇒ 从人读输出里撤掉，只在 JSON 里留着供研究。
+        #   它原来的位置由顶部【结论】块回答。
     else:
         L.append("    （无大阳样本）")
     L.append("-" * 66)
@@ -578,8 +632,11 @@ def render_news(n):
                     ("，%s" % m["stop_reason"]) if m.get("stop_reason") else ""))
     L.append("    消息后 %d 日期望   %s   <- 反应日收盘买入的期望；< 0 出消息即顶型"
              % (n["hold"], pf(n.get("chase_exp"))))
-    L.append("    后 %d 日为正 %5.0f%%   后10日为正 %5.0f%%   （< %.0f%% = 不利追入）"
-             % (n["hold"], n["win5"] * 100, n["win10"] * 100, NEWS_WIN * 100))
+    L.append("    后 %d 日为正 %s   后10日为正 %s   （< %.0f%% = 不利追入）"
+             % (n["hold"],
+                "n/a" if n.get("win5") is None else "%5.0f%%" % (n["win5"] * 100),
+                "n/a" if n.get("win10") is None else "%5.0f%%" % (n["win10"] * 100),
+                NEWS_WIN * 100))
     L.append("    兑现率（反应日收跌）  %5.0f%%   高开低走率 %5.0f%%   高开率 %5.0f%%"
              % (n["spike_rate"] * 100, n["hi_open_rate"] * 100,
                 n["red_open_rate"] * 100))

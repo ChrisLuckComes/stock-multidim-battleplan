@@ -150,6 +150,67 @@ def test_render_smoke():
     assert "股性体检" in txt and "股性判定" in txt
 
 
+# ─────────────── 人读输出：给结论，不给看不懂的指标 ───────────────
+# 老罗 2026-09-24：「冲击率这个指标我看不懂啊，打出来没意义，我要的是结论。」
+def test_render_leads_with_conclusion():
+    bars = mk([10 + i * 0.1 for i in range(80)])
+    a = sc.analyze(bars)
+    a["code"] = "000000"
+    txt = sc.render(a)
+    assert "【结论 · 突破买】" in txt, "顶部必须先给一句能直接执行的话"
+    # 结论必须出现在明细（「一、突破后行为」）之前
+    assert txt.index("【结论 · 突破买】") < txt.index("一、突破后行为")
+    # 结论必须覆盖三个类的每一个（不能有类落到无结论）
+    for k in ("breakout", "grind", "mixed", "unknown"):
+        assert k in sc.BREAK_CONCL
+
+
+def test_render_drops_shock_rate():
+    """冲击率既非判据、也不改类 ⇒ 从人读输出撤掉（JSON 里仍留）。"""
+    bars = mk([10 + i * 0.1 for i in range(80)])
+    for k in (30, 50, 70):
+        bars[k]["c"] = bars[k - 1]["c"] * 1.08
+    a = sc.analyze(bars)
+    a["code"] = "000000"
+    txt = sc.render(a)
+    assert "冲击率" not in txt
+    assert "延续率" in txt, "延续率是 published 判据，必须留"
+
+
+def test_render_news_conclusion():
+    """第二层（出消息）也要给结论 —— 诺诚 688428 那种「出消息即顶」要一眼看到。"""
+    bars = mk([10 + i * 0.02 for i in range(120)])
+    a = sc.analyze(bars, anns=[])
+    a["code"] = "000000"
+    a["news"] = {"available": True, "n": 5, "news_class": "spike", "label": "出消息即顶型",
+                 "advice": "公告日禁止追入", "reason": None, "meta": {},
+                 "chase_exp": -3.79, "win5": 0.14, "win10": 0.2, "hold": 5,
+                 "spike_rate": 0.8, "hi_open_rate": 0.6, "red_open_rate": 0.4,
+                 "avg_ret": -2.0, "avg_gap": 1.0, "avg_vr": 1.2, "events": [],
+                 "ann_total": 9}
+    txt = sc.render(a)
+    assert "【结论 · 出消息】" in txt and "出消息即顶" in txt
+
+
+def test_news_habit_tolerates_recent_event_without_forward():
+    """最近 hold 日内的事件 `fwd5=None` —— 旧代码在这里 TypeError 直接崩（诺诚 688428 09-24）。
+
+    修法：None 一律排除出分子分母；全为 None 时给 None（下游判「样本不足」）。
+    """
+    bars = mk([10 + i * 0.02 for i in range(120)])
+    last = bars[-1]["d"]
+    anns = [(last, "关于签订重大合同的公告")]          # 就是最后一根 ⇒ 无 fwd5
+    h = sc.news_habit(bars, anns, hold=5)
+    assert h["available"] is True
+    if h.get("n"):
+        assert h.get("win5") is None or 0.0 <= h["win5"] <= 1.0
+        assert h.get("win10") is None or 0.0 <= h["win10"] <= 1.0
+    # 渲染不得因 None 崩
+    a = sc.analyze(bars, anns=anns)
+    a["code"] = "000000"
+    assert "股性体检" in sc.render(a)
+
+
 # ─────────────── 第二层：利好兑现习惯 ───────────────
 def gen_dates(n):
     out, m, d = [], 1, 1
