@@ -75,7 +75,7 @@ stock-multidim-battleplan/
 ├── research_ride_priority.py  # 「突破事件 vs 沿均线背景」优先级 + 无锚=新高的实证复现
 ├── test_breakout_modes.py
 ├── test_living_platform.py
-├── test_ma_ride.py           # 「均线刚收复 vs 沿某条均线上行」模式判别 + 无锚=新高 + 突破优先回归（28 项）
+├── test_ma_ride.py           # 「均线刚收复 vs 沿某条均线上行」模式判别 + 无锚=新高 + 突破优先回归（29 项）
 ├── test_pre_runup.py
 ├── test_review_fixes.py
 ├── test_stock_character.py  # 股性体检回归（40 项）
