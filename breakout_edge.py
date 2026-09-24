@@ -18,8 +18,9 @@
      （体系口径：一律收盘确认，盘中触碰不算数）；另记盘中触及率作参考。
   3. 量能拆分：临近日量 ≥1.3×前 5 日均量 = 放量日，分桶统计突破率。
   4. 突破买入 RR：entry=压力位 P，stop=P−0.30×ATR_i，T1=P 上方下一个压力位
-     （无参照位按 +2×ATR 估并标注）。真实突破样本按 5 日内**先到先得**逐日判
-     均R/胜率（先到 +1R 记赢、先到止损记输、都没到记平）。
+     （无参照位按 +2×ATR 估并标注）。真实突破样本从**收盘确认的下一根**起、
+     5 日内先到先得（先到 +1R 记赢、先到止损记输、都没到记平）。确认日本身的
+     最低价发生在收盘成交之前，不参与止损判定。
 
 维度声明（不臆造）：板块强度、个股历史主力净额**无稳定数据源，未接入**；
 当前判据 = K 线结构 + 量能拆分。样本 <10 次标「样本不足」，不得当通用阈值
@@ -53,7 +54,7 @@ from levels import (levels_from_bars, resistance_levels,   # noqa: E402
 PROX_ATR = 0.5          # 临近带：收盘距压力位 ≤0.5×ATR（MEMORY ①：0.5~1.0×ATR 触及率 66%）
 HORIZON = 3             # 突破确认窗口：3 个交易日内收盘站上
 VOL_MULT = 1.3          # 放量日：临近日量 ≥1.3×前 5 日均量
-STOP_ATR = 0.30         # 突破买入止损：entry − 0.30×ATR（硬止损锚规则一致）
+STOP_ATR = 0.30         # 突破买入止损：entry − 0.30×ATR（本模块固定宽度，不是 MA5/阳线/中点锚）
 MIN_SAMPLE = 10         # 单桶样本 <10 = 样本不足
 MIN_HISTORY = 60        # 回测起点：至少 60 根历史再开始算层
 
@@ -142,10 +143,14 @@ def backtest_breakout(bars, *, prox_atr=PROX_ATR, horizon=HORIZON,
         risk = px - stop
         if risk <= 0 or s["gap"] is None:
             continue
+        # 收盘确认才入场：确认日的低点在成交之前，从下一根开始判止损/+1R
+        start = s["i"] + s["gap"] + 1
+        if start >= len(bars):
+            continue
         rr_n += 1
         settled = False
-        for j in range(s["i"] + s["gap"], min(s["i"] + s["gap"] + max_hi5,
-                                              len(bars))):
+        end = min(start + max_hi5, len(bars))
+        for j in range(start, end):
             if bars[j]["l"] <= stop:
                 r_sums.append(-1.0)
                 settled = True
@@ -156,8 +161,7 @@ def backtest_breakout(bars, *, prox_atr=PROX_ATR, horizon=HORIZON,
                 settled = True
                 break
         if not settled:
-            close_j = bars[min(s["i"] + s["gap"] + max_hi5 - 1,
-                               len(bars) - 1)]["c"]
+            close_j = bars[min(end - 1, len(bars) - 1)]["c"]
             r_sums.append((close_j - px) / risk)
             rr_flat += 1
     return {
