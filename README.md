@@ -69,8 +69,10 @@ stock-multidim-battleplan/
 ├── backtest_intraday.py # 盘中通道回测（真实 5 分钟数据 + 账户口径 + 参数扫描）
 ├── backtest_yang_pullback.py  # 大阳回踩买区成交率统计
 ├── calc_ash_position.py # A 股仓位闸门全量扫描（结构性能否交易）
+├── pre_runup.py         # 公告前「抢跑涨幅」检查（消息驱动型标的的否决型判据）
 ├── test_breakout_modes.py
 ├── test_living_platform.py
+├── test_pre_runup.py
 ├── test_review_fixes.py
 ├── references/          # 按场景加载的策略、量价、风控与输出细则
 ├── scan_all/            # 全市场扫描（买区走 rule123.build_ev）
