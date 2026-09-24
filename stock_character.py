@@ -64,6 +64,8 @@ NEWS_MOVE_TRIG = 3.0     # 反应日定位：当日 |涨跌| ≥ 此值（%）�
 NEWS_VOL_TRIG = 1.5      # 反应日定位：当日量比 ≥ 此值视为「当日已反应」
 NEWS_CHASE = 0.0         # 消息反应日收盘买入的后 hold 日期望 < 此值 ⇒ 出消息即顶型
 NEWS_WIN = 0.55          # 后 hold 日为正比例 ≥ 此值 ⇒ 利好有效型
+NEWS_MIN_EVENTS = 3      # 判定所需最小事件数（不足只标「仅供参考」）；同时作为抓取早停门槛
+ANN_TTL_HOURS = 24       # 公告缓存有效期（小时）—— 公告习惯是历史统计，日级陈旧无害
 
 # 利好类关键词（命中任一即进入候选）
 ANN_GOOD = (
@@ -155,7 +157,7 @@ def mean(xs):
 
 # ─────────────────────── 第一层：突破后行为 ───────────────────────
 def analyze(bars, big=BIG_DEFAULT, hold=HOLD_DEFAULT,
-            anns=None, news_hold=NEWS_HOLD):
+            anns=None, news_hold=NEWS_HOLD, ann_meta=None):
     if len(bars) < 60:
         return None
     last = len(bars) - 1
@@ -209,7 +211,7 @@ def analyze(bars, big=BIG_DEFAULT, hold=HOLD_DEFAULT,
     a.update({"class": klass, "class_label": label, "advice": advice})
 
     # —— 第二层：利好兑现习惯 ——
-    news = news_habit(bars, anns, hold=news_hold)
+    news = news_habit(bars, anns, hold=news_hold, meta=ann_meta)
     a["news"] = news
     return a
 
@@ -229,20 +231,45 @@ def classify(a):
 
 
 # ─────────────────────── 第二层：利好兑现习惯 ───────────────────────
-def fetch_announcements(code, until=None, max_pages=NEWS_PAGES, use_cache=True):
-    """东财公告接口 → [(YYYY-MM-DD, title)] 倒序。失败返回 []。"""
+def fetch_announcements_ex(code, until=None, max_pages=NEWS_PAGES, use_cache=True):
+    """东财公告接口 → (anns, meta)。anns = [(YYYY-MM-DD, title)] 倒序，失败给 []。
+
+    停止条件只有三个：覆盖到 until（日线起点）/ 翻页上限 / 接口异常。
+
+    ⚠️ 刻意**不**做「样本够了就早停」。试过「命中 ≥ NEWS_MIN_EVENTS 个利好即停」，
+    实测 7 只票里天元宠物 301335 结论翻转：4 事件 +0.79%「混合型」→ 7 事件 −0.83%
+    「出消息即顶型」。**错的方向还是「鼓励交易」，省 1 秒不值这个风险。**
+    「近期无利好就跳过」同样不成立：振华 603067 前 2 页（回溯 4~5 个月）零命中，
+    但第 3~4 页有 2026-01-19 / 2025-11-25 两个事件，掐掉就报成「无利好事件」。
+    省时改由缓存（ANN_TTL_HOURS）和显式 `--no-ann` 开关承担。
+
+    缓存 ANN_TTL_HOURS 内有效。
+    meta: {pages, ann_total, stop_reason, cached, age_hours}
+    """
     cache_f = os.path.join(_ANN_CACHE, "ann_%s.json" % code)
-    today = dt.date.today().isoformat()
+    now = dt.datetime.now()
     if use_cache and os.path.exists(cache_f):
         try:
             with open(cache_f, "r", encoding="utf-8") as f:
                 c = json.load(f)
-            if c.get("date") == today:
-                return [tuple(x) for x in c.get("list", [])]
+            m = dict(c.get("meta") or {})
+            ts = c.get("ts")
+            if ts:
+                fresh = (now - dt.datetime.fromisoformat(ts)
+                         < dt.timedelta(hours=ANN_TTL_HOURS))
+                age = (now - dt.datetime.fromisoformat(ts)).total_seconds() / 3600
+            else:                                  # 老缓存（只有 date）
+                fresh = c.get("date") == now.date().isoformat()
+                age = None
+            if fresh:
+                m["cached"] = True
+                m["age_hours"] = None if age is None else round(age, 2)
+                return [tuple(x) for x in c.get("list", [])], m
         except Exception:
             pass
 
-    out, stop = [], False
+    out = []
+    meta = {"pages": 0, "ann_total": 0, "stop_reason": None}
     for p in range(1, max_pages + 1):
         url = ("https://np-anotice-stock.eastmoney.com/api/security/ann?"
                "page_size=50&page_index=%d&ann_type=A&client_source=web"
@@ -253,6 +280,7 @@ def fetch_announcements(code, until=None, max_pages=NEWS_PAGES, use_cache=True):
             with urllib.request.urlopen(req, timeout=15) as r:
                 d = json.loads(r.read().decode("utf-8"))
         except Exception:
+            meta["stop_reason"] = "接口请求失败（第 %d 页）" % p
             break
         lst = (d.get("data") or {}).get("list") or []
         if not lst:
@@ -262,9 +290,9 @@ def fetch_announcements(code, until=None, max_pages=NEWS_PAGES, use_cache=True):
             title = (it.get("title") or "").strip()
             if day and title:
                 out.append((day, title))
+        meta["pages"] = p
         if until and out and out[-1][0] < until:
-            stop = True
-        if stop:
+            meta["stop_reason"] = "已覆盖日线区间（起点 %s）" % until
             break
         time.sleep(0.15)
 
@@ -277,15 +305,25 @@ def fetch_announcements(code, until=None, max_pages=NEWS_PAGES, use_cache=True):
         seen.add(k)
         uniq.append(k)
     uniq.sort(reverse=True)
+    meta["ann_total"] = len(uniq)
 
     if use_cache and uniq:
         try:
             os.makedirs(_ANN_CACHE, exist_ok=True)
             with open(cache_f, "w", encoding="utf-8") as f:
-                json.dump({"date": today, "list": uniq}, f, ensure_ascii=False)
+                json.dump({"date": now.date().isoformat(),
+                           "ts": now.isoformat(timespec="seconds"),
+                           "list": uniq, "meta": meta}, f, ensure_ascii=False)
         except Exception:
             pass
-    return uniq
+    return uniq, meta
+
+
+def fetch_announcements(code, until=None, max_pages=NEWS_PAGES, use_cache=True):
+    """兼容包装：只返回公告列表（老调用点与测试无需改）。"""
+    anns, _ = fetch_announcements_ex(code, until=until, max_pages=max_pages,
+                                     use_cache=use_cache)
+    return anns
 
 
 def is_good_news(title):
@@ -370,11 +408,23 @@ def event_metrics(bars, i, hold=NEWS_HOLD):
     return m
 
 
-def news_habit(bars, anns, hold=NEWS_HOLD):
-    """汇总利好兑现习惯。anns 为 None ⇒ 未取到公告，返回 available=False。"""
+def news_habit(bars, anns, hold=NEWS_HOLD, meta=None):
+    """汇总利好兑现习惯。
+
+    anns=None ⇒ 本项完全跳过（--no-ann / 手动 --events 场景）；
+    anns=[]   ⇒ 接口没给数据，必须与「抓到公告但没有利好」分开报
+                （旧实现把前者也写成「未识别出利好事件」，措辞误导）。
+    """
     if anns is None:
         return {"available": False, "reason": "未取到公告数据（离线或接口失败）",
                 "events": [], "n": 0}
+    if not anns:
+        return {"available": True, "n": 0, "events": [], "hold": hold,
+                "ann_total": 0, "ann_days": 0, "meta": meta or {},
+                "spike_rate": None, "win5": None, "win10": None,
+                "reason": "公告接口未返回数据（网络/接口异常）",
+                "label": "无数据",
+                "advice": "公告未取到 —— 本项不参与判定；可用 --events YYYYMMDD 手动指定利好日"}
     after, before = bars[0]["d"], bars[-1]["d"]
     days = pick_events(anns, after=after, before=before)
     evs, seen = [], set()
@@ -391,11 +441,12 @@ def news_habit(bars, anns, hold=NEWS_HOLD):
             m["ann_date"] = d
             evs.append(m)
     h = {"available": True, "n": len(evs), "events": evs, "hold": hold,
-         "ann_total": len(anns), "ann_days": len(days)}
+         "ann_total": len(anns), "ann_days": len(days), "meta": meta or {}}
     if not evs:
-        h.update({"reason": "样本不足：区间内未识别出可统计的利好事件",
+        h.update({"reason": "区间内 %d 条公告未识别出利好类事件（该股近期非消息驱动）"
+                            % len(anns),
                   "spike_rate": None, "win5": None, "win10": None,
-                  "label": "样本不足", "advice": "利好事件不足，本项不参与判定"})
+                  "label": "无利好事件", "advice": "本项不适用 —— 该股近期没有可统计的利好公告"})
         return h
     n = len(evs)
     h.update({
@@ -425,7 +476,8 @@ def classify_news(h):
     n, exp, win5 = h.get("n") or 0, h.get("chase_exp"), h.get("win5")
     if not n or exp is None:
         return "unknown", "样本不足", "利好事件不足，本项不参与判定"
-    note = "（样本仅 %d 个，仅供参考）" % n if n < 3 else ""
+    note = ("（样本仅 %d 个，仅供参考）" % n
+            if n < NEWS_MIN_EVENTS else "")
     if exp < NEWS_CHASE and (win5 or 0) < 0.5:
         return ("spike", "出消息即顶型" + note,
                 "历史上消息反应日后 5 日为负期望 —— **公告日禁止追入**"
@@ -502,12 +554,26 @@ def render_news(n):
         L.append("    （离线或接口失败时用 --events YYYYMMDD,YYYYMMDD 手动指定利好日）")
         return L
     if not n.get("n"):
-        L.append("    公告 %d 条，识别出利好日 %d 个 —— %s"
-                 % (n.get("ann_total", 0), n.get("ann_days", 0),
+        m0 = n.get("meta") or {}
+        L.append("    公告 %d 条（联网 %d 页%s）—— %s"
+                 % (n.get("ann_total", 0), m0.get("pages", 0),
+                    ("，%s" % m0["stop_reason"]) if m0.get("stop_reason") else "",
                     n.get("reason", "无可统计数据")))
+        if n.get("advice"):
+            L.append("    %s" % n["advice"])
         return L
     L.append("    公告 %d 条 → 识别利好事件 %d 个（反应日后 %d 日观察）"
              % (n["ann_total"], n["n"], n["hold"]))
+    m = n.get("meta") or {}
+    if m.get("cached"):
+        age = m.get("age_hours")
+        L.append("    取数：缓存命中（%s，未联网）"
+                 % ("刚刚抓过" if age is None or age < 0.1
+                    else "%.1f 小时前抓过" % age))
+    elif m.get("pages"):
+        L.append("    取数：联网 %d 页%s"
+                 % (m["pages"],
+                    ("，%s" % m["stop_reason"]) if m.get("stop_reason") else ""))
     L.append("    消息后 %d 日期望   %s   <- 反应日收盘买入的期望；< 0 出消息即顶型"
              % (n["hold"], pf(n.get("chase_exp"))))
     L.append("    后 %d 日为正 %5.0f%%   后10日为正 %5.0f%%   （< %.0f%% = 不利追入）"
@@ -551,12 +617,13 @@ def main():
         for d in days:
             f = d if "-" in d else "%s-%s-%s" % (d[:4], d[4:6], d[6:8])
             anns.append((f, "手动指定利好 授权许可"))
+        meta = None
     elif args.no_ann:
-        anns = None
+        anns, meta = None, None
     else:
-        anns = fetch_announcements(args.code, until=bars[0]["d"])
+        anns, meta = fetch_announcements_ex(args.code, until=bars[0]["d"])
 
-    a = analyze(bars, big=args.big, hold=args.hold, anns=anns)
+    a = analyze(bars, big=args.big, hold=args.hold, anns=anns, ann_meta=meta)
     if not a:
         print("%s 日线样本不足（< 60 根）" % args.code)
         return 2

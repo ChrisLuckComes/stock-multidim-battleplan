@@ -313,9 +313,68 @@ def test_news_habit_no_anns():
 
 
 def test_news_habit_no_events():
+    """抓到公告但区间内无利好 ⇒ 本项不适用；接口给空 ⇒ 措辞必须是「接口没给数据」。
+
+    两者不能混为一谈 —— 旧实现把「接口失败」也写成「未识别出利好事件」。
+    """
     h = sc.news_habit(flat(60), [("2026-02-01", "证券变动月报表")])
     assert h["available"] is True and h["n"] == 0
-    assert "样本不足" in h["label"]
+    assert h["label"] == "无利好事件", h["label"]
+    assert "未识别出利好" in h["reason"], h["reason"]
+    h2 = sc.news_habit(flat(60), [])
+    assert h2["label"] == "无数据", h2["label"]
+    assert "接口" in h2["reason"], h2["reason"]
+
+
+def test_fetch_ann_cache_ttl():
+    """公告缓存：TTL 内命中并标 cached；过期不复用；老格式（只有 date）兼容。
+
+    max_pages=0 让翻页循环空转 ⇒ 走到缓存分支时不联网，测试可离线跑。
+    """
+    import json as _json
+    import datetime as _dt
+    code = "000000"
+    f = os.path.join(sc._ANN_CACHE, "ann_%s.json" % code)
+    os.makedirs(sc._ANN_CACHE, exist_ok=True)
+    row = [["2026-01-01", "授权许可协议公告"]]
+    meta0 = {"pages": 1, "ann_total": 1, "stop_reason": "已覆盖日线区间"}
+    try:
+        # ① 新鲜缓存（ts = 现在）
+        fresh = {"date": _dt.date.today().isoformat(),
+                 "ts": _dt.datetime.now().isoformat(timespec="seconds"),
+                 "list": row, "meta": meta0}
+        with open(f, "w", encoding="utf-8") as fp:
+            _json.dump(fresh, fp, ensure_ascii=False)
+        anns, meta = sc.fetch_announcements_ex(code, max_pages=0)
+        assert len(anns) == 1, "TTL 内应命中缓存"
+        assert meta.get("cached") is True, "meta.cached 应标 True"
+        assert meta.get("age_hours") is not None, "meta.age_hours 应有值"
+
+        # ② 过期缓存（ts = TTL + 1 小时前）
+        old = dict(fresh)
+        old["ts"] = (_dt.datetime.now()
+                     - _dt.timedelta(hours=sc.ANN_TTL_HOURS + 1)).isoformat(timespec="seconds")
+        with open(f, "w", encoding="utf-8") as fp:
+            _json.dump(old, fp, ensure_ascii=False)
+        anns2, meta2 = sc.fetch_announcements_ex(code, max_pages=0)
+        assert meta2.get("cached") is None, "过期缓存不得标记命中：%s" % meta2
+        assert len(anns2) == 0, "过期且 max_pages=0 ⇒ 无数据"
+
+        # ③ 老格式缓存（只有 date，无 ts）—— 当日仍可复用
+        legacy = {"date": _dt.date.today().isoformat(), "list": row}
+        with open(f, "w", encoding="utf-8") as fp:
+            _json.dump(legacy, fp, ensure_ascii=False)
+        anns3, meta3 = sc.fetch_announcements_ex(code, max_pages=0)
+        assert len(anns3) == 1, "老格式当日缓存应兼容复用"
+        assert meta3.get("cached") is True, "老格式命中也要标 cached"
+
+        # ④ 兼容包装仍返回纯列表
+        out = sc.fetch_announcements(code, max_pages=0)
+        assert len(out) == 1, "fetch_announcements 仍返回列表"
+        assert isinstance(out[0], tuple), "返回元组列表"
+    finally:
+        if os.path.exists(f):
+            os.remove(f)
 
 
 def test_real_ruichuang_regression():
