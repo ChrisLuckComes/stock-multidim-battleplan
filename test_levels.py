@@ -113,6 +113,8 @@ lines = L.flex_map(spot_up, lv_fx)
 kinds = [k for k, _ in lines]
 chk("地图含 头/压力标题/支撑标题/规则", {"head", "res_title", "sup_title", "rule"} <= set(kinds))
 chk("超买时标题带加分提示", any("加分" in t for k, t in lines if k == "res_title"))
+chk("标题不带「N档」计数（老罗 2026-09-24）",
+    all("档" not in t for k, t in lines if k in ("res_title", "sup_title")))
 lv_fx["rsi14"] = 22.0
 lines2 = L.flex_map(spot_up, lv_fx)
 chk("超卖时头部含禁追空", any("禁追空" in t for k, t in lines2 if k == "head"))

@@ -148,21 +148,19 @@ def flex_map(spot, lv, ref_close=None):
     lines.append(("head", head))
     res = resistance_levels(lv, spot)
     sup = support_levels(lv, spot)
-    lines.append(("res_title", f"▲ 压力位 {len(res)} 档（做空参考：反抽到位站不上 + 缩量才空"
-                            f"{'；当前' + stance + '，空单质量加分' if stance == '超买' else ''}）"))
+    # 标题不带「N 档」计数、不带长括号说明（老罗 2026-09-24：增加阅读成本，看不懂）
+    lines.append(("res_title", "▲ 压力位"
+                  + (f"（{stance}，空单质量加分）" if stance == "超买" else "")))
     for lbl, px in res:
         dist = (px / spot - 1) * 100
         lines.append(("res", f"{px:9.2f}  {lbl:<6} 距现价 {dist:+.2f}%"))
-    lines.append(("sup_title",
-                  "▼ 支撑位 %d 档（平空档 + T0/缩量回调的低吸参考："
-                  "**收盘站稳 → 反多候选**，需 rule123 买法确认、均线之上才做多）" % len(sup)))
+    lines.append(("sup_title", "▼ 支撑位"))
     for lbl, px in sup:
         dist = (px / spot - 1) * 100
         near = abs(spot - px) < NOISE_ATR * atr
         tag = "  ⚠ 贴噪声带，需两日收盘确认" if near else ""
         lines.append(("sup", f"{px:9.2f}  {lbl:<6} 距现价 {dist:+.2f}%{tag}"))
-    lines.append(("rule", "转换规则：压力位做空 / 支撑位平空·低吸 / 支撑位收盘站稳反多 —— "
-                  "一律以收盘确认，盘中触碰不算数；超卖区禁追空，反多不接下跌中的刀"))
+    lines.append(("rule", "口径：一律收盘确认，盘中触碰不算数；超卖禁追空，反多不接下跌中的刀"))
     return lines
 
 
@@ -217,9 +215,6 @@ def main():
     for kind, txt in flex_map(anchor, lv):
         print(f"  {txt}" if kind in ("head", "res_title", "sup_title", "rule")
               else f"    {txt}")
-    print()
-    print("用法提示：T0 / 缩量回调 → 支撑档=回踩低吸买区参考、收盘破位=结构止损锚；"
-          "做空 → 压力档=反抽空点参考（美股配合 us_short.py 出完整作战卡）")
 
 
 def _now_bj():
