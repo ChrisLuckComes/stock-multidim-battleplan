@@ -575,8 +575,11 @@ def tie_line_check(z, ma_info):
     """
     if not z or not z.get("anchor"):
         return None
+    #   ★ 2026-09-24 晚：补 `sma20` —— `ma_ride_state` 的 anchor 用的是 `sma20`
+    #     （对应 ANCHOR_LABEL），而 ma_info 的行名是 `MA20`；缺这条映射会让
+    #     「回踩 MA20 改道」的票在这里静默 return None，贴线真伪判定整段消失。
     key = {"ma5": "MA5", "ma10": "MA10", "ema10": "EMA10",
-           "ma20": "MA20", "ma50": "MA50"}.get(str(z["anchor"]).lower())
+           "ma20": "MA20", "sma20": "MA20", "ma50": "MA50"}.get(str(z["anchor"]).lower())
     if not key:
         return None
     row = next((x for x in (ma_info or []) if x.get("name") == key), None)

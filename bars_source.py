@@ -349,8 +349,32 @@ def _intraday_capture(snap, market, last_date):
     return (hh, mi) < (close_h, close_m)
 
 
-def snapshot_stale(snap, market, now=None):
-    """快照是否已被更新的完整交易日甩下，或末根是盘中半日 bar。返回 (硬过期?, 说明)。"""
+def _intraday_mtime(mtime, market, last_date):
+    """快照**缺**带时钟 as_of 时的兜底：用文件写入时刻判断末根是否为盘中半日 bar。
+
+    只认 mtime 落在末根同一自然日、且早于该市场收盘时刻 ⇒ 视为盘中截取。
+    （`fetch_ashare.py` / `fetch_market.py` 的 spot 型快照不写 as_of，此前 10:04 抓的
+     盘中快照被当成完整收盘日线直接用 —— 2026-09-24 东材 601208 踩到：快照末根收
+     55.01，真实收盘 56.44，量 31.7万手 vs 93.2万手。）
+    """
+    if not mtime:
+        return False
+    try:
+        ts = dt.datetime.fromtimestamp(mtime)      # 本地时区（深圳 GMT+8）
+    except Exception:
+        return False
+    if ts.date() != last_date:
+        return False
+    close_h, close_m = (15, 0) if is_ash(market) else (16, 0)
+    return (ts.hour, ts.minute) < (close_h, close_m)
+
+
+def snapshot_stale(snap, market, now=None, mtime=None):
+    """快照是否已被更新的完整交易日甩下，或末根是盘中半日 bar。返回 (硬过期?, 说明)。
+
+    `mtime` = 快照文件写入时刻（`ash_bars` / `us_quote` 传 `os.path.getmtime(p)`），
+    仅在快照**没有**带时钟 as_of 时作为兜底判据使用。
+    """
     now = now or now_bj()
     bars = snap.get("bars") or []
     if not bars:
@@ -364,6 +388,10 @@ def snapshot_stale(snap, market, now=None):
     if not in_session(market, now) and _intraday_capture(snap, market, last):
         return True, (f"取数时刻 {snap.get('as_of')} 早于 {last} 收盘 → "
                       f"末根疑为盘中半日 bar")
+    if not in_session(market, now) and _intraday_mtime(mtime, market, last):
+        return True, (f"快照无取数时刻，文件写入 "
+                      f"{dt.datetime.fromtimestamp(mtime):%Y-%m-%d %H:%M} 早于 {last} 收盘"
+                      f" → 末根疑为盘中半日 bar")
     if in_session(market, now) and last < now.date() and now.weekday() < 5:
         return False, f"盘中口径：快照末根 {last} 非今日，缺今日实时 bar"
     return False, ""
@@ -387,13 +415,21 @@ def ash_bars(prefix, code, n=140, *, fetch=sina_raw, snap_dirs=None,
             if snap is None:
                 notes.append(f"快照 {os.path.basename(p)} 不可用（{why}）")
             else:
-                hard, note = snapshot_stale(snap, "ASH", now)
+                sbars = snap.get("bars") or []
                 tag = f"快照 {os.path.basename(p)}（取数时刻 {snap.get('as_of') or '未标注'}）"
-                if hard:
-                    notes.append(f"{tag} 不可用：{note} → 改走实时源")
+                # 快照根数不足也降级：调用方问 n 根就是要 n 根（结构判定 / 统计的深度口径）。
+                # 与磁盘缓存的 `_check_rules` 同一条判据，此前只有缓存侧校验、快照侧漏了，
+                # 结果「问 300 根拿到 160 根」静默发生（2026-09-24 stock_character 688428 踩到）。
+                if len(sbars) < _min_bars(n):
+                    notes.append(f"{tag} 根数不足（{len(sbars)} < {_min_bars(n)}） → 改走缓存/实时源")
                 else:
-                    notes.append(tag + (f" · {note}" if note else ""))
-                    return snap["bars"][-n:], "snapshot:" + os.path.basename(p), notes
+                    hard, note = snapshot_stale(snap, "ASH", now,
+                                                mtime=os.path.getmtime(p))
+                    if hard:
+                        notes.append(f"{tag} 不可用：{note} → 改走实时源")
+                    else:
+                        notes.append(tag + (f" · {note}" if note else ""))
+                        return sbars[-n:], "snapshot:" + os.path.basename(p), notes
     if use_cache:
         if not explicit:
             bars, why = _memo_get("ASH", code, n, now_bj())
@@ -435,7 +471,8 @@ def us_quote(sym, *, fetch=None, snap_dirs=None, use_cache=True, use_snap=True,
             if snap is None:
                 notes.append(f"快照 {os.path.basename(p)} 不可用（{why}）")
             else:
-                hard, note = snapshot_stale(snap, "US", now)
+                hard, note = snapshot_stale(snap, "US", now,
+                                            mtime=os.path.getmtime(p))
                 tag = f"快照 {os.path.basename(p)}（取数时刻 {snap.get('as_of') or '未标注'}）"
                 if hard:
                     notes.append(f"{tag} 不可用：{note} → 改走实时源")

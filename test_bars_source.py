@@ -142,6 +142,29 @@ def test_snapshot_lookup():
            "美股 as_of 11:58（交易所当地）早于 16:00 收盘 → 判为盘中")
         ck(B._intraday_capture({"as_of": "2026-09-18 16:00:00"}, "US", FRI) is False,
            "美股 as_of 16:00 收盘时刻 → 不算盘中")
+        # 缺 as_of 的 spot 型快照（fetch_ashare / fetch_market 产物）→ 用文件 mtime 兜底。
+        # 2026-09-24 东材 601208 踩到：10:04 抓的快照没写 as_of，末根收 55.01 被当收盘，
+        # 真实收盘 56.44（量 31.7万手 vs 93.2万手）。
+        def mt(y, m, d, hh, mm):
+            return dt.datetime(y, m, d, hh, mm).timestamp()
+        ck(B._intraday_mtime(mt(2026, 9, 21, 10, 4), "ASH", MON) is True,
+           "mtime 当日 10:04 早于 15:00 收盘 → 判为盘中快照")
+        ck(B._intraday_mtime(mt(2026, 9, 21, 15, 30), "ASH", MON) is False,
+           "mtime 在收盘后 → 不算盘中")
+        ck(B._intraday_mtime(mt(2026, 9, 18, 10, 4), "ASH", MON) is False,
+           "mtime 非末根当日 → 不参与判定")
+        ck(B._intraday_mtime(None, "ASH", MON) is False, "无 mtime → 不判（向后兼容）")
+        ck(B._intraday_mtime(mt(2026, 9, 21, 11, 58), "US", MON) is True,
+           "美股 mtime 11:58 当地早于 16:00 → 判为盘中")
+        ck(B.snapshot_stale({"bars": bars_upto(MON)}, "ASH", at(2026, 9, 21, 20, 0),
+                            mtime=mt(2026, 9, 21, 10, 4))[0] is True,
+           "无 as_of 但 mtime 盘中 ⇒ 半日 bar，收盘复盘不可用")
+        ck(B.snapshot_stale({"bars": bars_upto(MON)}, "ASH", at(2026, 9, 21, 20, 0),
+                            mtime=mt(2026, 9, 21, 15, 30))[0] is False,
+           "无 as_of 但 mtime 收盘后 ⇒ 可用")
+        ck(B.snapshot_stale({"bars": bars_upto(MON)}, "ASH", at(2026, 9, 21, 10, 40),
+                            mtime=mt(2026, 9, 21, 10, 4))[0] is False,
+           "盘中调阅时仍允许盘中快照（那本来要最新 bar）")
 
 
 def test_cache(tmpdir):
@@ -243,6 +266,17 @@ def test_ash_bars_chain(tmpdir):
                                          now=cur["now"])
         eq(bars6, [], "网络返回空 → 空 list（不抛）")
         ck(any("返回空" in x for x in notes6), f"空返回有说明（{notes6}）")
+        # 快照根数不足 n → 必须降级，不能「问 140 根只给 100 根」
+        # （2026-09-24 stock_character 688428 踩到：data/688428.json 只有 160 根，
+        #   问 300 根静默拿到 160 根，公告习惯统计样本被人为砍掉一半）
+        # 注：load_snapshot 另有「< 60 根」的硬门槛，这里要测的是 60 ~ n 之间的缺口。
+        with open(os.path.join(sd, "301335.json"), "w", encoding="utf-8") as f:
+            json.dump({"ticker": "301335", "name": "天元宠物",
+                       "bars": bars_upto(FRI)[-100:]}, f, ensure_ascii=False)
+        bars7, src7, notes7 = B.ash_bars("sz", "301335", n=140, fetch=fake_fetch,
+                                         snap_dirs=[sd], now=cur["now"])
+        ck(len(bars7) >= 140, f"快照根数不足 → 仍取够 140 根（实得 {len(bars7)}，src={src7}）")
+        ck(any("根数不足" in x for x in notes7), f"根数不足被记录（{notes7}）")
 
 
 def test_us_quote(tmpdir):

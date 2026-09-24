@@ -183,6 +183,33 @@ def secid_of(ticker: str):
     return f"0.{ticker}"
 
 
+_US_AC_CACHE = {}          # sym -> "stocks" / "etf"（进程内；命中后仍只发一发）
+
+
+def _assetclass_order(s):
+    """Nasdaq assetclass 探测顺序：命中的档位优先，其余按 [stocks, etf]。
+
+    ★ 2026-09-24：原实现所有 Nasdaq 调用都写死 `assetclass=stocks`，导致
+    **ETF 全线取不到**（实测 assetclass=stocks 对 SNDQ/SOXS/MUZ/SKDD/SOXX/SMH
+    的 primaryData 为空、tradesTable 为 0 行；而 assetclass=etf 对 SNDK/ILMN 为空）。
+    两个口径各自只覆盖一半标的 —— 写死任一个都会丢掉另一半。
+    做空工具（SOXS/MUZ/SNDQ/SKDD）与板块 ETF（SOXX/SMH）全是 ETF ⇒
+    修复前「做空腿永远没有盘前价、也没有日线」。
+    """
+    order = ["stocks", "etf"]
+    hit = _US_AC_CACHE.get(s)
+    if hit in order:
+        order = [hit] + [x for x in order if x != hit]
+    return order
+
+
+def _nasdaq_info_raw(s, assetclass):
+    """Nasdaq /info 单发（指定 assetclass）。"""
+    return (fetch_json_nasdaq(
+        f"https://api.nasdaq.com/api/quote/{s}/info"
+        f"?assetclass={assetclass}").get("data") or {})
+
+
 def nasdaq_info(sym):
     """Nasdaq /info 单发 → (spot, meta)。
 
@@ -193,17 +220,35 @@ def nasdaq_info(sym):
     盘中合成正是靠 session=="Open" 与 as_of 推美东交易日，缺了就退回昨收口径
     （即 INTC 2026-09-17「突破了平台却让我买 104.03」那个坑）。
     单发实测 2–4s，比整条历史链路（约 6s）便宜一半，且不动 bars。
+
+    `assetclass` 自动探测（见 `_assetclass_order`）：**ETF 必须走 etf 档**，
+    否则盘前价恒为 None。命中档位进程内缓存，常态仍只发一发。
     """
     s = sym.upper()
-    info = (fetch_json_nasdaq(
-        f"https://api.nasdaq.com/api/quote/{s}/info?assetclass=stocks").get("data") or {})
-    pdat = info.get("primaryData") or {}
-    sdat = info.get("secondaryData") or {}
-    return _num_q(pdat.get("lastSalePrice")), {
-        "session": info.get("marketStatus") or "",
-        "as_of": pdat.get("lastTradeTimestamp"),
-        "prev_close": _num_q(sdat.get("lastSalePrice")),      # ← 唯一可靠昨收
-    }
+    last_err = None
+    connected = False
+    fb_meta = {"session": "", "as_of": None, "prev_close": None}
+    for ac in _assetclass_order(s):
+        try:
+            info = _nasdaq_info_raw(s, ac)
+        except Exception as e:            # 网络/403：换下一档再试
+            last_err = e
+            continue
+        connected = True
+        pdat = info.get("primaryData") or {}
+        sdat = info.get("secondaryData") or {}
+        meta = {"session": info.get("marketStatus") or "",
+                "as_of": pdat.get("lastTradeTimestamp"),
+                "prev_close": _num_q(sdat.get("lastSalePrice"))}   # ← 唯一可靠昨收
+        spot = _num_q(pdat.get("lastSalePrice"))
+        if spot is not None:              # 该 assetclass 认这个代码
+            _US_AC_CACHE[s] = ac
+            return spot, meta
+        if meta["prev_close"] is not None or meta["session"]:
+            fb_meta = meta                # 这一档不认代码，但留个底（保持原形状）
+    if last_err is not None and not connected:
+        raise last_err                    # 两档都是网络错 ⇒ 如实抛（调用方会回退）
+    return None, fb_meta
 
 
 def bars_from_nasdaq(sym, days=400):
@@ -219,11 +264,25 @@ def bars_from_nasdaq(sym, days=400):
     s = sym.upper()
     today = datetime.date.today()
     frm = today - datetime.timedelta(days=days)
-    j = fetch_json_nasdaq(
-        f"https://api.nasdaq.com/api/quote/{s}/historical"
-        f"?assetclass=stocks&fromdate={frm:%Y-%m-%d}&todate={today:%Y-%m-%d}&limit=300"
-    )
-    rows = ((j.get("data") or {}).get("tradesTable") or {}).get("rows") or []
+    # ★ 2026-09-24：assetclass 探测。ETF（SOXX/SMH/SOXS/SNDQ…）在 stocks 档
+    #   tradesTable 为 0 行、必须走 etf 档（实测 SOXX/SMH/SOXS 各 275 根、
+    #   SNDQ 106 根=成立日至今）。正股仍第一档命中，取数口径与行为不变。
+    rows, last_err = [], None
+    for ac in _assetclass_order(s):
+        try:
+            j = fetch_json_nasdaq(
+                f"https://api.nasdaq.com/api/quote/{s}/historical"
+                f"?assetclass={ac}&fromdate={frm:%Y-%m-%d}"
+                f"&todate={today:%Y-%m-%d}&limit=300")
+        except Exception as e:
+            last_err = e
+            continue
+        rows = ((j.get("data") or {}).get("tradesTable") or {}).get("rows") or []
+        if rows:
+            _US_AC_CACHE[s] = ac
+            break
+    if not rows and last_err is not None:
+        raise last_err                     # 两档都是网络错 ⇒ 抛，让上层回退下一源
     bars = []
     for r in rows:
         try:
@@ -2291,6 +2350,204 @@ def _near_wall_above(bars, trigger, win=250):
     return best
 
 
+# ── 「均线刚收复」还是「已沿五日线上升一段」（2026-09-24 定稿）─────────────
+#
+# 用户 2026-09-24 指出：用「D0 收盘距 MA5 几个百分点」（旧 ④ 贴线度，4% 闸门）
+# 区分 T0 与趋势跟随，**等于写死**，且统计上站不住 ——
+#   ① 该阈值是在 4 只票、约 6 个月样本上拟合的；扩到 53 只 × 500 根、按「买入持有
+#      5 日收盘」口径，>4% 与 ≤4% 的差只有 +1.50% vs +0.95%（旧表是 +1.75% vs +3.35%）； 
+#      按**引擎真实触发价 + MA5 硬止损**回放，方向直接反过来（>4% 均R −0.032 /
+#      止损出局 61%，≤4% 均R −0.196 / 止损出局 77%）—— 因为「离得近」意味着 MA5 锚
+#      风险只有 2.3%，正常波动就扫掉了。
+#   ② 2026-09-24 东材科技 601208 实测：距 MA5 +5.42% 落在「>4% 档」，但它确实是
+#      用户说的「沿五日线上升」——真正该判的是**这条线已经向上走了多久**，不是今天离多远。
+#
+# 改用状态判别（全部自归一化，不含价格阈值）：
+MA_RIDE_SLOPE_WIN = 20     # MA5 斜率窗口（根）
+MA_RIDE_ABOVE_MIN = 12     # 近 20 根里站上 MA5 的根数下限（≥12 = 多数时间在线上）
+# 「锚」的定义（2026-09-24 老罗定）：一条线只是「在收盘下方」还不够，必须**贴着**才算锚。
+# 他原话：「没有锚点就代表是新高，不需要找锚」。
+# 门槛取 1.5×ATR —— 实证落点（`research_ride_priority.py`，53 只 × 500 根，突破日样本）：
+#   距锚线 0.5~1.0×ATR：5 日内回踩触及率 66%、触及后期望 +1.59%
+#   距锚线 1.0~1.5×ATR：触及率 41%、期望 +1.99%
+#   距锚线 >1.5×ATR  ：触及率跌到 **24%**、期望转负 **−0.22%** ⇒ 这条线已不是可用回踩锚
+# 同日突破买（1.5×ATR 止损、持有 5 日）在远锚档反而最好（均R +0.278 / 收益 +1.68%），
+# ⇒ 远锚不是「趋势中段危险」，而是「新高加速、根本没得回踩」。
+MA_RIDE_ANCHOR_MAX_ATR = 1.5
+
+
+def _ride_line_stats(bars, closes, levels):
+    """一条均线的 20 根斜率、近 20 根站上根数。levels[i] 为 None 表示还算不出。"""
+    i = len(closes) - 1
+    cur, prev = levels[i], levels[i - MA_RIDE_SLOPE_WIN]
+    if not cur or not prev:
+        return None
+    slope20 = (cur / prev - 1) * 100
+    win = [k for k in range(max(0, i - 19), i + 1) if levels[k]]
+    above = sum(1 for k in win if closes[k] > levels[k])
+    bounce = sum(1 for k in range(max(1, i - 19), i + 1)
+                 if levels[k] and bars[k]["l"] <= levels[k] and closes[k] > levels[k])
+    return {
+        "slope20": slope20,
+        "above": above,
+        "bounce": bounce,
+        "level": cur,
+        "dist_pct": (closes[i] - cur) / cur * 100,
+    }
+
+
+def ma_ride_state(bars, atr_v=None):
+    """判定最后一根是刚收复，还是已经沿着某一条均线上涨。
+
+    线不写死五日线。MA5、EMA10、MA20 各自算「20 根斜率 > 0 且近 20 根 ≥12 根收在线上」。
+    有多条同时成立时，取收盘下方、离现价最近的**且距现价 ≤ `MA_RIDE_ANCHOR_MAX_ATR`×ATR**
+    的那条（价格贴着哪条，回踩就锚哪条）。
+
+        line_ride      至少一条线已上行、价格多数时间在其上，且现价仍在可回踩距离内
+                       （距该线 ≤ 1.5×ATR）⇒ 有回踩锚
+        new_high       有线满足上行条件、但**一条都不在可回踩距离内** ⇒ 新高·无回踩锚
+                       （老罗 2026-09-24：「没有锚点就代表是新高，不需要找锚」）
+        fresh_reclaim  三条都不成立，且 MA5 尚未转头、价格多数时间在 MA5 下
+        mixed          其余
+        None           数据不足（< 26 根；另：MA20 要算 20 根斜率需 ≥ 40 根才开始参与）
+
+    ⚠️ `line_ride` 是**趋势背景**，不是当日形态。它与「当日突破事件」的优先级见
+    `SKILL.md` 执行原则第 12 条：**客观突破（平台/W底/旗形/下降趋势线）优先**，
+    `line_ride` 只在「当日别无买点」时提供回踩入口，否则仅作突破失败后的回踩锚。
+    否则「沿均线走」几乎恒真，会把所有形态都吃掉。
+
+    实测（53 只 A 股 × 500 根日线，引擎真实触发价/止损锚回放，2026-09-24）：
+
+        | 持有 | line_ride | mixed | fresh_reclaim |
+        |---|---|---|---|
+        | 5 日  | −0.292 / 胜率 19% / 扫损 77% (n=2173) | −0.158 / 24% / 70% (n=1206) | **+0.160 / 26% / 68% (n=1015)** |
+        | 10 日 | −0.196 / 15% / 83% | −0.181 / 19% / 78% | **+0.475 / 23% / 75%** |
+        | 20 日 | +0.085 / 11% / 88% | −0.133 / 15% / 84% | **+0.731 / 20% / 79%** |
+
+    稳健性：slope20 阈值 0 / +2 / +5 单调（−0.246 / −0.267 / −0.295），
+    反向 ≤0 / ≤−2 为 +0.115 / +0.198；2025-10 前后各半样本排序一致。
+    ⇒ 结论：line_ride 不是「不能做」，而是「**不该按 T0 的窄止损锚做过昨高**」。
+
+    补证（`research_ride_priority.py`，突破日 n=1560，2026-09-24 二轮）：问题出在**止损锚**而非
+    「追高」本身 —— 同一批突破日，突破买若用 1.5×ATR 止损，均R **+0.212** / 收益 +1.16% / 胜 44%；
+    而「等回踩锚线」只有 31% 的日子等得到（每机会 +0.39%）。且**突破买在远锚档反而最好**
+    （>1.5×ATR 档 +0.278R / +1.68%）⇒ 「价格远离均线」是新高加速，不是危险。
+    ⇒ 所以 `line_ride` 只降为**背景**：不改道掉客观突破，只在当日无买点时提供回踩入口。
+
+    返回字段口径（2026-09-24 晚统一，读取方别再取 `ma5`）：
+        `line_*`  = **被选中的那条线**（无候选时回落 MA5）：line / line_label / anchor /
+                    line_slope20_pct / line_above20 / line_bounce20 / line_dist_pct / line_dist_atr
+        `ma5_*` / above20 / bounce20 / dist_ma5_pct / ma5 = 恒为 MA5 口径（历史字段，勿改语义）
+    """
+    if not bars or len(bars) < MA_RIDE_SLOPE_WIN + 6:
+        return None
+    closes = [b["c"] for b in bars]
+    n = len(closes)
+    e10 = ema_series(closes, 10)
+    series = (
+        ("ma5", "五日线", [sma_at(closes, 5, i) for i in range(n)]),
+        ("ema10", "EMA10", e10),
+        ("sma20", "MA20", [sma_at(closes, 20, i) for i in range(n)]),
+    )
+    stats = {}
+    for key, _label, levels in series:
+        st = _ride_line_stats(bars, closes, levels)
+        if st:
+            stats[key] = st
+    ma = stats.get("ma5")
+    if not ma:
+        return None
+    riding = [k for k, st in stats.items()
+              if st["slope20"] > 0 and st["above"] >= MA_RIDE_ABOVE_MIN
+              and st["level"] <= closes[-1]]
+    # ★ 2026-09-24 老罗：「没有锚点就代表是新高，不需要找锚」。
+    #   候选线都在收盘下方 ≠ 贴着它走。距现价 > MA_RIDE_ANCHOR_MAX_ATR 的线不是回踩锚
+    #   （5 日内触及率仅 24%、触及后期望转负），此时按「新高·无回踩锚」处理，
+    #   不把一条 2 个 ATR 外的均线当作「沿它上行」。无 ATR 时不做此闸门（保持旧行为）。
+    def _near(k):
+        return (not atr_v) or atr_v <= 0 or (closes[-1] - stats[k]["level"]) <= \
+            MA_RIDE_ANCHOR_MAX_ATR * atr_v
+    attached = [k for k in riding if _near(k)]
+    # 贴着哪条算哪条：收盘下方、距离最近的那条。
+    chosen_key = min(attached, key=lambda k: closes[-1] - stats[k]["level"]) if attached else None
+    chosen = stats.get(chosen_key) if chosen_key else None
+    far_key = (min(riding, key=lambda k: closes[-1] - stats[k]["level"])
+               if (not chosen and riding) else None)
+    far = stats.get(far_key) if far_key else None
+    i = n - 1
+    slope5 = ((ma["level"] / sma_at(closes, 5, i - 5) - 1) * 100
+              if sma_at(closes, 5, i - 5) else None)
+    if atr_v and atr_v > 0:
+        levels = series[0][2]
+        ride10 = sum(1 for k in range(max(0, i - 9), i + 1)
+                     if levels[k] and 0 <= (closes[k] - levels[k]) <= 1.0 * atr_v)
+    else:
+        ride10 = None
+    labels = {"ma5": "五日线", "ema10": "EMA10", "sma20": "MA20"}
+    if chosen:
+        state = "line_ride"
+        label = labels[chosen_key]
+        note = (
+            f"【沿{label}上升】{label} 已上行 {chosen['slope20']:+.1f}%（20 根），"
+            f"且近 20 根有 {chosen['above']} 根收在线上"
+            f"（回踩线上 {chosen['bounce']} 次）—— 这是趋势中段，不是均线刚收复。"
+            f"首选改成回踩 {label}（{round(chosen['level'], 2)}）低吸，"
+            f"过昨高只作次选，且须换更宽的止损锚（阳线下沿 / 大阳中点）。"
+        )
+    elif far:
+        # 有「已上行、且在收盘下方」的线，但一条都不够近 ⇒ 无锚 ⇒ 新高。
+        state = "new_high"
+        label = labels[far_key]
+        _gap = (closes[i] - far["level"]) / atr_v if atr_v else None
+        note = (
+            f"【新高·无回踩锚】{label} 虽已上行 {far['slope20']:+.1f}%（20 根）、"
+            f"近 20 根 {far['above']} 根在线上，但现价已高出它 "
+            f"{_gap:+.2f}×ATR（{round(far['level'], 2)}）—— 一条均线都不在可回踩距离内"
+            f"（> {MA_RIDE_ANCHOR_MAX_ATR}×ATR）。距锚这么远，回踩买挂单 5 日内只有 ~24% 能成交、"
+            f"成交后期望转负；当日按**突破/新高**处理，不设回踩锚。"
+        )
+    elif ma["slope20"] <= 0 and ma["above"] <= MA_RIDE_ABOVE_MIN - 1:
+        state = "fresh_reclaim"
+        note = (
+            f"【均线刚收复】MA5 20 根斜率 {ma['slope20']:+.1f}%（尚未转头），近 20 根只有 "
+            f"{ma['above']} 根收在线上。EMA10 / MA20 也没有形成沿线上行。"
+            f"正是 T0 原定的「刚收复、贴墙蓄势」场景，过昨高成立。"
+        )
+    else:
+        state = "mixed"
+        note = (
+            f"【中间态】MA5 20 根斜率 {ma['slope20']:+.1f}%、近 20 根 {ma['above']} 根收在线上"
+            f"—— 既非刚收复，也没有一条均线达到沿线上行。"
+        )
+    # ★ 统一口径：`line*` 系列 = **被选中的那条线**（line_ride 时 = 回踩锚；new_high 时 =
+    #   最近却仍够不着的候选线，仅供报告说明；其余态回落 MA5）。读取方（报告 / 改道 /
+    #   t0_held_for_ride）一律用 `line*`，不要再取 `ma5`。
+    #   `above20` / `bounce20` / `ma5*` 保留 MA5 口径，勿改语义（历史字段）。
+    _pick = chosen or far or ma
+    _d_close = closes[i] - _pick["level"]
+    return {
+        "state": state,
+        "anchor": (chosen_key or far_key) if (chosen or far) else "ma5",
+        "line": round(_pick["level"], 2),
+        "line_label": labels[chosen_key or far_key] if (chosen or far) else "五日线",
+        "line_slope20_pct": round(_pick["slope20"], 2),
+        "line_above20": _pick["above"],
+        "line_bounce20": _pick["bounce"],
+        "line_dist_pct": round(_d_close / _pick["level"] * 100, 2),
+        "line_dist_atr": round(_d_close / atr_v, 2) if atr_v and atr_v > 0 else None,
+        "anchor_max_atr": MA_RIDE_ANCHOR_MAX_ATR,
+        "ma5_slope20_pct": round(ma["slope20"], 2),
+        "ma5_slope5_pct": round(slope5, 2) if slope5 is not None else None,
+        "above20": ma["above"],
+        "bounce20": ma["bounce"],
+        "ride10": ride10,
+        "dist_ma5_pct": round(ma["dist_pct"], 2),
+        "ma5": round(ma["level"], 2),
+        "prefer": "line_pullback" if state == "line_ride" else "breakout",
+        "note": note,
+    }
+
+
 def ma_reclaim_break(bars, ev, atr_v, last_c, res_win=25):
     """★ T0 买法：均线收复后「过昨高」买（2026-09-20 用户定稿，优先级高于 T1 买突破）。
 
@@ -2314,6 +2571,11 @@ def ma_reclaim_break(bars, ev, atr_v, last_c, res_win=25):
               ★ 平台度 100%、收盘位 94% —— 真正的判据是「贴着平台沿收强」
               ★ 用户自述是「回踩收绿跌回收盘价买 19.18」→ 实测那是**次优价**：
                 比触发价 18.50 贵 +3.68%，R 从 17.38 掉到 4.09。**P1 触发价才是最优入场**。
+      超频三   300647 2026-09-23 信号 → 09-24 过昨高 8.78 才买（用户 09-24 定为正确案例）
+              D0 收 8.55，ATR14 0.492，止损锚 MA5 8.29（风险 5.58%），阻力 8.97（09-02）距墙 4.91%（半路）
+              D1 开盘 8.67（昨收 +1.40%，落在 +1%~+3%「只挂不追」），低于触发价 8.78 → **集合竞价进场不合格**
+              盘中最高 9.84 已过 8.78，低点 8.48 未打到止损 8.29。早盘约 10:01 现价 9.72（相对触发 +1.9R）
+              ★ 高开但开盘仍在触发价下方 ≠ 开盘买。当日未收盘，只存执行对错，不把浮盈写成已落袋。
       美股 AI 制药共振 TEM / SDGR / ILMN（2026-09-14~15 同日给信号，用户未买到）
       ── 反面案例 ──
       联瑞新材 688300 2026-08-28 被平台度闸门拦下（见下 ①-B）
@@ -2669,6 +2931,11 @@ def ma_reclaim_break(bars, ev, atr_v, last_c, res_win=25):
         f"但 A 股本身 T+1 交割，买入即锁定至次日）"
     )
 
+    # ★ 2026-09-24：「均线刚收复」还是「已沿五日线上升一段」—— 决定这一单该不该按
+    #   T0 过昨高做（line_ride ⇒ 应改回踩**被选中的那条线**，可能是 EMA10/MA20）。
+    #   见 `ma_ride_state()`。
+    _ride = ma_ride_state(bars, atr_v)
+
     return {
         "setup_kind": "ma_reclaim_break",
         "mode": "ma_reclaim_break",
@@ -2722,6 +2989,22 @@ def ma_reclaim_break(bars, ev, atr_v, last_c, res_win=25):
         # ★ 均线排列**不作闸门**（2026-09-20 用户定）：纳微 9-08 突破时均线也未走顺
         #   （MA10/MA20 仍纠缠），后面还调了几天，但不影响最终结果。仅记录供复盘。
         "ma_aligned": bool(ma5 > ma10 > ma20),
+        # ★ 2026-09-24 新增：「均线刚收复」还是「已沿线上行一段」——见
+        #   `ma_ride_state()` 的 docstring（旧「距 MA5 ≤4%」闸门已作废）。
+        #   line_ride ⇒ 过昨高是趋势中段追高，首选应改回踩**被选中的那条线**。
+        "ride_state": (_ride or {}).get("state"),
+        "ride": _ride,
+        "entry_redirect": (
+            {
+                "to": "line_pullback",
+                "level": (_ride.get("line") if _ride.get("line") is not None
+                          else _ride["ma5"]),
+                "why": "line_ride 态下过昨高属趋势中段追高，实测均R 最差、"
+                       "77% 被短均线锚扫掉",
+                "alt": "若仍走 T0，须把硬止损锚换成更宽的「阳线下沿 / 大阳中点」",
+            }
+            if _ride and _ride.get("state") == "line_ride" else None
+        ),
         # ★ 板块共振（用户 2026-09-20 指出：这是真正提高胜率的维度）：
         #   「对板块强度有要求，能提高胜率，大部分是同时启动的」。
         #   实证：TEM/SDGR/ILMN（AI制药）+ 赛分/纳微 于 2026-09-14~15 同日共振。
@@ -2792,6 +3075,8 @@ def ma_reclaim_break(bars, ev, atr_v, last_c, res_win=25):
                if kb_back > 0 else "")
             + (f" ⚠ 风险 {risk_pct_v:.2f}%>8%，小账户难做仓位管理，"
                f"建议降为半仓或改做更贴墙的标的" if risk_over else "")
+            # ★ 2026-09-24：模式判别结论必须进 note —— 渲染层只印 note，不印 ride 字段。
+            + (f" ｜ {_ride['note']}" if _ride else "")
         ),
     }
 
@@ -3033,6 +3318,8 @@ def plan_entry(bars, ev):
         #                              → T0 接管。★ 这两条是 T1 的纪律，与 T0 天然冲突：
         #                                T0 要的正是「大阳次日的过昨高」，不是等回踩。
         #   其他 recommend==True 的形态  → 保留原 mode，T0 仅并列挂载（先到先做）
+        if _ride_any:
+            result["ma_ride"] = _ride_any
         if t0:
             result["ma_reclaim"] = t0
             result["tier_t0"] = "T0"
@@ -3042,8 +3329,84 @@ def plan_entry(bars, ev):
                 or result.get("mode") in ("impulse_pause",)
                 or "大阳" in str(result.get("verdict") or "")
             )
+            # ★ 2026-09-24：`line_ride` 态**不接管** —— 用户 09-24 定「东材是沿五日线
+            #   上升的，不是突破」，全池回放也证明此态过昨高追买最差（均R −0.29、
+            #   77% 被 MA5 锚扫掉）。此时把入口让给回踩（若当日已有 line_pullback 买点
+            #   则原样保留；若原本是 wait，则保持 wait 并写明「等回踩 MA5」）。
+            _ride_state = (t0.get("ride") or {}).get("state")
+            if _ride_state == "line_ride":
+                # ★ 2026-09-24 晚：这里的 line / 文案必须跟 `ma_ride_state` 选中的那条线
+                #   走 —— 锚可能是 EMA10 / MA20（全池 83 只里 42 只 line_ride，其中
+                #   21 只锚非 MA5）。写死 `ride["ma5"]` 会让 50% 的票报错价位。
+                _rd = t0["ride"]
+                _rd_line = _rd.get("line") if _rd.get("line") is not None else _rd.get("ma5")
+                _rd_label = _rd.get("line_label") or "五日线"
+                result["t0_held_for_ride"] = {
+                    "reason": f"line_ride（沿{_rd_label}上升，非均线刚收复）",
+                    "preferred": "line_pullback",
+                    "line": _rd_line,
+                    "line_label": _rd_label,
+                    "anchor": _rd.get("anchor") or "ma5",
+                    "line_dist_pct": _rd.get("line_dist_pct"),
+                    "note": _rd["note"],
+                }
+                if _takeover:
+                    # 改道而不是否决：把入口从「过昨高追」换成「回踩 MA5 挂限价」。
+                    result = _t0_ride_redirect(result, t0, atr_v, last_c)
+                    _takeover = False
             if _takeover:
                 result = _t0_takeover(result, t0)
+        # ★ 2026-09-24（老罗三轮）：「沿线」是趋势背景，当日形态是事件 —— 定优先级。
+        #   他原话：「振华 603067 翻成 line_ride 后，但平台突破是客观存在的，这个优先级，
+        #   你要想想到底怎么判定。否则所有股大部分时间都是沿均线走的。」
+        #   判据（实证见 research_ride_priority.py）：
+        #     · 当日有 fresh 突破形态（平台/W底/旗形/下降趋势线）⇒ **突破优先**，
+        #       沿线的意义只剩「突破失败后回踩到锚线的次选」；
+        #       依据：同日突破买（1.5×ATR 止损）均R +0.21 / 收益 +1.16%，而等回踩只有
+        #       31% 的日子等得到（每机会 +0.39%），且远锚档突破买反而最好（+0.278R）。
+        #     · 当日无买点（wait）而 line_ride 在 ⇒ 回踩锚接管（此时不牺牲任何突破机会）。
+        #     · `new_high`（无锚）⇒ 不给回踩锚，按突破/新高执行。
+        _rp = None
+        _rs = (result.get("ma_ride") or {}).get("state")
+        _rm = result.get("mode")
+        _mrd = result.get("ma_ride") or {}
+        if _rs == "line_ride" and _rm in breakout_modes and result.get("recommend"):
+            _rp = {
+                "winner": "breakout", "mode": _rm,
+                "why": ("当日已有新鲜突破形态（事件），优先级高于「沿均线上行」（趋势背景）。"
+                        "全池实测：突破买（1.5×ATR 止损）均R +0.21 / 收益 +1.16%，"
+                        "而「等回踩」只有 31% 的日子等得到 ⇒ 不拿沿线去改道客观突破。"),
+                "ride_role": "仅作突破失败、回踩到锚线时的次选",
+                "line": _mrd.get("line"), "line_label": _mrd.get("line_label"),
+            }
+        elif _rs == "new_high":
+            _rp = {
+                "winner": "breakout", "mode": _rm,
+                "why": ("现价距最近候选线（%s %s）已 %s×ATR，超过可回踩距离 %.1f×ATR "
+                        "⇒ 无回踩锚 = 新高，不按沿线回踩处理。"
+                        % (_mrd.get("line_label"), _mrd.get("line"),
+                           _mrd.get("line_dist_atr"), MA_RIDE_ANCHOR_MAX_ATR)),
+                "ride_role": "无（不给回踩锚）",
+                "line": None, "line_label": None,
+            }
+        elif _rs == "line_ride" and _rm == "line_pullback":
+            if result.get("ride_redirected"):
+                _rp = {
+                    "winner": "ride", "mode": _rm,
+                    "why": "当日别无买点，沿线回踩锚是唯一入口（不牺牲任何突破机会）",
+                    "ride_role": "首选（由 T0 改道而来）",
+                    "line": _mrd.get("line"), "line_label": _mrd.get("line_label"),
+                }
+            else:
+                _rp = {
+                    "winner": "pullback", "mode": _rm,
+                    "why": ("当日原有回踩买区为主（非沿线改道），T0 未接管；"
+                            "沿线上行的锚仅作并列的第二个回踩位"),
+                    "ride_role": "并列参考（非改道）",
+                    "line": _mrd.get("line"), "line_label": _mrd.get("line_label"),
+                }
+        if _rp:
+            result["ride_priority"] = _rp
         return result
 
     # ★★ T0 入口：均线收复 + 过昨高（2026-09-20 用户定级，优先级**高于** T1 买突破）
@@ -3064,6 +3427,10 @@ def plan_entry(bars, ev):
     #   （常高于现价）喂给 stop_plan，触发「止损锚在现价之上·买入即止损」误判
     #   （2026-09-20 康龙 8-04 实测：结构止损被算成趋势线 40.44 > 现价 39.92）。
     t0 = ma_reclaim_break(bars, ev, atr_v, last_c)
+    # ★ 2026-09-24：`ma_ride` **与 T0 是否成立无关** —— 状态本身就要能给报告看。
+    #   东材 601208 09-24 收 56.44 已创 25 日新高（头上无墙）⇒ T0 不成立，但它就是
+    #   `line_ride`；只在 T0 成立时才算 ride，等于老罗问的那只票恰恰看不到答案。
+    _ride_any = (t0 or {}).get("ride") or ma_ride_state(bars, atr_v)
     _t0z = None
     if t0:
         _t0z = {
@@ -3480,6 +3847,111 @@ def _t0_takeover(result, t0):
     return result
 
 
+def _t0_ride_redirect(result, t0, atr_v, last_c):
+    """★ `line_ride` 态的买法改道（2026-09-24）：T0 让位给「回踩被选中的那条线低吸」。
+
+    触发：T0 条件成立（站上三条均线 + 左侧平台 + 上方有墙），但 `ma_ride_state`
+    判为 `line_ride`（某条均线已上行一段、价格多数时间在线上，且现价距它 ≤ 1.5×ATR），
+    **且当日别无 recommend=True 的买点**（`_takeover` 为真）。后者是硬前提 ——
+
+    ⚠️ 优先级（2026-09-24 老罗三轮定）：「沿线上行」是**趋势背景**，「平台/W底/旗形突破」
+    是**当日事件**。事件优先。若当日已有客观突破，本函数**不会被调用**（`_takeover` 为假），
+    沿线只作为突破失败后的次选锚。理由：否则「沿均线走」几乎恒真（全池 83 只里 42 只成立），
+    会把所有形态都吃掉。
+
+    用户原话（2026-09-24）：「我是判断出东材是走五日线上升的……我想提高判断 T0 和
+    沿趋势上升的模式准确度」。全池回放（53 只 × 500 根）证实此态按 T0 过昨高 + 窄止损锚
+    最差：5 日均R −0.292 / 胜率 19% / 77% 被 MA5 锚扫掉，而「刚收复」态 +0.160 / 26% / 68%。
+
+    ⚠ 这不是「不允许开仓」（用户定：只有钱不够 / 涨停买不到 / 结构已坏 能否决交易）
+    —— 是把**入口**从「过昨高追」改成「回踩锚线挂限价」。买区通常整体在现价下方
+    （ride 态下收盘已离线上行），因此是**可预挂的限价单**，不需要盯盘。
+    """
+    ride = t0.get("ride") or {}
+    line = ride.get("line") if ride.get("line") is not None else ride.get("ma5")
+    label = ride.get("line_label") or "五日线"
+    anchor = ride.get("anchor") or "ma5"
+    if line is None or not atr_v or atr_v <= 0:
+        return result
+    lo = round(line - 0.05 * atr_v, 2)      # 下沿只留毛刺（与 line_pullback 同口径）
+    hi = round(line + 1.0 * atr_v, 2)
+    hard = round(line - 0.10 * atr_v, 2)
+    z = _empty_zone()
+    z.update({
+        "type": f"沿线回踩·{label} {round(line, 2)}（line_ride 改道）",
+        "path": "A",
+        "anchor": anchor,
+        "level": round(line, 2),
+        "base": round(line, 2),
+        "line": round(line, 2),
+        "line_label": label,
+        "primary_lo": lo,
+        "primary_hi": hi,
+        # ★ `ma5` 字段保持「真的 MA5」语义 —— 被选中的线可能是 EMA10/MA20，
+        #   池表（watch_cn / pool_us / scanner）拿它当「MA5」列显示，写成 line 会串价。
+        "ma5": ride.get("ma5"),
+        "in_zone": bool(last_c is not None and lo <= last_c <= hi),
+        "dist_atr": (round((last_c - line) / atr_v, 2) if last_c is not None else None),
+        # ★ 命中数取**被选中那条线**的回踩次数（line_bounce20），不是 MA5 的。
+        "hits": (ride.get("line_bounce20") if ride.get("line_bounce20") is not None
+                 else ride.get("bounce20")),
+        "invalidation": round(line, 2),
+    })
+    _prev_mode, _prev_verdict = result.get("mode"), result.get("verdict")
+    result["mode"] = "line_pullback"
+    result["priority"] = 1
+    result["setup"] = "pullback"
+    result["path"] = "A"
+    result["verdict"] = (
+        f"沿{label}上升（20 根斜率 {ride.get('line_slope20_pct'):+.1f}%）"
+        f"·回踩 {label} {round(line, 2)} 低吸"
+    )
+    result["recommend"] = True
+    result["tier"] = "T1"
+    result["grade"] = "沿线上行"
+    result["prev_verdict"] = _prev_verdict
+    result["t0_superseded_mode"] = _prev_mode
+    # ★ 2026-09-24 三轮：显式标记「这次真是由沿线改道而来」—— 单看 `t0_held_for_ride`
+    #   不够：当日若有**原有**的 line_pullback 买区（东材 601208 09-24：demand 锚 EMA10），
+    #   也会带 `t0_held_for_ride` 但并未改道，报告写「T0 已改道」就是误标。
+    result["ride_redirected"] = True
+    _below = last_c is not None and last_c > hi
+    _ldp, _lda = ride.get("line_dist_pct"), ride.get("line_dist_atr")
+    _dist_txt = (f"锚线距现价 {_ldp:+.1f}%"
+                 + (f"（{_lda:+.2f}×ATR）" if _lda is not None else "") + "；"
+                 ) if _ldp is not None else ""
+    result["note"] = (
+        ride.get("note", "") + f" 【改道执行】买区 {lo}~{hi}（{label}−0.05×ATR ~ {label}+1.0×ATR）"
+        + _dist_txt
+        + ("整体在现价下方 ⇒ **可预挂限价单、不需盯盘**；" if _below else
+           "与现价重叠 ⇒ 回踩已在进行，按现价/限价在区内成交；")
+        + f"结构止损 = 收盘破 {label} {round(line, 2)}，硬止损 {hard}（{label}−0.10×ATR）。"
+        f"原 T0 过昨高方案降为次选（水平 {t0.get('trigger')}）：若仍要走，须把硬止损锚"
+        f"从 {t0.get('stop_anchor') or 'MA5'} 换成更宽的「阳线下沿 / 大阳中点」，否则"
+        f"{t0.get('risk_pct')}% 的短均线锚"
+        f"在 ride 态下会被毛刺反复扫掉（全池实测 77% 止损出局）。"
+    )
+    result["exec"] = ("回踩类可预挂限价单（买区在现价下方），不需要盘中盯守" if _below
+                      else "回踩买区与现价重叠，按限价单在区内成交")
+    result["buy_zone"] = z
+    result["stop_plan"] = {
+        "struct": round(line, 2),
+        "struct_anchor": f"{label}@{round(line, 2)}（收盘破）",
+        "hard": hard,
+        "hard_anchor": label,
+        "trigger": None,
+        "struct_exec": STRUCT_EXEC,
+        "hard_exec": HARD_EXEC,
+        "hard_dist_atr": round((line - hard) / atr_v, 2),
+        "hard_noise": False,
+        "stop_basis": f"沿线回踩：结构止损 = 收盘破回踩线（{label}）；硬止损 = {label} −0.10×ATR",
+        "t0": False,
+    }
+    result.pop("stop_above_price", None)
+    result.pop("stop_warning", None)
+    return result
+
+
 def buy_zone(ev, bars):
     """兼容扫描器：买区由 plan_entry 的活需求给出，禁止硬编码均线底座。"""
     if not bars:
@@ -3773,7 +4245,10 @@ def evaluate(sym, data_file=None, eod=False):
     #   09-21 收复全部均线、09-22 过昨高，T0 早已成立，报告里却只有 T2 回踩单，
     #   用户直接反问「为什么我觉得像 T0 的变种」。
     #   纯透传，不改 mode / recommend 语义（T0 是并行执行方案，先到先做）。
-    for _k in ("ma_reclaim", "tier_t0"):
+    #   ★ 2026-09-24 追加 `t0_held_for_ride`：line_ride 态下 T0 不接管，若这个
+    #     标记被 rebuild 丢掉，报告就看不出「T0 条件成立但不该追」的原因。
+    for _k in ("ma_reclaim", "tier_t0", "t0_held_for_ride", "ma_ride", "ride_priority",
+               "ride_redirected"):
         if plan.get(_k) is not None:
             out[_k] = plan[_k]
 
