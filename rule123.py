@@ -183,6 +183,33 @@ def secid_of(ticker: str):
     return f"0.{ticker}"
 
 
+_US_AC_CACHE = {}          # sym -> "stocks" / "etf"（进程内；命中后仍只发一发）
+
+
+def _assetclass_order(s):
+    """Nasdaq assetclass 探测顺序：命中的档位优先，其余按 [stocks, etf]。
+
+    ★ 2026-09-24：原实现所有 Nasdaq 调用都写死 `assetclass=stocks`，导致
+    **ETF 全线取不到**（实测 assetclass=stocks 对 SNDQ/SOXS/MUZ/SKDD/SOXX/SMH
+    的 primaryData 为空、tradesTable 为 0 行；而 assetclass=etf 对 SNDK/ILMN 为空）。
+    两个口径各自只覆盖一半标的 —— 写死任一个都会丢掉另一半。
+    做空工具（SOXS/MUZ/SNDQ/SKDD）与板块 ETF（SOXX/SMH）全是 ETF ⇒
+    修复前「做空腿永远没有盘前价、也没有日线」。
+    """
+    order = ["stocks", "etf"]
+    hit = _US_AC_CACHE.get(s)
+    if hit in order:
+        order = [hit] + [x for x in order if x != hit]
+    return order
+
+
+def _nasdaq_info_raw(s, assetclass):
+    """Nasdaq /info 单发（指定 assetclass）。"""
+    return (fetch_json_nasdaq(
+        f"https://api.nasdaq.com/api/quote/{s}/info"
+        f"?assetclass={assetclass}").get("data") or {})
+
+
 def nasdaq_info(sym):
     """Nasdaq /info 单发 → (spot, meta)。
 
@@ -193,17 +220,35 @@ def nasdaq_info(sym):
     盘中合成正是靠 session=="Open" 与 as_of 推美东交易日，缺了就退回昨收口径
     （即 INTC 2026-09-17「突破了平台却让我买 104.03」那个坑）。
     单发实测 2–4s，比整条历史链路（约 6s）便宜一半，且不动 bars。
+
+    `assetclass` 自动探测（见 `_assetclass_order`）：**ETF 必须走 etf 档**，
+    否则盘前价恒为 None。命中档位进程内缓存，常态仍只发一发。
     """
     s = sym.upper()
-    info = (fetch_json_nasdaq(
-        f"https://api.nasdaq.com/api/quote/{s}/info?assetclass=stocks").get("data") or {})
-    pdat = info.get("primaryData") or {}
-    sdat = info.get("secondaryData") or {}
-    return _num_q(pdat.get("lastSalePrice")), {
-        "session": info.get("marketStatus") or "",
-        "as_of": pdat.get("lastTradeTimestamp"),
-        "prev_close": _num_q(sdat.get("lastSalePrice")),      # ← 唯一可靠昨收
-    }
+    last_err = None
+    connected = False
+    fb_meta = {"session": "", "as_of": None, "prev_close": None}
+    for ac in _assetclass_order(s):
+        try:
+            info = _nasdaq_info_raw(s, ac)
+        except Exception as e:            # 网络/403：换下一档再试
+            last_err = e
+            continue
+        connected = True
+        pdat = info.get("primaryData") or {}
+        sdat = info.get("secondaryData") or {}
+        meta = {"session": info.get("marketStatus") or "",
+                "as_of": pdat.get("lastTradeTimestamp"),
+                "prev_close": _num_q(sdat.get("lastSalePrice"))}   # ← 唯一可靠昨收
+        spot = _num_q(pdat.get("lastSalePrice"))
+        if spot is not None:              # 该 assetclass 认这个代码
+            _US_AC_CACHE[s] = ac
+            return spot, meta
+        if meta["prev_close"] is not None or meta["session"]:
+            fb_meta = meta                # 这一档不认代码，但留个底（保持原形状）
+    if last_err is not None and not connected:
+        raise last_err                    # 两档都是网络错 ⇒ 如实抛（调用方会回退）
+    return None, fb_meta
 
 
 def bars_from_nasdaq(sym, days=400):
@@ -219,11 +264,25 @@ def bars_from_nasdaq(sym, days=400):
     s = sym.upper()
     today = datetime.date.today()
     frm = today - datetime.timedelta(days=days)
-    j = fetch_json_nasdaq(
-        f"https://api.nasdaq.com/api/quote/{s}/historical"
-        f"?assetclass=stocks&fromdate={frm:%Y-%m-%d}&todate={today:%Y-%m-%d}&limit=300"
-    )
-    rows = ((j.get("data") or {}).get("tradesTable") or {}).get("rows") or []
+    # ★ 2026-09-24：assetclass 探测。ETF（SOXX/SMH/SOXS/SNDQ…）在 stocks 档
+    #   tradesTable 为 0 行、必须走 etf 档（实测 SOXX/SMH/SOXS 各 275 根、
+    #   SNDQ 106 根=成立日至今）。正股仍第一档命中，取数口径与行为不变。
+    rows, last_err = [], None
+    for ac in _assetclass_order(s):
+        try:
+            j = fetch_json_nasdaq(
+                f"https://api.nasdaq.com/api/quote/{s}/historical"
+                f"?assetclass={ac}&fromdate={frm:%Y-%m-%d}"
+                f"&todate={today:%Y-%m-%d}&limit=300")
+        except Exception as e:
+            last_err = e
+            continue
+        rows = ((j.get("data") or {}).get("tradesTable") or {}).get("rows") or []
+        if rows:
+            _US_AC_CACHE[s] = ac
+            break
+    if not rows and last_err is not None:
+        raise last_err                     # 两档都是网络错 ⇒ 抛，让上层回退下一源
     bars = []
     for r in rows:
         try:

@@ -1,6 +1,7 @@
 {
   "symbols": [
-    "ILMN"
+    "ILMN",
+    "SNDK"
   ],
   "interval_sec": 60,
   "note": "美股自选池。symbols 里加代码即可（大写，如 MDB、RVMD）。account = 美股账户美元。 ｜ 账户资金口径已统一到 .env / account_config.py（2026-09-21）：A股 总上限 100000 = 主力 50000 + 后备 50000；美股 US_ACCOUNT。本文件不再存 account —— 改口径请改 .env，别改这里。",
