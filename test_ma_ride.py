@@ -209,6 +209,26 @@ class TestMixedStateKeepsTakeover(unittest.TestCase):
         self.assertNotIn("t0_held_for_ride", plan)
 
 
+class TestRideDecoupledFromT0(unittest.TestCase):
+    """`ma_ride` 必须与 T0 是否成立**解耦**。
+
+    反例就是老罗点名的东材 601208 09-24：收 56.44 已创 25 日新高（头上无墙）⇒ T0 判据
+    不成立，但它恰恰就是 `line_ride`。若只在 T0 成立时才算 ride，这只票反而看不到答案。
+    """
+
+    def test_ride_reported_when_t0_absent(self):
+        bars = riding_series()
+        b = dict(bars[-1])
+        b.update({"h": 12.60, "c": 12.45, "o": 12.30, "l": 12.20})
+        bars = bars[:-1] + [b]
+        ev, bars2, _ = R.build_ev(bars, drop_live=False, ticker="688999")
+        plan = R.plan_entry(bars2, ev)
+        self.assertIsNone(plan.get("ma_reclaim"),
+                          "前提：收盘创 25 根窗口新高 ⇒ 头上无墙 ⇒ T0 不成立")
+        self.assertIn("ma_ride", plan, "T0 不成立时仍必须给出模式判别")
+        self.assertEqual(plan["ma_ride"]["state"], "line_ride")
+
+
 class TestEvaluatePassThrough(unittest.TestCase):
     """`evaluate()` 是重建 out（逐字段挑）—— 新字段漏了就只在 report 里消失。"""
 

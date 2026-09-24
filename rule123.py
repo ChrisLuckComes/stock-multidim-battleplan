@@ -3154,6 +3154,8 @@ def plan_entry(bars, ev):
         #                              → T0 接管。★ 这两条是 T1 的纪律，与 T0 天然冲突：
         #                                T0 要的正是「大阳次日的过昨高」，不是等回踩。
         #   其他 recommend==True 的形态  → 保留原 mode，T0 仅并列挂载（先到先做）
+        if _ride_any:
+            result["ma_ride"] = _ride_any
         if t0:
             result["ma_reclaim"] = t0
             result["tier_t0"] = "T0"
@@ -3201,6 +3203,10 @@ def plan_entry(bars, ev):
     #   （常高于现价）喂给 stop_plan，触发「止损锚在现价之上·买入即止损」误判
     #   （2026-09-20 康龙 8-04 实测：结构止损被算成趋势线 40.44 > 现价 39.92）。
     t0 = ma_reclaim_break(bars, ev, atr_v, last_c)
+    # ★ 2026-09-24：`ma_ride` **与 T0 是否成立无关** —— 状态本身就要能给报告看。
+    #   东材 601208 09-24 收 56.44 已创 25 日新高（头上无墙）⇒ T0 不成立，但它就是
+    #   `line_ride`；只在 T0 成立时才算 ride，等于老罗问的那只票恰恰看不到答案。
+    _ride_any = (t0 or {}).get("ride") or ma_ride_state(bars, atr_v)
     _t0z = None
     if t0:
         _t0z = {
@@ -3993,7 +3999,7 @@ def evaluate(sym, data_file=None, eod=False):
     #   纯透传，不改 mode / recommend 语义（T0 是并行执行方案，先到先做）。
     #   ★ 2026-09-24 追加 `t0_held_for_ride`：line_ride 态下 T0 不接管，若这个
     #     标记被 rebuild 丢掉，报告就看不出「T0 条件成立但不该追」的原因。
-    for _k in ("ma_reclaim", "tier_t0", "t0_held_for_ride"):
+    for _k in ("ma_reclaim", "tier_t0", "t0_held_for_ride", "ma_ride"):
         if plan.get(_k) is not None:
             out[_k] = plan[_k]
 

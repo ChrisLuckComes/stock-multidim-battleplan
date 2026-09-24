@@ -74,7 +74,7 @@ stock-multidim-battleplan/
 ├── research_ma_ride.py  # 「均线刚收复 vs 沿五日线上升」判别器的实证复现（T0 改道依据）
 ├── test_breakout_modes.py
 ├── test_living_platform.py
-├── test_ma_ride.py           # 「均线刚收复 vs 沿五日线上升」模式判别 + T0 改道回归（13 项）
+├── test_ma_ride.py           # 「均线刚收复 vs 沿五日线上升」模式判别 + T0 改道回归（14 项）
 ├── test_pre_runup.py
 ├── test_review_fixes.py
 ├── test_stock_character.py  # 股性体检回归（34 项）

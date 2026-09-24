@@ -136,6 +136,15 @@ def build_kpis(a, n):
         badges.append('<span class="badge b-t1">T0 并行入口：过昨高 %s / 止损 %s（%s）</span>'
                       % (num(_t0.get("trigger")), num(_t0.get("hard_stop")),
                          esc(_t0.get("stop_anchor") or "锚")))
+    # ★ 2026-09-24：T0 不成立时也要把模式判别挂出来（东材 601208 09-24 已创 25 日新高
+    #   ⇒ T0 判据不成立，但它就是 line_ride —— 只在 T0 成立时才显示等于答案缺失）。
+    _ride_any = p.get("ma_ride") or {}
+    if _ride_any.get("state") and not (_t0 and (_t0.get("ride") or {}).get("state") == "line_ride"):
+        _cls = "b-no" if _ride_any["state"] == "line_ride" else "b-ok"
+        badges.append('<span class="badge %s">模式判别 = %s（MA5 20 根斜率 %s%% · '
+                      '近 20 根 %s 根在线上）</span>'
+                      % (_cls, esc(_ride_any["state"]),
+                         num(_ride_any.get("ma5_slope20_pct")), int(_ride_any.get("above20") or 0)))
     for x in (n.get("badges") or []):
         if isinstance(x, dict):
             badges.append('<span class="badge %s">%s</span>' % (x.get("cls", "b-ok"), x.get("txt", "")))
