@@ -42,16 +42,30 @@ WIDTH_INDEXES = ["1.000001", "0.399001"]   # 仅沪+深，避免创业板重复
 TRADE_SESSIONS = [(9 * 60 + 30, 11 * 60 + 30), (13 * 60, 15 * 60)]  # 分钟
 FULL_MINUTES = 240
 
+# ---- 两个「待校准」映射常数（改这两个值会直接跨档，勿凭手感调）----
+# 宽度中性点：上涨占比多少算「不偏不倚」。A股跌家数常年多于涨家数，取 45% 而非 50%。
+WIDTH_CENTER = 0.45
+# 宽度斜率：每偏离中性点 1 个百分点折几分。
+WIDTH_SLOPE = 200.0
+# 资金斜率：主力净额/成交额 每 1 个百分点折几分。1000 ⇒ ±5% 触顶/触底，
+# 保留「中等流出 vs 重度流出」的区分度；2000 会让 -2.5% 即归零、失去区分。
+MONEY_SLOPE = 1000.0
+
 WEIGHTS = {"width": 0.35, "temp": 0.20, "money": 0.20, "trend": 0.15, "volume": 0.10}
 
-# 情绪分 -> 环境闸门（直接对应仓位纪律）
+# 情绪分 -> 仓位缩放（**不是开/不开仓的开关**）
 LEVELS = [
-    (70, "强",     "环境允许：可按计划执行标准仓"),
-    (55, "偏强",   "环境尚可：标准仓，弱票仍不追"),
+    (70, "强",     "可按计划执行标准仓"),
+    (55, "偏强",   "标准仓，弱票不追"),
     (45, "中性",   "只做最强龙头，半仓"),
-    (30, "偏弱",   "只观察 / 小仓试错（≤1/4 仓），禁标准仓"),
-    (0,  "极弱",   "禁开新仓；已持仓按纪律执行止损"),
+    (30, "偏弱",   "小仓试错（≤1/4 仓），禁标准仓"),
+    (0,  "极弱",   "缩到最小仓或观望；已持仓按纪律执行止损"),
 ]
+
+# 性质声明（读分数前先读这句）
+SOFT_NOTE = ("情绪分是**软约束**：只缩放仓位，不构成「开/不开仓」的开关。"
+             "能否决一笔交易的只有硬约束——资金不足（最小申报单位×股价 > 仓位上限）、"
+             "涨停买不到、结构已坏。")
 
 
 def fetch_json(url, timeout=20, retries=3):
@@ -163,12 +177,18 @@ def ymd(v):
 
 
 def score_width(adv, dec):
+    """上涨占比 → 0-100 分。
+
+    中性点取 WIDTH_CENTER（默认 45%）而非 50%：A 股小盘 / ST / 退市风险股结构性偏弱，
+    跌家数常年多于涨家数，用 50% 会让本维度全年负偏（普跌日常态被压到低分区、失去区分度）。
+    斜率 200 = 每偏离中性点 1 个百分点 ±2 分；上涨占比 ≤20% 归零、≥70% 满分。
+    常数属**待校准参数**，攒够历史落盘（--out）后可用滚动分位数替换，见 sentiment_calibrate.py。
+    """
     tot = adv + dec
     if tot <= 0:
         return 50.0, 0.0
     r = adv / tot
-    # 上涨占比 50% = 50 分；每偏离 1 个百分点 ±2 分（25%→0，75%→100）
-    return clamp(50 + (r - 0.5) * 200), r
+    return clamp(50 + (r - WIDTH_CENTER) * WIDTH_SLOPE), r
 
 
 def score_temp(zt, dt, day_frac=1.0):
@@ -181,11 +201,11 @@ def score_temp(zt, dt, day_frac=1.0):
 
 
 def score_money(net_amt, amount):
+    """主力净额占成交额 → 0-100 分。0% = 50 分；斜率 MONEY_SLOPE=1000 ⇒ -5% 归零。"""
     if not amount:
         return 50.0, 0.0
     r = net_amt / amount
-    # 主力净额占成交额 0% = 50 分；每 ±0.5% ≈ ±10 分
-    return clamp(50 + r * 2000), r
+    return clamp(50 + r * MONEY_SLOPE), r
 
 
 def score_trend(poses):
@@ -310,6 +330,7 @@ def analyze(now=None, force_minutes=None):
         "score": round(score, 1),
         "level": level,
         "action": action,
+        "note": SOFT_NOTE,
         "dims": {
             "width": {"score": round(w_score, 1), "weight": WEIGHTS["width"],
                       "adv": adv, "dec": dec, "flat": flat,
@@ -342,7 +363,8 @@ def render(r):
              f"{'· 非交易时段，读数为最近收盘' if r['pre_open'] else ''}）")
     L.append("=" * 62)
     L.append(f"情绪分  {r['score']:>5.1f} / 100      【{r['level']}】")
-    L.append(f"环境闸门：{r['action']}")
+    L.append(f"仓位缩放：{r['action']}")
+    L.append(f"⚠ 性质：{SOFT_NOTE}")
     L.append("-" * 62)
     L.append(f"{'维度':<10}{'得分':>7}{'权重':>7}   原始读数")
     L.append(f"{'市场宽度':<10}{d['width']['score']:>7.1f}{d['width']['weight']*100:>6.0f}%   "
@@ -371,6 +393,8 @@ def render(r):
              f"（{ratio if ratio is not None else '—'}x）")
     L.append("-" * 62)
     L.append("分级口径：≥70 强 | 55-70 偏强 | 45-55 中性 | 30-45 偏弱 | <30 极弱")
+    L.append(f"映射常数：宽度中性点 {WIDTH_CENTER:.0%}（斜率 {WIDTH_SLOPE:.0f}）| "
+             f"资金斜率 {MONEY_SLOPE:.0f}（±{50/MONEY_SLOPE*100:.1f}% 触顶/底）")
     L.append("注：涨停中性值随当日进度缩放；池子日期不符时该项固定 50 分。")
     L.append("    请结合原始读数看，不要只看总分。")
     return "\n".join(L)
