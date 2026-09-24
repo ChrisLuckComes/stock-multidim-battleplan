@@ -88,6 +88,13 @@ def test_classify_mixed():
     assert k == "mixed" and "混合" in label
 
 
+def test_classify_shock_alone_stays_mixed():
+    # 冲击率只展示。赔率 1.2、延续率 45% 仍是混合型，不因冲击率 >70% 改成消化型。
+    a = {"odds": 1.2, "cont_rate": 0.45, "shock_rate": 0.8}
+    k, _, _ = sc.classify(a)
+    assert k == "mixed"
+
+
 def test_classify_unknown():
     a = {"odds": None, "cont_rate": None, "shock_rate": None}
     k, _, _ = sc.classify(a)
