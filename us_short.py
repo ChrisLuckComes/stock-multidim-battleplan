@@ -25,6 +25,10 @@
   python us_short.py MU --etf MUZ             # 指定反向工具（默认按映射表）
   python us_short.py SNDK --beta 1.95         # 用实测 beta 替代名义杠杆
 
+股池映射（2026-09-24 配置化）：正股 ↔ 反向ETF 对应关系在仓库根 `reverse_etf.json`
+的 pairs 里维护（etf/lev 必填，beta/note 可选），加一对就支持一只新票，代码零改动。
+无映射时脚本会提示怎么加；内置兜底只有 MU/SNDK/SKHY/SOXX 四对。
+
 多空转换（2026-09-24 老罗追加需求）：
   「在压力位/非常超买处做空，到支撑位平空，站稳支撑则建议做多」→ 输出
   「多空转换地图」：上方压力位=做空参考（反抽站不上才空，RSI≥70 加分），
@@ -35,6 +39,7 @@
 返回码：0 正常；2 = 数据不可用。
 """
 import argparse
+import json
 import os
 import sys
 
@@ -48,13 +53,48 @@ except Exception:
 
 import rule123 as R          # noqa: E402  指标只走引擎口径（Wilder ATR / SMA）
 
-# 已核实方向与名义杠杆的反向 ETF（勿凭记忆扩充，新工具须先核 direction 成立日）
-REVERSE_ETF = {
-    "MU": ("MUZ", 2.0),
-    "SNDK": ("SNDQ", 2.0),
-    "SKHY": ("SKDD", 2.0),
-    "SOXX": ("SOXS", 3.0),
+# 已核实方向与名义杠杆的反向 ETF —— **配置化（2026-09-24）**：真实股池在
+# `reverse_etf.json`（老罗自行扩充），此处仅留代码内置兜底（文件缺失/损坏时用，
+# 保证脚本不至于因为配置问题整个跑不了）。扩充新对前仍须先核 direction/
+# 杠杆/成立日——json 的 _readme 字段写了核实清单。
+DEFAULT_REVERSE_ETF = {
+    "MU": {"etf": "MUZ", "lev": 2.0},
+    "SNDK": {"etf": "SNDQ", "lev": 2.0},
+    "SKHY": {"etf": "SKDD", "lev": 2.0},
+    "SOXX": {"etf": "SOXS", "lev": 3.0},
 }
+REVERSE_ETF_PATH = os.path.join(HERE, "reverse_etf.json")
+
+_MAP_CACHE = None
+
+
+def load_reverse_etf(path=None, refresh=False):
+    """读 reverse_etf.json 并叠加到内置兜底上（配置优先）。
+
+    返回 {sym: {"etf":…, "lev":…, "beta":…(可选), "note":…(可选)}}。
+    文件缺失 → 只用内置兜底；JSON 损坏 / pairs 非法 → ValueError（配置错了
+    要人改，不许静默吞掉）。进程内缓存，refresh=True 强制重读。
+    """
+    global _MAP_CACHE
+    p = path or REVERSE_ETF_PATH
+    if not refresh and _MAP_CACHE is not None and _MAP_CACHE[0] == p:
+        return _MAP_CACHE[1]
+    merged = {k: dict(v) for k, v in DEFAULT_REVERSE_ETF.items()}
+    if os.path.exists(p):
+        with open(p, encoding="utf-8") as f:
+            cfg = json.load(f)
+        pairs = cfg.get("pairs") if isinstance(cfg, dict) else None
+        if not isinstance(pairs, dict) or not pairs:
+            raise ValueError(f"{p}: 缺少非空 'pairs' 对象")
+        for sym, it in pairs.items():
+            if not isinstance(it, dict) or not it.get("etf"):
+                raise ValueError(f"{p}: pairs.{sym} 缺 'etf' 字段")
+            if not isinstance(it.get("lev"), (int, float)) or it["lev"] <= 0:
+                raise ValueError(f"{p}: pairs.{sym} 的 'lev' 必须是正数")
+            merged[sym.upper()] = {k: v for k, v in it.items() if v is not None}
+    _MAP_CACHE = (p, merged)
+    return merged
+
 RR_LADDER = (3.0, 2.5, 2.0, 1.5, 1.0)   # 门槛 = 1.5
 STOP_ATR_MULT = 0.30                    # 止损锚 = MA5 + 0.30×ATR（9/24 定稿）
 NOISE_ATR = 0.25                        # 止损距离 <0.25×ATR = 噪声带
@@ -313,9 +353,12 @@ def main():
               else f"    {txt}")
     print()
     print("── 反向 ETF 换算（买入 = 做空；sell short = 双倍做多）──")
-    etf, lev_default = REVERSE_ETF.get(sym, (a.etf, None))
-    etf_code = (a.etf or etf or "").upper() if (a.etf or etf) else None
-    lev = a.beta or a.lev or lev_default
+    pair = load_reverse_etf().get(sym, {})
+    etf_code = (a.etf or pair.get("etf") or "")
+    etf_code = etf_code.upper() if etf_code else None
+    lev = a.beta or a.lev or pair.get("beta") or pair.get("lev")
+    if pair.get("note"):
+        print(f"  ※ {pair['note']}")
     etf_ref = None
     if etf_code and lev:
         try:
@@ -331,7 +374,9 @@ def main():
         except Exception as e:
             print(f"  [{etf_code}] 换算取数失败：{e}")
     else:
-        print(f"  （{sym} 无已核实映射；用 --etf CODE --lev N 显式指定）")
+        print(f"  （{sym} 无映射；往 reverse_etf.json 的 pairs 里加一行"
+              f"\"{sym}\": {{\"etf\": \"…\", \"lev\": 2.0}}，"
+              f"或用 --etf CODE --lev N 临时指定）")
     print()
     if a.entry is not None:
         entry = a.entry

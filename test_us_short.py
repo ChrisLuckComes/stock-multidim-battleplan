@@ -112,9 +112,48 @@ eq("最大亏损", p["max_loss"], int(75 // 31.71) * 31.71)
 chk("T1 收益为正", p["gain_t1"] > 0)
 chk("止损无效返回 None", U.position_rows(1807, 1807, 1680.53, 1636.43, 5000, 1.5) is None)
 
-# ── 8. 映射表互锁（防凭记忆扩充）──
-for und, (etf, lev) in U.REVERSE_ETF.items():
-    chk(f"映射 {und}->{etf} 杠杆合理", lev in (2.0, 3.0), f"lev={lev}")
+# ── 8. 映射表：配置化加载（reverse_etf.json 优先，内置兜底）──
+import json
+import os
+import tempfile
+
+m = U.load_reverse_etf(refresh=True)
+chk("配置含内置四对", {"MU", "SNDK", "SKHY", "SOXX"} <= set(m), str(sorted(m)))
+chk("配置含 AAOI->AAOZ（2026-09-24 老罗扩充）",
+    m.get("AAOI", {}).get("etf") == "AAOZ" and m["AAOI"]["lev"] == 2.0, str(m.get("AAOI")))
+chk("配置 note 透传", "AUM" in (m.get("AAOI", {}).get("note") or ""))
+chk("配置键统一大写", all(k == k.upper() for k in m))
+
+# 覆盖语义：json 里的对覆盖内置，内置独有的保留
+with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as tf:
+    json.dump({"pairs": {"SNDK": {"etf": "XXXX", "lev": 2.0},
+                         "XYZ": {"etf": "YYY", "lev": 2.0}}},
+              tf)
+    tmp_path = tf.name
+m2 = U.load_reverse_etf(path=tmp_path, refresh=True)
+eq("json 覆盖内置 SNDK.lev", m2["SNDK"]["lev"], 2.0)
+chk("json 覆盖内置 SNDK.etf", m2["SNDK"]["etf"] == "XXXX", str(m2["SNDK"]))
+chk("内置 MU 保留", m2.get("MU", {}).get("etf") == "MUZ")
+chk("新增 XYZ 收录", m2.get("XYZ", {}).get("etf") == "YYY")
+os.unlink(tmp_path)
+
+# 文件缺失 → 只剩内置兜底
+m3 = U.load_reverse_etf(path=os.path.join(tempfile.gettempdir(), "no_such_map.json"),
+                        refresh=True)
+chk("缺文件回退内置", set(m3) == set(U.DEFAULT_REVERSE_ETF), str(sorted(m3)))
+
+# 非法配置必须报错（不许静默吞）
+with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as tf:
+    json.dump({"pairs": {"BAD": {"etf": "X", "lev": -1}}}, tf)
+    bad_path = tf.name
+chk("lev<=0 报错", _raises(lambda: U.load_reverse_etf(path=bad_path, refresh=True)))
+os.unlink(bad_path)
+with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as tf:
+    tf.write("{broken")
+    bad_path2 = tf.name
+chk("JSON 损坏报错", _raises(lambda: U.load_reverse_etf(path=bad_path2, refresh=True)))
+os.unlink(bad_path2)
+U.load_reverse_etf(refresh=True)   # 恢复缓存，免得污染后续用例
 
 # ── 9. rsi14（Wilder 口径）──
 eq("rsi 手算锚 n=5", U.rsi14([2, 2.5, 2.2, 2.8, 2.4, 3.0], n=5), 100 * 0.34 / 0.48, tol=1e-9)

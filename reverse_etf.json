@@ -1,0 +1,10 @@
+{
+  "_readme": "做空股池映射（2026-09-24 从 us_short.py 硬编码提取）。新增一对前必须核实三件事：① 方向（官网/基金全称含 Short，如 Tradr 2X Short XXX Daily）② 名义杠杆 lev ③ 成立日 since。可选 beta=实测单日反向系数（换算时优先于 lev，也可运行时 --beta 覆盖）。买入 etf = 做空正股；券商 sell short = 双倍做多，方向勿反。",
+  "pairs": {
+    "MU":   { "etf": "MUZ",  "lev": 2.0, "since": "2026-06-08", "issuer": "Defiance" },
+    "SNDK": { "etf": "SNDQ", "lev": 2.0, "since": "2026-04-22", "issuer": "Tradr", "note": "2026-07-21 做过 1:10 反向拆股" },
+    "SKHY": { "etf": "SKDD", "lev": 2.0, "since": "2026-07-14", "issuer": "GraniteShares", "note": "费率 2.20%" },
+    "SOXX": { "etf": "SOXS", "lev": 3.0, "since": null, "issuer": "Direxion" },
+    "AAOI": { "etf": "AAOZ", "lev": 2.0, "since": "2026-07-14", "issuer": "Tradr", "note": "AUM 仅约 $5.6M，盘口薄、滑点大；正股 AAOI 波动极大，止损务必放宽" }
+  }
+}
