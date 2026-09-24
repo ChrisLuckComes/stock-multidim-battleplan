@@ -127,20 +127,24 @@ class TestRideState(unittest.TestCase):
                           "不足 20+6 根无法判 20 根斜率，必须返回 None 而不是瞎猜")
 
     def test_same_dist_ma5_different_state(self):
-        """**同样「距 MA5 +5%」的两段序列必须判出不同态** —— 这正是旧 4% 阈门的死穴。
+        """**同样「距 MA5」的两段序列必须判出不同态** —— 这正是旧 4% 阈门的死穴。
 
-        旧口径下这两段都是「>4% ⇒ 不按 T0 追」，但一段是沿线上行（改道回踩）、
+        旧口径下两段都是「>4% ⇒ 不按 T0 追」，但一段是沿线上行（改道回踩）、
         一段是刚收复（T0 成立）。判别必须来自状态，而不是那个百分比。
+        ⚠️ 距 MA5 的绝对值只在此处取小值（0.5%）—— 因为 2026-09-24 三轮又加了一条
+        **独立的**闸门：距最近候选线 > `MA_RIDE_ANCHOR_MAX_ATR` 时不再是 line_ride，
+        而是 `new_high`（无锚=新高，见 `TestNewHighNoAnchor`）。两条闸门语义不同：
+        这条管「趋势还是刚收复」，那条管「够不够得着、有没有回踩锚」。
         """
-        rid = _force_last_dist(riding_series(), 0.05)
-        dec = _force_last_dist(declining_series(), 0.05)
+        rid = _force_last_dist(riding_series(), 0.005)
+        dec = _force_last_dist(declining_series(), 0.005)
         s_rid = R.ma_ride_state(rid, R.atr14(rid))
         s_dec = R.ma_ride_state(dec, R.atr14(dec))
-        self.assertAlmostEqual(s_rid["dist_ma5_pct"], 5.0, delta=0.4)
-        self.assertAlmostEqual(s_dec["dist_ma5_pct"], 5.0, delta=0.4)
+        self.assertAlmostEqual(s_rid["dist_ma5_pct"], 0.5, delta=0.4)
+        self.assertAlmostEqual(s_dec["dist_ma5_pct"], 0.5, delta=0.4)
         self.assertEqual(s_rid["state"], "line_ride")
         self.assertEqual(s_dec["state"], "fresh_reclaim",
-                         "距 MA5 同为 +5%，但 MA5 20 根斜率为负 = 刚收复 ⇒ 两态必须分开")
+                         "距 MA5 相同，但 MA5 20 根斜率为负 = 刚收复 ⇒ 两态必须分开")
 
     def test_ride_can_be_longer_ma(self):
         """沿线上涨不写死五日线。价格落到五日线下面时，仍可贴着更长的均线。"""
@@ -177,6 +181,12 @@ class TestRideRedirect(unittest.TestCase):
         self.assertIn("t0_held_for_ride", self.plan)
         self.assertEqual(self.plan["t0_held_for_ride"]["preferred"], "line_pullback")
         self.assertEqual(self.plan["t0_superseded_mode"], "wait")
+
+    def test_redirect_flag_is_explicit(self):
+        """`ride_redirected` 必须显式为真 —— 光有 `t0_held_for_ride` 区分不了「真改道」
+        与「当日原有 line_pullback」（东材 601208 09-24 就是后者，报告曾误标「已改道」）。"""
+        self.assertTrue(self.plan.get("ride_redirected"))
+        self.assertEqual((self.plan.get("ride_priority") or {}).get("winner"), "ride")
 
     def test_buy_zone_is_ma5_pullback(self):
         z = self.plan["buy_zone"]
@@ -224,11 +234,157 @@ class TestMixedStateKeepsTakeover(unittest.TestCase):
         self.assertNotIn("t0_held_for_ride", plan)
 
 
+class TestNewHighNoAnchor(unittest.TestCase):
+    """「没有锚点就代表是新高，不需要找锚」（老罗 2026-09-24 三轮原话）。
+
+    振华股份 603067 当时被标成 `line_ride`、锚 MA20 36.36 —— 可现价高出该线 **2.20×ATR**，
+    离「贴着它走」十万八千里；而它当日是实打实的平台突破（活平台沿 40.89、刚站上 1 根）。
+    「沿均线走」这种几乎恒真的描述不该盖住客观形态。
+    ⇒ 距最近候选线 > `MA_RIDE_ANCHOR_MAX_ATR`(1.5)×ATR ⇒ 判 `new_high`（无回踩锚），
+       `prefer` 走 breakout，不再改道回踩。
+
+    门槛 1.5×ATR 的实证落点（`research_ride_priority.py`，突破日 n=1560）：
+      距线 0.5~1.0×ATR ⇒ 5 日内回踩触及率 66%、触及后期望 +1.59%
+      距线 >1.5×ATR   ⇒ 触及率跌到 24%、期望转负 −0.22%（这条线已不是可用回踩锚）
+      同日突破买（1.5×ATR 止损）在远锚档反而最好（+0.278R / +1.68%）
+    """
+
+    def _far(self):
+        return _force_last_dist(riding_series(), 0.05)
+
+    def test_close_anchor_is_line_ride(self):
+        bars = riding_series()
+        s = R.ma_ride_state(bars, R.atr14(bars))
+        self.assertEqual(s["state"], "line_ride")
+        self.assertLessEqual(s["line_dist_atr"], R.MA_RIDE_ANCHOR_MAX_ATR)
+        self.assertEqual(s["prefer"], "line_pullback")
+
+    def test_far_anchor_is_new_high(self):
+        bars = self._far()
+        s = R.ma_ride_state(bars, R.atr14(bars))
+        self.assertEqual(s["state"], "new_high",
+                         "距最近候选线 >1.5×ATR ⇒ 没有回踩锚 ⇒ 新高，不该叫「沿线上行」")
+        self.assertGreater(s["line_dist_atr"], R.MA_RIDE_ANCHOR_MAX_ATR)
+        self.assertEqual(s["prefer"], "breakout")
+        self.assertIn("新", s["note"])
+        self.assertEqual(s["anchor_max_atr"], R.MA_RIDE_ANCHOR_MAX_ATR)
+        # 仍要报出「最近那条候选线」，否则用户看不懂为什么不给锚
+        self.assertIsNotNone(s["line"])
+        self.assertIsNotNone(s["line_label"])
+
+    def test_far_anchor_does_not_redirect(self):
+        """`new_high` 不得触发回踩改道（`t0_held_for_ride` / `line_pullback` 都不该出现）。"""
+        bars = self._far()
+        ev, bars2, _ = R.build_ev(bars, drop_live=False, ticker="688999")
+        plan = R.plan_entry(bars2, ev)
+        self.assertIsNone(plan.get("t0_held_for_ride"))
+        self.assertNotEqual(plan.get("mode"), "line_pullback")
+        self.assertNotIn("line_ride 改道", json.dumps(plan, ensure_ascii=False))
+
+    def test_no_anchor_gate_without_atr(self):
+        """不给 ATR 时不做这条闸门 —— 回到纯状态判别（对外接口的向后兼容）。"""
+        bars = self._far()
+        s = R.ma_ride_state(bars, None)
+        self.assertEqual(s["state"], "line_ride")
+        self.assertIsNone(s["line_dist_atr"])
+
+    def test_anchor_gate_used_by_engine(self):
+        """引擎侧真的接上了这条闸门：`plan["ride_priority"]` 写明突破优先。"""
+        bars = self._far()
+        ev, bars2, _ = R.build_ev(bars, drop_live=False, ticker="688999")
+        plan = R.plan_entry(bars2, ev)
+        self.assertEqual(plan["ma_ride"]["state"], "new_high")
+        rp = plan.get("ride_priority") or {}
+        self.assertEqual(rp.get("winner"), "breakout")
+        self.assertEqual(rp.get("ride_role"), "无（不给回踩锚）")
+
+
+def flat_then_break(lip=10.05, brk=10.15, n=60):
+    """60 根在 9.95~10.05 反复触碰、末根收 10.15 站上平台沿 ⇒ 合成 `platform_break`。
+
+    取 brk−lip ≈ 1×ATR，避开 `pack()` 的「突破已延伸·>2×ATR 不追」降级，确保 recommend=True。
+    """
+    d = datetime.date(2026, 3, 1)
+    bars = [{"d": (d + datetime.timedelta(days=i)).isoformat(), "o": 10.00,
+             "h": lip, "l": 9.95, "c": 10.00, "v": 1.0e6} for i in range(n)]
+    bars.append({"d": (d + datetime.timedelta(days=n)).isoformat(), "o": 10.02,
+                 "h": round(brk + 0.03, 2), "l": 10.00, "c": brk, "v": 2.0e6})
+    return bars
+
+
+def _fake_ride(state="line_ride", **kw):
+    d = {"state": state, "anchor": "ma5", "line": 10.02, "line_label": "五日线",
+         "line_slope20_pct": 3.1, "line_above20": 14, "line_bounce20": 6,
+         "line_dist_pct": 1.3, "line_dist_atr": 1.1, "anchor_max_atr": 1.5,
+         "ma5_slope20_pct": 3.1, "above20": 14, "ma5": 10.02,
+         "prefer": "line_pullback", "note": "假状态（测试注入）"}
+    d.update(kw)
+    return d
+
+
+class TestRidePriorityOverBackground(unittest.TestCase):
+    """沿线是**背景**、当日形态是**事件** ⇒ 事件优先（老罗 2026-09-24 三轮）。
+
+    他原话：「但平台突破是客观存在的，这个优先级，你要想想到底怎么判定。
+    否则所有股大部分时间都是沿均线走的。」—— 全池 83 只里 42 只 line_ride（占一半），
+    若它能随意抢位，客观形态全被吃掉。
+    """
+
+    def _plan(self, ride_state="line_ride", **ride_kw):
+        """用「合成平台突破 + 注入 ride 状态」把两条路摆在同一天。"""
+        bars = flat_then_break()
+        ev, bars2, _ = R.build_ev(bars, drop_live=False, ticker="688999")
+        orig = R.ma_ride_state
+        R.ma_ride_state = lambda *a, **k: _fake_ride(ride_state, **ride_kw)
+        try:
+            return R.plan_entry(bars2, ev)
+        finally:
+            R.ma_ride_state = orig
+
+    def test_breakout_beats_line_ride_on_same_day(self):
+        """当日已有 platform_break 且 recommend=True ⇒ mode 不被沿线改道，且写明突破优先。
+
+        数据依据（`research_ride_priority.py`，突破日 n=1560）：同日突破买（1.5×ATR 止损）
+        均R +0.212 / 收益 +1.16% / 胜 44%；而「挂限价等回踩」只有 31% 的日子等得到
+        （每机会 +0.39%）⇒ 拿沿线去改道客观突破是净损失。
+        """
+        plan = self._plan()
+        self.assertEqual(plan.get("mode"), "platform_break",
+                         "前提：当日确实是平台突破且 recommend=True")
+        self.assertTrue(plan.get("recommend"))
+        rp = plan.get("ride_priority") or {}
+        self.assertEqual(rp.get("winner"), "breakout",
+                         "沿线上行是背景，不能改道掉当日的客观突破")
+        self.assertEqual(rp.get("mode"), "platform_break")
+        self.assertIsNone(plan.get("t0_held_for_ride"),
+                          "T0 未接管：突破优先（这里也没有 T0 可接管）")
+        self.assertIn("次选", rp.get("ride_role") or "")
+
+    def test_line_ride_wins_when_no_other_setup(self):
+        """当日别无买点时，沿线回踩锚是**唯一入口** ⇒ winner=ride，不牺牲任何突破机会。
+
+        `riding_series()` 就是这形状：沿线上行 + T0 成立 + 当日原本无买点 ⇒ 改道
+        `line_pullback`（有研硅 688432 09-24 实盘即此）。
+        """
+        bars = riding_series()
+        ev, bars2, _ = R.build_ev(bars, drop_live=False, ticker="688999")
+        plan = R.plan_entry(bars2, ev)
+        self.assertEqual(plan.get("mode"), "line_pullback",
+                         "前提：沿线上行 + T0 成立 + 当日无其他买点 ⇒ 改道回踩")
+        rp = plan.get("ride_priority") or {}
+        self.assertEqual(rp.get("winner"), "ride")
+        self.assertEqual(rp.get("line"), plan["ma_ride"]["line"])
+
+
 class TestRideDecoupledFromT0(unittest.TestCase):
     """`ma_ride` 必须与 T0 是否成立**解耦**。
 
-    反例就是老罗点名的东材 601208 09-24：收 56.44 已创 25 日新高（头上无墙）⇒ T0 判据
+    反例就是老罗点名的东材 601208 09-24：收 56.44 已创 25 根窗口新高（头上无墙）⇒ T0 判据
     不成立，但它恰恰就是 `line_ride`。若只在 T0 成立时才算 ride，这只票反而看不到答案。
+
+    本用例把末根直接跳到远高于均线的新高 ⇒ 按三轮的锚闸门判为 `new_high`
+    （东材实盘距 MA5 只有 0.55×ATR，所以它是 `line_ride`）；要断言的是
+    **「(ma_ride) 必须在」** 这条不变 —— 只在 T0 成立时才算 ride，等于这只票看不到答案。
     """
 
     def test_ride_reported_when_t0_absent(self):
@@ -241,7 +397,8 @@ class TestRideDecoupledFromT0(unittest.TestCase):
         self.assertIsNone(plan.get("ma_reclaim"),
                           "前提：收盘创 25 根窗口新高 ⇒ 头上无墙 ⇒ T0 不成立")
         self.assertIn("ma_ride", plan, "T0 不成立时仍必须给出模式判别")
-        self.assertEqual(plan["ma_ride"]["state"], "line_ride")
+        self.assertIn(plan["ma_ride"]["state"], ("line_ride", "new_high"))
+        self.assertEqual(plan["ma_ride"]["prefer"], "breakout")
 
 
 class TestRideAnchorNotHardcodedToMa5(unittest.TestCase):

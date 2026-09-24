@@ -128,33 +128,53 @@ def build_kpis(a, n):
     #   会直接反问「为什么像 T0 的变种」。这里把它显式挂到首屏徽标上。
     _t0 = p.get("ma_reclaim") or {}
     _rd = _t0.get("ride") or {}
+    _ride_any = p.get("ma_ride") or {}
+    _rp = p.get("ride_priority") or {}
     if _t0 and _rd.get("state") == "line_ride":
-        # ★ 2026-09-24：line_ride 态 T0 已改道 —— 徽标必须写「不追」，别让人当成首选入口。
-        #   ★ 当晚补：锚线不写死五日线，价位/名称一律取 `line*`（全池 42 只 line_ride 里
-        #     21 只锚 EMA10/MA20，取 ma5 会报出错误价位）。
         _lbl = _rd.get("line_label") or "五日线"
         _ln = _rd.get("line") if _rd.get("line") is not None else _rd.get("ma5")
-        badges.append('<span class="badge b-no">T0 已改道：沿%s上升 · '
-                      '回踩 %s %s 低吸（原过昨高 %s 不作首选）</span>'
-                      % (esc(_lbl), esc(_lbl), num(_ln), num(_t0.get("trigger"))))
+        if p.get("ride_redirected"):
+            # ★ 2026-09-24：line_ride 态且当日别无买点 ⇒ T0 已改道到回踩锚 —— 徽标必须
+            #   写「不追」，别让人当成首选入口。锚线不写死五日线（取 `line*`）。
+            #   ⚠️ 必须用 `ride_redirected` 而不是「mode==line_pullback 且有 t0_held_for_ride」：
+            #     东材 601208 09-24 当日**本来就有** line_pullback 买区（demand 锚 EMA10），
+            #     也带 t0_held_for_ride，但并未改道 —— 旧判据会误标成「T0 已改道」。
+            badges.append('<span class="badge b-no">T0 已改道：沿%s上升 · '
+                          '回踩 %s %s 低吸（原过昨高 %s 不作首选）</span>'
+                          % (esc(_lbl), esc(_lbl), num(_ln), num(_t0.get("trigger"))))
+        else:
+            # ★ 2026-09-24 三轮：沿线是背景、当日形态是事件 ⇒ 事件优先，T0 不接管。
+            badges.append('<span class="badge b-t1">T0 未接管：当日 %s 优先 · '
+                          '沿线锚 %s %s 仅作次选</span>'
+                          % (esc(p.get("mode")), esc(_lbl), num(_ln)))
     elif _t0 and p.get("mode") != "ma_reclaim_break":
         badges.append('<span class="badge b-t1">T0 并行入口：过昨高 %s / 止损 %s（%s）</span>'
                       % (num(_t0.get("trigger")), num(_t0.get("hard_stop")),
                          esc(_t0.get("stop_anchor") or "锚")))
     # ★ 2026-09-24：T0 不成立时也要把模式判别挂出来（东材 601208 09-24 已创 25 日新高
     #   ⇒ T0 判据不成立，但它就是 line_ride —— 只在 T0 成立时才显示等于答案缺失）。
-    _ride_any = p.get("ma_ride") or {}
+    #   ★ 三轮补 `new_high`：有线上行但一条都不在可回踩距离内 ⇒ 无锚=新高，别硬找锚。
     if _ride_any.get("state") and not (_t0 and _rd.get("state") == "line_ride"):
-        _cls = "b-no" if _ride_any["state"] == "line_ride" else "b-ok"
         _rl = _ride_any.get("line_label") or "五日线"
         _rs = _ride_any.get("line_slope20_pct")
         _ra = _ride_any.get("line_above20")
         if _rs is None or _ra is None:                 # 老口径 plan 兼容
             _rl, _rs, _ra = "MA5", _ride_any.get("ma5_slope20_pct"), _ride_any.get("above20")
-        badges.append('<span class="badge %s">模式判别 = %s（%s 20 根斜率 %s%% · '
-                      '近 20 根 %s 根在线上）</span>'
-                      % (_cls, esc(_ride_any["state"]), esc(_rl),
-                         num(_rs), int(_ra or 0)))
+        if _ride_any["state"] == "new_high":
+            badges.append('<span class="badge b-ok">模式判别 = new_high（新高·无回踩锚：'
+                          '最近候选线 %s %s 已在现价下方 %s×ATR，超过可回踩距离 %s×ATR）</span>'
+                          % (esc(_rl), num(_ride_any.get("line")),
+                             num(_ride_any.get("line_dist_atr")),
+                             num(_ride_any.get("anchor_max_atr") or 1.5)))
+        else:
+            _cls = "b-no" if _ride_any["state"] == "line_ride" else "b-ok"
+            badges.append('<span class="badge %s">模式判别 = %s（%s 20 根斜率 %s%% · '
+                          '近 20 根 %s 根在线上）</span>'
+                          % (_cls, esc(_ride_any["state"]), esc(_rl),
+                             num(_rs), int(_ra or 0)))
+    if _rp:
+        badges.append('<span class="badge b-ok">优先级 = %s（%s）</span>'
+                      % (esc(_rp.get("winner")), esc(_rp.get("why"))))
     for x in (n.get("badges") or []):
         if isinstance(x, dict):
             badges.append('<span class="badge %s">%s</span>' % (x.get("cls", "b-ok"), x.get("txt", "")))
@@ -349,11 +369,12 @@ def build_plan_rows(a):
                                     num(abs(_trig / _c - 1) * 100))
         else:
             _dist = "—"
-        # ★ 2026-09-24：`line_ride`（沿线上行）态下 T0 已改道给回踩 —— 报告必须
-        #   写明「这单不该按过昨高追」，否则读者会把 T0 行当成首选入口。
+        # ★ 2026-09-24：`line_ride`（沿线上行）态且当日别无买点 ⇒ T0 已改道给回踩。
         #   ★ 当晚补：锚线不写死五日线 —— 名称/斜率/站上根数/价位一律取 `line*`。
+        #   ★ 三轮补：若当日已有客观突破（事件），改道**不执行** —— 沿线只是背景，
+        #     不能吃掉客观形态。此时标题写「突破优先」，不写「已改道」。
         _ride = t0.get("ride") or {}
-        _redirect = _ride.get("state") == "line_ride"
+        _redirect = bool(_ride.get("state") == "line_ride" and p.get("ride_redirected"))
         _rlabel = _ride.get("line_label") or "五日线"
         _cline = _ride.get("line") if _ride.get("line") is not None else _ride.get("ma5")
         _head = ("过昨高 <b>%s</b>（D0 最高价 · %s）· 止损 <b>%s</b>（%s）· "
@@ -369,14 +390,36 @@ def build_plan_rows(a):
             _bz = p.get("buy_zone") or {}
             _body = _head + (
                 "⚠ <b>本票处于【沿%s上升】态</b>（%s 20 根斜率 %s%%、近 20 根 %s 根"
-                "收在线上）—— 此时「过昨高」属<b>趋势中段追高</b>：全池 53 只回放 5 日均R "
-                "−0.29、胜率 19%%、77%% 被均线锚扫掉 ⇒ <b>首选改成回踩 %s %s 低吸</b>"
+                "收在线上），且<b>当日没有其他买点</b> ⇒ T0 改道：<b>首选回踩 %s %s 低吸</b>"
                 "（买区 %s~%s，已改道为当日首选入口）；若仍走 T0，硬止损锚须换成更宽的"
-                "「阳线下沿 / 大阳中点」。<br>模式判别：%s"
+                "「阳线下沿 / 大阳中点」——问题不在「追高」，而在 T0 的窄止损锚会被毛刺扫掉"
+                "（全池回放 5 日均R −0.29、胜率 19%%、77%% 被扫）。<br>模式判别：%s"
                 % (esc(_rlabel), esc(_rlabel), num(_ride.get("line_slope20_pct")),
                    int(_ride.get("line_above20") or 0), esc(_rlabel), num(_cline),
                    num(_bz.get("primary_lo")),
                    num(_bz.get("primary_hi")), esc(_ride.get("note") or "—")))
+        elif _ride.get("state") == "line_ride":
+            _rp = p.get("ride_priority") or {}
+            if p.get("mode") == "line_pullback":
+                # 当日**本来就有**回踩买区（demand 路径，非沿线改道）—— 东材 601208 09-24 即此：
+                # mode=line_pullback 锚 EMA10 52.23，同时 ma_ride 是 line_ride 锚 MA5。
+                # 两个回踩位并存，不许把沿线那个说成「T0 已改道」。
+                _body = _head + (
+                    "✅ <b>当日已有回踩买区（%s）—— T0 未接管，沿线也未改道</b>（沿线是背景、"
+                    "当日买区是事件/既有计划）。<br>沿%s上升的锚 %s 只是<b>并列的第二个回踩位</b>"
+                    "（先到先做）。<br>模式判别：%s%s"
+                    % (esc(p.get("mode")), esc(_rlabel), num(_cline),
+                       esc(_ride.get("note") or "—"),
+                       ("<br>优先级判据：%s" % esc(_rp.get("why"))) if _rp.get("why") else ""))
+            else:
+                _body = _head + (
+                    "✅ <b>优先级：当日 %s（事件）优先于「沿%s上升」（背景）</b> —— 沿线不改道"
+                    "客观形态。依据：同日突破买（1.5×ATR 止损）均R +0.21 / 收益 +1.16%%、胜 44%%，"
+                    "而「等回踩」只有 31%% 的日子等得到。<br>沿%s锚 %s 仅作<b>次选</b>。"
+                    "<br>模式判别：%s%s"
+                    % (esc(p.get("mode")), esc(_rlabel), esc(_rlabel), num(_cline),
+                       esc(_ride.get("note") or "—"),
+                       ("<br>优先级判据：%s" % esc(_rp.get("why"))) if _rp.get("why") else ""))
         else:
             _body = _head + (
                 "↑ 与当日买点<b>先到先做</b>；T0 是趋势单：用移动止损（MA5 / 大阳中点）管理，"
