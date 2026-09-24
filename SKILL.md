@@ -28,10 +28,13 @@ disable-model-invocation: true
    - ★ **情绪分是软约束：只缩放仓位，不是「开/不开仓」的开关**。能否决一笔交易的只有硬约束（最小申报单位×股价 > 仓位上限 / 涨停买不到 / 结构已坏）。**<45 的正确动作是「降仓」而不是「不许做」**，报告里写「因环境降仓至 X 成」，**禁止写成「环境否决」**——那是把软约束抬成否决权。
    - 量能维度**方向感知**：放量上涨才加分，放量下跌视为恐慌抛售而扣分；盘中成交额按时段加权折算（上午 55% / 下午 45%），不按分钟线性折算。
    - 三个映射常数（`WIDTH_CENTER=0.45` / `WIDTH_SLOPE=200` / `MONEY_SLOPE=1000`）**不得凭手感调**——它们直接决定总分跨不跨档（45→30 那条线）。每个交易日收盘 `python market_sentiment.py --out data/sentiment_$(date +%Y%m%d).json` 落盘，攒够 ≥20 个交易日后跑 `python sentiment_calibrate.py` 用真实分位数校准中性点。回归测试：`python test_market_sentiment.py`（17 项）。
+10. **禁止在消息驱动型标的的开盘瞬间抢单**（A 股 09:30 开盘与**午间公告后的 13:00 开盘**同等适用；美股对应开盘/盘前首分钟）。公告兑现日的开盘 1~3 分钟是价格发现阶段，**市价单输在秒级报入时点，预埋单+保护限价自相矛盾（设上限可能不成交、不设则失控），不存在"既抢到又便宜"的解**。正解 = 等开盘后 ≥5 分钟第一波回落给出结构再评估，或完全不做。前置信号（任一命中即不参与）：公告前已带量下跌 / 主力净流出 / 内盘 > 外盘。另：**同一标的当日卖出后，消息不构成回补理由**（与「后悔式回补禁止」合并执行）。案例与完整口径见 [trade-lessons.md](references/trade-lessons.md) L001（诺诚 688428，2026-09-24，亏损 600 元）。
 
 ## 按需读取
 
 只读取当前任务所需文件，不要预加载全部 references：
+
+- **准备追消息 / 抢开盘 / 回补卖出前**：必读 [trade-lessons.md](references/trade-lessons.md)。
 
 - **完整单票报告**：读取 [research-report.md](references/research-report.md)、[strategy-modes.md](references/strategy-modes.md)、[entry-odds.md](references/entry-odds.md)、[risk-exit.md](references/risk-exit.md)、[data-operations.md](references/data-operations.md)、[output-pitfalls.md](references/output-pitfalls.md)、[report-generation.md](references/report-generation.md)。
 - **只问买点/止损/持仓处置**：读取 [strategy-modes.md](references/strategy-modes.md)、[entry-odds.md](references/entry-odds.md)、[risk-exit.md](references/risk-exit.md)。
