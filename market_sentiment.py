@@ -24,8 +24,8 @@
 口径说明（重要）:
   - 涨跌家数只用 上证指数 + 深证成指，**不含创业板指**（其家数是深市子集，重复计入会失真）。
   - 盘中成交额按「已交易分钟 / 240」折算成全日口径，再与 5 日均额比。
-  - 涨停/跌停家数为**时点值**，早盘天然偏少；同一分数在 10:00 与 14:30 的含义不同，
-    故原始值一并输出，别只看分数。
+  - 涨停中性值按当日已完成比例缩放（全天净涨停 20 家 = 50 分）。池子日期对不上行情日时本项记 50，不拿过期家数打分。
+  - 时钟落在交易时段但日线没有今天这根（周末、节假日）时，成交额不再按「才走了一部分」放大。
 """
 import argparse
 import datetime
@@ -155,28 +155,37 @@ def get_index_bars(secid, lmt=60):
 
 
 # ---------------------------------------------------------------- 打分
+def ymd(v):
+    if v is None:
+        return None
+    s = str(v).replace("-", "")
+    return s[:8] if len(s) >= 8 else None
+
+
 def score_width(adv, dec):
     tot = adv + dec
     if tot <= 0:
         return 50.0, 0.0
     r = adv / tot
-    return clamp((r - 0.15) / 0.50 * 100), r
+    # 上涨占比 50% = 50 分；每偏离 1 个百分点 ±2 分（25%→0，75%→100）
+    return clamp(50 + (r - 0.5) * 200), r
 
 
-def score_temp(zt, dt):
+def score_temp(zt, dt, day_frac=1.0):
     if zt is None or dt is None:
         return 50.0, None
     net = zt - dt
-    # 净涨停 20 家 = 50 分（常态中性）；+1 家 ≈ +1.2 分；-1 家 ≈ -1.2 分
-    return clamp(50 + (net - 20) * 1.2), net
+    # 全天中性 = 净涨停 20 家。盘中按当日已完成比例缩放，避免早盘家数少被打成极弱。
+    center = 20.0 * max(0.0, min(1.0, day_frac))
+    return clamp(50 + (net - center) * 1.2), net
 
 
 def score_money(net_amt, amount):
     if not amount:
         return 50.0, 0.0
     r = net_amt / amount
-    # 主力净额占成交额 0% = 50 分；每 ±1% ≈ ∓10 分
-    return clamp(50 + r * 1000), r
+    # 主力净额占成交额 0% = 50 分；每 ±0.5% ≈ ±10 分
+    return clamp(50 + r * 2000), r
 
 
 def score_trend(poses):
@@ -206,7 +215,6 @@ def analyze(now=None, force_minutes=None):
     now = now or beijing_now()
     today = now.strftime("%Y%m%d")
     mins = force_minutes if force_minutes is not None else traded_minutes(now)
-    pre_open = mins == 0
 
     idx = get_index_snapshot()
     zt, dt, qdate = get_limit_pools(today)
@@ -217,9 +225,6 @@ def analyze(now=None, force_minutes=None):
     flat = sum(int((idx.get(s) or {}).get("f106") or 0) for s in WIDTH_INDEXES)
     w_score, adv_ratio = score_width(adv, dec)
 
-    # --- 情绪温度
-    t_score, net_zt = score_temp(zt, dt)
-
     # --- 资金 / 量能（指数级 f62 主力净额、f6 成交额）
     net_amt = sum(float((idx.get(s) or {}).get("f62") or 0)
                   for s in WIDTH_INDEXES)
@@ -227,18 +232,46 @@ def analyze(now=None, force_minutes=None):
                   for s in WIDTH_INDEXES)
     m_score, net_ratio = score_money(net_amt, amt_now)
 
-    share = amount_share(mins)
-    amt_full = amt_now if pre_open else (amt_now / share)
+    bars_by = {}
+    for secid, _, _ in INDEXES:
+        try:
+            bars_by[secid] = get_index_bars(secid)
+        except Exception:              # noqa: BLE001
+            bars_by[secid] = []
+
+    def bar_today(bars):
+        return bool(bars) and ymd(bars[-1]["d"]) == today
+
+    session_live = mins > 0 and any(bar_today(bars_by.get(s) or []) for s, _, _ in INDEXES)
+    if session_live:
+        share = amount_share(mins)
+        amt_full = amt_now / share if share else amt_now
+        day_frac = share
+        score_date = today
+    else:
+        share = 1.0
+        amt_full = amt_now
+        day_frac = 1.0
+        score_date = None
+        for s in WIDTH_INDEXES:
+            b = bars_by.get(s) or []
+            if b:
+                score_date = ymd(b[-1]["d"])
+                break
+
+    pool_ok = ymd(qdate) == score_date and score_date is not None
+    if pool_ok:
+        t_score, net_zt = score_temp(zt, dt, day_frac)
+    else:
+        t_score, net_zt = 50.0, None
+
     trends = []
     for secid, name, _ in INDEXES:
-        try:
-            bars = get_index_bars(secid)
-        except Exception:              # noqa: BLE001
-            continue
+        bars = bars_by.get(secid) or []
         if len(bars) < 25:
             continue
         closes = [b["c"] for b in bars]
-        live = bars[-1]["d"].replace("-", "") == today
+        live = bar_today(bars)
         hist = closes[:-1] if live else closes
         ma20 = sum(hist[-20:]) / 20.0
         spot = closes[-1]
@@ -252,16 +285,16 @@ def analyze(now=None, force_minutes=None):
 
     # 量能：仅沪+深（避免创业板指成交额与深市重复计入），5 日均额不含当日
     amt5 = 0.0
+    width_chg = []
     for secid in WIDTH_INDEXES:
-        try:
-            bars = get_index_bars(secid)
-        except Exception:              # noqa: BLE001
-            continue
-        hist = bars[:-1] if (bars and bars[-1]["d"].replace("-", "") == today) else bars
+        bars = bars_by.get(secid) or []
+        hist = bars[:-1] if bar_today(bars) else bars
         if len(hist) >= 5:
             amt5 += sum(b["amt"] for b in hist[-5:]) / 5.0
+        if secid in idx:
+            width_chg.append(float((idx.get(secid) or {}).get("f3") or 0))
     vol_ratio = (amt_full / amt5) if amt5 else None
-    avg_chg = (sum(t["chg_pct"] for t in trends) / len(trends)) if trends else 0.0
+    avg_chg = (sum(width_chg) / len(width_chg)) if width_chg else 0.0
     v_score = score_volume(vol_ratio, avg_chg)
 
     score = (w_score * WEIGHTS["width"] + t_score * WEIGHTS["temp"]
@@ -271,8 +304,8 @@ def analyze(now=None, force_minutes=None):
 
     return {
         "asof": now.strftime("%Y-%m-%d %H:%M:%S"),
-        "traded_minutes": mins,
-        "pre_open": pre_open,
+        "traded_minutes": mins if session_live else 0,
+        "pre_open": not session_live,
         "limit_pool_date": qdate,
         "score": round(score, 1),
         "level": level,
@@ -282,7 +315,8 @@ def analyze(now=None, force_minutes=None):
                       "adv": adv, "dec": dec, "flat": flat,
                       "adv_ratio": round(adv_ratio * 100, 1)},
             "temp": {"score": round(t_score, 1), "weight": WEIGHTS["temp"],
-                     "zt": zt, "dt": dt, "net_zt": net_zt},
+                     "zt": zt, "dt": dt, "net_zt": net_zt, "used": pool_ok,
+                     "day_frac": round(day_frac, 3)},
             "money": {"score": round(m_score, 1), "weight": WEIGHTS["money"],
                       "net_amount": round(net_amt, 0),
                       "amount": round(amt_now, 0),
@@ -314,8 +348,12 @@ def render(r):
     L.append(f"{'市场宽度':<10}{d['width']['score']:>7.1f}{d['width']['weight']*100:>6.0f}%   "
              f"涨{d['width']['adv']} / 跌{d['width']['dec']}（上涨占比 {d['width']['adv_ratio']}%）")
     zt, dt, nz = d["temp"]["zt"], d["temp"]["dt"], d["temp"]["net_zt"]
+    if d["temp"].get("used") and nz is not None:
+        temp_txt = f"涨停{zt} / 跌停{dt}（净{nz:+d}，中性按当日进度 {d['temp']['day_frac']:.0%}）"
+    else:
+        temp_txt = "涨停池日期与行情日不符，本项记 50 分不计入方向"
     L.append(f"{'情绪温度':<10}{d['temp']['score']:>7.1f}{d['temp']['weight']*100:>6.0f}%   "
-             f"涨停{zt} / 跌停{dt}（净{nz:+d}）")
+             f"{temp_txt}")
     L.append(f"{'资金面':<10}{d['money']['score']:>7.1f}{d['money']['weight']*100:>6.0f}%   "
              f"主力净额 {d['money']['net_amount']/1e8:+.1f}亿 / 成交额 "
              f"{d['money']['amount']/1e8:.0f}亿（{d['money']['net_ratio_pct']:+.2f}%）")
@@ -333,7 +371,7 @@ def render(r):
              f"（{ratio if ratio is not None else '—'}x）")
     L.append("-" * 62)
     L.append("分级口径：≥70 强 | 55-70 偏强 | 45-55 中性 | 30-45 偏弱 | <30 极弱")
-    L.append("注：涨停/跌停为时点值，早盘天然偏少；同分数在 10:00 与 14:30 含义不同，")
+    L.append("注：涨停中性值随当日进度缩放；池子日期不符时该项固定 50 分。")
     L.append("    请结合原始读数看，不要只看总分。")
     return "\n".join(L)
 
