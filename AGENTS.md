@@ -50,4 +50,5 @@
 - 报告类字段必须与引擎同步：`scan_all/scanner.py` 负责把新字段（`pre_breakout` / `struct_exec` / `hard_exec` / `hard_dist_atr` / `hard_noise`）导出到 `results.jsonl`，`scan_all/report.py` 负责渲染；**只改引擎不改这两处 = 全市场扫描用不到该功能**（CLI/probe 能打印不等于报表能看）。
 - 美股必须有 HTML 报告通道（2026-09-22 补）：`battle_analyze.py` 原来只收 6 位 A 股代码，美股 ticker 直接 SystemExit ⇒ 美股永远只能拿 `rule123.py --out` 的 JSON 手搓，出不了报告。现由 `is_us_code()` 分流，美股走 `bars_source.us_quote` / `probe_intraday.probe_us` / `probe_intraday.us_lots`（1 股起、无整手、`$`、无 T+1）。`report_render.py` 按 `meta.market` 切换币种、交易制度文案与「超 40% 仓位习惯线」提示（该提示是 A 股 30%×跌停 10% 倒推的，美股两条前提都不成立）。**给美股出报告一律走两步流程，禁止手写 HTML。**
 - 「硬止损贴噪声带」（距买区下沿 <0.25×ATR）**只对突破类成立**（`BREAKOUT_MODES`）：突破类买区下沿＝突破位＝真实成交价；回踩类买在线上、主风控是收盘破线的结构止损，硬止损本就是 0.10×ATR 毛刺滤网，套突破类阈值会 1/3 误报（2026-09-18 样本 44 候选误报 15）。
+- 日常口述、复盘口气、事后感想不改代码。只有用户明确要求改代码、改规则、入池或出池时才动文件。
 用户纠正后：把新规则写成**一行具体指令**追加到本节；已有条目则收紧，不堆抽象空话。
