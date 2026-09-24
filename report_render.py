@@ -127,7 +127,12 @@ def build_kpis(a, n):
     #   （evaluate 重建 out 时漏键）→ 用户看到「均线收复 + 过昨高」的票却只有 T2 回踩单，
     #   会直接反问「为什么像 T0 的变种」。这里把它显式挂到首屏徽标上。
     _t0 = p.get("ma_reclaim") or {}
-    if _t0 and p.get("mode") != "ma_reclaim_break":
+    if _t0 and (_t0.get("ride") or {}).get("state") == "line_ride":
+        # ★ 2026-09-24：line_ride 态 T0 已改道 —— 徽标必须写「不追」，别让人当成首选入口。
+        badges.append('<span class="badge b-no">T0 已改道：沿五日线上升 · '
+                      '回踩 MA5 %s 低吸（原过昨高 %s 不作首选）</span>'
+                      % (num((_t0.get("ride") or {}).get("ma5")), num(_t0.get("trigger"))))
+    elif _t0 and p.get("mode") != "ma_reclaim_break":
         badges.append('<span class="badge b-t1">T0 并行入口：过昨高 %s / 止损 %s（%s）</span>'
                       % (num(_t0.get("trigger")), num(_t0.get("hard_stop")),
                          esc(_t0.get("stop_anchor") or "锚")))
@@ -325,17 +330,35 @@ def build_plan_rows(a):
                                     num(abs(_trig / _c - 1) * 100))
         else:
             _dist = "—"
-        out.insert(5, ("T0 并行入口", (
-            "过昨高 <b>%s</b>（D0 最高价 · %s）· 止损 <b>%s</b>（%s）· "
-            "每股风险 %s（%s%%）<br>"
-            "阻力墙 %s（%s）距 %s%% ｜ 档位 %s ｜ 「收复全部均线」那根 = <b>%s</b><br>"
-            "↑ 与当日买点<b>先到先做</b>；T0 是趋势单：用移动止损（MA5 / 大阳中点）管理，"
-            "不设固定目标。"
-            % (num(_trig), esc(_dist), num(t0.get("hard_stop")),
-               esc(t0.get("stop_anchor") or "锚"), num(t0.get("risk_per_share")),
-               num(t0.get("risk_pct")), num(t0.get("resistance")),
-               esc(t0.get("resistance_from") or "—"), num(t0.get("dist_to_wall_pct")),
-               esc(t0.get("grade") or "—"), esc(t0.get("kanchor_date") or "—")))))
+        # ★ 2026-09-24：`line_ride`（沿五日线上升）态下 T0 已改道给回踩 —— 报告必须
+        #   写明「这单不该按过昨高追」，否则读者会把 T0 行当成首选入口。
+        _ride = t0.get("ride") or {}
+        _redirect = _ride.get("state") == "line_ride"
+        _head = ("过昨高 <b>%s</b>（D0 最高价 · %s）· 止损 <b>%s</b>（%s）· "
+                 "每股风险 %s（%s%%）<br>"
+                 "阻力墙 %s（%s）距 %s%% ｜ 档位 %s ｜ 「收复全部均线」那根 = <b>%s</b><br>"
+                 % (num(_trig), esc(_dist), num(t0.get("hard_stop")),
+                    esc(t0.get("stop_anchor") or "锚"), num(t0.get("risk_per_share")),
+                    num(t0.get("risk_pct")), num(t0.get("resistance")),
+                    esc(t0.get("resistance_from") or "—"),
+                    num(t0.get("dist_to_wall_pct")),
+                    esc(t0.get("grade") or "—"), esc(t0.get("kanchor_date") or "—")))
+        if _redirect:
+            _bz = p.get("buy_zone") or {}
+            _body = _head + (
+                "⚠ <b>本票处于【沿五日线上升】态</b>（MA5 20 根斜率 %s%%、近 20 根 %s 根"
+                "收在线上）—— 此时「过昨高」属<b>趋势中段追高</b>：全池 53 只回放 5 日均R "
+                "−0.29、胜率 19%%、77%% 被 MA5 锚扫掉 ⇒ <b>首选改成回踩 MA5 %s 低吸</b>"
+                "（买区 %s~%s，已改道为当日首选入口）；若仍走 T0，硬止损锚须换成更宽的"
+                "「阳线下沿 / 大阳中点」。<br>模式判别：%s"
+                % (num(_ride.get("ma5_slope20_pct")), int(_ride.get("above20") or 0),
+                   num(_ride.get("ma5")), num(_bz.get("primary_lo")),
+                   num(_bz.get("primary_hi")), esc(_ride.get("note") or "—")))
+        else:
+            _body = _head + (
+                "↑ 与当日买点<b>先到先做</b>；T0 是趋势单：用移动止损（MA5 / 大阳中点）管理，"
+                "不设固定目标。<br>模式判别：%s" % esc(_ride.get("note") or "—"))
+        out.insert(5, ("T0 并行入口" + ("（已改道·见下）" if _redirect else ""), _body))
     return kv_rows(out)
 
 

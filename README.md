@@ -71,8 +71,10 @@ stock-multidim-battleplan/
 ├── calc_ash_position.py # A 股仓位闸门全量扫描（结构性能否交易）
 ├── pre_runup.py         # 公告前「抢跑涨幅」检查（消息驱动型标的的否决型判据）
 ├── stock_character.py   # 股性体检：① 突破加速型 vs 拉高消化型 ② 利好兑现习惯（是否出消息即顶）
+├── research_ma_ride.py  # 「均线刚收复 vs 沿五日线上升」判别器的实证复现（T0 改道依据）
 ├── test_breakout_modes.py
 ├── test_living_platform.py
+├── test_ma_ride.py           # 「均线刚收复 vs 沿五日线上升」模式判别 + T0 改道回归（13 项）
 ├── test_pre_runup.py
 ├── test_review_fixes.py
 ├── test_stock_character.py  # 股性体检回归（34 项）
