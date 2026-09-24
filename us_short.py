@@ -53,6 +53,12 @@ except Exception:
 
 import rule123 as R          # noqa: E402  指标只走引擎口径（Wilder ATR / SMA）
 
+# 压力/支撑/RSI/多空转换地图 —— 2026-09-24 抽到独立模块 levels.py
+# （A 股 T0 / 缩量回调同样可调，市场无关）。这里 re-export 保持旧调用名可用。
+from levels import (NOISE_ATR, RSI_OB, RSI_OS,               # noqa: F401
+                    flex_map, levels_from_bars, resistance_levels,
+                    rsi14, rsi_stance, support_levels)
+
 # 已核实方向与名义杠杆的反向 ETF —— **配置化（2026-09-24）**：真实股池在
 # `reverse_etf.json`（老罗自行扩充），此处仅留代码内置兜底（文件缺失/损坏时用，
 # 保证脚本不至于因为配置问题整个跑不了）。扩充新对前仍须先核 direction/
@@ -97,28 +103,9 @@ def load_reverse_etf(path=None, refresh=False):
 
 RR_LADDER = (3.0, 2.5, 2.0, 1.5, 1.0)   # 门槛 = 1.5
 STOP_ATR_MULT = 0.30                    # 止损锚 = MA5 + 0.30×ATR（9/24 定稿）
-NOISE_ATR = 0.25                        # 止损距离 <0.25×ATR = 噪声带
-RSI_OB, RSI_OS = 70.0, 30.0             # 超买 / 超卖线（Wilder RSI14）
 
 
 # ────────────────────────────── 纯函数（回归覆盖） ──────────────────────────────
-def rsi14(closes, n=14):
-    """Wilder RSI。全平 → 50；序列长度 < n+1 → None。"""
-    if len(closes) < n + 1:
-        return None
-    gains, losses = [], []
-    for i in range(1, len(closes)):
-        ch = closes[i] - closes[i - 1]
-        gains.append(max(ch, 0.0))
-        losses.append(max(-ch, 0.0))
-    ag = sum(gains[:n]) / n
-    al = sum(losses[:n]) / n
-    for i in range(n, len(gains)):
-        ag = (ag * (n - 1) + gains[i]) / n
-        al = (al * (n - 1) + losses[i]) / n
-    if al == 0:
-        return 100.0 if ag > 0 else 50.0
-    return 100.0 * ag / (ag + al)
 def rr_ratio(entry, t1, stop):
     """做空盈亏比 = (entry − T1) / (stop − entry)。entry≥stop 或 ≤T1 → None。"""
     if entry is None or t1 is None or stop is None:
@@ -141,102 +128,6 @@ def etf_from_underlying(und_px, und_ref, etf_ref, lev):
 def underlying_from_etf(etf_px, und_ref, etf_ref, lev):
     """反向换算：ETF 价 → 隐含正股价。"""
     return und_ref * (1.0 - (etf_px / etf_ref - 1.0) / lev)
-
-
-def levels_from_bars(bars):
-    """日线 bars（rule123 口径 dict）→ 关键位 dict。指标只走引擎口径。"""
-    closes = [b["c"] for b in bars]
-    if len(closes) < 21:
-        raise ValueError(f"日线不足 21 根（got {len(closes)}），不给出结构位")
-    lv = {
-        "last_close": closes[-1],
-        "last_date": bars[-1]["d"],
-        "prev_high": bars[-1]["h"],
-        "prev_low": bars[-1]["l"],
-        "ma5": R.sma(closes, 5),
-        "ma10": R.sma(closes, 10),
-        "ma20": R.sma(closes, 20),
-        "ma50": R.sma(closes, 50) if len(closes) >= 50 else None,
-        "atr14": R.atr14(bars),          # Wilder，禁用简单均值
-        "rsi14": rsi14(closes),          # Wilder 平滑
-        "hi20": max(b["h"] for b in bars[-20:]),
-        "lo20": min(b["l"] for b in bars[-20:]),
-        "hi60": max(b["h"] for b in bars[-60:]) if len(bars) >= 60 else None,
-        "lo60": min(b["l"] for b in bars[-60:]) if len(bars) >= 60 else None,
-    }
-    return lv
-
-
-def _dedup_sorted(levels, above, spot):
-    """[(label, px)] 去重并按离现价排序：above=True 近→远（升序），False 近→远（降序）。"""
-    seen, out = set(), []
-    for lbl, px in levels:
-        if px is None:
-            continue
-        key = round(px, 2)
-        if key in seen:
-            continue
-        seen.add(key)
-        if (above and px > spot) or (not above and px < spot):
-            out.append((lbl, px))
-    out.sort(key=lambda x: x[1], reverse=not above)
-    return out
-
-
-def resistance_levels(lv, spot):
-    """现价上方的压力位（近→远）：均线/昨高/20日高/60日高。"""
-    cands = [("MA5", lv["ma5"]), ("MA10", lv["ma10"]), ("MA20", lv["ma20"]),
-             ("MA50", lv.get("ma50")), ("昨高", lv["prev_high"]),
-             ("20日高", lv["hi20"]), ("60日高", lv.get("hi60"))]
-    return _dedup_sorted(cands, above=True, spot=spot)
-
-
-def support_levels(lv, spot):
-    """现价下方的支撑位（近→远）：均线/昨低/20日低/60日低。"""
-    cands = [("MA5", lv["ma5"]), ("MA10", lv["ma10"]), ("MA20", lv["ma20"]),
-             ("MA50", lv.get("ma50")), ("昨低", lv["prev_low"]),
-             ("20日低", lv["lo20"]), ("60日低", lv.get("lo60"))]
-    return _dedup_sorted(cands, above=False, spot=spot)
-
-
-def rsi_stance(rsi):
-    """RSI → (区间标签, 做空含义)。"""
-    if rsi is None:
-        return "n/a", ""
-    if rsi >= RSI_OB:
-        return "超买", "超买加分：压力位反抽不破的空单质量更高"
-    if rsi <= RSI_OS:
-        return "超卖", "超卖禁追空：随时 V 反，等反抽"
-    return "中性", ""
-
-
-def flex_map(spot, lv, ref_close):
-    """多空转换地图文本行。压力=空档，支撑=平空档+反多前提。"""
-    atr = lv["atr14"]
-    rsi = lv.get("rsi14")
-    stance, note = rsi_stance(rsi)
-    lines = []
-    rtxt = f"{rsi:.1f}" if rsi is not None else "n/a"
-    head = f"RSI14 {rtxt}（{stance}）" + (f"  {note}" if note else "")
-    lines.append(("head", head))
-    res = resistance_levels(lv, spot)
-    sup = support_levels(lv, spot)
-    lines.append(("res_title", f"▲ 压力位 {len(res)} 档（做空参考：反抽到位站不上 + 缩量才空"
-                            f"{'；当前' + stance + '，空单质量加分' if stance == '超买' else ''}）"))
-    for lbl, px in res:
-        dist = (px / spot - 1) * 100
-        lines.append(("res", f"{px:9.2f}  {lbl:<6} 距现价 {dist:+.2f}%"))
-    lines.append(("sup_title",
-                  "▼ 支撑位 %d 档（平空参考：持空单到该位主动减/平；"
-                  "**收盘站稳 → 反多候选**，需 rule123 买法确认、均线之上才做多）" % len(sup)))
-    for lbl, px in sup:
-        dist = (px / spot - 1) * 100
-        near = abs(spot - px) < NOISE_ATR * atr
-        tag = "  ⚠ 贴噪声带，需两日收盘确认" if near else ""
-        lines.append(("sup", f"{px:9.2f}  {lbl:<6} 距现价 {dist:+.2f}%{tag}"))
-    lines.append(("rule", "转换规则：压力位做空 / 支撑位平空 / 支撑位收盘站稳反多 —— "
-                  "一律以收盘确认，盘中触碰不算数；超卖区禁追空，反多不接下跌中的刀"))
-    return lines
 
 
 def short_candidates(lv):

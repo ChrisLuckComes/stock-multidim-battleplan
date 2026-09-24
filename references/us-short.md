@@ -13,6 +13,8 @@
 
 ## ② 多空转换地图（2026-09-24 老罗追加：「压力位/超买做空，支撑位平空，站稳支撑反多」）
 
+> **2026-09-24 抽出为独立模块 `levels.py`**（压力位/支撑位/RSI 超买超卖，市场无关）——A 股 T0 / 缩量回调模式同样可调：`python levels.py 300404`（A股）/ `python levels.py SNDK --us`（美股）；其他模块 `from levels import levels_from_bars, resistance_levels, support_levels, rsi_stance, flex_map`。us_short.py 里 re-export 保持旧名可用。判据细则本节不变，A 股美股同一套。
+
 脚本每次输出**多空转换地图**（无需开关）：
 
 - **▲ 压力位**（近→远）：MA5/10/20/50、昨高、20日高、60日高中在现价上方的档位 → **做空参考**：反抽到位 + 站不上 + 缩量才空；RSI14 ≥70 超买时空单质量加分。
