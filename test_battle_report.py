@@ -572,6 +572,18 @@ class TestTieLineAndCash(unittest.TestCase):
         self.assertIsNone(BA.tie_line_check({"anchor": "boll_up"}, []))
         self.assertIsNone(BA.tie_line_check({"anchor": "ma5"}, []))
 
+    def test_tie_line_accepts_sma20_anchor(self):
+        """`ma_ride_state` 的 MA20 锚用的是 `sma20`（对应 ANCHOR_LABEL），
+        而 ma_info 的行名是 `MA20` —— 缺这条映射会让「回踩 MA20 改道」的票在这里
+        **静默 return None**，贴线真伪判定整段消失（不是判成存疑，是没有判定）。"""
+        z = {"anchor": "sma20"}
+        ma = [{"name": "MA20", "value": 36.36, "dir": 1, "dir_txt": "上行",
+               "hit1": 3, "hit2": 5, "hit3": 8}]
+        r = BA.tie_line_check(z, ma)
+        self.assertIsNotNone(r, "sma20 锚必须落到 MA20 行，否则判定被静默吞掉")
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["name"], "MA20")
+
     def test_cash_caps_position_size(self):
         """cash 必须真的封顶，且进 meta 供报告标注；不传时行为与旧版一致。"""
         if not os.path.exists(self.SNAP):

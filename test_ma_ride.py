@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""「T0 启动日」vs「沿五日线趋势上升」两态判别 + 买法改道的回归测试。
+"""「T0 启动日」vs「沿某条均线趋势上升」两态判别 + 买法改道的回归测试。
 
 ## 背景（用户原话 2026-09-24）
 「T0 触发日看距 MA5 的判断，这个也不对吧，我是判断出东材是走五日线上升的，
@@ -10,12 +10,16 @@
 扩到 53 只 × 500 根后：
   · 「买入持有 5 日收盘」口径：>4% +1.50%% vs ≤4% +0.95%%（旧表是 +1.75%% vs +3.35%%，腰斩）
   · 「引擎真实触发价 + MA5 硬止损」口径：>4% 均R −0.032 vs ≤4% −0.196（**方向反转**）
-故改为看**该票与 MA5 的关系状态**（自归一化，无价格阈值）：
-  line_ride      MA5 已上行一段（slope20 > 0）且价格多数时间在线上（above20 ≥ 12）
-  fresh_reclaim  MA5 尚未转头（slope20 ≤ 0）且价格多数时间在线下（above20 ≤ 11）
+故改为看**该票与均线的关系状态**（自归一化，无价格阈值）：
+  line_ride      MA5 / EMA10 / MA20 任一：20 根斜率 > 0 且价格多数时间在线上（站上 ≥ 12 根）
+                 —— 多条成立时取**收盘下方离现价最近**的那条，回踩锚这条（**不写死五日线**）
+  fresh_reclaim  三条都不成线，且 MA5 尚未转头（slope20 ≤ 0）且多数时间在 MA5 下（≤ 11）
   mixed          其余
 53 只全池回放（引擎真实触发价/止损锚）：line_ride  5 日均R −0.292 / 胜率 19% / 77% 被扫；
-fresh_reclaim +0.160 / 26% / 68%。→ line_ride 态把入口从「过昨高追」改成「回踩 MA5 挂限价」。
+fresh_reclaim +0.160 / 26% / 68%。→ line_ride 态把入口从「过昨高追」改成「回踩被选中的那条线挂限价」。
+
+★ 字段口径（2026-09-24 晚统一）：`line*` = 被选中的那条线；`ma5*` / `above20` / `bounce20`
+  恒为 MA5 口径。读取方取错会报出完全不同的价位 —— 见 `TestRideAnchorNotHardcodedToMa5`。
 
 跑法：`python test_ma_ride.py`（或 `python -m unittest test_ma_ride`）。
 """
@@ -138,6 +142,17 @@ class TestRideState(unittest.TestCase):
         self.assertEqual(s_dec["state"], "fresh_reclaim",
                          "距 MA5 同为 +5%，但 MA5 20 根斜率为负 = 刚收复 ⇒ 两态必须分开")
 
+    def test_ride_can_be_longer_ma(self):
+        """沿线上涨不写死五日线。价格落到五日线下面时，仍可贴着更长的均线。"""
+        closes = [10.0 + 0.05 * i for i in range(55)]
+        peak = closes[-1]
+        closes += [peak - 0.04 * i for i in range(1, 7)]
+        bars = _bars(closes)
+        s = R.ma_ride_state(bars, R.atr14(bars))
+        self.assertEqual(s["state"], "line_ride")
+        self.assertIn(s["anchor"], ("ema10", "sma20"))
+        self.assertNotEqual(s["anchor"], "ma5")
+
 
 class TestRideRedirect(unittest.TestCase):
     """`line_ride` 态：T0 让位给「回踩 MA5 低吸」，且必须给出可挂的限价买区。"""
@@ -227,6 +242,87 @@ class TestRideDecoupledFromT0(unittest.TestCase):
                           "前提：收盘创 25 根窗口新高 ⇒ 头上无墙 ⇒ T0 不成立")
         self.assertIn("ma_ride", plan, "T0 不成立时仍必须给出模式判别")
         self.assertEqual(plan["ma_ride"]["state"], "line_ride")
+
+
+class TestRideAnchorNotHardcodedToMa5(unittest.TestCase):
+    """沿线不一定是沿五日线 —— 锚可能是 EMA10 / MA20（老罗 2026-09-24 晚改）。
+
+    `ma_ride_state` 改成「MA5/EMA10/MA20 各算一遍，取收盘下方离现价最近的那条」之后，
+    下游还有三处在取 `ride["ma5"]`：`t0_held_for_ride["line"]`、改道买区的 `hits`
+    （回踩次数）、报告徽标/脚注的名称与斜率。全池 83 只里 42 只 line_ride，其中
+    **21 只锚非 MA5**（CRWD −9.2%、HPE −10.2%、振华 603067 −12.6% 量级）——
+    取 ma5 会报出**完全不同**的价位，不是显示瑕疵。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.bars = riding_series()
+        ev, bars2, _ = R.build_ev(cls.bars, drop_live=False, ticker="688999")
+        cls.base = R.ma_ride_state(bars2, R.atr14(bars2))
+        cls.fake = dict(cls.base)
+        cls.fake.update({
+            "state": "line_ride", "anchor": "sma20", "line_label": "MA20",
+            "line": 10.00, "line_slope20_pct": 7.5, "line_above20": 16,
+            "line_bounce20": 4, "line_dist_pct": -1.8, "line_dist_atr": -0.6,
+        })
+        _orig = R.ma_ride_state
+        R.ma_ride_state = lambda *a, **k: dict(cls.fake)
+        try:
+            cls.plan = R.plan_entry(bars2, ev)
+        finally:
+            R.ma_ride_state = _orig
+
+    def test_redirect_anchor_follows_chosen_line(self):
+        z = self.plan["buy_zone"]
+        self.assertEqual(self.plan["mode"], "line_pullback")
+        self.assertEqual(z["anchor"], "sma20")
+        self.assertEqual(z["level"], self.fake["line"])
+        self.assertNotEqual(z["anchor"], "ma5")
+
+    def test_zone_ma5_stays_real_ma5(self):
+        z = self.plan["buy_zone"]
+        self.assertEqual(z["ma5"], self.fake["ma5"],
+                         "买区 ma5 字段必须留真 MA5 —— 池表（watch_cn / pool_us / "
+                         "scanner）拿它当 MA5 列显示，写成锚线价位会串价")
+
+    def test_hits_uses_chosen_line_bounce(self):
+        self.assertEqual(self.plan["buy_zone"]["hits"], self.fake["line_bounce20"],
+                         "回踩次数必须取**被选中那条线**的，不是 MA5 的 bounce20")
+
+    def test_t0_held_for_ride_reports_chosen_line(self):
+        th = self.plan["t0_held_for_ride"]
+        self.assertEqual(th["line"], self.fake["line"],
+                         "t0_held_for_ride.line 必须是被选中的锚线，不是 MA5")
+        self.assertEqual(th["line_label"], "MA20")
+        self.assertEqual(th["anchor"], "sma20")
+        self.assertIn("沿MA20上升", th["reason"])
+
+    def test_verdict_names_chosen_line(self):
+        self.assertIn("MA20", self.plan["verdict"])
+        self.assertNotIn("五日线", self.plan["verdict"])
+
+    def test_line_fields_track_chosen_line_not_ma5(self):
+        """`line_*` 与 `ma5_*` 是两套口径，不得互相顶替。
+
+        构造「收盘跌破 MA5、但贴着更长的均线」的序列：此时锚不是 MA5，
+        `line_slope20_pct`（所选线）与 `ma5_slope20_pct` 必然不同 —— 报告若把
+        所选线的斜率配上 MA5 的 `above20`，会输出「斜率达标但站上根数不足 12」的
+        自相矛盾文案。
+        """
+        closes = [10.0 + 0.05 * i for i in range(55)]
+        peak = closes[-1]
+        closes += [peak - 0.04 * i for i in range(1, 7)]
+        bars = _bars(closes)
+        s = R.ma_ride_state(bars, R.atr14(bars))
+        self.assertEqual(s["state"], "line_ride")
+        self.assertNotEqual(s["anchor"], "ma5")
+        self.assertGreaterEqual(s["line_above20"], R.MA_RIDE_ABOVE_MIN,
+                                "被选中那条线必须自己过 ≥12 根闸门")
+        self.assertEqual(s["line_label"],
+                         {"ema10": "EMA10", "sma20": "MA20"}[s["anchor"]])
+        self.assertEqual(s["line"], round(s["line"], 2))
+        self.assertNotEqual(s["line_slope20_pct"], s["ma5_slope20_pct"],
+                            "所选线与 MA5 的斜率不能是同一个值（否则等于没换锚）")
 
 
 class TestEvaluatePassThrough(unittest.TestCase):

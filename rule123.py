@@ -2308,15 +2308,36 @@ MA_RIDE_SLOPE_WIN = 20     # MA5 斜率窗口（根）
 MA_RIDE_ABOVE_MIN = 12     # 近 20 根里站上 MA5 的根数下限（≥12 = 多数时间在线上）
 
 
-def ma_ride_state(bars, atr_v=None):
-    """判定最后一根处于哪种「与 20 日均线的关系态」—— T0 与趋势跟随的分野。
+def _ride_line_stats(bars, closes, levels):
+    """一条均线的 20 根斜率、近 20 根站上根数。levels[i] 为 None 表示还算不出。"""
+    i = len(closes) - 1
+    cur, prev = levels[i], levels[i - MA_RIDE_SLOPE_WIN]
+    if not cur or not prev:
+        return None
+    slope20 = (cur / prev - 1) * 100
+    win = [k for k in range(max(0, i - 19), i + 1) if levels[k]]
+    above = sum(1 for k in win if closes[k] > levels[k])
+    bounce = sum(1 for k in range(max(1, i - 19), i + 1)
+                 if levels[k] and bars[k]["l"] <= levels[k] and closes[k] > levels[k])
+    return {
+        "slope20": slope20,
+        "above": above,
+        "bounce": bounce,
+        "level": cur,
+        "dist_pct": (closes[i] - cur) / cur * 100,
+    }
 
-        line_ride      MA5 已上行一段（slope20 > 0）且价格多数时间在线上（above20 ≥ 12）
-                       ⇒ 「过昨高买」= 在**趋势中段追高**，MA5 锚又紧，反复被毛刺扫
-        fresh_reclaim  MA5 尚未转头（slope20 ≤ 0）且价格多数时间在线下（above20 ≤ 11）
-                       ⇒ 这才是 T0 原定场景「均线刚收复」
+
+def ma_ride_state(bars, atr_v=None):
+    """判定最后一根是刚收复，还是已经沿着某一条均线上涨。
+
+    线不写死五日线。MA5、EMA10、MA20 各自算「20 根斜率 > 0 且近 20 根 ≥12 根收在线上」。
+    有多条同时成立时，取收盘下方、离现价最近的那条（价格贴着哪条，回踩就锚哪条）。
+
+        line_ride      至少一条均线已上行且价格多数时间在其上
+        fresh_reclaim  三条都不成立，且 MA5 尚未转头、价格多数时间在 MA5 下
         mixed          其余
-        None          数据不足（< 25 根）
+        None           数据不足（< 26 根；另：MA20 要算 20 根斜率需 ≥ 40 根才开始参与）
 
     实测（53 只 A 股 × 500 根日线，引擎真实触发价/止损锚回放，2026-09-24）：
 
@@ -2329,59 +2350,92 @@ def ma_ride_state(bars, atr_v=None):
     稳健性：slope20 阈值 0 / +2 / +5 单调（−0.246 / −0.267 / −0.295），
     反向 ≤0 / ≤−2 为 +0.115 / +0.198；2025-10 前后各半样本排序一致。
     ⇒ 结论：line_ride 不是「不能做」，而是「**不该按 T0 过昨高做**」——
-      首选改为回踩 MA5 低吸（引擎侧 `line_pullback`）。
+      首选改为回踩**被选中的那条线**低吸（引擎侧 `line_pullback`）。
+
+    返回字段口径（2026-09-24 晚统一，读取方别再取 `ma5`）：
+        `line_*`  = **被选中的那条线**（无候选时回落 MA5）：line / line_label / anchor /
+                    line_slope20_pct / line_above20 / line_bounce20 / line_dist_pct / line_dist_atr
+        `ma5_*` / above20 / bounce20 / dist_ma5_pct / ma5 = 恒为 MA5 口径（历史字段，勿改语义）
     """
     if not bars or len(bars) < MA_RIDE_SLOPE_WIN + 6:
         return None
     closes = [b["c"] for b in bars]
     n = len(closes)
-    ma5 = [sma_at(closes, 5, i) for i in range(n)]
-    i = n - 1
-    if ma5[i] is None or ma5[i - MA_RIDE_SLOPE_WIN] is None:
+    e10 = ema_series(closes, 10)
+    series = (
+        ("ma5", "五日线", [sma_at(closes, 5, i) for i in range(n)]),
+        ("ema10", "EMA10", e10),
+        ("sma20", "MA20", [sma_at(closes, 20, i) for i in range(n)]),
+    )
+    stats = {}
+    for key, _label, levels in series:
+        st = _ride_line_stats(bars, closes, levels)
+        if st:
+            stats[key] = st
+    ma = stats.get("ma5")
+    if not ma:
         return None
-    slope20 = (ma5[i] / ma5[i - MA_RIDE_SLOPE_WIN] - 1) * 100
-    slope5 = ((ma5[i] / ma5[i - 5] - 1) * 100) if ma5[i - 5] else None
-    win = [k for k in range(max(0, i - 19), i + 1) if ma5[k] is not None]
-    above20 = sum(1 for k in win if closes[k] > ma5[k])
-    bounce20 = sum(1 for k in range(max(1, i - 19), i + 1)
-                   if ma5[k] is not None and bars[k]["l"] <= ma5[k] and closes[k] > ma5[k])
+    riding = [k for k, st in stats.items()
+              if st["slope20"] > 0 and st["above"] >= MA_RIDE_ABOVE_MIN
+              and st["level"] <= closes[-1]]
+    # 贴着哪条算哪条：收盘下方、距离最近的那条。
+    chosen_key = min(riding, key=lambda k: closes[-1] - stats[k]["level"]) if riding else None
+    chosen = stats.get(chosen_key) if chosen_key else None
+    i = n - 1
+    slope5 = ((ma["level"] / sma_at(closes, 5, i - 5) - 1) * 100
+              if sma_at(closes, 5, i - 5) else None)
     if atr_v and atr_v > 0:
+        levels = series[0][2]
         ride10 = sum(1 for k in range(max(0, i - 9), i + 1)
-                     if ma5[k] is not None and 0 <= (closes[k] - ma5[k]) <= 1.0 * atr_v)
+                     if levels[k] and 0 <= (closes[k] - levels[k]) <= 1.0 * atr_v)
     else:
         ride10 = None
-    dist_pct = (closes[i] - ma5[i]) / ma5[i] * 100
-    if slope20 > 0 and above20 >= MA_RIDE_ABOVE_MIN:
+    labels = {"ma5": "五日线", "ema10": "EMA10", "sma20": "MA20"}
+    if chosen:
         state = "line_ride"
+        label = labels[chosen_key]
         note = (
-            f"【沿五日线上升】MA5 已上行 {slope20:+.1f}%（20 根），且近 20 根有 {above20} 根"
-            f"收在线上（回踩线上 {bounce20} 次）—— 这是**趋势中段**，不是均线刚收复。"
-            f"此态按 T0「过昨高」追买实测最差（53 只全池 5 日均R −0.29、胜率 19%、"
-            f"77% 被 MA5 锚扫掉）⇒ **首选改成回踩 MA5（{round(ma5[i], 2)}）低吸**，"
+            f"【沿{label}上升】{label} 已上行 {chosen['slope20']:+.1f}%（20 根），"
+            f"且近 20 根有 {chosen['above']} 根收在线上"
+            f"（回踩线上 {chosen['bounce']} 次）—— 这是趋势中段，不是均线刚收复。"
+            f"首选改成回踩 {label}（{round(chosen['level'], 2)}）低吸，"
             f"过昨高只作次选，且须换更宽的止损锚（阳线下沿 / 大阳中点）。"
         )
-    elif slope20 <= 0 and above20 <= MA_RIDE_ABOVE_MIN - 1:
+    elif ma["slope20"] <= 0 and ma["above"] <= MA_RIDE_ABOVE_MIN - 1:
         state = "fresh_reclaim"
         note = (
-            f"【均线刚收复】MA5 20 根斜率 {slope20:+.1f}%（尚未转头），近 20 根只有 "
-            f"{above20} 根收在线上 ⇒ 正是 T0 原定的「刚收复、贴墙蓄势」场景，过昨高成立。"
+            f"【均线刚收复】MA5 20 根斜率 {ma['slope20']:+.1f}%（尚未转头），近 20 根只有 "
+            f"{ma['above']} 根收在线上。EMA10 / MA20 也没有形成沿线上行。"
+            f"正是 T0 原定的「刚收复、贴墙蓄势」场景，过昨高成立。"
         )
     else:
         state = "mixed"
         note = (
-            f"【中间态】MA5 20 根斜率 {slope20:+.1f}%、近 20 根 {above20} 根收在线上"
-            f"（回踩线上 {bounce20} 次）—— 既非刚收复也非沿线上行，两态证据都不足。"
+            f"【中间态】MA5 20 根斜率 {ma['slope20']:+.1f}%、近 20 根 {ma['above']} 根收在线上"
+            f"—— 既非刚收复，也没有一条均线达到沿线上行。"
         )
+    # ★ 统一口径：`line*` 系列 = **被选中的那条线**（无候选时回落 MA5）。读取方
+    #   （报告 / 改道 / t0_held_for_ride）一律用 `line*`，不要再取 `ma5`。
+    #   `above20` / `bounce20` / `ma5*` 保留 MA5 口径，勿改语义（历史字段）。
+    _pick = chosen or ma
+    _d_close = closes[i] - _pick["level"]
     return {
         "state": state,
-        "ma5_slope20_pct": round(slope20, 2),
+        "anchor": chosen_key if chosen else "ma5",
+        "line": round(_pick["level"], 2),
+        "line_label": labels[chosen_key] if chosen else "五日线",
+        "line_slope20_pct": round(_pick["slope20"], 2),
+        "line_above20": _pick["above"],
+        "line_bounce20": _pick["bounce"],
+        "line_dist_pct": round(_d_close / _pick["level"] * 100, 2),
+        "line_dist_atr": round(_d_close / atr_v, 2) if atr_v and atr_v > 0 else None,
+        "ma5_slope20_pct": round(ma["slope20"], 2),
         "ma5_slope5_pct": round(slope5, 2) if slope5 is not None else None,
-        "above20": above20,
-        "bounce20": bounce20,
+        "above20": ma["above"],
+        "bounce20": ma["bounce"],
         "ride10": ride10,
-        "dist_ma5_pct": round(dist_pct, 2),
-        "ma5": round(ma5[i], 2),
-        # ★ 买法改道：line_ride 时首选不是过昨高而是回踩那条线。
+        "dist_ma5_pct": round(ma["dist_pct"], 2),
+        "ma5": round(ma["level"], 2),
         "prefer": "line_pullback" if state == "line_ride" else "breakout",
         "note": note,
     }
@@ -2771,7 +2825,8 @@ def ma_reclaim_break(bars, ev, atr_v, last_c, res_win=25):
     )
 
     # ★ 2026-09-24：「均线刚收复」还是「已沿五日线上升一段」—— 决定这一单该不该按
-    #   T0 过昨高做（line_ride ⇒ 应改回踩 MA5）。见 `ma_ride_state()`。
+    #   T0 过昨高做（line_ride ⇒ 应改回踩**被选中的那条线**，可能是 EMA10/MA20）。
+    #   见 `ma_ride_state()`。
     _ride = ma_ride_state(bars, atr_v)
 
     return {
@@ -2827,17 +2882,19 @@ def ma_reclaim_break(bars, ev, atr_v, last_c, res_win=25):
         # ★ 均线排列**不作闸门**（2026-09-20 用户定）：纳微 9-08 突破时均线也未走顺
         #   （MA10/MA20 仍纠缠），后面还调了几天，但不影响最终结果。仅记录供复盘。
         "ma_aligned": bool(ma5 > ma10 > ma20),
-        # ★ 2026-09-24 新增：「均线刚收复」还是「已沿五日线上升一段」——见
+        # ★ 2026-09-24 新增：「均线刚收复」还是「已沿线上行一段」——见
         #   `ma_ride_state()` 的 docstring（旧「距 MA5 ≤4%」闸门已作废）。
-        #   line_ride ⇒ 过昨高是趋势中段追高，首选应改回踩 MA5。
+        #   line_ride ⇒ 过昨高是趋势中段追高，首选应改回踩**被选中的那条线**。
         "ride_state": (_ride or {}).get("state"),
         "ride": _ride,
         "entry_redirect": (
             {
                 "to": "line_pullback",
-                "level": _ride["ma5"],
-                "why": "line_ride 态下过昨高属趋势中段追高，实测均R 最差、77% 被 MA5 锚扫掉",
-                "alt": "若仍走 T0，须把硬止损锚从 MA5 换成更宽的「阳线下沿 / 大阳中点」",
+                "level": (_ride.get("line") if _ride.get("line") is not None
+                          else _ride["ma5"]),
+                "why": "line_ride 态下过昨高属趋势中段追高，实测均R 最差、"
+                       "77% 被短均线锚扫掉",
+                "alt": "若仍走 T0，须把硬止损锚换成更宽的「阳线下沿 / 大阳中点」",
             }
             if _ride and _ride.get("state") == "line_ride" else None
         ),
@@ -3171,11 +3228,20 @@ def plan_entry(bars, ev):
             #   则原样保留；若原本是 wait，则保持 wait 并写明「等回踩 MA5」）。
             _ride_state = (t0.get("ride") or {}).get("state")
             if _ride_state == "line_ride":
+                # ★ 2026-09-24 晚：这里的 line / 文案必须跟 `ma_ride_state` 选中的那条线
+                #   走 —— 锚可能是 EMA10 / MA20（全池 83 只里 42 只 line_ride，其中
+                #   21 只锚非 MA5）。写死 `ride["ma5"]` 会让 50% 的票报错价位。
+                _rd = t0["ride"]
+                _rd_line = _rd.get("line") if _rd.get("line") is not None else _rd.get("ma5")
+                _rd_label = _rd.get("line_label") or "五日线"
                 result["t0_held_for_ride"] = {
-                    "reason": "line_ride（沿五日线上升，非均线刚收复）",
+                    "reason": f"line_ride（沿{_rd_label}上升，非均线刚收复）",
                     "preferred": "line_pullback",
-                    "line": t0["ride"]["ma5"],
-                    "note": t0["ride"]["note"],
+                    "line": _rd_line,
+                    "line_label": _rd_label,
+                    "anchor": _rd.get("anchor") or "ma5",
+                    "line_dist_pct": _rd.get("line_dist_pct"),
+                    "note": _rd["note"],
                 }
                 if _takeover:
                     # 改道而不是否决：把入口从「过昨高追」换成「回踩 MA5 挂限价」。
@@ -3638,7 +3704,9 @@ def _t0_ride_redirect(result, t0, atr_v, last_c):
     （ride 态下收盘必然已离线上行），因此是**可预挂的限价单**，不需要盯盘。
     """
     ride = t0.get("ride") or {}
-    line = ride.get("ma5")
+    line = ride.get("line") if ride.get("line") is not None else ride.get("ma5")
+    label = ride.get("line_label") or "五日线"
+    anchor = ride.get("anchor") or "ma5"
     if line is None or not atr_v or atr_v <= 0:
         return result
     lo = round(line - 0.05 * atr_v, 2)      # 下沿只留毛刺（与 line_pullback 同口径）
@@ -3646,17 +3714,23 @@ def _t0_ride_redirect(result, t0, atr_v, last_c):
     hard = round(line - 0.10 * atr_v, 2)
     z = _empty_zone()
     z.update({
-        "type": f"沿线回踩·MA5 {round(line, 2)}（line_ride 改道）",
+        "type": f"沿线回踩·{label} {round(line, 2)}（line_ride 改道）",
         "path": "A",
-        "anchor": "ma5",
+        "anchor": anchor,
         "level": round(line, 2),
         "base": round(line, 2),
+        "line": round(line, 2),
+        "line_label": label,
         "primary_lo": lo,
         "primary_hi": hi,
-        "ma5": round(line, 2),
+        # ★ `ma5` 字段保持「真的 MA5」语义 —— 被选中的线可能是 EMA10/MA20，
+        #   池表（watch_cn / pool_us / scanner）拿它当「MA5」列显示，写成 line 会串价。
+        "ma5": ride.get("ma5"),
         "in_zone": bool(last_c is not None and lo <= last_c <= hi),
         "dist_atr": (round((last_c - line) / atr_v, 2) if last_c is not None else None),
-        "hits": ride.get("bounce20"),
+        # ★ 命中数取**被选中那条线**的回踩次数（line_bounce20），不是 MA5 的。
+        "hits": (ride.get("line_bounce20") if ride.get("line_bounce20") is not None
+                 else ride.get("bounce20")),
         "invalidation": round(line, 2),
     })
     _prev_mode, _prev_verdict = result.get("mode"), result.get("verdict")
@@ -3665,8 +3739,8 @@ def _t0_ride_redirect(result, t0, atr_v, last_c):
     result["setup"] = "pullback"
     result["path"] = "A"
     result["verdict"] = (
-        f"沿五日线上升（MA5 20 根斜率 {ride.get('ma5_slope20_pct'):+.1f}%）"
-        f"·回踩 MA5 {round(line, 2)} 低吸"
+        f"沿{label}上升（20 根斜率 {ride.get('line_slope20_pct'):+.1f}%）"
+        f"·回踩 {label} {round(line, 2)} 低吸"
     )
     result["recommend"] = True
     result["tier"] = "T1"
@@ -3674,13 +3748,19 @@ def _t0_ride_redirect(result, t0, atr_v, last_c):
     result["prev_verdict"] = _prev_verdict
     result["t0_superseded_mode"] = _prev_mode
     _below = last_c is not None and last_c > hi
+    _ldp, _lda = ride.get("line_dist_pct"), ride.get("line_dist_atr")
+    _dist_txt = (f"锚线距现价 {_ldp:+.1f}%"
+                 + (f"（{_lda:+.2f}×ATR）" if _lda is not None else "") + "；"
+                 ) if _ldp is not None else ""
     result["note"] = (
-        ride.get("note", "") + f" 【改道执行】买区 {lo}~{hi}（MA5−0.05×ATR ~ MA5+1.0×ATR）"
+        ride.get("note", "") + f" 【改道执行】买区 {lo}~{hi}（{label}−0.05×ATR ~ {label}+1.0×ATR）"
+        + _dist_txt
         + ("整体在现价下方 ⇒ **可预挂限价单、不需盯盘**；" if _below else
            "与现价重叠 ⇒ 回踩已在进行，按现价/限价在区内成交；")
-        + f"结构止损 = 收盘破 MA5 {round(line, 2)}，硬止损 {hard}（MA5−0.10×ATR）。"
+        + f"结构止损 = 收盘破 {label} {round(line, 2)}，硬止损 {hard}（{label}−0.10×ATR）。"
         f"原 T0 过昨高方案降为次选（水平 {t0.get('trigger')}）：若仍要走，须把硬止损锚"
-        f"从 MA5 换成更宽的「阳线下沿 / 大阳中点」，否则 {t0.get('risk_pct')}% 的 MA5 锚"
+        f"从 {t0.get('stop_anchor') or 'MA5'} 换成更宽的「阳线下沿 / 大阳中点」，否则"
+        f"{t0.get('risk_pct')}% 的短均线锚"
         f"在 ride 态下会被毛刺反复扫掉（全池实测 77% 止损出局）。"
     )
     result["exec"] = ("回踩类可预挂限价单（买区在现价下方），不需要盘中盯守" if _below
@@ -3688,15 +3768,15 @@ def _t0_ride_redirect(result, t0, atr_v, last_c):
     result["buy_zone"] = z
     result["stop_plan"] = {
         "struct": round(line, 2),
-        "struct_anchor": f"MA5@{round(line, 2)}（收盘破）",
+        "struct_anchor": f"{label}@{round(line, 2)}（收盘破）",
         "hard": hard,
-        "hard_anchor": "MA5",
+        "hard_anchor": label,
         "trigger": None,
         "struct_exec": STRUCT_EXEC,
         "hard_exec": HARD_EXEC,
         "hard_dist_atr": round((line - hard) / atr_v, 2),
         "hard_noise": False,
-        "stop_basis": "沿线回踩：结构止损 = 收盘破回踩线（MA5）；硬止损 = MA5 −0.10×ATR",
+        "stop_basis": f"沿线回踩：结构止损 = 收盘破回踩线（{label}）；硬止损 = {label} −0.10×ATR",
         "t0": False,
     }
     result.pop("stop_above_price", None)

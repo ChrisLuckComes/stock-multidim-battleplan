@@ -127,11 +127,16 @@ def build_kpis(a, n):
     #   （evaluate 重建 out 时漏键）→ 用户看到「均线收复 + 过昨高」的票却只有 T2 回踩单，
     #   会直接反问「为什么像 T0 的变种」。这里把它显式挂到首屏徽标上。
     _t0 = p.get("ma_reclaim") or {}
-    if _t0 and (_t0.get("ride") or {}).get("state") == "line_ride":
+    _rd = _t0.get("ride") or {}
+    if _t0 and _rd.get("state") == "line_ride":
         # ★ 2026-09-24：line_ride 态 T0 已改道 —— 徽标必须写「不追」，别让人当成首选入口。
-        badges.append('<span class="badge b-no">T0 已改道：沿五日线上升 · '
-                      '回踩 MA5 %s 低吸（原过昨高 %s 不作首选）</span>'
-                      % (num((_t0.get("ride") or {}).get("ma5")), num(_t0.get("trigger"))))
+        #   ★ 当晚补：锚线不写死五日线，价位/名称一律取 `line*`（全池 42 只 line_ride 里
+        #     21 只锚 EMA10/MA20，取 ma5 会报出错误价位）。
+        _lbl = _rd.get("line_label") or "五日线"
+        _ln = _rd.get("line") if _rd.get("line") is not None else _rd.get("ma5")
+        badges.append('<span class="badge b-no">T0 已改道：沿%s上升 · '
+                      '回踩 %s %s 低吸（原过昨高 %s 不作首选）</span>'
+                      % (esc(_lbl), esc(_lbl), num(_ln), num(_t0.get("trigger"))))
     elif _t0 and p.get("mode") != "ma_reclaim_break":
         badges.append('<span class="badge b-t1">T0 并行入口：过昨高 %s / 止损 %s（%s）</span>'
                       % (num(_t0.get("trigger")), num(_t0.get("hard_stop")),
@@ -139,12 +144,17 @@ def build_kpis(a, n):
     # ★ 2026-09-24：T0 不成立时也要把模式判别挂出来（东材 601208 09-24 已创 25 日新高
     #   ⇒ T0 判据不成立，但它就是 line_ride —— 只在 T0 成立时才显示等于答案缺失）。
     _ride_any = p.get("ma_ride") or {}
-    if _ride_any.get("state") and not (_t0 and (_t0.get("ride") or {}).get("state") == "line_ride"):
+    if _ride_any.get("state") and not (_t0 and _rd.get("state") == "line_ride"):
         _cls = "b-no" if _ride_any["state"] == "line_ride" else "b-ok"
-        badges.append('<span class="badge %s">模式判别 = %s（MA5 20 根斜率 %s%% · '
+        _rl = _ride_any.get("line_label") or "五日线"
+        _rs = _ride_any.get("line_slope20_pct")
+        _ra = _ride_any.get("line_above20")
+        if _rs is None or _ra is None:                 # 老口径 plan 兼容
+            _rl, _rs, _ra = "MA5", _ride_any.get("ma5_slope20_pct"), _ride_any.get("above20")
+        badges.append('<span class="badge %s">模式判别 = %s（%s 20 根斜率 %s%% · '
                       '近 20 根 %s 根在线上）</span>'
-                      % (_cls, esc(_ride_any["state"]),
-                         num(_ride_any.get("ma5_slope20_pct")), int(_ride_any.get("above20") or 0)))
+                      % (_cls, esc(_ride_any["state"]), esc(_rl),
+                         num(_rs), int(_ra or 0)))
     for x in (n.get("badges") or []):
         if isinstance(x, dict):
             badges.append('<span class="badge %s">%s</span>' % (x.get("cls", "b-ok"), x.get("txt", "")))
@@ -339,10 +349,13 @@ def build_plan_rows(a):
                                     num(abs(_trig / _c - 1) * 100))
         else:
             _dist = "—"
-        # ★ 2026-09-24：`line_ride`（沿五日线上升）态下 T0 已改道给回踩 —— 报告必须
+        # ★ 2026-09-24：`line_ride`（沿线上行）态下 T0 已改道给回踩 —— 报告必须
         #   写明「这单不该按过昨高追」，否则读者会把 T0 行当成首选入口。
+        #   ★ 当晚补：锚线不写死五日线 —— 名称/斜率/站上根数/价位一律取 `line*`。
         _ride = t0.get("ride") or {}
         _redirect = _ride.get("state") == "line_ride"
+        _rlabel = _ride.get("line_label") or "五日线"
+        _cline = _ride.get("line") if _ride.get("line") is not None else _ride.get("ma5")
         _head = ("过昨高 <b>%s</b>（D0 最高价 · %s）· 止损 <b>%s</b>（%s）· "
                  "每股风险 %s（%s%%）<br>"
                  "阻力墙 %s（%s）距 %s%% ｜ 档位 %s ｜ 「收复全部均线」那根 = <b>%s</b><br>"
@@ -355,13 +368,14 @@ def build_plan_rows(a):
         if _redirect:
             _bz = p.get("buy_zone") or {}
             _body = _head + (
-                "⚠ <b>本票处于【沿五日线上升】态</b>（MA5 20 根斜率 %s%%、近 20 根 %s 根"
+                "⚠ <b>本票处于【沿%s上升】态</b>（%s 20 根斜率 %s%%、近 20 根 %s 根"
                 "收在线上）—— 此时「过昨高」属<b>趋势中段追高</b>：全池 53 只回放 5 日均R "
-                "−0.29、胜率 19%%、77%% 被 MA5 锚扫掉 ⇒ <b>首选改成回踩 MA5 %s 低吸</b>"
+                "−0.29、胜率 19%%、77%% 被均线锚扫掉 ⇒ <b>首选改成回踩 %s %s 低吸</b>"
                 "（买区 %s~%s，已改道为当日首选入口）；若仍走 T0，硬止损锚须换成更宽的"
                 "「阳线下沿 / 大阳中点」。<br>模式判别：%s"
-                % (num(_ride.get("ma5_slope20_pct")), int(_ride.get("above20") or 0),
-                   num(_ride.get("ma5")), num(_bz.get("primary_lo")),
+                % (esc(_rlabel), esc(_rlabel), num(_ride.get("line_slope20_pct")),
+                   int(_ride.get("line_above20") or 0), esc(_rlabel), num(_cline),
+                   num(_bz.get("primary_lo")),
                    num(_bz.get("primary_hi")), esc(_ride.get("note") or "—")))
         else:
             _body = _head + (
