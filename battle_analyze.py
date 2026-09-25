@@ -462,6 +462,32 @@ def single_cap_with_cash(account, cash=None):
     return cap
 
 
+def limit_touch_rate(bars, limit_px, horizon=5):
+    """挂单价的历史触达率：按同样的距收盘比例，后 horizon 日最低价碰到的占比。"""
+    if not bars or limit_px is None or len(bars) < horizon + 30:
+        return None
+    last = bars[-1]["c"]
+    if not last or limit_px >= last:
+        return None
+    ratio = limit_px / last
+    hits = 0
+    n = 0
+    last_i = len(bars) - horizon - 1
+    for i in range(last_i):
+        c = bars[i]["c"]
+        if not c:
+            continue
+        cap = c * ratio
+        n += 1
+        for b in bars[i + 1:i + 1 + horizon]:
+            if b["l"] <= cap:
+                hits += 1
+                break
+    if n < 30:
+        return None
+    return {"px": round(limit_px, 2), "pct": round(hits / n * 100, 1), "n": n, "horizon": horizon}
+
+
 def pick_recommend(rows, z):
     """从全档里挑「可执行且赔率最高」的一条。
 
@@ -794,6 +820,19 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
     odds = odds_matrix(entries, anchors, atr_v, t1, wall_far if wall_far else t2_engine, last_c)
     odds = annotate_odds(odds, z, atr_v, last_c)
     rec = pick_recommend(odds, z)
+    touch_px = None
+    if rec and rec.get("entry") is not None and rec["entry"] < last_c:
+        touch_px = rec["entry"]
+    if touch_px is None:
+        line = (plan.get("ma_ride") or {}).get("line")
+        if line is None:
+            line = (z or {}).get("level")
+        if line is not None and line < last_c:
+            touch_px = line
+    touch = limit_touch_rate(bars, touch_px)
+    if rec is not None and touch:
+        rec["touch_rate"] = touch["pct"]
+        rec["touch_px"] = touch["px"]
     # ★ 股数一律走引擎自己的风险预算法（ash_lots）——别在这里另写一套：
     #   它同时受「账户 × risk_pct / 每股风险」与「单笔金额硬顶 ash_single_cap」约束，
     #   并按最小申报单位取整（科创板 200 起 1 股递增）。自成一套迟早与引擎走偏。

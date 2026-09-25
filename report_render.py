@@ -240,6 +240,13 @@ def build_best(a, n):
     if n.get("best_kpi_extra"):
         for x in n["best_kpi_extra"]:
             kpis.append(tuple(x))
+    tr = (rec or {}).get("touch_rate")
+    if tr is not None and not any(str(k).startswith("触达率") for k, _v in kpis):
+        px = (rec or {}).get("touch_px")
+        shown = "%s%%" % num(tr, 1)
+        if px is not None:
+            shown = "%s（%s）" % (shown, num(px))
+        kpis.append(("触达率", "<b>%s</b>" % shown))
     html = "\n    ".join('<div class="kpi">%s <b>%s</b></div>' % (k, v) for k, v in kpis)
     title = n.get("best_title") or ("可执行档：%s，止损 %s" % (rec["entry_name"], rec["stop_name"]))
     # 对照：全档最高 R（不一定可执行）与最差档
