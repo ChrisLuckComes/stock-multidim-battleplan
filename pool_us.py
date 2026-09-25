@@ -45,6 +45,7 @@ import account_config as _AC  # noqa: E402
 import fetch_market as F  # noqa: E402
 from bars_source import us_quote as _bs_us_quote  # noqa: E402
 from rule123 import build_ev, plan_entry, atr14  # noqa: E402
+import confluence as CF  # noqa: E402  叠加概率七层计数（只汇总排序，不否决）
 
 CFG = os.path.join(HERE, "pool_us.json")
 REPORTS = os.path.join(HERE, "reports")
@@ -190,6 +191,10 @@ def analyze_one(item, cfg):
     r["live"] = q.get("spot")
     r["spot"] = round(spot, 2)
     r["chg_pct"] = round((spot / prev - 1) * 100, 2) if prev else None
+    # 20 日涨幅（日线自算）。用途：叠加计数的「领导者」层 —— 同板块内谁涨得最好。
+    # 日线已在本函数内存里，不额外取数；口径与 battle_analyze 的 range_change["20d"] 一致。
+    r["d20"] = (round((spot / bars[-21]["c"] - 1) * 100, 2)
+                if len(bars) > 21 else None)
     r["date"] = bars[-1]["d"]
     r["prev_close"] = round(prev, 2)
     r["nbars"] = len(bars)
@@ -587,6 +592,13 @@ def render(cfg, rows, watch_rows, senti, idx, manual, src_stat=None, snap_info=N
             L.append(f"  {m['name']}（{m['code']}） —— {m['note']}")
 
     L.append("")
+    # ★ 叠加概率七层计数（2026-09-25 新增）：把「对上了几层」变成可比的排序，
+    #   直接回答推文那句「哪种情况给你更多汇合因素」。**只排序，不改任何买卖结论**。
+    _cf_entries = [(r.get("name") or r.get("sym"), r.get("confluence"))
+                   for r in rows if not r.get("err")]
+    L.extend(CF.section_lines(
+        _cf_entries, "【七】叠加计数（七层）—— 只排序，不否决"))
+    L.append("")
     L.append("─" * 96)
     L.append("口径提醒：")
     L.append("  · **致富证券：既无 buy-stop、也无条件单（2026-09-19 用户确认）** —— 别把")
@@ -665,6 +677,19 @@ def main():
         r["sector_resonance"] = (
             "强" if len(peers) >= 3 else ("中" if len(peers) == 2
                                           else ("弱" if len(peers) == 1 else None)))
+    # ★ 叠加概率七层计数（2026-09-25 新增）。池层是唯一能拿到「板块共振」的地方，
+    #   所以七层里最关键的板块层只有在这里才算得出来。**只排序，不否决** ——
+    #   与情绪分同一分工：软约束只换做法/排序，不作开不开仓的开关。
+    #   领导者层需要「同板块内谁 20 日涨得最好」，故按 sk_bucket 再分一次组。
+    _by_bucket = {}
+    for r in _all:
+        _by_bucket.setdefault(_grp(r), []).append(r)
+    for r in rows:
+        try:
+            r["confluence"] = CF.from_pool_row(
+                r, bucket_rows=_by_bucket.get(_grp(r)))
+        except Exception:                      # noqa: BLE001  计数失败不影响复盘
+            r["confluence"] = None
 
     sentiment_cfg = cfg.get("sentiment", [])
     index_cfg = cfg.get("indices", [])

@@ -42,6 +42,7 @@ import rule123 as R                     # noqa: E402
 import probe_intraday as P              # noqa: E402
 import bars_source as BS                # noqa: E402
 import top_signals as TS_TOP            # noqa: E402  顶部标志 K 线硬指标
+import confluence as CF                 # noqa: E402  叠加概率七层计数（只汇总，不否决）
 
 VERSION = "1.0"
 
@@ -947,6 +948,16 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
         "peers": peer_rows,
         "probe_text": probe_txt,
     }
+    # ★ 叠加概率七层计数（2026-09-25 新增）：把上面已经算好的结论**汇总成一个数**，
+    #   回答「这单是单因素还是多因素」。市场层自动去 data/sentiment_<基准日>.json 找
+    #   当日情绪分（日期必须严格一致，隔日不算）；板块与催化剂单票报告拿不到，
+    #   由 report_render 在模型写好 notes.json 后注入。
+    #   ⚠ 只汇总、不裁决：失败也不得影响主流程（计数缺失 ≠ 分析失败）。
+    try:
+        out["confluence"] = CF.from_analysis(out)
+    except Exception as e:                      # noqa: BLE001
+        out["confluence"] = None
+        notes_all.append("叠加计数生成失败（不影响其余分析）：%s" % e)
     return out
 
 
@@ -1029,6 +1040,13 @@ def summarize(r):
                  % (_mk, _tv.get("exit_code", 0), _tv.get("advice")))
     elif _tv.get("state") == "invalidated":
         L.append(" 顶部硬指标：曾有顶部标志K线但已被反包推翻（形态失效），不构成限制")
+    # ★ 叠加计数（七层）：只汇总不裁决。放在这里是因为它和顶部硬指标同属
+    #   「看一眼就知道这单成色」的首屏信息，但性质相反 —— 顶部是指标是否决权，
+    #   这里是解释力，**不能互相抵消**。
+    _cf = r.get("confluence")
+    if _cf:
+        L.append("")
+        L.extend(CF.format_lines(_cf))
     L.append(" 买区 %s ~ %s   持仓防守 %s" % (z.get("primary_lo"), z.get("primary_hi"),
                                             z.get("invalidation")))
     L.append(" 结构止损 %s(%s) / 硬止损 %s(%s)  hard_dist_atr=%s" % (

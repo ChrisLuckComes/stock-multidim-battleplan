@@ -26,6 +26,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_TMPL = os.path.join(HERE, "templates", "battle_report.html")
 VERSION = "1.0"
 
+try:                                        # 叠加概率七层计数（2026-09-25 新增）
+    import confluence as CF
+except ImportError:                         # 老副本没有该模块时静默降级
+    CF = None
+
 
 # ───────────────────────────── 格式化 ─────────────────────────────
 
@@ -755,11 +760,89 @@ def build_top_signal(a, n):
                  + tail)
 
 
+def build_confluence(a, n):
+    """叠加概率七层计数区块（2026-09-25 新增）。
+
+    把 battle_analyze 已经算好的各层结论**汇总成一个数**，回答
+    「这单是单因素还是多因素」。七层顺序固定：整体市场 → 板块主题 →
+    领导者 → 催化剂 → 形态 → 量能 → 执行。
+
+    ⚠ 性质：**只用于排序与解释，不作准入闸门、不缩放仓位**
+    （与 market_sentiment 同一分工 —— 软约束只换做法）。「全对齐」不等于可买，
+    「少对齐」也不等于不能买；能否决交易的只有硬约束。
+    硬约束（顶部已确认等）单独一行列出，**不计入七层** —— 一个是否决权，
+    一个是解释力，混在一起就分不清了。
+
+    板块与催化剂单票报告算不出来（板块共振只在池层、催化剂属定性研究），
+    由模型写进 notes.json 注入：
+        "sector_count": 3, "sector_bucket": "半导体", "sector_peers": ["a","b"],
+        "catalyst_has": true, "catalyst_note": "缺 CPU 叙事 + 市场热度"
+    不写就记 `无数据` 并**在表里显示出来** —— 不留白充数。
+    """
+    if CF is None:
+        return ("<div class='card'><h3>叠加概率（七层计数）</h3>"
+                "<p class='note'>未找到 confluence.py，跳过本区块。</p></div>")
+    sector = None
+    if n.get("sector_count") is not None:
+        sector = {"count": n.get("sector_count"),
+                  "bucket": n.get("sector_bucket"),
+                  "peers": n.get("sector_peers")}
+    catalyst = None
+    if n.get("catalyst_has") is not None:
+        catalyst = {"has": n.get("catalyst_has"),
+                    "note": n.get("catalyst_note")}
+    try:
+        conf = CF.from_analysis(a, sector=sector, catalyst=catalyst)
+    except Exception:                        # noqa: BLE001
+        conf = a.get("confluence")           # 降级用引擎写入的那一份
+    if not conf:
+        return ("<div class='card'><h3>叠加概率（七层计数）</h3>"
+                "<p class='note'>本次 analysis.json 未携带叠加计数"
+                "（旧版 battle_analyze 生成的？重跑即可）。</p></div>")
+
+    _st = {"on": ("#1b7f3b", "对齐"), "off": ("#8a8a8a", "未对齐"),
+           "unknown": ("#8a6d00", "无数据")}
+    badge_cls = "b-ok" if conf["count"] >= max(1, conf["known"] - 1) else "b-warn"
+    rows_l = []
+    for x in conf["layers"]:
+        color, mark = _st[x["state"]]
+        rows_l.append([
+            "<b>%s</b> <span class='note'>%s</span>" % (esc(x["cn"]), esc(x["en"])),
+            "<span style='color:%s;font-weight:600'>%s</span>" % (color, mark),
+            esc(x["detail"]),
+        ])
+
+    veto_html = ""
+    if conf.get("veto"):
+        v = conf["veto"]
+        veto_html = ("<p class='note'><b>硬约束（不计入七层）</b>："
+                     "<span style='color:%s;font-weight:600'>顶部%s</span> —— %s"
+                     "%s</p>"
+                     % ("#b3261e" if v["hard"] else "#8a5a00",
+                        esc(v["level_cn"]), esc(v["note"]),
+                        ("；建议仓位 ×%s" % num(v.get("size_factor"), 2))
+                        if v.get("size_factor") is not None else ""))
+
+    unknown_txt = ""
+    if conf["unknown"]:
+        names = "、".join(CF.LAYER_CN.get(k, k) for k in conf["unknown"])
+        unknown_txt = ("<p class='note'>未计入分母的 %d 层：%s。<b>分母已按此缩小"
+                       "—— 不要把「无数据」读成「对上了」</b>。</p>"
+                       % (len(conf["unknown"]), esc(names)))
+
+    head = ("<p><span class='badge %s'>%s</span>"
+            "<span class='note'>分母只含「有数据」的层，硬约束另列</span></p>"
+            % (badge_cls, esc(conf["label"])))
+    table = "<table>" + rows(rows_l, header=["层", "状态", "依据"]) + "</table>"
+    return ("<div class='card' style='border-left:5px solid #e3e6ea'>"
+            "<h3>叠加概率（七层计数 · 只排序不否决）</h3>%s%s%s%s</div>"
+            % (head, table, veto_html + unknown_txt,
+               "<p class='note'>%s</p>" % esc(conf["note"])))
+
+
 # ───────────────────────── 主流程 ─────────────────────────
 
 SLOT_RE = re.compile(r"\{\{([A-Z0-9_]+)\}\}")
-
-
 def render(a, n, tmpl_path=DEFAULT_TMPL):
     m, s, p = a["meta"], a["struct"], a["plan"]
     n = n or {}
@@ -834,6 +917,7 @@ def render(a, n, tmpl_path=DEFAULT_TMPL):
         "PLAN_NOTE": note(n.get("plan_note"), ""),
         "CALIBER_NOTES": "".join("<p>%s</p>" % x for x in caliber),
         "TOP_SIGNAL_BLOCK": build_top_signal(a, n),
+        "CONFLUENCE_BLOCK": build_confluence(a, n),
         "T1": num(a["targets"].get("t1")),
         "T2": num(a["targets"].get("wall_far")),
         "ODDS_ROWS": build_odds_rows(a),

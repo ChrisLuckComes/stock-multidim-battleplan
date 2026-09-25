@@ -49,6 +49,23 @@
 ### 3. 强制产出模块
 研报必须显式包含：**模式（mode + 优先级）**、**入场（买区来自脚本，禁止手写均线）**、**止损**、**目标1 / 目标2（止盈档，≠ 模式优先级 T1/T2）+ 减仓节奏**、**扫雷**、**双轨打分（投资价值 / 短线博弈各 0–10）**、**同板块龙头对照与优先做谁**。缺任一则计划不可执行。
 
+### 4. 叠加概率七层计数（`confluence.py`）
+回答「这笔交易对上了几层有利因素」，而不是「形态好不好看」——**停止寻找一个交易的理由，开始寻找叠加的理由**。
+
+| # | 层 | 判据（全部锚在既有规则上） |
+|---|---|---|
+| 1 | 整体市场 | 情绪分 ≥55（`market_sentiment` 的「偏强」线） |
+| 2 | 板块主题 | 池层共振 ≥2 只（`watch_cn` / `pool_us` 口径） |
+| 3 | 领导者 | 本票 20 日涨幅 ≥ 同板块最强者（= 龙头定义「近期涨得最好」） |
+| 4 | 催化剂 | 定性判断（由人/模型写入，缺省**不计入分母**） |
+| 5 | 形态 | `recommend=True` 且 `mode` 非 wait/none |
+| 6 | 量能 | RVOL20 ≥1.0 且涨/跌均量比 ≥1.0（<1/1.15 = 派发） |
+| 7 | 执行 | `R→t1` ≥1.5 且风险 ≥0.25×ATR |
+
+**⚠ 性质：只用于排序与解释，不作准入闸门、不缩放仓位。**「全对齐」不等于可买，「少对齐」也不等于不能买——能否决交易的只有硬约束（钱不够 / 涨停买不到 / 结构已坏 / 顶部已确认 / 标的总否决）。顶部标志 K 线是**否决权**，单独列 `veto`，**不与七层相加**。`unknown` 层不进分母，但会在终端、HTML 报告、池层段落三处显示出来——**分母静默缩水 = 把「没数据」伪装成「对上了」**。
+
+CLI：`python confluence.py <analysis.json> [--market-score N --sector-count N --catalyst yes|no]`；回归 `python test_confluence.py`。
+
 ---
 
 ## 目录结构
@@ -71,6 +88,12 @@ stock-multidim-battleplan/
 ├── calc_ash_position.py # A 股仓位闸门全量扫描（结构性能否交易）
 ├── pre_runup.py         # 公告前「抢跑涨幅」检查（消息驱动型标的的否决型判据）
 ├── stock_character.py   # 股性体检：① 突破加速型 vs 拉高消化型 ② 利好兑现习惯（是否出消息即顶）；输出顶部先给【结论】
+├── market_sentiment.py  # 大盘情绪量化 0–100 分 → 仓位缩放（软约束，不否决）
+├── top_signals.py       # 顶部标志 K 线五形态 + 次日确认制（硬指标，出口 top_verdict）
+├── confluence.py         # 叠加概率七层计数：市场/板块/领导者/催化剂/形态/量能/执行（只排序不否决）
+├── levels.py            # 多空参考位：压力/支撑分区 + RSI14 + 多空转换地图（A股美股通吃）
+├── battle_analyze.py    # 单票一键分析 → analysis.json（A股/美股同入口）
+├── report_render.py     # analysis.json + notes.json → 作战计划 HTML（禁止手写 HTML）
 ├── research_ma_ride.py  # 「均线刚收复 vs 沿某条均线上行」判别器的实证复现（T0 改道依据）
 ├── research_ride_priority.py  # 「突破事件 vs 沿均线背景」优先级 + 无锚=新高的实证复现
 ├── test_breakout_modes.py
@@ -79,6 +102,7 @@ stock-multidim-battleplan/
 ├── test_pre_runup.py
 ├── test_review_fixes.py
 ├── test_stock_character.py  # 股性体检回归（40 项）
+├── test_confluence.py       # 叠加概率七层计数回归（100 项）
 ├── references/          # 按场景加载的策略、量价、风控与输出细则
 ├── scan_all/            # 全市场扫描（买区走 rule123.build_ev）
 ├── out_cn/              # A股运行输出（gitignore）：fetch_market/rule123 的 out_*.json 按市场自动归档于此
