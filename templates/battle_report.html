@@ -63,7 +63,6 @@
 <div class="card">
   <div class="kpis">{{KPI_ITEMS}}</div>
   <p style="margin:10px 0 0">{{KPI_BADGES}}</p>
-  <p style="margin:8px 0 0">{{HEAD_EXTRA}}</p>
   <p style="margin:10px 0 0;font-size:14.5px">{{THESIS}}</p>
 </div>
 
@@ -73,21 +72,14 @@
   <p class="note" style="margin:8px 0 0">{{BEST_NOTE}}</p>
 </div>
 
-<!-- ================= 双轨打分（紧跟最高盈亏比） ================= -->
-<h2>双轨打分（禁止合成总分）</h2>
-<div class="grid g2">
-  <div class="card">
-    <h3>投资价值 <span class="sec-no">{{SCORE_INVEST}} / 10</span></h3>
-    <ul>{{SCORE_INVEST_LI}}</ul>
-  </div>
-  <div class="card">
-    <h3>短线博弈 <span class="sec-no">{{SCORE_TRADE}} / 10</span></h3>
-    <ul>{{SCORE_TRADE_LI}}</ul>
-  </div>
-</div>
+<!-- ================= 顶部标志 K 线硬指标（跑个股必看） ================= -->
+{{TOP_SIGNAL_BLOCK}}
 
 <!-- ================= 叠加概率七层计数（只排序不否决） ================= -->
 {{CONFLUENCE_BLOCK}}
+
+<!-- ================= 开盘作战方案（开盘价落在哪 → 动作） ================= -->
+{{OPEN_PLAYBOOK_BLOCK}}
 
 <!-- ================= 1. 模式卡 ================= -->
 <h2>1 · 模式卡与执行口径</h2>
@@ -127,9 +119,27 @@
 </div>
 
 <!-- ================= 3. 量价分析 ================= -->
-<h2>3 · 量价结论</h2>
+<h2>3 · 量价分析（当日分钟复盘 + 近 20 日）</h2>
+<div class="grid g2">
+  <div class="card">
+    <h3>3.1 当日（{{BASIS_DATE}}）分钟复盘</h3>
+    <table>
+      <tr><th>项</th><th>值</th></tr>
+      {{INTRADAY_ROWS}}
+    </table>
+    <p class="note" style="margin-top:6px">{{INTRADAY_NOTE}}</p>
+  </div>
+  <div class="card">
+    <h3>3.2 近 20 日量价节奏</h3>
+    <table>
+      <tr><th>项</th><th>值</th></tr>
+      {{VP_ROWS}}
+    </table>
+    <p class="note">{{VP_NOTE}}</p>
+  </div>
+</div>
 <div class="card">
-  <h3>当日 + 近 20 日</h3>
+  <h3>3.3 量价结论（强制：当日 + 近 20 日分别判定）</h3>
   <table>
     <tr><th>维度</th><th>判定</th><th>依据</th></tr>
     {{VP_VERDICT_ROWS}}
@@ -147,7 +157,7 @@
   <div class="card">
     <h3>4.2 财务与经营节奏</h3>
     <table>
-      <tr><th>项</th><th>值</th><th>同比</th><th>环比</th></tr>
+      <tr><th>项</th><th>值</th></tr>
       {{FIN_ROWS}}
     </table>
   </div>
@@ -156,7 +166,7 @@
   <div class="card">
     <h3>4.3 估值水位</h3>
     <table>
-      <tr><th>口径</th><th>值</th><th>说明</th></tr>
+      <tr><th>口径</th><th>值</th></tr>
       {{VALUATION_ROWS}}
     </table>
     <p class="note">{{VALUATION_NOTE}}</p>
@@ -204,6 +214,19 @@
     {{PEER_ROWS}}
   </table>
   <p class="note">{{PEER_NOTE}}</p>
+</div>
+
+<!-- ================= 8. 双轨打分 ================= -->
+<h2>8 · 双轨打分（禁止合成总分）</h2>
+<div class="grid g2">
+  <div class="card">
+    <h3>投资价值 <span class="sec-no">{{SCORE_INVEST}} / 10</span></h3>
+    <ul>{{SCORE_INVEST_LI}}</ul>
+  </div>
+  <div class="card">
+    <h3>短线博弈 <span class="sec-no">{{SCORE_TRADE}} / 10</span></h3>
+    <ul>{{SCORE_TRADE_LI}}</ul>
+  </div>
 </div>
 
 <!-- ================= 9. 执行方案 ================= -->
