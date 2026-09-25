@@ -71,6 +71,10 @@ def analyze(code, name, prefix):
     stop = sp.get("hard") or sp.get("struct") or z.get("hard_stop") or z.get("struct_stop") or z.get("invalidation")
     struct_stop = sp.get("struct") or z.get("struct_stop")
     hard_stop = sp.get("hard") or z.get("hard_stop")
+    # 顶部标志 K 线（墓碑/上吊/射击之星/十字星/大阴线 + 次日确认制，2026-09-25）。
+    # 闸门已经在 plan_entry 出口生效（确认后 recommend=False），这里只做导出，
+    # 让报表能看出「这只票为什么被否」以及「信号档位/推翻线」。
+    ts = plan.get("top_signal") or {}
     # 预备突破单（buy-stop 埋伏）：与当日 mode 独立并存，先到先做。
     # 全市场表里这一列比 buy_zone 更可执行 —— A 股用户盯不住盘中，只能靠挂单。
     pb = plan.get("pre_breakout") or {}
@@ -124,6 +128,18 @@ def analyze(code, name, prefix):
         recommend=plan.get("recommend"),
         verdict=plan.get("verdict"),
         pre_breakout=pb,
+        # 顶部标志 K 线（缺字段时全 None/False，报表按「无」渲染）
+        top_state=ts.get("state"),
+        top_block=bool(ts.get("block")),
+        top_veto=bool(plan.get("top_signal_veto")),
+        top_pattern=ts.get("pattern_cn"),
+        top_date=ts.get("d"),
+        top_vol=ts.get("vol_cn"),
+        top_rvol=ts.get("rvol"),
+        top_prob=ts.get("prob"),
+        top_invalidation=ts.get("invalidation"),
+        top_size_factor=ts.get("size_factor"),
+        top_summary=ts.get("summary"),
         anchor=z.get("anchor"),
         vwap5=z.get("vwap5"), in_zone=z.get("in_zone"),
         chase_only=bool(z.get("chase_only")),

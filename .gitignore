@@ -1,21 +1,29 @@
 rule123_out.json
+rule123_all.json
 out_*.json
+out_*.txt
 out_cn/*.json
 out_us/*.json
 *_data.json
 data/
 __pycache__/
 *.pyc
+*.tmp
 output/
 _gen_*.py
 scan_all/codes.json
 scan_all/results.jsonl
 data_n/
 cache/
+.cache/
 reports/
 run.log
 .env
 us_proxy.txt
+
+# 私人生成物（2026-09-25 补）：作战计划笔记 + 顶部研究控制台输出。
+# 仓库为 public，notes_*.json 含持仓/成本/买点，不得收录。
+notes_*.json
 
 # 工作区记忆 / 自动化文件，勿入仓库（2026-09-18）
 .workbuddy/

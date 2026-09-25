@@ -78,6 +78,9 @@ FIELD_TYPE = {
     "板块主题": "text",
     "报告": "url",
     "操作记录": "text",
+    # 2026-09-24 新增列（A股表 field_id=J9Pi1P6n）：存 battle_analyze 出的可执行作战计划
+    # （买点/止损/仓位/目标/雷/纪律）。美股表暂无此列，写前会被 check_fields 拦。
+    "作战计划": "text",
 }
 
 DB_OF = {"cn": CN_DB_ID, "us": US_DB_ID}

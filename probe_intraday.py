@@ -696,6 +696,31 @@ def _print_vp_regime(vp, section_no):
         print("  结论      : 中性（涨跌量比不极端）→ 仓位照旧，盯死证伪位")
 
 
+def _print_top_signal(plan):
+    """顶部标志 K 线「硬指标」（2026-09-25 老罗：跑个股时出现这种要避雷）。
+
+    有信号才打，无信号不刷屏。打印 `plan["top_signal"]`（rule123 已算好、与 veto 同源），
+    不再 import top_signals 重算一遍 —— 两处口径必须只有一个。
+    """
+    t = plan.get("top_signal") or {}
+    if t.get("block"):
+        b = t.get("best") or {}
+        print(f" 顶部信号   : [X] 顶部标志K线已确认 → 避雷"
+              f"（{b.get('d')} {b.get('pattern_cn')}·{b.get('variant_cn')}，"
+              f"{b.get('vol_cn')}{b.get('rvol')}×，次日走弱）")
+        print(f"              依据   : {t.get('block_reason') or ''}")
+        print(f"              推翻线 : {t.get('invalidation')}"
+              f"（其后任一收盘收复即作废）｜ recommend 已被本项否决")
+    elif t.get("signals"):
+        b = t.get("best") or {}
+        print(f" 顶部信号   : [!] {b.get('d')} {b.get('pattern_cn')}"
+              f"（{b.get('vol_cn')}{b.get('rvol')}×）待确认 → 只预警不否决；"
+              f"次日走弱=确认顶部，收盘收复 {t.get('invalidation')}=反包推翻")
+    elif t.get("rejected"):
+        print(f" 顶部信号   : [ ] 近端 {len(t['rejected'])} 根同形态，"
+              f"但都不是这一波高点（低位同形态属看涨反转，不算顶部信号）")
+
+
 def probe(code, qty=None, account=None, asof=None, min_scale=5, replay=False,
           until=None, us_account=None, date=None, data_file=None, market_data=None):
     # ★ 默认值现取（不在签名里写 50000 / 5000）：配置改了不必改代码
@@ -754,6 +779,7 @@ def probe(code, qty=None, account=None, asof=None, min_scale=5, replay=False,
         "zone_lo": z.get("primary_lo"), "zone_hi": z.get("primary_hi"),
         "defend": z.get("invalidation"),
         "note": plan.get("note"),
+        "top_signal": plan.get("top_signal"),
     }
 
     print("=" * 66)
@@ -768,6 +794,7 @@ def probe(code, qty=None, account=None, asof=None, min_scale=5, replay=False,
            else f"{z.get('primary_lo')} ~ {z.get('primary_hi')}")
     print(f" 买区       : {_zt}"
           f"   防守位 {z.get('invalidation')}")
+    _print_top_signal(plan)
     if z.get("stop_warning"):
         print(f" ⚠ 止损冲突 : {z['stop_warning']}")
     if plan.get("note"):
@@ -1608,6 +1635,7 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None,
     print(f" 买区       : {_zt}"
           f"{'（盘中口径）' if live_bar is not None else ''}"
           f"   防守位 {z.get('invalidation')}")
+    _print_top_signal(plan)
     if z.get("relaxed"):
         print(f" 门控       : ⚠ 已放宽 —— {z.get('relaxed_reason')}")
     if z.get("stop_warning"):
@@ -1632,7 +1660,8 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None,
            "spot": spot, "atr": round(atr_v, 3), "mode": plan["mode"],
            "recommend": plan["recommend"], "zone_lo": z.get("primary_lo"),
            "zone_hi": z.get("primary_hi"), "defend": z.get("invalidation"),
-           "src": src, "src_notes": src_notes}
+           "src": src, "src_notes": src_notes,
+           "top_signal": plan.get("top_signal")}
 
     # ---------- 1) 预案单 ----------
     print()

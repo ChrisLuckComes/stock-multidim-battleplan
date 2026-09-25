@@ -1663,6 +1663,11 @@ def _report_row(**kw):
         "pre_breakout": None, "T1": 118.0, "T2": 130.0, "rvol": 1.8,
         "dd_from_high": -1.2, "buy_type": "platform", "mode": "platform_break",
         "candidate": True,
+        # 顶部标志 K 线（2026-09-25 新增列；缺省 = 无信号）
+        "top_state": None, "top_block": False, "top_veto": False,
+        "top_pattern": None, "top_date": None, "top_vol": None, "top_rvol": None,
+        "top_prob": None, "top_invalidation": None, "top_size_factor": None,
+        "top_summary": None,
     }
     r.update(kw)
     return r
@@ -1703,6 +1708,22 @@ def test_report_renders_pre_breakout_and_two_tier_stop():
         _report_row(code="600002", name="待挂单股", pre_breakout=dict(
             pb, anchor=None, triggered=False, fill_px=None, status=None,
             level=106.0, trigger=106.30)),
+        # 顶部标志 K 线三态各来一只：已确认（否决）/ 待确认（预警）/ 已推翻（作废）
+        _report_row(code="600003", name="顶部确认股", recommend=False,
+                    top_state="confirmed", top_block=True, top_veto=True,
+                    top_pattern="上吊线", top_date="2026-09-24", top_vol="巨量",
+                    top_rvol=3.42, top_prob="极高", top_invalidation=108.60,
+                    top_size_factor=0.0),
+        _report_row(code="600004", name="顶部待确认股",
+                    top_state="pending", top_block=False, top_veto=False,
+                    top_pattern="墓碑线", top_date="2026-09-25", top_vol="巨量",
+                    top_rvol=2.71, top_prob="中高", top_invalidation=112.30,
+                    top_size_factor=0.5),
+        _report_row(code="600005", name="顶部被推翻股",
+                    top_state="invalidated", top_block=False, top_veto=False,
+                    top_pattern="射击之星", top_date="2026-09-22", top_vol="放量",
+                    top_rvol=1.62, top_prob="作废", top_invalidation=109.10,
+                    top_size_factor=1.0),
     ]
 
     old = os.getcwd()
@@ -1723,8 +1744,8 @@ def test_report_renders_pre_breakout_and_two_tier_stop():
 
     # 表头两列必须存在，否则列数与行数不匹配（新增列最容易漏的一处）
     assert "预案单<br>" in html
-    assert html.count("<th>") == 15, html.count("<th>")
-    assert html.count("</td>") == 2 * 15, html.count("</td>")
+    assert html.count("<th>") == 16, html.count("<th>")
+    assert html.count("</td>") == 5 * 16, html.count("</td>")
     # 预案单一：触发价 / 挂法 / 风险都要落盘，且「已触发」要显式区别于挂单
     assert "挂 106.68" in html, "预案单触发价没渲染"
     assert "斜线 105.40" in html, "预案单挂法（斜线/平台沿）没渲染"
@@ -1737,6 +1758,16 @@ def test_report_renders_pre_breakout_and_two_tier_stop():
     assert "结构止损：收盘口径" in html and "硬止损：盘中口径" in html
     assert "结构 104.50（收盘破）" in html
     assert "距下沿 0.08×ATR" in html
+    # 顶部标志 K 线（2026-09-25）：三态必须各自渲染，且「已确认」要写出否决语义
+    assert "顶部信号<br>" in html, "顶部信号列头没渲染"
+    assert "已确认·否决" in html and "上吊线" in html and "巨量 3.42×" in html
+    assert "推翻线 108.60" in html
+    assert "待确认·预警" in html and "中高" in html and "仓位×0.5" in html
+    assert "已推翻" in html and "射击之星" in html
+    # 「已确认」的票必须显式写明「顶上无买点」，不能只标个红字
+    assert "已否决当日买点" in html and "收盘收复即作废" in html
+    # 计数徽标：1 只否决、1 只待确认
+    assert "顶部标志K线·否决" in html and "顶部标志K线·待确认" in html
     assert "硬止损贴噪声带" in html, "硬止损落进噪声带必须标红"
     assert "压低买入价" in html, "噪声带正解是压买价，必须写在报表上"
     # 盘中口径：盘中价非收盘价，必须给复核时点

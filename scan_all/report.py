@@ -112,6 +112,10 @@ def main():
     cands.sort(key=key)
     # 预案单可挂数：对盯不住盘中/T+1 的人，这一列才是能落地的入口，单独计数
     n_pb = len([r for r in cands if r.get("pre_breakout")])
+    # 被顶部标志 K 线否决的候选数（确认档才是真否决；待确认只预警，不计入）
+    n_top_veto = len([r for r in cands if r.get("top_veto")])
+    n_top_warn = len([r for r in cands
+                      if r.get("top_state") == "pending" and not r.get("top_veto")])
     today = datetime.date.today().strftime("%Y%m%d")
 
     def f2(x): return f"{x:.2f}" if isinstance(x, (int, float)) else "-"
@@ -164,13 +168,43 @@ def main():
             bz += '<br><span class="amb">≥上沿·只挂单</span>'
         if r.get("intraday"):
             bz += '<br><span class="amb">⚠ 盘中·未收盘</span>'
+        # ── 顶部标志 K 线格（五根：墓碑/上吊/射击之星 + 顶部十字星 + 大阴线）──────
+        # 口径：只有「这一波最高点 + 标志 K 线 + 次日走弱」才否决 recommend，
+        # 形态当日只预警（回测：形态当日无预测力 t=1.64；确认后 -6.64%/胜率12%）。
+        # 2026-09-25 追加十字星（次级）/ 大阴线（顶级）：两者当日同样无预测力，
+        # 也走同一条次日确认制（确认后 -8.7% / -5.9%，与对照 -6.95% 同量级）。
+        _ts = r.get("top_state")
+        if _ts in (None, "none"):
+            top_cell = "-"
+        else:
+            _lbl = {"confirmed": ("已确认·否决", "red"),
+                    "pending": ("待确认·预警", "amb"),
+                    "invalidated": ("已推翻", "muted")}.get(_ts, (_ts, "muted"))
+            top_cell = (f'<b class="{_lbl[1]}">{_lbl[0]}</b>'
+                        f'<br><span class="muted">{T(r.get("top_pattern")) or "-"} '
+                        f'{T(r.get("top_date")) or ""}</span>')
+            if r.get("top_vol"):
+                top_cell += (f'<br><span class="muted">{T(r.get("top_vol"))} '
+                             f'{z(r.get("top_rvol"))}×</span>')
+            if r.get("top_prob"):
+                top_cell += f'<br><span class="muted">{T(r.get("top_prob"))}</span>'
+            if r.get("top_invalidation") is not None:
+                top_cell += (f'<br><span class="muted">推翻线 '
+                             f'{f2(r.get("top_invalidation"))}</span>')
+            if r.get("top_size_factor") not in (None, 1.0):
+                top_cell += (f'<br><span class="muted">仓位×{r.get("top_size_factor")}'
+                             f'<span title="巨量长影放大的是波动（-5%概率56% vs 缩量38%），'
+                             f'不是方向；用仓位承担">ⓘ</span></span>')
+            if r.get("top_veto"):
+                cls += " warn"
         tbl += (f'<tr class="{cls}"><td>{r["code"]}</td><td class="l">{r["name"]}</td>'
                 f'<td>{r["market"]}</td><td>{r["regime"]}</td><td>{r["tier"]}</td>'
                 f'<td>{f2(r["spot"])}</td><td>{f2(r.get("platform") or r.get("R1"))}</td><td>{bz}</td>'
                 f'<td>{pb_cell}</td>'
                 f'<td class="red">{stop_cell}</td><td>{f2(r["T1"])}</td><td>{f2(r["T2"])}</td>'
                 f'<td>{z(r["rvol"])}</td><td>{r.get("dd_from_high")}%</td>'
-                f'<td>{r.get("buy_type","-")}<br><span class="muted">{T(r.get("mode")) or "-"}</span></td></tr>')
+                f'<td>{r.get("buy_type","-")}<br><span class="muted">{T(r.get("mode")) or "-"}</span></td>'
+                f'<td>{top_cell}</td></tr>')
 
     # 重点候选图（前 12）
     top = cands[:12]
@@ -234,6 +268,28 @@ def main():
                 charts += (f'<p class="warnbox amb">现价已出买区上沿 '
                            f'{f2(r.get("support_hi"))}（距买位 &lt;2×ATR，仍可执行）：'
                            f'只能在上沿一带挂回踩单，禁止市价追。</p>')
+            if r.get("top_state") not in (None, "none"):
+                _ts = r["top_state"]
+                _tcls = {"confirmed": "red", "pending": "amb"}.get(_ts, "")
+                if _ts == "confirmed":
+                    charts += (f'<p class="warnbox red">🔴 <b>顶部标志 K 线已确认 → 已否决当日买点</b>：'
+                               f'{T(r.get("top_pattern"))}（{T(r.get("top_date"))}，'
+                               f'{T(r.get("top_vol"))} {z(r.get("top_rvol"))}×）是这一波最高点，'
+                               f'次日走弱。回测同形态后 5 日期望 −6.6%、胜率 12.1%、−5% 概率 53%。'
+                               f'反包推翻线 <b>{f2(r.get("top_invalidation"))}</b>（收盘收复即作废）。</p>')
+                elif _ts == "invalidated":
+                    charts += (f'<p class="warnbox amb">✅ 顶部标志 K 线<b>已被反包推翻</b>'
+                               f'（{T(r.get("top_pattern"))} {T(r.get("top_date"))}，'
+                               f'收盘收复 {f2(r.get("top_invalidation"))}）—— 该结论作废，'
+                               f'按原判定执行。</p>')
+                else:
+                    charts += (f'<p class="warnbox {_tcls}">🟠 <b>顶部标志 K 线·待次日确认</b>：'
+                               f'{T(r.get("top_pattern"))}（{T(r.get("top_date"))}，'
+                               f'{T(r.get("top_vol"))} {z(r.get("top_rvol"))}×）是这一波最高点。'
+                               f'<b>形态当日不足以否决</b>（回测无预测力），但别追：'
+                               f'等次日——收盘走弱即顶部确认（否决），'
+                               f'收盘收复 <b>{f2(r.get("top_invalidation"))}</b> 即反包推翻。'
+                               f'巨量长影放大的是波动，建议仓位×{r.get("top_size_factor")}。</p>')
             charts += svg_chart(r, bars, f'{r["code"]} {r["name"]}') + '</div>'
         except Exception as e:
             charts += f'<div class="card"><b>{r["code"]} {r["name"]}</b> 图抓取失败：{type(e).__name__}: {e!r}</div>'
@@ -272,6 +328,8 @@ svg{{width:100%;height:auto;display:block;border:1px solid #eee;border-radius:6p
 <div class="b"><b style="color:#C8870A">{len(tier2)}</b><span>tier2 · 上升延续回踩</span></div>
 <div class="b"><b>{len(cands)}</b><span>候选合计</span></div>
 <div class="b"><b style="color:#1E8E3E">{n_pb}</b><span>可挂预案单</span></div>
+<div class="b"><b style="color:#A32D2D">{n_top_veto}</b><span>顶部标志K线·否决</span></div>
+<div class="b"><b style="color:#C8870A">{n_top_warn}</b><span>顶部标志K线·待确认</span></div>
 </div>
 
 <div class="card">
@@ -283,15 +341,16 @@ svg{{width:100%;height:auto;display:block;border:1px solid #eee;border-radius:6p
 • 止损分<b>两档</b>，禁止合成一个价。结构止损：{STRUCT_EXEC}。硬止损：{HARD_EXEC}。硬止损列同时给出锚名与「距买区下沿多少 ATR」，<b>突破类不足 {NOISE_ROOM_ATR}×ATR 会标红</b>——突破类的买区下沿就是突破位（真实成交价），塞在它下面这么窄的止损不是止损，是一次正常波动就扫掉的噪声带。<b>回踩类（沿线回踩 / 大阳后缩量回踩）不套这个阈值</b>：它们买在线上、主风控是收盘破线的结构止损，硬止损本就是 0.10×ATR 的毛刺滤网，套突破类口径会几乎必然误报。<br>
 • <b>预案单（buy-stop 埋伏）</b>：上方关键位（活平台沿 / 下降趋势线）<b>尚未被收盘打穿</b>时给的挂单 —— 在线上方 0.05×ATR 挂买入，触发才成交、假突破自动不成交，所以它不属追高。它<b>与当日买区并存、先到先做</b>；对盯不住盘中的人（以及 A 股 T+1）这一列往往比买区更可执行。<br>
 • <b>量能口径（2026-09-17 起）</b>：RVOL <b>不再作突破类的一票否决闸门</b>——突破确认看价格本身（收盘落在当日振幅上半区且不低于前收，排除长上影插针式站上）。RVOL 列降级为参考量，<b>低 RVOL 不等于假突破</b>。回踩类（沿线回踩 / 大阳后缩量回踩）仍要求缩量，那是回踩质量问题，两者不得混用。<br>
-• <b>盘中口径</b>：行内出现「⚠ 盘中·未收盘」= 结构与买区已并入今日未收盘 K 线（非昨收口径），盘中价非收盘价，应以尾盘复核为准。全市场 A 股扫描已在盘中自动跳过，故该标记只会在外部/美股口径数据里出现。</p>
+• <b>盘中口径</b>：行内出现「⚠ 盘中·未收盘」= 结构与买区已并入今日未收盘 K 线（非昨收口径），盘中价非收盘价，应以尾盘复核为准。全市场 A 股扫描已在盘中自动跳过，故该标记只会在外部/美股口径数据里出现。<br>
+• <b>顶部标志 K 线（2026-09-25 新增）</b>：<b>五根</b>——墓碑线（几乎无实体+长上影）/ 上吊线（长下影）/ 射击之星（小实体+长上影）/ <b>顶部十字星</b>（实体≈0，老罗定「次级高危」）/ <b>大阴线</b>（长实体阴线+短上影+收低位，老罗定「顶级高危」）。走<b>四道闸门</b>——① 形态比例 ② <b>是这一波最高点</b>（左侧 60 根内无更高高点，否则同形态属<b>低位看涨反转</b>，不计）③ 量能档 ④ <b>次日确认</b>。<b>五根一视同仁：只有「已确认」（其后走弱）才否决 recommend</b>；形态当日只预警（回测：形态当日均无预测力——三根 +0.70/t=1.64、大阴线 +0.06/t=0.11、十字星 −0.25/t=−0.40；而「波峰 + 走弱确认」从次根收盘起后 5 日：三根 −6.64%、十字星 −8.66%、大阴线 −5.91%，<b>与「波峰普通K线 + 走弱」对照 −6.95% 同量级 ⇒ 信息来自「走弱」不是形态</b>）。<b>反包</b>（收盘收复信号 K 线最高价）⇒ 结论推翻（大阴线被反包占 80.9%，反包后 +1.75%）。<b>推翻线</b>列 = 信号 K 线最高价。量能放大的是<b>波动不是方向</b>（巨量组 −5% 概率 56% vs 缩量 38%），故「仓位×0.5」是<b>建议</b>不是自动生效。⚠️ 十字星/大阴线的「次级/顶级」是<b>显示标签</b>，回测<b>不支持</b>用它排序预测力。</p>
 </div>
 
 <h2>一、候选总表（{len(cands)} 只 · tier1 优先，按距区间高降序）</h2>
 <div class="card"><table>
-<tr><th>代码</th><th>名称</th><th>市场</th><th>regime</th><th>tier</th><th>现价</th><th>R1</th><th>买区<br><span style="font-weight:400;color:#888">回踩等待位</span></th><th>预案单<br><span style="font-weight:400;color:#888">buy-stop 挂价位</span></th><th>止损<br><span style="font-weight:400;color:#888">硬 / 锚 · 结构</span></th><th>T1</th><th>T2</th><th>RVOL<br><span style="font-weight:400;color:#888">仅参考</span></th><th>距区间高</th><th>买点类型<br><span style="font-weight:400;color:#888">/ mode</span></th></tr>
+<tr><th>代码</th><th>名称</th><th>市场</th><th>regime</th><th>tier</th><th>现价</th><th>R1</th><th>买区<br><span style="font-weight:400;color:#888">回踩等待位</span></th><th>预案单<br><span style="font-weight:400;color:#888">buy-stop 挂价位</span></th><th>止损<br><span style="font-weight:400;color:#888">硬 / 锚 · 结构</span></th><th>T1</th><th>T2</th><th>RVOL<br><span style="font-weight:400;color:#888">仅参考</span></th><th>距区间高</th><th>买点类型<br><span style="font-weight:400;color:#888">/ mode</span></th><th>顶部信号<br><span style="font-weight:400;color:#888">墓碑/上吊/射击/十字/大阴</span></th></tr>
 {tbl}
 </table>
-<p class="note">绿=tier1(123完整)；黄=tier2(上升延续回踩)；<b>浅红=锚与买区冲突</b>（硬止损锚价落在买区内，已把买区下沿抬到硬止损之上，可执行价位以买区列为准）。<b class="amb">买区列标「≥上沿·只挂单」</b>=现价已出买区上沿但距买位 &lt;2×ATR，仍可执行，只能挂回踩单、禁市价追。<b class="grn">预案单列绿字「✓ 已触发」</b>=该埋伏单当日已成交，是持仓不是挂单。<b>买区与预案单是两条腿</b>：买区等回踩，预案单等突破，先到先做，不必二选一。距区间高=相对取数窗口最高价（约 130 根，非严格 52 周）；负=低于窗口高，正=已破新高。<b>RVOL 为末根量/20日均量，自 2026-09-17 起仅作参考，不作突破类否决项</b>（低 RVOL ≠ 假突破）。</p>
+<p class="note">绿=tier1(123完整)；黄=tier2(上升延续回踩)；<b>浅红=锚与买区冲突</b>（硬止损锚价落在买区内，已把买区下沿抬到硬止损之上，可执行价位以买区列为准）。<b class="amb">买区列标「≥上沿·只挂单」</b>=现价已出买区上沿但距买位 &lt;2×ATR，仍可执行，只能挂回踩单、禁市价追。<b class="grn">预案单列绿字「✓ 已触发」</b>=该埋伏单当日已成交，是持仓不是挂单。<b>买区与预案单是两条腿</b>：买区等回踩，预案单等突破，先到先做，不必二选一。距区间高=相对取数窗口最高价（约 130 根，非严格 52 周）；负=低于窗口高，正=已破新高。<b>RVOL 为末根量/20日均量，自 2026-09-17 起仅作参考，不作突破类否决项</b>（低 RVOL ≠ 假突破）。<b>末列「顶部信号」</b>：<b class="red">已确认·否决</b>=五根标志 K 线任一出现在这一波最高点且<b>次日走弱</b>，当票已 recommend=False（回测后 5 日 −6.6%~−8.7%、胜率 9~17%）；<b class="amb">待确认·预警</b>=形态当日，<b>不否决</b>只提示盯次日；<b class="muted">已推翻</b>=其后反包、结论作废。推翻线 = 信号 K 线最高价（收盘收复即作废）。</p>
 </div>
 
 <h2>二、重点候选价格结构图（前 {len(top)}）</h2>

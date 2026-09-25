@@ -27,6 +27,13 @@ NASDAQ_HEADERS = {
     "Referer": "https://www.nasdaq.com/",
 }
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+# 顶部标志 K 线（墓碑/上吊/射击之星/十字星/大阴线 + 次日确认制）。
+# 只做**否决**：`apply_top_signal_gate` 挂在 plan_entry 出口，不回写任何买区/止损口径。
+import top_signals as TS_TOP  # noqa: E402
+
 
 def fetch_json_nasdaq(url, timeout=20, retries=2):
     """Nasdaq 官方 API 需要完整浏览器头 + Referer，否则 403。"""
@@ -3103,7 +3110,7 @@ def _is_dual_crea(bars):
     return False
 
 
-def plan_entry(bars, ev):
+def _plan_entry_core(bars, ev):
     """当日只给一种 mode（含 W底/旗形突破）。"""
     last_c = bars[-1]["c"] if bars else None
     atr_v = atr14(bars)
@@ -3755,6 +3762,89 @@ def plan_entry(bars, ev):
     )
 
 
+# ---------------------------------------------------------------------------
+# 顶部标志 K 线闸门（2026-09-25）
+# ---------------------------------------------------------------------------
+# 为什么要做成**出口包装**而不是改各个 return：`_plan_entry_core` 内部有 25 个
+# 出口（含 T0 接管、W底/旗形/平台各分支），逐处打补丁必然漏。而且闸门必须落在
+# **T0 接管之后** —— 否则 `_t0_takeover` 会把 recommend 重新写成 True，
+# 于是「顶部确认了但 T0 照样叫你过昨高追」这种自相矛盾的结果就出来了。
+#
+# 口径（回测见 top_signals 模块 docstring，393 只随机全 A / 169,247 根日线）：
+#   · 默认 `veto="confirmed"`：只有「这一波最高点 + 长影标志 K 线 + **次日走弱**」
+#     才否决。该组从次根收盘起后 5 日 −6.64%、胜率 12.1%、−5% 概率 53%。
+#   · 信号当日**不否决** —— 形态当日无预测力（相对同位置对照 +0.70、t=1.64），
+#     且巨量组是双向放大（±5% 概率各约 55%）。只写进 top_signal 供降仓参考。
+_TOP_VETO = "confirmed"
+
+
+def _top_for(bars, ev):
+    """取/算顶部信号。build_ev 已算好就复用，否则就地从 bars 现算（兼容老调用方）。
+
+    `ev["bars_live"]`：末根是否未走完的当日 K 线 —— 交盘中 probe 传 True 时，
+    不许拿半日 bar 的收盘价去判「次日走弱」（会误报顶部确认）。
+    """
+    if not bars:
+        return None
+    cached = (ev or {}).get("top_signals")
+    if isinstance(cached, dict):
+        return cached
+    return TS_TOP.analyze_top_signals(bars, atr_v=(ev or {}).get("atr_v"),
+                                      live_last=bool((ev or {}).get("bars_live")))
+
+
+def apply_top_signal_gate(result, bars, ev=None, veto=None):
+    """在 plan_entry 出口套一层顶部标志 K 线闸门。
+
+    只做三件事：① 挂 `result["top_signal"]`（报告/池表消费）；
+    ② 命中「已确认」时把 recommend 压成 False 并改写 verdict/note；
+    ③ 同步作废 `pre_breakout` 埋伏单（否则会出现「已否决买入、却还挂着一个突破触发价」）。
+    """
+    if not isinstance(result, dict):
+        return result
+    top = _top_for(bars, ev)
+    if not top or not top.get("ok"):
+        return result
+    b = top.get("best")
+    result["top_signal"] = {
+        "state": top["state"],
+        "block": top["block"],
+        "prob": (b or {}).get("prob"),
+        "pattern": (b or {}).get("pattern"),
+        "pattern_cn": top.get("pattern_cn") or (b or {}).get("pattern_cn"),
+        "variant_cn": (b or {}).get("variant_cn"),
+        "d": (b or {}).get("d"),
+        "vol_cn": (b or {}).get("vol_cn"),
+        "rvol": top.get("rvol"),
+        "is_top": bool(b and b.get("is_top")),
+        "invalidation": top.get("invalidation"),
+        "size_factor": top.get("size_factor"),
+        "block_reason": top.get("block_reason") or "",
+        "summary": top.get("summary"),
+        "note": (b or {}).get("note"),
+        "warn": list((b or {}).get("warn") or []),
+    }
+    if not top.get("block"):
+        return result
+
+    result["recommend"] = False
+    result["top_signal_veto"] = True
+    reason = top.get("block_reason") or top.get("summary") or "顶部标志K线已确认"
+    result["verdict"] = f"顶部确认·否决｜{result.get('verdict') or ''}"
+    result["note"] = f"【顶部标志K线已确认】{reason}。当日不出买点。｜{result.get('note') or ''}"
+    pb = result.get("pre_breakout")
+    if isinstance(pb, dict):
+        pb["suppressed_by"] = "top_signal"
+        pb["status"] = "已作废（顶部标志K线确认）"
+        pb["note"] = "【已作废·顶部标志K线确认】" + str(pb.get("note") or "")
+    return result
+
+
+def plan_entry(bars, ev):
+    """公开入口：`_plan_entry_core` 的结果再套一层顶部标志 K 线闸门。"""
+    return apply_top_signal_gate(_plan_entry_core(bars, ev), bars, ev, _TOP_VETO)
+
+
 def _t0_takeover(result, t0):
     """★ T0 接管（2026-09-20）：当日原买法为 wait / 不推荐 / 「大阳后」家族时，
     由 T0「均线收复+过昨高」接管为首选入口。
@@ -4049,11 +4139,20 @@ def build_ev(bars, drop_live=False, ticker=None):
     plat = living_platform(bars, Hs, atr_v)
     w_bottom = detect_w_bottom(bars, Hs, Ls, atr_v)
     bull_flag = detect_bull_flag(bars, Hs, atr_v)
+    # 顶部标志 K 线（墓碑/上吊/射击/十字星/大阴线 + 次日确认制）。纯**否决**用，不改买区。
+    _mkt = "ASH" if (ticker and is_ash(str(ticker).split(".")[0])) else "US"
+    try:
+        _bars_live = bool(is_live_bar(bars, market=_mkt))
+    except Exception:
+        _bars_live = False
+    top_sig = TS_TOP.analyze_top_signals(bars, atr_v=atr_v, live_last=_bars_live)
     ev = {
         "regime": regime,
         "passed": passed,
         "rvol20": rvol20,
         "ticker": ticker,          # T0 判定板块涨跌幅上限用（主板10%/双创20%）
+        "top_signals": top_sig,
+        "bars_live": _bars_live,
         "cond3_break_prior_high": c3,
         "c2": c2,
         "cond2_no_new_low": c2,
@@ -4248,7 +4347,7 @@ def evaluate(sym, data_file=None, eod=False):
     #   ★ 2026-09-24 追加 `t0_held_for_ride`：line_ride 态下 T0 不接管，若这个
     #     标记被 rebuild 丢掉，报告就看不出「T0 条件成立但不该追」的原因。
     for _k in ("ma_reclaim", "tier_t0", "t0_held_for_ride", "ma_ride", "ride_priority",
-               "ride_redirected"):
+               "ride_redirected", "top_signal", "top_signal_veto"):
         if plan.get(_k) is not None:
             out[_k] = plan[_k]
 

@@ -121,6 +121,14 @@ def build_kpis(a, n):
                    % (esc(mode), esc(p.get("verdict") or ""))))
     badges.append('<span class="badge %s">recommend = %s</span>'
                   % ("b-ok" if p.get("recommend") else "b-no", p.get("recommend")))
+    # ★ 顶部标志 K 线硬指标（2026-09-25）：跑个股必看的一项，首屏就要看得见。
+    _tv = a.get("top_verdict") or {}
+    if _tv.get("level") == "block":
+        badges.append('<span class="badge b-no">顶部标志K线已确认 → 否决买点（%s %s）</span>'
+                      % (esc(_tv.get("date")), esc(_tv.get("pattern_cn"))))
+    elif _tv.get("level") == "alert":
+        badges.append('<span class="badge b-warn">顶部标志K线待确认（预警 · 仓位×%s）</span>'
+                      % num(_tv.get("size_factor"), 2))
     if p.get("regime"):
         badges.append('<span class="badge b-warn">regime = %s</span>' % esc(p["regime"]))
     # ★ T0 并行入口（2026-09-22）：`plan_entry` 一直有算 ma_reclaim，但报告以前拿不到
@@ -637,8 +645,19 @@ def build_summary(a, n):
     p, z = a["plan"], a["plan"].get("buy_zone") or {}
     rec = a.get("odds_recommend")
     top = a.get("odds_top")
+    _tv = a.get("top_verdict") or {}
+    if _tv.get("level") == "block":
+        _tv_txt = ("<b class='up'>已确认 · 避雷</b>（%s %s）%s"
+                   % (esc(_tv.get("date")), esc(_tv.get("pattern_cn")),
+                      esc(_tv.get("advice") or "")))
+    elif _tv.get("level") == "alert":
+        _tv_txt = ("预警 · 未确认（仓位 ×%s）— 形态当日不是判据，等次日走弱/反包"
+                   % num(_tv.get("size_factor"), 2))
+    else:
+        _tv_txt = "无顶部标志 K 线"
     out = [
         ("模式", "%s（%s）· recommend=%s" % (esc(p.get("mode")), esc(p.get("verdict")), p.get("recommend"))),
+        ("顶部硬指标", _tv_txt),
         ("结论", n.get("thesis_plain") or "见首屏结论"),
         ("最高 R 路径", ("买 %s / %s 止损 / 风险 %s（%s×ATR）/ R→t1 = <b>%s</b>"
                      % (num(rec["entry"]), num(rec["stop"]), num(rec["risk"]),
@@ -657,6 +676,83 @@ def build_summary(a, n):
                            for k, v in a["struct"]["percentile"].items())),
     ]
     return rows(out)
+
+
+def build_top_signal(a, n):
+    """顶部标志 K 线「硬指标」区块（2026-09-25 老罗：单独提取，跑个股时避雷）。
+
+    三态：`block` 红框否决 / `alert` 橙框预警（**仍可买，缩仓**）/ `ok` 灰字不构成限制。
+    数据来自 analysis.json 的 `top_verdict`（battle_analyze 已算好，渲染器不重算）。
+    """
+    tv = a.get("top_verdict") or {}
+    if not tv:
+        return ("<div class='card'><h3>顶部标志 K 线（硬指标 · 跑个股必看）</h3>"
+                "<p class='note'>本次 analysis.json 未携带顶部硬指标"
+                "（旧版 battle_analyze 生成的？重跑即可）。</p></div>")
+    lv = tv.get("level")
+    cls, mark = {"block": ("b-no", "🔴 顶部已确认 · 避雷"),
+                 "alert": ("b-warn", "🟠 顶部预警 · 未确认"),
+                 "ok": ("b-ok", "✅ 无顶部信号")}.get(lv, ("b-ok", lv))
+    advice = esc(tv.get("advice") or "")
+    head = '<p><span class="badge %s">%s</span> %s</p>' % (cls, mark, advice)
+    _bc = {"block": "#d32f2f", "alert": "#f0c14b"}.get(lv, "#e3e6ea")
+
+    def _wrap(inner):
+        return ('<div class="card" style="border-left:5px solid %s">'
+                '<h3>顶部标志 K 线（硬指标 · 跑个股必看）</h3>%s</div>'
+                % (_bc, inner))
+
+    tail = ("<p class='note'>本项只回答「有没有顶部标志 K 线」。形态当日无预测力"
+            "（回测 t=1.64、同位置对照超额 +0.70 不显著）；真正被回测支持的是"
+            "「次日走弱」（−6.64% / 胜率 12.1%），反包即推翻 ⇒ "
+            "<b>alert 不否决买点，只缩仓</b>。</p>")
+    b = tv.get("signal") or {}
+    if not tv.get("hit") or not b:
+        extra = ""
+        if tv.get("state") == "invalidated":
+            extra = ("<p class='note'>窗口内曾有顶部标志 K 线，但已被反包推翻"
+                     "（上影抛压被吃掉）—— 形态失效，本项不构成限制。</p>")
+        extra += ("<p class='note'>本次扫描：命中形态 %s 个，因「不是这一波高点」"
+                  "排除 %s 个（低位同形态属看涨反转，不算顶部信号）。</p>"
+                  % (num(tv.get("n_signals"), 0), num(tv.get("n_rejected"), 0)))
+        return _wrap(head + extra + tail)
+
+    def _p(x):
+        try:
+            return "%d%%" % round(float(x) * 100)
+        except (TypeError, ValueError):
+            return "—"
+    pos_txt = ("是这一波（近 %s 根）最高点 ⇒ 才算「顶部标志 K 线」"
+               % num(b.get("wave_span"), 0)) if b.get("is_top") else \
+              ("非波峰（左侧有更高高点）—— 同形态在本位置属<b>看涨反转</b>，"
+               "不算顶部信号")
+    rows_l = [
+        ("形态 K 线", "%s <b>%s</b>（%s）"
+         % (esc(b.get("d")), esc(b.get("pattern_cn")), esc(b.get("variant_cn")))),
+        ("K 线", "开 %s / 高 %s / 低 %s / 收 %s"
+         % (num(b.get("o")), num(b.get("h")), num(b.get("l")), num(b.get("c")))),
+        ("结构", "实体 %s · 上影 %s · 下影 %s · 收盘位 %s"
+         % (_p(b.get("body_r")), _p(b.get("upper_r")), _p(b.get("lower_r")),
+            num(b.get("pos"), 3))),
+        ("位置", pos_txt),
+        ("量能", "%s <b>%s×</b>20 日均量"
+         % (esc(b.get("vol_cn")), num(b.get("rvol")))),
+        ("次日确认", "<b>%s</b>（%s）"
+         % (esc(tv.get("state_cn")), esc(tv.get("confirm_reason") or "—"))),
+        ("推翻线", "<b>%s</b> —— 其后任一收盘收复即作废（反包压倒一切）"
+         % num(tv.get("invalidation"))),
+        ("概率档 / 仓位", "%s（%s）｜建议仓位 <b>×%s</b>"
+         % (esc(b.get("prob")), esc(b.get("prob_why") or "—"),
+            num(tv.get("size_factor"), 2))),
+    ]
+    warns = b.get("warn") or []
+    warn_html = ("<p class='note'>⚠ " + "；".join(esc(w) for w in warns) + "</p>"
+                 if warns else "")
+    return _wrap(head + "<table>" + rows(rows_l) + "</table>" + warn_html
+                 + "<p class='note'>自检：命中形态 %s 个 / 因「不是这一波高点」排除 %s 个；"
+                   "完整避雷清单见 <code>references/top-signals.md</code>。</p>"
+                   % (num(tv.get("n_signals"), 0), num(tv.get("n_rejected"), 0))
+                 + tail)
 
 
 # ───────────────────────── 主流程 ─────────────────────────
@@ -737,6 +833,7 @@ def render(a, n, tmpl_path=DEFAULT_TMPL):
         "PLAN_ROWS": build_plan_rows(a),
         "PLAN_NOTE": note(n.get("plan_note"), ""),
         "CALIBER_NOTES": "".join("<p>%s</p>" % x for x in caliber),
+        "TOP_SIGNAL_BLOCK": build_top_signal(a, n),
         "T1": num(a["targets"].get("t1")),
         "T2": num(a["targets"].get("wall_far")),
         "ODDS_ROWS": build_odds_rows(a),

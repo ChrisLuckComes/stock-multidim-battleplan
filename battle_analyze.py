@@ -41,6 +41,7 @@ import account_config as _AC            # noqa: E402
 import rule123 as R                     # noqa: E402
 import probe_intraday as P              # noqa: E402
 import bars_source as BS                # noqa: E402
+import top_signals as TS_TOP            # noqa: E402  顶部标志 K 线硬指标
 
 VERSION = "1.0"
 
@@ -725,6 +726,13 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
     last = bars[-1]
     last_c = last["c"]
     atr_v = R.atr14(bars)
+    # ★ 顶部标志 K 线「硬指标」（2026-09-25 老罗：单独提取作为硬指标，跑个股时避雷）——
+    #   与 rule123 的 veto 同一套口径，但这里给的是**单票结论**（level / 退出码 / 仓位系数 /
+    #   处置文案），终端摘要与 HTML 报告都读它，不各自解释 plan["top_signal"]。
+    #   `live_last`：盘中末根未走完时不判「次日走弱」，否则盘中一探底就误报顶部确认。
+    _ts_live = R.is_live_bar(bars, market="US" if is_us else "ASH")
+    top_verdict = TS_TOP.top_verdict(bars, atr_v=atr_v, live_last=_ts_live,
+                                     name=name or market_data.get("name"))
     z = plan.get("buy_zone") or {}
     ma5 = R.sma(closes, 5)
     ema10 = R.ema(closes, 10)
@@ -913,6 +921,7 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
             "plan_warning": plan_warn,
         },
         "plan": plan,
+        "top_verdict": top_verdict,
         "probe": probe_out,
         "struct": {
             "atr14": _f(atr_v, 3),
@@ -1011,6 +1020,15 @@ def summarize(r):
         p.get("mode"), p.get("verdict"), p.get("recommend"), p.get("regime")))
     if m.get("plan_warning"):
         L.append(" ★★ %s" % m["plan_warning"])
+    # ★ 顶部标志 K 线硬指标：跑个股必看的一项（有信号才打，避免噪音）
+    _tv = r.get("top_verdict") or {}
+    if _tv.get("hit"):
+        _mk = {"block": "[X] 顶部已确认·避雷",
+               "alert": "[!] 顶部预警·未确认"}.get(_tv["level"], _tv["level"])
+        L.append(" ★★ 顶部硬指标 %s（退出码 %d）：%s"
+                 % (_mk, _tv.get("exit_code", 0), _tv.get("advice")))
+    elif _tv.get("state") == "invalidated":
+        L.append(" 顶部硬指标：曾有顶部标志K线但已被反包推翻（形态失效），不构成限制")
     L.append(" 买区 %s ~ %s   持仓防守 %s" % (z.get("primary_lo"), z.get("primary_hi"),
                                             z.get("invalidation")))
     L.append(" 结构止损 %s(%s) / 硬止损 %s(%s)  hard_dist_atr=%s" % (
