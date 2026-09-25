@@ -81,7 +81,7 @@ D0（信号日）：
      ★ **`new_high` = 无锚**（老罗：「没有锚点就代表是新高，不需要找锚」），1.5×ATR 的实证落点（`research_ride_priority.py`，突破日 n=1560）：距线 0.5~1.0×ATR 时 5 日内回踩触及率 **66%**、触及后期望 **+1.59%**；>1.5×ATR 时触及率跌到 **24%**、期望转负 **−0.22%**；且同日突破买（1.5×ATR 止损）在远锚档**反而最好**（+0.278R / +1.68%）⇒ 远锚是新高加速，不是危险。振华 603067 09-24 锚 MA20 36.32 距 **1.92×ATR** 即此类。
      ★ 稳健性：`slope20` 阈值 0/+2/+5 → −0.246/−0.267/−0.295（单调），反向 ≤0/≤−2 → +0.115/+0.198；2025-10 前后各半样本排序一致。⇒ `line_ride` 不是「不能做」—— **真正的问题是 T0 的止损锚太紧**，「追高」本身没错：同一批突破日，突破买换 1.5×ATR 止损即 均R **+0.212** / 收益 +1.16% / 胜 44%，而「挂限价等回踩」只有 **31%** 的日子等得到（每机会 +0.39%）。
      ★★ 优先级（老罗三轮：「平台突破是客观存在的……否则所有股大部分时间都是沿均线走的」）：**当日形态（事件）> 沿线上行（背景）** —— `line_ride` **只在当日别无买点**时才改道 `line_pullback`（回踩锚挂限价：买区 线−0.05×ATR ~ 线+1.0×ATR，结构止损 = 收盘破该线，硬止损 = 该线−0.10×ATR），记 `t0_held_for_ride` **且 `ride_redirected=True`**；**当日已有 platform_break / w_bottom_break / flag_tl_break / downtrend_tl_break 且 recommend=True 时不改道**，写 `plan["ride_priority"]`（`winner=breakout`，沿线锚仅作「突破失败后的次选」）。⚠️ **判「是否真改道」只看 `ride_redirected`** —— 不能看「`mode == line_pullback` 且有 `t0_held_for_ride`」（东材 601208 09-24 当日**本就有** `line_pullback` 买区、带 `t0_held_for_ride` 却未改道）。本地池 21/53 只成线（约四成），若它能随意抢位，客观形态就全被吃掉。
-     ⚠️ **改道不是否决**（买区在现价下方 = 可预挂限价单）；`plan["ma_ride"]` **与 T0 是否成立解耦**（东材 09-24 创 25 根新高 ⇒ T0 不成立，但它就是 `line_ride`）；字段口径 `line*` = 被选中的那条线，`ma5*`/`above20` 恒为 MA5，勿混用。回归 `test_ma_ride.py`（29 项）；复现 `python research_ma_ride.py` / `research_ride_priority.py`。
+     ⚠️ **改道不是否决**（买区在现价下方 = 可预挂限价单）；`plan["ma_ride"]` **与 T0 是否成立解耦**（东材 09-24 创 25 根新高 ⇒ T0 不成立，但它就是 `line_ride`）；字段口径 `line*` = 被选中的那条线，`ma5*`/`above20` 恒为 MA5，勿混用。回归 `tests/entry/test_ma_ride.py`（29 项）；复现 `python research/research_ma_ride.py` / `research/research_ride_priority.py`。
 
 D1（次日）：
   ★★ 「昨高」= D0 的**最高价 D0.high**（含上影线插针），**不是 D0 收盘价**。
@@ -152,7 +152,7 @@ D1（次日）：
               —— 两套口径**不得混同**，故 `near_wall` 单独成一个字段。
             · 留痕字段：`near_wall / near_wall_from / near_wall_kind / near_wall_extended`。
               `near_wall_extended=False` ⇒ 老行为逐字不变（东微 84.79 / R **1.59** 实测未变）。
-            · 回归：`test_near_wall.py`（2 用例：D0 创窗口新高必须顺延且 R>0 /
+            · 回归：`tests/entry/test_near_wall.py`（2 用例：D0 创窗口新高必须顺延且 R>0 /
               D0 未创则 near_wall 恒等于 resistance）。全量 13 个 test_* 全 rc=0。
             · ⚠ **这一档 R 只在门槛线上，对口径极度敏感，别只看一位小数**：
               德邦 pp 实际 **1.4955**（显示 1.50）—— 换更保守的止损锚 81.44（09-17 前高）
@@ -287,7 +287,7 @@ D1（次日）：
   上面那句「差距来自板块/题材/基本面筛选」讲的正是「单看技术形态不够」，本模块就是它的计数版。
   ⚠ 池层是**唯一**拿得到板块共振的地方，所以板块层只有 `watch_cn` / `pool_us` 末段
   【叠加计数】才算得出来；单票报告要靠 `notes.json` 注入 `sector_count`。
-  细则见 SKILL.md 第 17 条，回归 `python test_confluence.py`（100 项）。
+  细则见 SKILL.md 条件工具「要解释这单对上了几层」，回归 `python -m pytest tests/screen/test_confluence.py -q`（100 项）。
 - **执行（关键）**：P1 触发价在**现价上方** → 券商无 buy-stop/条件单 ⇒ **必须盯盘手动打**；
   P3 买点在**下方** ⇒ **可预挂限价**。两条路径分开写清，不得混为一谈。
 - **五个实证案例**（全部走 P1）：

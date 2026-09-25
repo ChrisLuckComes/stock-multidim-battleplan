@@ -1729,6 +1729,44 @@ def zone_at_level(level, atr_v, last_c, kind, ev, bars):
     return z
 
 
+# 大阳下沿落到突破位下方超过这么多 ATR，才改用中点。中点更窄，避免止损被放到过远的下沿。
+WIDE_YANG_ATR = 1.0
+
+
+def _broken_hard_cands(bars, y, level, atr_v, long_yang, z):
+    """已突破时的硬止损候选。返回按「最窄优先」排好的列表，通常只留一条。"""
+    raw = [("阳线下沿", y["l"])]
+    if long_yang and atr_v and (level - y["l"]) > WIDE_YANG_ATR * atr_v:
+        mid = (y["h"] + y["l"]) / 2.0
+        raw.append(("大阳中点", mid))
+    closes = [b["c"] for b in bars]
+    ma5 = z.get("ma5")
+    if ma5 is None:
+        ma5 = sma(closes, 5)
+    if ma5 is not None:
+        raw.append(("MA5", ma5))
+    ma10 = sma(closes, 10)
+    if ma10 is not None:
+        raw.append(("MA10", ma10))
+    if len(bars) >= 8:
+        _hs, lows = pivots(bars, w=2)
+        if len(lows) >= 2:
+            (i0, p0), (i1, p1) = lows[-2], lows[-1]
+            if p1 > p0 and i1 != i0:
+                tl = line_val((i0, p0), (i1, p1), len(bars) - 1)
+                if tl is not None:
+                    raw.append(("上升趋势线", tl))
+    under_px = z.get("primary_lo")
+    if under_px is None:
+        under_px = level
+    under = [it for it in raw if it[1] is not None and it[1] < under_px]
+    pool = under or [it for it in raw if it[1] is not None]
+    if not pool:
+        return [("阳线下沿", y["l"])]
+    pool.sort(key=lambda it: it[1], reverse=True)
+    return [pool[0]]
+
+
 HARD_STOP_TRIGGER = (
     "开盘已在硬止损下→开盘走；盘中破后3分钟仍在下或分钟线新低→市价走；"
     "1–2分钟收回且非放量加速阴→当毛刺"
@@ -1755,7 +1793,7 @@ HARD_EXEC = ("盘中口径 — 需要盯盘或券商条件单；两者都没有�
              "届时保护只剩收盘轨（应改用更低限价买入，用买价替代止损）")
 
 # SKILL 硬止损锚名；禁止静默改写成「买区下沿」
-SKILL_HARD_ANCHORS = ("阳线下沿", "大阳中点", "MA5", "缺口下沿")
+SKILL_HARD_ANCHORS = ("突破位", "阳线下沿", "大阳中点", "MA5", "缺口下沿")
 
 
 def stop_plan(bars, mode, z, atr_v):
@@ -2001,12 +2039,16 @@ def stop_plan(bars, mode, z, atr_v):
             "t0": True,
         }
 
-    # 平台 / W底 / 旗形 / 下降趋势线突破
+    # 平台 / W底 / 旗形 / 下降趋势线突破。
+    # 结构止损仍是突破位（收盘跌破才算突破失败）。
+    # 硬止损不拿突破位本身：回踩突破位是常态，挂在位上会被扫掉。
+    # 候选：大阳下沿、下沿距突破位超过 1×ATR 时的大阳中点、MA5、MA10、上升趋势线。
+    # 只留突破位下方的，再取其中最窄（最高）的一条。
     struct = round(level, 2)
     struct_name = f"{ANCHOR_LABEL.get(z.get('anchor'), z.get('anchor') or '突破位')}@{struct}(收盘破)"
-    if long_yang:
-        # SKILL:198 长阳用中点；若中点算出的止损落进买区、或落进单日噪声带（距买区下沿
-        # < NOISE_ROOM_ATR×ATR，等于没有止损），按同族合法锚降级到阳线下沿
+    if last_c is not None and level is not None and last_c > level:
+        cands = _broken_hard_cands(bars, y, level, atr_v, long_yang, z)
+    elif long_yang:
         cands = [("大阳中点", (y["h"] + y["l"]) / 2.0), ("阳线下沿", y["l"])]
     else:
         cands = [("阳线下沿", y["l"])]
@@ -2419,7 +2461,7 @@ def ma_ride_state(bars, atr_v=None):
         None           数据不足（< 26 根；另：MA20 要算 20 根斜率需 ≥ 40 根才开始参与）
 
     ⚠️ `line_ride` 是**趋势背景**，不是当日形态。它与「当日突破事件」的优先级见
-    `SKILL.md` 执行原则第 12 条：**客观突破（平台/W底/旗形/下降趋势线）优先**，
+    `SKILL.md` 条件工具「判 T0 还是沿线」：**客观突破（平台/W底/旗形/下降趋势线）优先**，
     `line_ride` 只在「当日别无买点」时提供回踩入口，否则仅作突破失败后的回踩锚。
     否则「沿均线走」几乎恒真，会把所有形态都吃掉。
 

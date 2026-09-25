@@ -16,7 +16,7 @@
 
 ## 0. 五条硬结论（先看这个，再看形态）
 
-`python research_top_candles.py --universe sample` 可复现（Q1~Q5：`--sample-n 400` ⇒ 393 只随机全A / 169,247 根日线 / 后 5 日；
+`python research/research_top_candles.py --universe sample` 可复现（Q1~Q5：`--sample-n 400` ⇒ 393 只随机全A / 169,247 根日线 / 后 5 日；
 **Q6**（跳空 / 断头铡刀 / 大阴线上影 / 射击之星放宽）：同脚本 `--sample-n 1100` ⇒ **1079 只 / 465,317 根**，见 §4.3）。
 **关键方法**：每组一律用**同位置对照组**（「是这一波高点但无形态」的普通 K 线），否则会拿「强势票的 beta」冒充「形态的信息量」。
 
@@ -176,7 +176,7 @@ for 信号K线之后的每一根：
 > §4.3 及之后（跳空 / 断头铡刀 / 大阴线上影 / 射击之星放宽）改用同脚本 `--sample-n 1100`（**1079 只 / 465,317 根**）——
 > 样本更大、且与 §4.4 的隆基复核跑在同一份池子上。引用数字时请注意**不要跨口径混用**。
 
-`python research_top_candles.py --universe sample` 可复现。各组**各自用同位置对照组**。
+`python research/research_top_candles.py --universe sample` 可复现。各组**各自用同位置对照组**。
 
 ### 4.1 第一批三根（Q1~Q4）
 
@@ -339,7 +339,7 @@ for 信号K线之后的每一根：
 
 #### ④ ★★ 大样本：老罗的直觉**方向对、归因错**
 
-`python research_top_candles.py --universe sample --sample-n 1100 --seed 20260925`
+`python research/research_top_candles.py --universe sample --sample-n 1100 --seed 20260925`
 （**1079 只 / 465,317 根日线**，全样本标尺 +0.34%）：
 
 | 组 | 样本 | 市场中性超额 | t |
@@ -390,7 +390,7 @@ for 信号K线之后的每一根：
 
 （⚠️ 剔除的历史残片：本节曾留有一行「涨幅 ≥+60% 但未破四线（归因对照）」的孤行 —— 那是更早一轮草稿的数字，
 与本表冲突。现以 ⑤c 的实证输出为准：脚本已显式打印对照组自身的 n 与均值 ⇒ 上表两个对照值
-不是反推的，而是 ⑤c 直接输出；`python research_top_candles.py --universe sample --sample-n 1100` 可原样复现。）
+不是反推的，而是 ⑤c 直接输出；`python research/research_top_candles.py --universe sample --sample-n 1100` 可原样复现。）
 
 #### ⑤ 单票纵向的陷阱（为什么「隆基历史上每次铡刀都准」不算证据）
 
@@ -639,12 +639,12 @@ pitfalls / signal / top`。
 
 ## 9. 回归与复现
 
-- `python test_top_signals.py`（**47 项**）—— 五形态与变种、四闸门、**13 条避雷**、两套 veto 语义、**大阴线走次日确认制（不是自确认）**、**大阴线三分变种（`textbook` / `long_body` / `spike`）与「上影上限已取消」**、十字星变种划分完备性（防死分支）、顶分型兼容、`screen_exclude`。
-- `python test_top_signal_gate.py`（**9 项**）—— 闸门在 T0 之后生效、当日不否决、反包恢复、埋伏单作废、`live_last` 生效。
-- `python test_top_signal_check.py`（**15 项**）—— `top_verdict` 三档与退出码、**已推翻不得报成预警**、`--strict`、CLI 退出码 / `--json` 结构 / `--holding` 文案、probe 打印三态、报告区块三态 + 旧 json 优雅降级。
-- **`python test_sndk_top_sequence.py`（12 项）** —— SNDK 2026-06 教科书顶部序列的**口径特征测试**（内置 84 根真实日线 fixture）。钉住 §4.3 的两个已知边界：四根**跳空** K 线不被识别（含「差在哪一项」的边界值）、06-29 与 07-02 形态被识别但**被位置闸门拒**；并断言**断头铡刀没有被接进 `top_signals`**（`len(PATTERNS_CN) == 5`）。**改了形态阈值或位置口径，这个测试会失败** ⇒ 强制回到 §4.3 做有意识的取舍。
-- **`python test_lj_top_sequence.py`（12 项）** —— 隆基绿能 601012「2022-07-08 断头铡刀」（内置 126 根真实日线）。钉住 §4.4 的三处口径：07-01 才是波峰、07-08 只满足铡刀 ②、`SCAN_BARS=6` 的有效期边界；**并断言铡刀未接入**。
-- **`python test_casebook_top_sequence.py`（34 项）** —— 老罗「案例簿」：**顺丰 002352**（2021-02-18，内置 115 根）、**茅台 600519**（2021-02-18，118 根）、**石头科技 688169**（2021-06-21/23，105 根）、**中国平安 601318**（2020-11-30，138 根）、**比亚迪 002594**（两个窗口共 205 根）。钉住 §4.5 的全部结论，含「**四要件齐备的那一根恰恰不是波峰**」这条跨案例元结论、茅台的上影修复锚点、平安「确认制会漏顶」的代价、比亚迪「叙述与方向不符」的两处纠正。
-- `python test_review_fixes.py` —— 报告列数与顶部信号三态渲染。
-- `python research_top_candles.py --universe sample` —— 复现实证表（Q1~Q5：`--sample-n 400` ⇒ 393 只 / 169k 根；**Q6 跳空·断头铡刀·上影约束·射击之星放宽：`--sample-n 1100` ⇒ 1079 只 / 465k 根**），带磁盘缓存。
+- `python -m pytest tests/top/test_top_signals.py -q`（**47 项**）—— 五形态与变种、四闸门、**13 条避雷**、两套 veto 语义、**大阴线走次日确认制（不是自确认）**、**大阴线三分变种（`textbook` / `long_body` / `spike`）与「上影上限已取消」**、十字星变种划分完备性（防死分支）、顶分型兼容、`screen_exclude`。
+- `python -m pytest tests/top/test_top_signal_gate.py -q`（**9 项**）—— 闸门在 T0 之后生效、当日不否决、反包恢复、埋伏单作废、`live_last` 生效。
+- `python -m pytest tests/top/test_top_signal_check.py -q`（**15 项**）—— `top_verdict` 三档与退出码、**已推翻不得报成预警**、`--strict`、CLI 退出码 / `--json` 结构 / `--holding` 文案、probe 打印三态、报告区块三态 + 旧 json 优雅降级。
+- **`python -m pytest tests/top/test_sndk_top_sequence.py -q`（12 项）** —— SNDK 2026-06 教科书顶部序列的**口径特征测试**（内置 84 根真实日线 fixture）。钉住 §4.3 的两个已知边界：四根**跳空** K 线不被识别（含「差在哪一项」的边界值）、06-29 与 07-02 形态被识别但**被位置闸门拒**；并断言**断头铡刀没有被接进 `top_signals`**（`len(PATTERNS_CN) == 5`）。**改了形态阈值或位置口径，这个测试会失败** ⇒ 强制回到 §4.3 做有意识的取舍。
+- **`python -m pytest tests/top/test_lj_top_sequence.py -q`（12 项）** —— 隆基绿能 601012「2022-07-08 断头铡刀」（内置 126 根真实日线）。钉住 §4.4 的三处口径：07-01 才是波峰、07-08 只满足铡刀 ②、`SCAN_BARS=6` 的有效期边界；**并断言铡刀未接入**。
+- **`python -m pytest tests/top/test_casebook_top_sequence.py -q`（34 项）** —— 老罗「案例簿」：**顺丰 002352**（2021-02-18，内置 115 根）、**茅台 600519**（2021-02-18，118 根）、**石头科技 688169**（2021-06-21/23，105 根）、**中国平安 601318**（2020-11-30，138 根）、**比亚迪 002594**（两个窗口共 205 根）。钉住 §4.5 的全部结论，含「**四要件齐备的那一根恰恰不是波峰**」这条跨案例元结论、茅台的上影修复锚点、平安「确认制会漏顶」的代价、比亚迪「叙述与方向不符」的两处纠正。
+- `python -m pytest tests/report/test_review_fixes.py -q` —— 报告列数与顶部信号三态渲染。
+- `python research/research_top_candles.py --universe sample` —— 复现实证表（Q1~Q5：`--sample-n 400` ⇒ 393 只 / 169k 根；**Q6 跳空·断头铡刀·上影约束·射击之星放宽：`--sample-n 1100` ⇒ 1079 只 / 465k 根**），带磁盘缓存。
 - 真实案例：**SNDK 2026-06**（教科书序列，逐根核对 + 逐日走查，见 §4.3）；**300650** 2025-09-26 墓碑线、巨量 2.47× ⇒ 其后第 3 根（2025-10-09）判 `confirmed` ⇒ `recommend=False`、`verdict="顶部确认·否决｜调整未缩量"`。

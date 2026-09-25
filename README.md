@@ -64,7 +64,7 @@
 
 **⚠ 性质：只用于排序与解释，不作准入闸门、不缩放仓位。**「全对齐」不等于可买，「少对齐」也不等于不能买——能否决交易的只有硬约束（钱不够 / 涨停买不到 / 结构已坏 / 顶部已确认 / 标的总否决）。顶部标志 K 线是**否决权**，单独列 `veto`，**不与七层相加**。`unknown` 层不进分母，但会在终端、HTML 报告、池层段落三处显示出来——**分母静默缩水 = 把「没数据」伪装成「对上了」**。
 
-CLI：`python confluence.py <analysis.json> [--market-score N --sector-count N --catalyst yes|no]`；回归 `python test_confluence.py`。
+CLI：`python confluence.py <analysis.json> [--market-score N --sector-count N --catalyst yes|no]`；回归 `python -m pytest tests/screen/test_confluence.py -q`。
 
 ---
 
@@ -78,31 +78,22 @@ stock-multidim-battleplan/
 ├── SKILL.md             # 主技能定义（Agent 加载的核心指令）
 ├── account_config.py    # 账户/仓位额度（env / .env）
 ├── .env.example         # 账户配置模板（复制为 .env）
-├── fetch_market.py      # 通用行情取数（零外部 skill：A股东方财富 / 美股 Yahoo）
-├── rule123.py           # 方向感知结构判定（延续回踩/突破 vs 反转 123）
-├── probe_intraday.py    # 盘中先手判定（预案单 / 突破预案单 / 盘中四通道 / 次级观察位）
-├── watch_us.py          # 美股自选池盯盘器（--pre 盘前预案 / --watch 盘中响铃）
-├── watch_us.json        # 盯盘自选池配置（symbols / account / interval_sec）
-├── backtest_intraday.py # 盘中通道回测（真实 5 分钟数据 + 账户口径 + 参数扫描）
-├── backtest_yang_pullback.py  # 大阳回踩买区成交率统计
-├── calc_ash_position.py # A 股仓位闸门全量扫描（结构性能否交易）
-├── pre_runup.py         # 公告前「抢跑涨幅」检查（消息驱动型标的的否决型判据）
-├── stock_character.py   # 股性体检：① 突破加速型 vs 拉高消化型 ② 利好兑现习惯（是否出消息即顶）；输出顶部先给【结论】
-├── market_sentiment.py  # 大盘情绪量化 0–100 分 → 仓位缩放（软约束，不否决）
-├── top_signals.py       # 顶部标志 K 线五形态 + 次日确认制（硬指标，出口 top_verdict）
-├── confluence.py         # 叠加概率七层计数：市场/板块/领导者/催化剂/形态/量能/执行（只排序不否决）
-├── levels.py            # 多空参考位：压力/支撑分区 + RSI14 + 多空转换地图（A股美股通吃）
-├── battle_analyze.py    # 单票一键分析 → analysis.json（A股/美股同入口）
-├── report_render.py     # analysis.json + notes.json → 作战计划 HTML（禁止手写 HTML）
-├── research_ma_ride.py  # 「均线刚收复 vs 沿某条均线上行」判别器的实证复现（T0 改道依据）
-├── research_ride_priority.py  # 「突破事件 vs 沿均线背景」优先级 + 无锚=新高的实证复现
-├── test_breakout_modes.py
-├── test_living_platform.py
-├── test_ma_ride.py           # 「均线刚收复 vs 沿某条均线上行」模式判别 + 无锚=新高 + 突破优先回归（29 项）
-├── test_pre_runup.py
-├── test_review_fixes.py
-├── test_stock_character.py  # 股性体检回归（40 项）
-├── test_confluence.py       # 叠加概率七层计数回归（100 项）
+├── fetch_market.py      # 通用行情取数
+├── rule123.py           # 结构判定
+├── probe_intraday.py    # 盘中先手
+├── battle_analyze.py    # 单票分析 → analysis.json
+├── report_render.py     # analysis.json → HTML
+├── bars_source.py       # 日线三级取数
+├── account_config.py    # 账户额度
+├── top_signals.py       # 顶部形态（被引擎引用）
+├── confluence.py        # 叠加计数（被报告引用）
+├── levels.py            # 多空参考位（被引擎引用）
+├── gates/               # 闸门 CLI
+├── watch/               # 盯盘与股池
+├── fetch/               # 备用取数、通达信快照、财务解析
+├── library/             # 资料库同步
+├── research/            # 可复跑实证
+├── tests/               # 回归：entry / top / screen / levels / data / report / library
 ├── references/          # 按场景加载的策略、量价、风控与输出细则
 ├── scan_all/            # 全市场扫描（买区走 rule123.build_ev）
 ├── out_cn/              # A股运行输出（gitignore）：fetch_market/rule123 的 out_*.json 按市场自动归档于此
@@ -276,11 +267,11 @@ python probe_intraday.py ILMN --until 22:10       # 美股回放（--until 用�
 ### 4. 通道回测 `backtest_intraday.py`
 
 ```bash
-python backtest_intraday.py                  # 43 只池 × 近 21 个交易日（约 903 个「标的×交易日」）
-python backtest_intraday.py --sweep          # 未决参数敏感性扫描（约 40s）
-python backtest_intraday.py --portfolio      # 组合层模拟（主力 5 万 + 备用 5 万的额度分配）
-python backtest_intraday.py --detail 002961  # 单只标的信号明细
-python backtest_intraday.py --days 10 --no-cache
+python research/backtest_intraday.py                  # 43 只池 × 近 21 个交易日（约 903 个「标的×交易日」）
+python research/backtest_intraday.py --sweep          # 未决参数敏感性扫描（约 40s）
+python research/backtest_intraday.py --portfolio      # 组合层模拟（主力 5 万 + 备用 5 万的额度分配）
+python research/backtest_intraday.py --detail 002961  # 单只标的信号明细
+python research/backtest_intraday.py --days 10 --no-cache
 ```
 
 给通道 A/B/C 与突破预案单做**样本外体检**：逐根回放真实 5 分钟数据，用 `probe_intraday`
@@ -288,7 +279,7 @@ python backtest_intraday.py --days 10 --no-cache
 同时输出 R 口径与**账户口径（走 `ash_lots`、扣 A 股双边 0.12% 成本）**，
 以及 T+1 的三套出场口径对照（结构止损只到次日 / 结构止损续持最长 5 日 / 旧日内止损）。
 
-结论（可 `python backtest_intraday.py` 复跑）：
+结论（可 `python research/backtest_intraday.py` 复跑）：
 
 1. **判策略只看净账户%，别信 R。** 预案单 T+0 的 `+0.27R / PF 1.56` 在价格口径下只有
    −0.019%/笔 —— 因为 27% 的单子止损距 <0.5%，跌 1% 就是 −5R：分子没变、分母被压扁。

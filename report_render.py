@@ -126,14 +126,12 @@ def build_kpis(a, n):
                    % (esc(mode), esc(p.get("verdict") or ""))))
     badges.append('<span class="badge %s">recommend = %s</span>'
                   % ("b-ok" if p.get("recommend") else "b-no", p.get("recommend")))
-    # ★ 顶部标志 K 线硬指标（2026-09-25）：跑个股必看的一项，首屏就要看得见。
+    # 顶部只留一个标签：有信号为红，没有为蓝。明细不再占一节。
     _tv = a.get("top_verdict") or {}
-    if _tv.get("level") == "block":
-        badges.append('<span class="badge b-no">顶部标志K线已确认 → 否决买点（%s %s）</span>'
-                      % (esc(_tv.get("date")), esc(_tv.get("pattern_cn"))))
-    elif _tv.get("level") == "alert":
-        badges.append('<span class="badge b-warn">顶部标志K线待确认（预警 · 仓位×%s）</span>'
-                      % num(_tv.get("size_factor"), 2))
+    if _tv.get("level") in ("block", "alert"):
+        badges.append('<span class="badge b-no">顶部标志K线：有</span>')
+    else:
+        badges.append('<span class="badge b-ok">顶部标志K线：无</span>')
     if p.get("regime"):
         badges.append('<span class="badge b-warn">regime = %s</span>' % esc(p["regime"]))
     # ★ T0 并行入口（2026-09-22）：`plan_entry` 一直有算 ma_reclaim，但报告以前拿不到
@@ -683,6 +681,77 @@ def build_summary(a, n):
     return rows(out)
 
 
+_BREAKOUT_MODES = ("platform_break", "w_bottom_break",
+                   "flag_tl_break", "downtrend_tl_break")
+
+
+def build_head_extra(a, n):
+    """首屏：股性；只有突破模式才带突破概率。"""
+    parts = []
+    character = n.get("character_line")
+    if character:
+        parts.append(character)
+    mode = (a.get("plan") or {}).get("mode")
+    if mode in _BREAKOUT_MODES:
+        prob = n.get("breakout_prob")
+        if prob:
+            parts.append("突破概率：%s" % prob)
+        else:
+            parts.append("突破模式，本次未提供突破概率")
+    return "<br>".join(parts)
+
+
+def build_bigstruct(a):
+    """notes 没写大结构时，用引擎里已有的分位和区间涨幅填表。"""
+    s = a.get("struct") or {}
+    pct = s.get("percentile") or {}
+    chg = s.get("range_change") or {}
+    out = []
+    for key, label in (("60", "60 日"), ("120", "120 日"), ("250", "250 日")):
+        v = pct.get(key) or {}
+        if not v:
+            continue
+        out.append([
+            label,
+            "%s – %s" % (num(v.get("lo")), num(v.get("hi"))),
+            "分位 %s%%" % num(v.get("pct"), 1),
+            "区间 %s%% · 距高 %s%%" % (num(chg.get(key + "d")), num(v.get("gap_hi_pct"))),
+        ])
+    if s.get("ath") is not None:
+        out.append(["前高", num(s.get("ath")), "—", "250 日 %s%%" % num(chg.get("250d"))])
+    return out
+
+
+def build_valuation(a, n):
+    """估值以行情为准。动态市盈率排第一，notes 里的「未取到」不采用。"""
+    v = a.get("valuation") or {}
+    cap = v.get("market_cap")
+    cap_txt = "%s 亿" % num(cap / 1e8, 2) if cap else "—"
+
+    def pe(key):
+        x = v.get(key)
+        return "%s 倍" % num(x, 2) if x is not None else "—"
+
+    base = []
+    if v and not v.get("error"):
+        base = [
+            ["动态市盈率", pe("pe_dynamic"), "现价 / 最新报告期利润年化"],
+            ["静态市盈率", pe("pe_static"), "现价 / 上一完整财年"],
+            ["市盈率 TTM", pe("pe_ttm"), "现价 / 近四个季度"],
+            ["市净率", num(v.get("pb"), 2), "行情接口"],
+            ["总市值", cap_txt, v.get("source") or ""],
+        ]
+    elif v.get("error"):
+        base = [["动态市盈率", "取数失败", esc(v.get("error"))]]
+    extra = []
+    for row in n.get("valuation_rows") or []:
+        text = "".join(str(x) for x in row)
+        if "未取到" in text or "未提供" in text:
+            continue
+        extra.append(row)
+    return rows(base + extra or [["动态市盈率", "—", "本次没有估值数据"]])
+
+
 def build_top_signal(a, n):
     """顶部标志 K 线「硬指标」区块（2026-09-25 老罗：单独提取，跑个股时避雷）。
 
@@ -906,6 +975,7 @@ def render(a, n, tmpl_path=DEFAULT_TMPL):
         "META_LINE": meta_line,
         "KPI_ITEMS": kpi_items,
         "KPI_BADGES": kpi_badges,
+        "HEAD_EXTRA": build_head_extra(a, n),
         "THESIS": note(n.get("thesis_html"), ""),
         "BEST_TITLE": esc(best_title),
         "BEST_KPIS": best_kpis,
@@ -931,12 +1001,12 @@ def render(a, n, tmpl_path=DEFAULT_TMPL):
         "VP_VERDICT_NOTE": note(n.get("vp_verdict_note"), ""),
         "FUND_BODY": n.get("fund_body") or "<p class='flat'>（未提供 —— 需检索一手来源后补写）</p>",
         "FIN_ROWS": rows(n.get("fin_rows") or [["—", "未提供", ""]]),
-        "VALUATION_ROWS": rows(n.get("valuation_rows") or [["—", "未提供", ""]]),
+        "VALUATION_ROWS": build_valuation(a, n),
         "VALUATION_NOTE": note(n.get("valuation_note"), ""),
         "CATALYST_LIST": lis(n.get("catalysts"), "<li class='flat'>（未提供）</li>"),
         "MINESWEEP_LIST": lis(n.get("minesweep"), "<li class='flat'>（未提供 —— 扫雷必须检索一手来源）</li>"),
         "MINESWEEP_NOTE": note(n.get("minesweep_note"), ""),
-        "BIGSTRUCT_ROWS": rows(n.get("bigstruct_rows") or []),
+        "BIGSTRUCT_ROWS": rows(n.get("bigstruct_rows") or build_bigstruct(a)),
         "BIGSTRUCT_NOTE": note(n.get("bigstruct_note"), ""),
         "VETO_ROWS": rows(n.get("veto") and [[x.get("no"), x.get("item"), x.get("judge"),
                                               x.get("verdict")] for x in n["veto"]] or []),

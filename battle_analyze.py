@@ -41,6 +41,7 @@ import account_config as _AC            # noqa: E402
 import rule123 as R                     # noqa: E402
 import probe_intraday as P              # noqa: E402
 import bars_source as BS                # noqa: E402
+import fetch_market as FM               # noqa: E402
 import top_signals as TS_TOP            # noqa: E402  顶部标志 K 线硬指标
 import confluence as CF                 # noqa: E402  叠加概率七层计数（只汇总，不否决）
 
@@ -386,6 +387,18 @@ def intraday_review(mins, bars, atr_v):
 
 # ────────────────────────── 近 20 日量价 ──────────────────────────
 
+def _breakout_hard_applies(z, entry):
+    """突破硬止损只约束突破买点。买在买区下沿之下的是回踩档，用它自己的止损。"""
+    if z.get("mode") not in (
+        "platform_break", "w_bottom_break", "flag_tl_break", "downtrend_tl_break",
+    ):
+        return True
+    floor = z.get("primary_lo")
+    if floor is None or entry is None:
+        return True
+    return entry >= floor
+
+
 def annotate_odds(rows, z, atr_v, last_c):
     """给每条赔率加风控标注（不删除任何一条 —— 全档枚举是硬要求）。"""
     struct_stop = z.get("struct_stop")
@@ -395,7 +408,7 @@ def annotate_odds(rows, z, atr_v, last_c):
         w = []
         if struct_stop is not None and r["entry"] <= struct_stop:
             w.append("买价≤结构止损位（开仓即止损口径）")
-        if hard is not None and r["entry"] <= hard:
+        if hard is not None and _breakout_hard_applies(z, r["entry"]) and r["entry"] <= hard:
             w.append("买价≤硬止损")
         if zone_hi is not None and r["entry"] > zone_hi:
             w.append("追高（超出买区上沿）")
@@ -425,6 +438,8 @@ def sizing_stop_of(rec, z):
     entry = rec.get("entry")
     stop = rec.get("stop")
     hard = z.get("hard_stop")
+    if not _breakout_hard_applies(z, entry):
+        hard = None
     if isinstance(hard, (int, float)) and entry is not None and hard < entry:
         if not isinstance(stop, (int, float)) or hard < stop:
             return hard, "计划硬止损 %s（%s · 盘中触价）" % (
@@ -899,6 +914,14 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
                     peer_rows.append(row)
     peer_rows.sort(key=lambda r: -(r.get("d20") or -999))
 
+    valuation = None
+    if not is_us:
+        secid = ("1." if prefix == "sh" else "0.") + code
+        try:
+            valuation = FM.fetch_ash_valuation(secid)
+        except Exception as e:
+            valuation = {"error": str(e)}
+
     vp20 = volprice_20d(bars)
 
     out = {
@@ -922,6 +945,7 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
             "plan_warning": plan_warn,
         },
         "plan": plan,
+        "valuation": valuation,
         "top_verdict": top_verdict,
         "probe": probe_out,
         "struct": {

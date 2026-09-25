@@ -8,20 +8,20 @@
 
 ```bash
 python fetch_market.py 601233 --out data/601233.json
-python fetch_ashare.py 688222 --out data/688222.json --n 300   # 东财被阻断时的 A 股备用源（新浪，不复权）
+python fetch/fetch_ashare.py 688222 --out data/688222.json --n 300   # 东财被阻断时的 A 股备用源（新浪，不复权）
 python fetch_market.py CF --out data/cf.json
 python rule123.py CF --data data/cf.json
-python snapshot_from_tdx.py raw_tdx.json --out data/301015.json   # 通达信 tdx_kline 返回 → 统一快照（rule123/probe 都吃它）
-python snapshot_from_tdx.py --batch raw_multi.json                 # 批量：一段含多个 tdx 返回的文本 → data/tdx/<code>.json
+python fetch/snapshot_from_tdx.py raw_tdx.json --out data/301015.json   # 通达信 tdx_kline 返回 → 统一快照（rule123/probe 都吃它）
+python fetch/snapshot_from_tdx.py --batch raw_multi.json                 # 批量：一段含多个 tdx 返回的文本 → data/tdx/<code>.json
 python bars_source.py --stat                                      # 看数据缓存命中 / 市场时钟 / 清理：--clear
-python watch_cn.py --snap-dir data/tdx                            # 复盘全离线：只吃 Agent 落的快照
+python watch/watch_cn.py --snap-dir data/tdx                            # 复盘全离线：只吃 Agent 落的快照
 python rule123.py 300207 --data data/300207.json --eod --out out.json
 python probe_intraday.py 002961 --qty 1500                    # 收盘后：次日预案单 + 次级观察位
 python probe_intraday.py 002961 --asof 2026-09-16 --replay --until 10:25   # 盘中/回放：量能突变三档
 python probe_intraday.py ILMN --us-account 5000               # 美股：盘前/盘中（含关键位突破）
 python probe_intraday.py ILMN --us-account 5000 --date 2026-09-15   # 美股回放：验证当日信号
-python watch_cn.py --save                      # A股股池每日复盘（逐票 + 情绪温度计）并存档 reports/
-python watch_cn.py 688758 300759               # 只复盘指定代码
+python watch/watch_cn.py --save                      # A股股池每日复盘（逐票 + 情绪温度计）并存档 reports/
+python watch/watch_cn.py 688758 300759               # 只复盘指定代码
 ```
 
 `--eod`：丢弃今日未收盘末根。`--out`：写出 JSON（默认不写 CWD）。
@@ -62,7 +62,7 @@ python watch_cn.py 688758 300759               # 只复盘指定代码
 
 `backtest_yang_pullback.py`：可复跑的证据脚本（全新浪链路，避开东财限流）。扫全市场大阳样本，统计「挂在不同高度」的 T+1 / 5 日内成交率、永久踏空率、按高开分层，以及「踏空后追高 vs 等回踩」对照。改 `BANDS` / 最低涨幅即可重验。
 
-`backtest_intraday.py`：**盘中通道的样本外体检**（全新浪 5 分钟链路 + 本地 `cache/`）。对「标的 × 交易日」逐根回放，用 `probe_intraday` 的**同一批常量**判定通道 A/B/C 与突破预案单，输出 R 口径与**账户口径（含双边成本）**两套结果；`--sweep` 做参数敏感性扫描，`--portfolio` 做**组合层模拟**（主力 5 万 + 备用 5 万的额度分配）。结论可 `python backtest_intraday.py` 复跑，最要紧的几条：
+`backtest_intraday.py`：**盘中通道的样本外体检**（全新浪 5 分钟链路 + 本地 `cache/`）。对「标的 × 交易日」逐根回放，用 `probe_intraday` 的**同一批常量**判定通道 A/B/C 与突破预案单，输出 R 口径与**账户口径（含双边成本）**两套结果；`--sweep` 做参数敏感性扫描，`--portfolio` 做**组合层模拟**（主力 5 万 + 备用 5 万的额度分配）。结论可 `python research/backtest_intraday.py` 复跑，最要紧的几条：
 - **判策略只看净账户%**：预案单 T+0 的 `+0.27R / PF 1.56` 在价格口径下只有 −0.019%/笔，因为 27% 的单子止损距 <0.5%（跌 1% 就是 −5R）。R 只适合比同一策略的不同参数。
 - **A 股 T+1 是结构问题**：四条通道 T+1 净账户全负，换成「日线结构位 + 收盘破」也只改善了 0.001%–0.023%/笔，仍未转正；持有期放到日线级（最长 5 日）反而更差。
 - **通道 A 改定义后活了，但仍无边**：旧定义 903 个标的日只触发 3 次；改成「前 5 根均量 × 2.0」后触发 266–657 次，可 T+0 净账户恒在 −0.001% ~ −0.014%（≈扣成本后归零）。
@@ -85,7 +85,7 @@ ATR：Wilder ATR14。
 
 | 市场 | 主源 | 降级 | 备注 |
 |---|---|---|---|
-| A 股 | 东方财富 | **新浪 `fetch_ashare.py`** | HTTPS 被中间设备阻断时自动降级 HTTP（`fetch_json_fallback`）。若 https / http **双双 `RemoteDisconnected`**（2026-09-18 实测：东财 `push2` 与 `push2his` 直连全挂），**停止重试**，直接跑 `python fetch_ashare.py <code> --out data/<code>.json --n 300` —— 输出与 `rule123.py` 兼容。注意：新浪日 K 为**不复权**价（分红缺口可能含噪）；批量抓 ~180 只后返回 HTTP 456 限流 |
+| A 股 | 东方财富 | **新浪 `fetch_ashare.py`** | HTTPS 被中间设备阻断时自动降级 HTTP（`fetch_json_fallback`）。若 https / http **双双 `RemoteDisconnected`**（2026-09-18 实测：东财 `push2` 与 `push2his` 直连全挂），**停止重试**，直接跑 `python fetch/fetch_ashare.py <code> --out data/<code>.json --n 300` —— 输出与 `rule123.py` 兼容。注意：新浪日 K 为**不复权**价（分红缺口可能含噪）；批量抓 ~180 只后返回 HTTP 456 限流 |
 | 美股 | Nasdaq 官方 API | 东财 http → Yahoo → stooq | Nasdaq 独有**盘前价/盘前量/市场状态**；东财 http 独有**分钟级带量 K 线** |
 
 - 美股 `session` 字段由 Nasdaq 直接给出（`Pre-Market` / `Open` / `Closed` / `After-Hours`），**不要自行判断夏令时/冬令时**。
@@ -99,7 +99,7 @@ ATR：Wilder ATR14。
   - `GET https://api.nasdaq.com/api/quote/<SYM>/info?assetclass=stocks` → `data.keyStats.dayrange.value`（同值，便于单发）。
   - ⚠️ 别用 `/chart` 的 `previousClose`（滞后一整天，见 `bars_from_nasdaq` docstring），也别把 `/info` 的 `primaryData` 当区间源（它**没有当日开盘价**）。
   - ★ **已修（2026-09-22，`fetch_market.fetch_us_nasdaq` + 新增 `_nasdaq_day_range()`）**：盘中单发 realtime-trades，把 `open/high/low/volume` 换成**当日**口径，并新增 `day_high` / `day_low` / `ohlc_basis` 三字段（`today` / `unavailable` / `last_closed`）。Nasdaq 无当日开盘价 ⇒ `open=None`（宁缺勿假）；当日区间取不到时四个字段**一律 None**，不再沿用昨天的值冒充。同时修掉昨收 fallback 的 off-by-one：Nasdaq 已把 `secondaryData` 改为 `null` ⇒ 旧代码退到 `bars[-2]`，把**前天**的收盘当昨收（实测交出 244.25，真值 257.38，误差 −2.8%）。**盘中 `bars[-1]` 才是昨收**。
-  - 下游注意：`open/high/low` 读到 `None` 时**不要退到 `bars[-1]`**（那是上一交易日）；先看 `ohlc_basis` 判断口径。回归钉在 `test_fetch_market_us.py`（19 项断言，自带 `main`，无需 pytest）。
+  - 下游注意：`open/high/low` 读到 `None` 时**不要退到 `bars[-1]`**（那是上一交易日）；先看 `ohlc_basis` 判断口径。回归钉在 `tests/data/test_fetch_market_us.py`（19 项断言，自带 `main`，无需 pytest）。
 - 美股盘中时段 = 北京时间 21:30–04:00（夏令时）。
 
 取数优先级：WorkBuddy 通达信连接器 → wb-finance-skill → `fetch_market.py` → 网页检索（并标注来源）。连接器调用成功后不得再调用后面的慢源做同字段重复取数；仅缺字段或返回失败时按缺口降级。
@@ -153,9 +153,9 @@ ATR：Wilder ATR14。
       ⇒ 排序后**按报告期去重**（保留首次出现）。
     - ★ **固化工具 `tdx_deep_fin.py`（2026-09-22 加）**：把上面全部坑一次处理完，不必再现场写 `python -c`。
       ```
-      python tdx_deep_fin.py <落盘文件>              # 概览：有哪些 result_set / 列名 / 样例行
-      python tdx_deep_fin.py <落盘文件> --fin        # 财务摘要：key_statistics + 利润表(按报告期排序去重) + 成长能力
-      python tdx_deep_fin.py <落盘文件> --dump o.json
+      python fetch/tdx_deep_fin.py <落盘文件>              # 概览：有哪些 result_set / 列名 / 样例行
+      python fetch/tdx_deep_fin.py <落盘文件> --fin        # 财务摘要：key_statistics + 利润表(按报告期排序去重) + 成长能力
+      python fetch/tdx_deep_fin.py <落盘文件> --dump o.json
       ```
       它会**自动做口径反查**：拿利润表最新一期营收 ÷ key_statistics 的「营业总收入」，
       比值 ≈1.000 即判定「同一期、累计口径」，并打印该结论 —— 这一步以前靠人工比，现在自动出。

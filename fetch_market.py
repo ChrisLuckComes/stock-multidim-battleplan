@@ -94,7 +94,7 @@ def fetch_ash(secid):
     quote_url = (
         "https://push2.eastmoney.com/api/qt/stock/get"
         f"?secid={secid}&ut=fa5fd1943c7b386f172d6893dbfba10b&invt=2&fltt=2"
-        "&fields=f43,f44,f45,f46,f47,f48,f50,f57,f58,f60,f116,f117,f162,f167,f168,f184,f189,f190"
+        "&fields=f43,f44,f45,f46,f47,f48,f50,f57,f58,f60,f116,f117,f162,f163,f164,f167,f168,f184,f189,f190"
     )
     # 日线历史（130 根约 6 个月）
     kline_url = (
@@ -130,7 +130,9 @@ def fetch_ash(secid):
         "volume": fv("f47"),
         "turnover": fv("f48"),
         "change_pct": change_pct,
-        "pe_ttm": fv("f162"),
+        "pe_dynamic": fv("f162"),
+        "pe_static": fv("f163"),
+        "pe_ttm": fv("f164"),
         "pb": fv("f167"),
         "market_cap": fv("f116"),
         "float_cap": fv("f117"),
@@ -154,6 +156,32 @@ def fetch_ash(secid):
         })
     quote["bars"] = bars
     return quote
+
+
+def fetch_ash_valuation(secid):
+    """只取估值，不拉 K 线。f162 动态 / f163 静态 / f164 TTM。"""
+    url = (
+        "https://push2.eastmoney.com/api/qt/stock/get"
+        f"?secid={secid}&ut=fa5fd1943c7b386f172d6893dbfba10b&invt=2&fltt=2"
+        "&fields=f43,f57,f58,f116,f117,f162,f163,f164,f167"
+    )
+    q = fetch_json_fallback(url).get("data") or {}
+    if not q:
+        raise RuntimeError("东方财富未返回 %s 估值" % secid)
+
+    def fv(key):
+        return _flt(q.get(key))
+
+    return {
+        "spot": fv("f43"),
+        "pe_dynamic": fv("f162"),
+        "pe_static": fv("f163"),
+        "pe_ttm": fv("f164"),
+        "pb": fv("f167"),
+        "market_cap": fv("f116"),
+        "float_cap": fv("f117"),
+        "source": "eastmoney",
+    }
 
 
 def fetch_stooq_bars(sym):

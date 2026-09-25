@@ -100,7 +100,7 @@ Agent 仍需自己检索一手来源的部分（**不能省**）：
 - **改版式只改模板**；**改数据来源或算法只改 `battle_analyze.py`**；渲染器负责把数据摆进去。
 - 新增插槽：模板里加 `{{NEW_SLOT}}`，`render()` 的 `slots` 字典里加一项即可。
   模板里出现未定义插槽 → 渲染结果写 `<!-- 未定义插槽 NEW_SLOT -->`，
-  且 `test_battle_report.py::test_template_slots_all_defined` 会直接失败。
+  且 `tests/report/test_battle_report.py::test_template_slots_all_defined` 会直接失败。
 - 渲染器每次都会跑 `check_html()`：div/table/tr/td/th/p/ul/li/span/b/code 的开关配对 +
   残留占位符扫描。历史上手写 43KB 时断过一次 CSS（`.best{R:}}`），这条自检就是为此。
 
