@@ -17,7 +17,9 @@
 
 退出码（可直接用于流程拦截）
     0 = 无牛旗            1 = 旗面成型·未过线（可挂埋伏单）/ **贴线待突破** /
-                             已过线但超出新鲜窗口
+                             已过线但超出新鲜窗口 /
+                             **旗形不标准·下倾线贴线待突破**（`knife_edge_dtl`，
+                             老罗：「牛旗一定是下降趋势线突破」⇒ 旗形是否标准不否决买法）
     2 = **已过牛旗（买点成立）**    3 = 取数失败
     4 = **旗形无效** —— 形态看似牛旗，但被老罗两条硬条件否掉
         （跌破旗杆大阳线最低点 / 整理超过 20 日）⇒ 不作牛旗买点
@@ -223,6 +225,31 @@ def bull_flag_verdict(bars, *, ticker=None, held=None, fresh_max=FRESH_MAX,
         out["advice"] = ("无牛旗形态（%s）⇒ 现在不是「过牛旗」买点，"
                          "按其他模式判（当日引擎给 %s）"
                          % (out["invalid_cn"] or "无合格旗杆/旗面", plan.get("mode") or "—"))
+        # ★ 2026-09-26 老罗：「**下降趋势线突破没有问题，牛旗一定是下降趋势线突破**」。
+        #   ⇒ 旗形「不标准」（回撤过深 `retrace_too_deep`、小高点成不了枢轴
+        #   `no_declining_high`）**不否决**这个买法 —— 买法挂在下倾线上。
+        #   ILMN 2026-09-14 就是这一类：旗面回撤 >66% ⇒ 旗形无效，但线锚
+        #   08-27@231.81→09-03@221.76 成立、贴线（gap +0.06×ATR）可买。
+        #   ⚠ 只在**非 VETO 档**补这一格：上面 `flag_too_long`（动能闸门）与
+        #   `flag_break_pole_low`（已破旗杆大阳低点）是老罗明确否决的，不复活
+        #   （ANET 旗面 28 根维持判无效、暂不考虑）。
+        _ke = plan.get("knife_edge") or {}
+        if _ke.get("level") is not None and _ke.get("anchor") == "down_tl":
+            out["state"] = "knife_edge_dtl"
+            out["knife_edge"] = _ke
+            out["level"], out["exit_code"] = RC_FORMING, RC_FORMING
+            out["level_cn"] = "旗形不标准 · 下倾线贴线待突破"
+            out["advice"] = (
+                "**无标准牛旗**（%s）—— **但下倾线成立**（%s 已下移到 %s，gap %+.2f×ATR）"
+                "⇒ 老罗 2026-09-26：「牛旗一定是下降趋势线突破」，旗形是否标准**不否决**"
+                "这个买法。次日**开盘 ≥%s 且 量 ≥%s×近5日均量**（两条都要）才买；"
+                "缩量 = 不成立、不追。硬止损 %s（线下 1×ATR）。"
+                "★ **在上沿买、不等平台突破买** —— 成本优势通常 5~10%%。当日引擎给 %s。"
+                % (out["invalid_cn"] or "无合格旗杆/旗面",
+                   _ke.get("label") or "下降趋势线",
+                   _num(_ke.get("level")), _ke.get("gap_atr") or 0.0,
+                   _num(_ke.get("level")), _ke.get("rvol_min"),
+                   _num(_ke.get("hard_stop")), plan.get("mode") or "—"))
         if plan.get("mode") == "flag_tl_break":      # 不可能，保险
             out["hit"] = True
         return out
@@ -370,6 +397,19 @@ def _render(code, name, src, bars, v, verbose=False):
         return L
     if not v["hit"]:
         L.append(" 处置    : %s" % v["advice"])
+        _ke = v.get("knife_edge")
+        if _ke:
+            # 旗形不标准、但下倾线贴线（`knife_edge_dtl`）—— 老罗：「牛旗一定是
+            # 下降趋势线突破」⇒ 这一档必须打出来，否则那天报告里只剩一句「无牛旗」。
+            L.append("-" * _WIDTH)
+            L.append(" 贴线待突破: %s 线值 %s · 今收 %s（未站上；次日不低开即算过线）"
+                     % (_ke.get("label") or "下降趋势线",
+                        _num(_ke.get("level")), _num(last.get("c"))))
+            L.append(" 成立条件 : **次日开盘 ≥%s** 且 **量 ≥%s×近5日均量**"
+                     "；两条都要，缩量 = 不成立、不追"
+                     % (_num(_ke.get("level")), _ke.get("rvol_min")))
+            L.append(" 硬止损   : %s（线下 1×ATR）｜ ★ 在上沿买、不等平台突破买"
+                     % _num(_ke.get("hard_stop")))
         L.append("-" * _WIDTH)
         L.append(" 本项只回答「有没有牛旗、过线没有」。无旗形**不等于**不能买 ——")
         L.append(" 它只说明当下不是「过牛旗」这个买点。")
@@ -429,8 +469,9 @@ def _render(code, name, src, bars, v, verbose=False):
     _ke = v.get("knife_edge")
     if _ke:
         L.append("-" * _WIDTH)
-        L.append(" 贴线待突破: 线值 %s · 今收 %s（未站上，次日只需不低开即算过线）"
-                 % (_num(_ke.get("level")), _num(last.get("c"))))
+        L.append(" 贴线待突破: %s 线值 %s · 今收 %s（未站上；次日不低开即算过线）"
+                 % (_ke.get("label") or "旗面线",
+                    _num(_ke.get("level")), _num(last.get("c"))))
         L.append(" 成立条件 : **次日开盘 ≥%s** 且 **量 ≥%s×近5日均量**；缩量 = 不成立、不追"
                  % (_num(_ke.get("level")), _ke.get("rvol_min")))
         L.append(" 硬止损   : %s（线下 1×ATR）" % _num(_ke.get("hard_stop")))
@@ -451,6 +492,9 @@ def _render(code, name, src, bars, v, verbose=False):
     L.append(" 旗帜越长动能越弱 ⇒ 动能闸门，不得用「合并 K 线 / 换更短旗杆」绕过）。")
     L.append(" 贴线待突破（2026-09-26，天能重工 300569）：线已下移到收盘价上 ⇒ 次日不低开")
     L.append("即算过线，但该档整体负期望 ⇒ **必须先放量**（≥1.5×近5日均量）才买。")
+    L.append(" ★ 旗形「不标准」（回撤过深 / 小高点无枢轴）**不否决**这个买法 —— 老罗")
+    L.append(" 2026-09-26：「牛旗一定是下降趋势线突破」⇒ 下倾线成立就走本档（ILMN 2026-09-14）。")
+    L.append(" 在上沿买、不等平台突破买：两层成本差 5~15%（ILMN 10.4% / 赛分科技 15.0%）。")
     L.append(" 退出码 0=无 / 1=成型未过线（含贴线待突破）或 过线已久 / 2=已过牛旗（买点成立） /")
     L.append(" 3=取数失败 / 4=旗形无效（避雷：跌破旗杆大阳线最低点 或 整理超 20 根）。")
     L.append("=" * _WIDTH)

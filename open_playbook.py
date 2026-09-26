@@ -156,7 +156,7 @@ def long_ladder(target, stop):
 
 def build(last, entry, stop, target=None, atr=None, board=None,
           code="", name="", shares=None, lot=100, r_mult=None,
-          prev_close=None, upper_entry=None, market="CN"):
+          prev_close=None, upper_entry=None, market="CN", knife_edge=None):
     """生成开盘作战方案。
 
     last      基准日收盘价（挂单是隔夜预挂，故次日开盘的参照系）
@@ -169,6 +169,9 @@ def build(last, entry, stop, target=None, atr=None, board=None,
               不套 A 股「差几个点就等回踩」。半夜不盯盘：正股可拿过觉，
               起来盘后确认止损；2 倍 ETF 睡前无论盈亏都平仓。
     upper_entry  buy 区上沿（在现价上方、不可预挂、只能盯盘），可空
+    knife_edge   「贴线待突破」档（`plan["knife_edge"]`，旗面线 / 下降趋势线
+                 已下移到收盘价附近）。有则插在 **⓪ 档**（成本最低），并写明
+                 「开盘不低开 + 放量」两条同时成立才执行。
     """
     is_cn = str(market or "CN").upper().startswith("CN")
     if board is None:
@@ -206,6 +209,57 @@ def build(last, entry, stop, target=None, atr=None, board=None,
         bands = []
         hi_gap = None
         lo_ok = None
+
+    # ── ⓪「贴线待突破」：旗面线 / 下降趋势线已下移到收盘价附近 —— **成本最低的一档**。
+    #   老罗 2026-09-26：「如果形成牛旗，**不在旗形上沿买入，而是在平台顶买入**的话，
+    #   虽然都能说得通，但**没有了成本优势，盈亏比变得差很多**」——实测两组：
+    #     · ILMN 2026-09-15 上沿 208.95 vs 平台突破 231.81 ⇒ **便宜 9.9%**
+    #       （到 09-24 高 277.95：+33.0% vs +19.9%）
+    #     · 赛分科技 2026-09-11 过线单 27.92 vs 平台突破 32.10 ⇒ **便宜 13.1%**
+    #       （到 09-23 高 34.79：+24.6% vs +8.4%）
+    #   范围条件：`knife_edge["level"] ≤ entry`（比原挂单更低才有资格叫「成本优势」；
+    #   人工在 notes 里把挂单价改到更低时会自动让位，不打架）。
+    #   ⚠ 它同时是**条件档**：廉价过线整体负期望（实测 n=213：5 日中位 −1.81%、
+    #   胜率 43.8%），必须「开盘不低开 **且** 放量」两条同时成立（规则见
+    #   `rule123.flag_knife_edge` docstring 的四组实测表）⇒ 成立才算买点，缩量作废。
+    ke = None
+    if isinstance(knife_edge, dict) and knife_edge.get("level"):
+        _klv = float(knife_edge["level"])
+        if _klv <= entry:
+            _krv = float(knife_edge.get("rvol_min") or 1.5)
+            _khd = knife_edge.get("hard_stop")
+            _lab = knife_edge.get("label") or "牛旗面线"
+            ke = {"level": _klv, "rvol_min": _krv, "hard_stop": _khd,
+                  "label": _lab,
+                  "gap_atr": knife_edge.get("gap_atr"),
+                  "line_from": knife_edge.get("line_from")}
+            _cost = ""
+            if entry > _klv:
+                _cost = ("；比原挂单 %.2f <b>低 %.1f%%</b>"
+                         % (entry, (entry - _klv) / entry * 100))
+            bands.insert(0, {
+                "key": "knife_edge",
+                "title": "⓪ 贴线待突破（上沿买 · 成本最低档）",
+                # 上界取涨停价（美股取 1.08× 异常跳空参照线）—— 否则「一字/涨停
+                # 开盘」会同时命中本档与 ①：那种情况量必然缩，本档「放量」条件
+                # 不成立，写清区间可免读者误判。
+                "cond": "%.2f ≤ O ＜ %.2f 且 量 ≥ <b>%.1f×</b>近5日均量" % (
+                    _klv, up_limit, _krv),
+                "act": (
+                    "<b>这是成本最低的一档</b>：%s 已下移到收盘价附近 "
+                    "（线值 <b>%.2f</b>、今收 %.2f、相距 %s×ATR）⇒ 次日"
+                    "<b>不低开即算「过线」= 过牛旗</b>%s。"
+                    "⚠ 廉价过线整体负期望 ⇒ <b>必须量能确认</b>："
+                    "上面两条<b>同时</b>成立才买；<b>缩量 = 本档不成立、不追</b>，"
+                    "回到下面各档按原计划做。"
+                    "★ 在上沿买而不是等平台突破买 —— 那才是成本优势所在。"
+                    % (_lab, _klv, last,
+                       ("%+.2f" % knife_edge["gap_atr"]) if knife_edge.get("gap_atr") is not None else "0.00",
+                       _cost)),
+                "pos": (("%d 股" % shares) if shares else "计划仓位") + "（放量确认后为<b>第一优先</b>）",
+                "stop": ("收盘破 <b>%s</b>（线下 1×ATR）" % _khd) if _khd else "—",
+                "tone": "on",
+            })
 
     # ── ① 一字 / 涨停开盘：买不到（硬约束）。美股不走这六档。
     if is_cn:
@@ -323,6 +377,7 @@ def build(last, entry, stop, target=None, atr=None, board=None,
         "upper_entry": (float(upper_entry) if upper_entry else None),
         "upper_note": upper_note,
         "bands": bands,
+        "knife_edge": ke,                                  # ⓪ 档（无则 None）
         "ladder": ladder,
         "directions": directions,
         "entry_grade": long_grade(r_mult) if not is_cn else None,
@@ -675,9 +730,13 @@ def from_analysis(a, n=None):
     atr = st.get("atr14")
     if last is None or entry is None or stop is None:
         return None
+    # ★ 2026-09-26：「贴线待突破」档（老罗「在上沿买、不在平台顶买」）——
+    #   直接取 plan 上已算好的那一档，作为 ⓪ 插入开盘作战方案。
+    _ke = plan.get("knife_edge")
     return build(last=last, entry=entry, stop=stop, target=target, atr=atr,
                  code=code, name=meta.get("name") or "", shares=shares,
-                 upper_entry=upper, market=meta.get("market") or "CN")
+                 upper_entry=upper, market=meta.get("market") or "CN",
+                 knife_edge=_ke if isinstance(_ke, dict) else None)
 
 
 # ---------------------------------------------------------------- CLI

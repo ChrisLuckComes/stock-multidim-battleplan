@@ -721,6 +721,38 @@ def _print_top_signal(plan):
               f"但都不是这一波高点（低位同形态属看涨反转，不算顶部信号）")
 
 
+def _print_knife_edge(plan):
+    """「贴线待突破」条件买点（老罗 2026-09-26：「**不在旗形上沿买入，而是在平台顶
+    买入的话……没有了成本优势，盈亏比变得差很多**」）。
+
+    有才打，无则不刷屏。读 `plan["knife_edge"]`（rule123 已算好，含**下降趋势线版**
+    —— 老罗：「牛旗一定是下降趋势线突破」）。
+    ⚑ 它是**条件档**，不是「可以买」：廉价过线整体负期望 ⇒ 必须「开盘不低开 **且**
+    放量」两条同时成立（实测放量组 +2.76%/52.6% vs 缩量组 −1.83%/42.5%）。
+    """
+    ke = plan.get("knife_edge") or {}
+    lv = ke.get("level")
+    if lv is None:
+        return
+    lab = ke.get("label") or "牛旗面线"
+    gap = ke.get("gap_atr")
+    if gap is None:                       # 注意 0.0 必须走「贴合」分支，别用真值判断
+        gap_txt = ""
+    elif abs(gap) < 0.02:
+        gap_txt = "贴合收盘价"
+    elif gap > 0:
+        gap_txt = "在收盘价下方 %.2f×ATR" % gap
+    else:
+        gap_txt = "在收盘价上方 %.2f×ATR" % abs(gap)
+    rv = ke.get("rvol_min") or 1.5
+    print(f" 贴线待突破 : [~] {lab} 已下移到 {lv}（{gap_txt}）"
+          f"—— 次日不低开即算「过线」")
+    print(f"              成立条件: 开盘 ≥ {lv} 且 量 ≥ {rv}×近5日均量"
+          f"（两条都要；缩量 = 不成立、不追）")
+    print(f"              硬止损   : {ke.get('hard_stop')}（线下 1×ATR）"
+          f"｜ ★ 在上沿买、不等平台突破 —— 成本优势通常 5~10%")
+
+
 def probe(code, qty=None, account=None, asof=None, min_scale=5, replay=False,
           until=None, us_account=None, date=None, data_file=None, market_data=None):
     # ★ 默认值现取（不在签名里写 50000 / 5000）：配置改了不必改代码
@@ -780,6 +812,7 @@ def probe(code, qty=None, account=None, asof=None, min_scale=5, replay=False,
         "defend": z.get("invalidation"),
         "note": plan.get("note"),
         "top_signal": plan.get("top_signal"),
+        "knife_edge": plan.get("knife_edge"),
     }
 
     print("=" * 66)
@@ -806,6 +839,7 @@ def probe(code, qty=None, account=None, asof=None, min_scale=5, replay=False,
               f"{_tt.get('trigger')}、收盘仍站上 MA5/MA10/MA20 且 > 硬止损 "
               f"{_tt.get('hard_stop')} ⇒ 尾盘按收盘价成交")
     _print_top_signal(plan)
+    _print_knife_edge(plan)
     if z.get("stop_warning"):
         print(f" ⚠ 止损冲突 : {z['stop_warning']}")
     if plan.get("note"):
@@ -1647,6 +1681,7 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None,
           f"{'（盘中口径）' if live_bar is not None else ''}"
           f"   防守位 {z.get('invalidation')}")
     _print_top_signal(plan)
+    _print_knife_edge(plan)
     if z.get("relaxed"):
         print(f" 门控       : ⚠ 已放宽 —— {z.get('relaxed_reason')}")
     if z.get("stop_warning"):
@@ -1672,7 +1707,8 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None,
            "recommend": plan["recommend"], "zone_lo": z.get("primary_lo"),
            "zone_hi": z.get("primary_hi"), "defend": z.get("invalidation"),
            "src": src, "src_notes": src_notes,
-           "top_signal": plan.get("top_signal")}
+           "top_signal": plan.get("top_signal"),
+           "knife_edge": plan.get("knife_edge")}
 
     # ---------- 1) 预案单 ----------
     print()

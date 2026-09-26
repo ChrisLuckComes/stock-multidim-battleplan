@@ -2496,7 +2496,7 @@ def pre_breakout_line_order(bars, ev, atr_v, last_c, rvol=None):
     }
 
 
-def _confirm_edge(plat_p, flag, last_c):
+def _confirm_edge(plat_p, flag, last_c, bars=None, ev=None):
     """整理段上沿线 —— **过它才算确认买点**（老罗 2026-09-26 合并口径）。
 
     「大阳之后缩量不代表次日一定能涨，但是如果涨了过了牛旗就是买点」⇒
@@ -2507,6 +2507,13 @@ def _confirm_edge(plat_p, flag, last_c):
 
     注：旗面线用 `tl_now`（当根线值），与 `flag_tl_break` 的 `f_tl` 同口径 ——
     不要换成下一根线值，否则「确认线」与「模式触发线」会差一根。
+
+    ★ 2026-09-26 追加**第三个候选：`ev["down_tl"]`（泛化下倾线）**。老罗：
+    「下降趋势线突破没有问题，**牛旗一定是下降趋势线突破**」⇒ 当 `detect_bull_flag`
+    判无效（`retrace_too_deep` / `no_declining_high`）时 `flag` 为 None，此前这条
+    确认线就只剩「平台沿」可给 —— 而 ILMN 2026-09-14 的现价 **208.21** 上方最近
+    那条恰恰是下倾线 **209.70**（次日 207.69），不是平台。漏掉它 ⇒ 报告会把人
+    引向「等平台突破（231.81）」= 老罗说的「没有成本优势、盈亏比差很多」。
     """
     if last_c is None:
         return None
@@ -2517,6 +2524,19 @@ def _confirm_edge(plat_p, flag, last_c):
     if flag and flag.get("tl_now") is not None and flag["tl_now"] > last_c:
         cands.append({"level": round(flag["tl_now"], 2),
                       "label": "牛旗面线（下倾）", "tier": "牛旗突破·T1"})
+    if bars is not None and ev is not None:
+        dl = (ev.get("down_tl") or {})
+        if dl.get("src") == "local_highs":
+            _a, _b = dl.get("a"), dl.get("b")
+            if _a and _b and _a["i"] != _b["i"] and _b["price"] > _a["price"]:
+                _lv = line_val((_b["i"], _b["price"]), (_a["i"], _a["price"]),
+                               len(bars) - 1)
+                # 与上面两条**同一条线**时不重复列（旗面线常与 down_tl 重合）
+                if _lv is not None and _lv > last_c and not any(
+                        abs(_lv - c["level"]) < 0.01 for c in cands):
+                    cands.append({"level": round(_lv, 2),
+                                  "label": "下降趋势线（牛旗面线·下倾）",
+                                  "tier": "下降趋势线突破·T1"})
     if not cands:
         return None
     return min(cands, key=lambda x: x["level"])
@@ -2696,6 +2716,82 @@ def flag_knife_edge(bars, flag, atr_v, last_c, rvol=None):
             f"⇒ **必须量能确认**：次日开盘 ≥{round(line_next, 2)} 且量 ≥{KNIFE_EDGE_RVOL}×近5日均量"
             f"才买（放量组 +2.76%、胜率 52.6%；缩量组 −1.83%、42.5%）；缩量 = 不成立，不追。"
             f"硬止损 {hard}（线下 1×ATR）。"
+        ),
+    }
+
+
+def dtl_knife_edge(bars, ev, atr_v, last_c, rvol=None):
+    """「贴线待突破」预警（**下降趋势线版** —— 老罗定的牛旗正落点）。
+
+    老罗 2026-09-26：「**下降趋势线突破没有问题，牛旗一定是下降趋势线突破**」⇒
+    这条线本身就是牛旗的面线，`detect_bull_flag` 的 `retrace_too_deep` /
+    `no_declining_high` 等闸门**不否决牛旗买法**（它们只管「是不是标准旗形」，
+    不管「下倾线上沿有没有被过」）。故本函数与 `flag_knife_edge` **同口径**，
+    只是数据源换成 `ev["down_tl"]`（泛化下倾线），覆盖 `detect_bull_flag` 判无效
+    但下倾线成立的票（ILMN / 赛分科技 2026-09 都是这一类）。
+
+    ── ILMN 2026-09-14 实录（老罗：「0915 就是牛旗买点」）──────────────
+      线锚 08-27@231.81 → 09-03@221.76（就是他截图里那条），线值每日下移 2.01：
+        09-11 收 206.45 / 当日线 211.71 / 次日线 209.70 ⇒ 正常埋伏单 **@210.13** ✓
+        09-14 收 208.21 / 当日线 209.70 / 次日线 **207.69** ⇒ 收盘已贴上次日线值
+              （gap **+0.06×ATR**）⇒ 旧守卫 `last_c >= line_next` 静默吞掉 ⇒
+              **看起来像「形态消失」**，这正是本函数要补的那一格。
+        09-15 开 **208.95**（≥207.69）· 量 3.15M（**1.69×**近5日均量）· 收 222.29（+6.9%）
+      ⇒ 「次日不低开 + 放量」两条都成立 ⇒ 买在 **208.95**。
+      对比平台突破（09-17 `platform_break` 买位 **231.81**）：**便宜 9.9%**；
+      到 09-24 高 277.95，208.95 买 +33.0% vs 231.81 买 +19.9%。
+
+    ⚠ 与 `flag_knife_edge` 同样**不给 buy-stop**：贴线档的「过线」不需要价格上涨
+      就算数（廉价过线，整体负期望），只有**放量**才翻正（见 `flag_knife_edge`
+      docstring 里的四组实测表）⇒ 只给「次日开盘不低开 + 量 ≥1.5×近5日均量」条件。
+    """
+    if not atr_v or atr_v <= 0 or last_c is None:
+        return None
+    dl = (ev or {}).get("down_tl") or {}
+    if dl.get("src") != "local_highs":
+        return None
+    a, b = dl.get("a"), dl.get("b")
+    if not a or not b or a["i"] == b["i"]:
+        return None
+    pb, pa = (b["i"], b["price"]), (a["i"], a["price"])
+    if pa[1] >= pb[1]:                       # 必须是下移线
+        return None
+    line_next = line_val(pb, pa, len(bars))
+    if line_next is None or last_c < line_next:
+        return None                          # 线仍在价上方 ⇒ 正常埋伏单那一档
+    gap_atr = (last_c - line_next) / atr_v
+    if gap_atr > 1.0:                        # 线已明显掉到价下方 = 形态走完
+        return None
+    hard = round(line_next - 1.0 * atr_v, 2)
+    dry = dry_small_body(bars, atr_v)
+    from_txt = (f"{bars[b['i']]['d']}高{b['price']:.2f}→"
+                f"{bars[a['i']]['d']}高{a['price']:.2f}")
+    _where = ("（贴合）" if abs(gap_atr) < 0.02
+              else ("下方 %.2f×ATR" % gap_atr if gap_atr > 0
+                    else "上方 %.2f×ATR" % abs(gap_atr)))
+    return {
+        "kind": "knife_edge",
+        "anchor": "down_tl",
+        "label": "下降趋势线（牛旗面线）",
+        "line_from": from_txt,
+        "level": round(line_next, 2),
+        "gap_atr": round(gap_atr, 2),
+        "rvol_min": KNIFE_EDGE_RVOL,
+        "dry": dry,
+        "hard_stop": hard,
+        "priority": 1,
+        "tier": "T1",
+        "setup_kind": "knife_edge",
+        "role": "primary_entry",
+        "note": (
+            f"下降趋势线（{from_txt}）**已下移到收盘价{_where}**"
+            f"（线值 {round(line_next, 2)}、今收 {round(last_c, 2)}）⇒ 未站上，"
+            f"但**次日只需不低开即算「过线」= 过牛旗**（老罗：「牛旗一定是下降趋势线突破」）。"
+            f"⚠ 这类廉价过线整体负期望（实测 n=213：5 日中位 −1.81%、胜率 43.8%）"
+            f"⇒ **必须量能确认**：次日开盘 ≥{round(line_next, 2)} 且量 ≥{KNIFE_EDGE_RVOL}×近5日均量"
+            f"才买（放量组 +2.76%、胜率 52.6%；缩量组 −1.83%、42.5%）；缩量 = 不成立，不追。"
+            f"硬止损 {hard}（线下 1×ATR）。★ 在上沿买而非等平台突破买："
+            f"成本优势通常 5~10%（ILMN 09-15 208.95 vs 平台突破 231.81 = 便宜 9.9%）"
         ),
     }
 
@@ -3820,8 +3916,18 @@ def _plan_entry_core(bars, ev):
         # ★ 2026-09-26：「贴线待突破」预警。与埋伏单**几何互斥** —— 埋伏单要求线仍在价上方，
         #   这一档是线已下移到收盘价附近（未站上，但次日只需不低开即算过线）。
         #   老罗 2026-09-26 定：加预警 + **放量确认**，不放宽守卫（该档整体负期望）。
-        if not cands and _flag_ev:
-            ke = flag_knife_edge(bars, _flag_ev, atr_v, last_c, rvol)
+        if not cands:
+            ke = flag_knife_edge(bars, _flag_ev, atr_v, last_c, rvol) if _flag_ev else None
+            if not ke:
+                # ★ 2026-09-26：**下降趋势线版**（老罗：「牛旗一定是下降趋势线突破」）。
+                #   旗面线与 down_tl 常常是**同一条**（MRNA 两者都 148.98），但旗面回撤
+                #   过深（>66% ⇒ retrace_too_deep）或小高点成不了枢轴（no_declining_high）
+                #   时 `detect_bull_flag` 判无效、`_flag_ev` 为 None —— 此时**下倾线依然
+                #   是牛旗的买法通道**，不能因此把「贴线待突破」整个丢掉。
+                #   ILMN 2026-09-14（收 208.21 / 次日线 207.69 / gap +0.06×ATR）
+                #   与赛分科技 2026-09-14（收 28.56 / 次日线 27.69 / gap +0.46×ATR）
+                #   都是这一类：线已贴上来，却因为没有「标准旗形」而静默无声。
+                ke = dtl_knife_edge(bars, ev, atr_v, last_c, rvol)
             if ke:
                 result["knife_edge"] = ke
         # ★ T0 均线收复+过昨高：**总是**计算并挂在结果上（供股池复盘/盯盘方案消费）。
@@ -4281,7 +4387,7 @@ def _plan_entry_core(bars, ev):
             #   的上沿线 —— 上沿水平走 platform_break、下倾走 flag_tl_break，两条都已是 T1，
             #   且在本分支**之前**就会被评估（真过沿了根本走不到这里）。此处把「该盯哪条线」
             #   写进买区，避免把「缩量到位」误当成「可以买」。
-            _edge = _confirm_edge(plat_p, _flag_ev, last_c)
+            _edge = _confirm_edge(plat_p, _flag_ev, last_c, bars=bars, ev=ev)
             if _edge:
                 z["confirm_edge"] = _edge["level"]
                 z["confirm_kind"] = _edge["label"]
