@@ -40,6 +40,16 @@ MRNA，过牛旗即是买点」。逐根核对后确认这段结构是**教科�
 
 `fixtures/MRNA_bars.json`：2025-11-03 → 2026-09-25 共 225 根，取自 nasdaq 源，
 逐根 o/h/l/c/v 原样，不合成、不插值。
+
+## 老罗 2026-09-26 追加的两个硬条件
+
+> 「牛旗的判断，需要有条件，旗形整理最好不要跌破大阳线的最低点，否则无效，
+>  然后整理天数不要太长（不超过 20 日）」
+
+⇒ ① **旗面（收盘口径）不得跌破旗杆「最后一根大阳」的最低点**。MRNA 的失效线是
+08-19 那根跳空大阳的最低点 **114.46**，旗面最低 128.61（+1.1×ATR）⇒ 本例**通过**；
+② **整理天数（旗面自身根数）≤ 20 根**。MRNA 旗面 **19** 根，顶在上限边缘但仍在内 ——
+这正是当初 `flag_len` 口径必须修的原因：旧口径下它会随时间增长，第二天就「变成」21 根。
 """
 import io
 import json
@@ -216,6 +226,104 @@ def test_cli_reports_buy_zone_on_breakout_day():
 def test_cli_is_read_only():
     """CLI 只回答「有没有牛旗、过线没有」，不得因为「无旗形」就说不该交易。"""
     import bull_flag_check as BF
-    v = BF.bull_flag_verdict(bars_upto("2026-04-20"), ticker="MRNA")
-    if not v["hit"]:
-        assert "不是「过牛旗」买点" in v["advice"]
+    # 2026-02-20：`retrace_too_deep` ⇒ 走「无牛旗」档（非否决档），退出码 0
+    v = BF.bull_flag_verdict(bars_upto("2026-02-20"), ticker="MRNA")
+    assert v["hit"] is False and v["exit_code"] == 0
+    assert v["invalid_reason"] == "retrace_too_deep"
+    assert "不是「过牛旗」买点" in v["advice"]
+    assert "不能买" not in v["advice"]
+
+
+# ───────────── 硬条件①②：不破旗杆大阳低点 / 整理 ≤20 根（2026-09-26 追加） ─────────────
+
+def test_flag_holds_the_pole_big_candle():
+    """★ 旗杆「最后一根大阳」= 08-19（跳空大阳，区间 114.46~176.66），失效线 114.46。
+
+    旗面最低 128.61（08-20）→ 余 **+1.1×ATR**，没有跌回大阳线内部 ⇒ 形态有效。
+    """
+    f = flag_at("2026-09-17")
+    a = f["anchor"]
+    assert a["i"] is not None and a["d"] == "2026-08-19"
+    assert a["kind"] == "low", a          # 大实体跳空（非一字）⇒ 失效线 = 当日最低价
+    assert a["yang_low"] == pytest.approx(114.46, abs=0.01)
+    assert a["price"] == pytest.approx(114.46, abs=0.01)
+    assert f["flag_low"] == pytest.approx(128.61, abs=0.01)
+    assert f["flag_min_close"] == pytest.approx(133.32, abs=0.01)   # 08-20 收
+    assert f["flag_low"] > a["price"]
+    assert f["undercut"] is False and f["valid"] is True
+    margin = (f["flag_low"] - a["price"]) / atr14(bars_upto("2026-09-17"))
+    assert margin == pytest.approx(1.18, abs=0.10)
+
+
+@pytest.mark.parametrize("day", ["2026-09-16", "2026-09-17", "2026-09-18",
+                                 "2026-09-21", "2026-09-22", "2026-09-25"])
+def test_anchor_holds_and_flag_len_within_limit(day):
+    """整个窗口内：失效线恒为 114.46、收盘从未跌破、整理根数 ≤ 20。"""
+    f = flag_at(day)
+    assert f is not None and f["valid"] is True, day
+    assert f["undercut"] is False, day
+    assert f["anchor"]["price"] == pytest.approx(114.46, abs=0.01), day
+    assert f["flag_low"] > f["anchor"]["price"], day
+    assert f["flag_len"] <= 20, day
+
+
+# ───────────────── CLI：无效档（退出码 4）的契约 ─────────────────
+
+def _synth(flag_rows, base=60):
+    """60 根平台 + 旗杆（52→70，末根大阳 o=68/h=71/l=67）+ 指定旗面。"""
+    bars = []
+    for i in range(base):
+        bars.append({"d": "2026-01-%02d" % (i % 28 + 1), "o": 50.0, "h": 50.8,
+                     "l": 49.2, "c": 50.0, "v": 5e5})
+    for j, c in enumerate([52, 55, 58, 62, 66, 70]):
+        bars.append({"d": "2026-06-%02d" % (16 + j), "o": c - 2, "h": c + 1,
+                     "l": c - 3, "c": c, "v": 3e6})
+    for j, (o, h, l, c) in enumerate(flag_rows):
+        bars.append({"d": "2026-07-%02d" % (j + 1), "o": o, "h": h, "l": l,
+                     "c": c, "v": 8e5})
+    return bars
+
+
+_DEEP_FLAG = [(68, 69.5, 66.8, 68), (67, 68.5, 65.8, 67), (66, 67.5, 64.8, 66),
+              (65, 66.5, 63.8, 65), (64, 65.5, 62.8, 64), (63.5, 64.9, 61.8, 63),
+              (63, 64.3, 61.9, 63)]
+
+
+def test_cli_rc4_when_flag_breaks_pole_low():
+    """旗面阴跌到 61.8 < 大阳低 67 ⇒ 退出码 **4**（老罗两条硬条件的第一条）。"""
+    import bull_flag_check as BF
+    v = BF.bull_flag_verdict(_synth(_DEEP_FLAG), ticker="TEST")
+    assert v["hit"] is False
+    assert v["state"] == "invalid"
+    assert v["exit_code"] == 4 and v["level"] == 4
+    assert v["invalid_reason"] == "flag_break_pole_low"
+    assert "跌破旗杆大阳线最低点" in v["level_cn"]
+    assert v["flag"]["anchor"]["price"] == pytest.approx(67.0, abs=0.01)
+    assert v["flag"]["flag_min_close"] < v["flag"]["anchor"]["price"]
+
+
+def test_cli_rc4_when_flag_too_long():
+    """整理 22 根 > 20 ⇒ 退出码 **4**（老罗两条硬条件的第二条）。"""
+    import bull_flag_check as BF
+    rows = []
+    for j in range(22):
+        c = 68.6 - j * 0.13
+        rows.append((c, c + 0.9, c - 0.5, c))
+    v = BF.bull_flag_verdict(_synth(rows), ticker="TEST")
+    assert v["state"] == "invalid" and v["exit_code"] == 4
+    assert v["invalid_reason"] == "flag_too_long"
+    assert "整理超过 20 根" in v["level_cn"]
+    assert v["flag"]["flag_len"] == 22 and v["flag"]["limit"] == 20
+
+
+def test_cli_render_shows_the_anchor_line():
+    """人读版必须把失效线打出来（老罗要的是「结论 + 能不能追」，数字要能核对）。"""
+    import bull_flag_check as BF
+    bars = bars_upto("2026-09-17")
+    v = BF.bull_flag_verdict(bars, ticker="MRNA")
+    txt = "\n".join(BF._render("MRNA", "Moderna, Inc.", "fixture", bars, v))
+    assert "失效线" in txt and "114.46" in txt and "128.61" in txt
+    assert "整理上限" in txt and "20" in txt
+    v2 = BF.bull_flag_verdict(_synth(_DEEP_FLAG), ticker="TEST")
+    txt2 = "\n".join(BF._render("TEST", "合成", "inline", _synth(_DEEP_FLAG), v2))
+    assert "旗形无效" in txt2 and "跌破失效线" in txt2 and "退出码 4" in txt2

@@ -18,6 +18,8 @@
 退出码（可直接用于流程拦截）
     0 = 无牛旗            1 = 旗面成型·未过线（可挂埋伏单）/ 已过线但超出新鲜窗口
     2 = **已过牛旗（买点成立）**    3 = 取数失败
+    4 = **旗形无效** —— 形态看似牛旗，但被老罗两条硬条件否掉
+        （跌破旗杆大阳线最低点 / 整理超过 20 日）⇒ 不作牛旗买点
 多票时取最大值。
 
 口径
@@ -26,6 +28,11 @@
   旗面（下降摆动高连线，旗面 3~20 根，回撤 ≤2/3 旗杆，多数收盘未彻底破位）。
 · **`flag_len` 是旗面自身的长度**（旗杆末端 → 突破前最后一根），不含突破后站线的根数
   —— 2026-09-26 修，否则旗面 ≥18 根的票会在突破后第二天整体消失。
+· ★★ 两条硬条件（老罗 2026-09-26）：
+  ① **旗面收盘不得跌破旗杆「最后一根大阳」的最低点**（`bull_flag_anchor`）——
+     **收盘破才算破**；盘中插针破、收盘收回仍有效，只标 `undercut`；
+  ② **整理天数 ≤ 20 根**（`FLAG_LEN_MAX`）。
+  被任一条否掉 ⇒ 形态无效（退出码 4），不作牛旗买点。
 · 触发：**收盘站上旗面下降线**（`days_above_tl ∈ [1, 3]` 才算新鲜）。量能只作提示
   —— 2026-09-17 老罗定「价格说明一切」。
 · 买区 = 旗面线 ~ 旗面线 + 1.0×ATR（单边向上，与平台/W底突破同构）；结构止损看旗面线下。
@@ -47,10 +54,31 @@ if _HERE not in sys.path:
 
 import rule123 as R          # noqa: E402
 
-RC_NONE, RC_FORMING, RC_BROKEN, RC_FAIL = 0, 1, 2, 3
+RC_NONE, RC_FORMING, RC_BROKEN, RC_FAIL, RC_INVALID = 0, 1, 2, 3, 4
 _WIDTH = 74
 # 过线后仍然「新鲜」的根数上限。与 rule123 的 flag_tl_break 触发窗口同口径。
 FRESH_MAX = 3
+
+# 被这两条否掉 = 「旗形无效」级（退出码 4）；其余原因只说明「为什么没识别到牛旗」（退出码 0）。
+VETO_REASONS = ("flag_break_pole_low", "flag_too_long")
+VETO_SHORT = {
+    "flag_break_pole_low": "跌破旗杆大阳线最低点",
+    "flag_too_long": "整理超过 20 根",
+}
+REASON_CN = {
+    "history_short": "日线不足 20 根",
+    "no_pole": "无合格旗杆（3~12 根内净涨幅 ≥2×ATR 且 ≥8%，且终点是区间高点）",
+    "no_flag_line": "旗面里没有可连的下降摆动高",
+    "no_declining_high": "旗面高点没有下移（不是下降整理）",
+    "flag_too_short": "整理不足 3 根（还没成形就突破了）",
+    "flag_too_long": "整理超过 20 根（是通道不是旗）",
+    "flag_empty": "旗面为空",
+    "retrace_too_deep": "回撤超过旗杆高度的 2/3",
+    "flag_break_pole_low": "旗面收盘跌破旗杆大阳线的最低点",
+    "no_tl": "旗面线算不出来",
+    "flag_not_below_pole_hi": "旗面多数收盘没有回到旗杆高点之下",
+    "flag_back_to_pole_mid": "旗面已回落到旗杆中点下方（未守住整理）",
+}
 
 
 def _is_us(code):
@@ -89,6 +117,27 @@ def _load(code, us, data_file=None, n=330, no_cache=False):
     return bars, src, code
 
 
+def _diag_facts(d, bars, atr_v):
+    """把 `detect_bull_flag(diagnostic=True)` 的「为什么不算」整理成可渲染 dict。"""
+    if not d:
+        return None
+    f = {"flag_len": d.get("flag_len"), "limit": d.get("limit")}
+    if d.get("flag_low") is not None:
+        f["flag_low"] = d["flag_low"]
+    if d.get("flag_min_close") is not None:
+        f["flag_min_close"] = d["flag_min_close"]
+    a = d.get("anchor") or {}
+    if a:
+        f["anchor"] = a
+        if d.get("flag_low") is not None and a.get("price") and atr_v:
+            f["anchor_margin_atr"] = (d["flag_low"] - a["price"]) / atr_v
+    for k in ("pole_start", "pole_end"):
+        i = d.get(k)
+        f[k] = bars[i]["d"] if isinstance(i, int) and 0 <= i < len(bars) else None
+    f["undercut"] = d.get("undercut")
+    return f
+
+
 def bull_flag_verdict(bars, *, ticker=None, held=None, fresh_max=FRESH_MAX,
                       live_last=False):
     """牛旗单票结论。返回 dict（含 level / exit_code / advice / flag / plan_mode）。
@@ -119,8 +168,12 @@ def bull_flag_verdict(bars, *, ticker=None, held=None, fresh_max=FRESH_MAX,
     last_c = bars[-1]["c"]
     Hs, _Ls = R.pivots(bars, w=3)
     flag = ev.get("bull_flag")
+    diag = None
     if flag is None:
         flag = R.detect_bull_flag(bars, Hs, atr_v)
+    if flag is None:
+        # 诊断版永不返回 None：`invalid_reason` 决定这是「避雷(4)」还是「本来就不是旗(0)」。
+        diag = R.detect_bull_flag(bars, Hs, atr_v, diagnostic=True) or {}
     plan = R.plan_entry(bars, ev)
 
     out["plan_mode"] = plan.get("mode")
@@ -129,12 +182,37 @@ def bull_flag_verdict(bars, *, ticker=None, held=None, fresh_max=FRESH_MAX,
     out["plan_note"] = plan.get("note")
 
     if not flag:
-        out["advice"] = ("无牛旗形态（无合格旗杆/旗面）⇒ 现在不是「过牛旗」买点，"
-                         "按其他模式判（当日引擎给 %s）" % (plan.get("mode") or "—"))
-        out["plan_mode"] = plan.get("mode")
+        reason = diag.get("invalid_reason")
+        out["flag"] = _diag_facts(diag, bars, atr_v)
+        out["invalid_reason"] = reason
+        out["invalid_cn"] = REASON_CN.get(reason, reason)
+        out["pre_breakout"] = plan.get("pre_breakout")
+        if reason in VETO_REASONS:
+            # 老罗两条硬条件否掉的 ⇒ 形态「看似牛旗但无效」，单独一档报出来（避雷）。
+            out["state"] = "invalid"
+            out["level"] = out["exit_code"] = RC_INVALID
+            out["level_cn"] = "旗形无效·%s" % VETO_SHORT.get(reason, out["invalid_cn"])
+            if reason == "flag_break_pole_low":
+                _f = out["flag"] or {}
+                out["advice"] = (
+                    "**避雷**：形态本可算牛旗，但旗面最低收盘 %s 已跌破旗杆大阳线（%s）"
+                    "最低点 %s ⇒ 按老罗 2026-09-26 口径**判无效**，不作牛旗买点，"
+                    "等它重新筑出守住大阳低点的整理。当日引擎给 %s。"
+                    % (_num(_f.get("flag_min_close")), (_f.get("anchor") or {}).get("d"),
+                       _num((_f.get("anchor") or {}).get("price")), plan.get("mode") or "—"))
+            else:
+                out["advice"] = (
+                    "**不算旗**：整理 %s 根 > 上限 %s 根 ⇒ 这是通道/箱体、不是旗形整理"
+                    "（老罗 2026-09-26「整理天数不要超过 20 日」），不作牛旗买点。"
+                    "当日引擎给 %s。"
+                    % (out["flag"].get("flag_len"), out["flag"].get("limit"),
+                       plan.get("mode") or "—"))
+            return out
+        out["advice"] = ("无牛旗形态（%s）⇒ 现在不是「过牛旗」买点，"
+                         "按其他模式判（当日引擎给 %s）"
+                         % (out["invalid_cn"] or "无合格旗杆/旗面", plan.get("mode") or "—"))
         if plan.get("mode") == "flag_tl_break":      # 不可能，保险
             out["hit"] = True
-        out["pre_breakout"] = plan.get("pre_breakout")
         return out
 
     out["hit"] = True
@@ -157,6 +235,15 @@ def bull_flag_verdict(bars, *, ticker=None, held=None, fresh_max=FRESH_MAX,
                                             flag["pa"]["d"], flag["pa"]["price"]),
         "tl_now": f_tl, "days_above_tl": days, "dist_atr": dist,
         "ma5": flag_px,
+        # 硬条件①的取证（老罗 2026-09-26）：旗面低点 vs 旗杆「最后一根大阳」的最低点
+        "flag_low": flag.get("flag_low"),
+        "flag_min_close": flag.get("flag_min_close"),
+        "anchor": flag.get("anchor"),
+        "anchor_margin_atr": ((flag["flag_low"] - flag["anchor"]["price"]) / atr_v
+                              if flag.get("flag_low") is not None
+                              and (flag.get("anchor") or {}).get("price") and atr_v else None),
+        "undercut": flag.get("undercut"),
+        "len_limit": R.FLAG_LEN_MAX,
     }
     out["pre_breakout"] = plan.get("pre_breakout")
 
@@ -218,6 +305,27 @@ def _render(code, name, src, bars, v, verbose=False):
                 "  【盘中·末根未走完】" if v.get("live_last") else ""))
     L.append("=" * _WIDTH)
     L.append(" 结论    : %s（退出码 %d）" % (v["level_cn"], v["exit_code"]))
+    if v.get("state") == "invalid":
+        f = v.get("flag") or {}
+        a = f.get("anchor") or {}
+        if f.get("pole_start"):
+            L.append(" 旗杆    : %s → %s" % (f["pole_start"], f.get("pole_end") or "—"))
+        if f.get("flag_len") is not None:
+            _extra = ""
+            if f.get("limit") and f["flag_len"] > f["limit"]:
+                _extra = "（上限 %s —— 超了）" % f["limit"]
+            L.append(" 旗面    : %s 根%s" % (f["flag_len"], _extra))
+        if a.get("price") is not None:
+            L.append(" 失效线  : 旗杆大阳 %s 最低点 %s" % (a.get("d"), _num(a.get("price"))))
+            L.append(" 旗面低  : 收 %s / 盘中 %s ⇒ **跌破失效线**"
+                     % (_num(f.get("flag_min_close")), _num(f.get("flag_low"))))
+        L.append(" 处置    : %s" % v["advice"])
+        L.append("-" * _WIDTH)
+        L.append(" 判据（老罗 2026-09-26）：① 旗面**收盘**不得跌破旗杆「最后一根大阳」的")
+        L.append(" 最低点（盘中插针收回不算破）；② 整理天数（旗面根数）≤ 20。")
+        L.append(" 被任一条否掉 = 形态无效，不作牛旗买点（退出码 4）。")
+        L.append("=" * _WIDTH)
+        return L
     if not v["hit"]:
         L.append(" 处置    : %s" % v["advice"])
         L.append("-" * _WIDTH)
@@ -235,6 +343,15 @@ def _render(code, name, src, bars, v, verbose=False):
     L.append(" 旗面    : %d 根（%s 收）  回撤 %.1f%% 旗杆高度（上限 66%%）"
              % (f["flag_len"], f["flag_end"] or "—",
                 (f["flag_retrace"] or 0) * 100))
+    _a = f.get("anchor") or {}
+    if _a.get("price") is not None and f.get("flag_low") is not None:
+        L.append(" 失效线  : 旗杆大阳 %s 最低点 %s；旗面低 %s → 余 %s×ATR（%s）"
+                 % (_a.get("d"), _num(_a.get("price")), _num(f["flag_low"]),
+                    _num(f.get("anchor_margin_atr")),
+                    "盘中插破过·收盘收回(仍有效)" if f.get("undercut") else "守住"))
+    L.append(" 整理上限: %s 根（本形态 %d 根%s）"
+             % (f.get("len_limit") or R.FLAG_LEN_MAX, f["flag_len"],
+                "，已顶到上限" if f["flag_len"] == (f.get("len_limit") or R.FLAG_LEN_MAX) else ""))
     L.append(" 旗面线  : %s   线值 %s" % (f["line_from"], _num(f["tl_now"])))
     L.append(" 位置    : 收 %s，距旗面线 %s×ATR；过线第 %d 根"
              % (_num(last.get("c")), _num(f["dist_atr"]), f["days_above_tl"]))
@@ -272,7 +389,9 @@ def _render(code, name, src, bars, v, verbose=False):
     L.append(" 口径：旗面线 = 旗杆之后的「下降摆动高」连线；买点 = **收盘站上该线**")
     L.append("（量能只作提示，2026-09-17 老罗定「价格说明一切」）。过线 1~3 根内是新鲜窗口；")
     L.append("超出则形态已走完，改等回踩。T1 优先级：平台突破 ⟷ 牛旗突破 → W底 → 沿线。")
-    L.append(" 退出码 0=无 / 1=成型未过线 或 过线已久 / 2=已过牛旗（买点成立） / 3=取数失败。")
+    L.append(" 硬条件（老罗 2026-09-26）：旗面收盘不破旗杆大阳线最低点 + 整理 ≤20 根。")
+    L.append(" 退出码 0=无 / 1=成型未过线 或 过线已久 / 2=已过牛旗（买点成立） / 3=取数失败 /")
+    L.append(" 4=旗形无效（避雷：跌破旗杆大阳线最低点 或 整理超 20 根）。")
     L.append("=" * _WIDTH)
     return L
 

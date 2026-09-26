@@ -3,6 +3,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from rule123 import atr14, detect_bull_flag, detect_w_bottom, plan_entry, pivots
 
@@ -171,27 +173,95 @@ def test_flag_blocks_generic_dtl():
     assert plan["mode"] != "flag_tl_break", plan
 
 
-def test_detect_bull_flag_shape():
+def _pole_then(base=15):
+    """15 根平台 + 6 根旗杆（52→70）：旗杆末根大阳 o=68/h=71/l=**67**/c=70。
+
+    ⇒ 牛旗的失效线（旗杆最后一根大阳的最低点）= **67**。
+    """
     bars = []
     px = 50.0
-    for i in range(15):
+    for i in range(base):
         bars.append(_bar(f"2026-06-{i + 1:02d}", px, px + 0.8, px - 0.8, px, 5e5))
         px += 0.1
-    # 旗杆：急涨
-    pole = [52, 55, 58, 62, 66, 70]
-    for j, c in enumerate(pole):
+    for j, c in enumerate([52, 55, 58, 62, 66, 70]):
         bars.append(_bar(f"2026-06-{16 + j:02d}", c - 2, c + 1, c - 3, c, 3e6))
-    # 旗面：下降高点
-    flag_cs = [68, 67, 66, 65, 64, 63.5, 63]
-    for j, c in enumerate(flag_cs):
-        h = c + 1.5 - j * 0.15
-        bars.append(_bar(f"2026-06-{22 + j:02d}", c, h, c - 1.2, c, 8e5))
+    return bars
+
+
+def _flags_of(bars, flag_rows):
+    for j, (o, h, l, c) in enumerate(flag_rows):
+        bars.append(_bar(f"2026-07-{j + 1:02d}", o, h, l, c, 8e5))
+    return bars
+
+
+def test_detect_bull_flag_shape():
+    """旧合成数据（旗面低 61.8、旗面线收 63）—— 2026-09-26 老罗加条件后**应该判无效**。
+
+    它的旗面从 68 一路阴跌到 63，最低 61.8 < 旗杆末根大阳低点 67 ⇒
+    「旗形整理跌破了大阳线的最低点」⇒ 形态无效（诊断分支要说得出是这个原因）。
+    """
+    bars = _flags_of(_pole_then(), [(68, 69.5, 66.8, 68), (67, 68.5, 65.8, 67),
+                                    (66, 67.5, 64.8, 66), (65, 66.5, 63.8, 65),
+                                    (64, 65.5, 62.8, 64), (63.5, 64.9, 61.8, 63),
+                                    (63, 64.3, 61.9, 63)])
+    Hs, _ = pivots(bars, w=3)
+    atr_v = atr14(bars)
+    assert detect_bull_flag(bars, Hs, atr_v) is None
+    d = detect_bull_flag(bars, Hs, atr_v, diagnostic=True)
+    assert d["valid"] is False
+    assert d["invalid_reason"] == "flag_break_pole_low", d
+    assert d["anchor"]["price"] == pytest.approx(67.0, abs=0.01)
+    assert d["flag_min_close"] < d["anchor"]["price"]
+    # 反向对照：不传 diagnostic 时必须是 None（老调用方一个都不能收到「无效件」）
+    assert detect_bull_flag(bars, Hs, atr_v, diagnostic=False) is None
+
+
+def test_detect_bull_flag_holds_pole_low():
+    """守住旗杆大阳最低点（旗面低 67.25 > 67）⇒ 形态有效，并带上失效线字段。"""
+    bars = _flags_of(_pole_then(), [(68.5, 69.5, 68.1, 68.6), (68.4, 69.0, 67.9, 68.2),
+                                    (68.1, 68.9, 67.7, 68.0), (68.0, 68.8, 67.5, 67.9),
+                                    (67.9, 68.7, 67.4, 67.8), (67.8, 68.6, 67.25, 67.75)])
     Hs, _ = pivots(bars, w=3)
     atr_v = atr14(bars)
     flag = detect_bull_flag(bars, Hs, atr_v)
     assert flag is not None, "should find bull flag"
+    assert flag["valid"] is True
     assert flag["pole_hi"] >= 68
     assert flag["tl_now"] is not None
+    assert flag["flag_len"] == 6
+    assert flag["anchor"]["price"] == pytest.approx(67.0, abs=0.01)
+    assert flag["anchor"]["d"] == "2026-06-21"
+    assert flag["anchor"]["kind"] == "low"
+    assert flag["flag_low"] == pytest.approx(67.25, abs=0.01)
+    assert flag["undercut"] is False
+
+
+def test_detect_bull_flag_undercut_intraday_is_still_valid():
+    """盘中插破失效线、**收盘收回** ⇒ 仍有效（老罗口径：收盘破才无效），只标 undercut。"""
+    bars = _flags_of(_pole_then(), [(68.5, 69.5, 68.1, 68.6), (68.4, 69.0, 67.9, 68.2),
+                                    (68.1, 68.9, 67.7, 68.0), (68.0, 68.8, 66.4, 67.9),
+                                    (67.9, 68.7, 67.4, 67.8), (67.8, 68.6, 67.25, 67.5)])
+    Hs, _ = pivots(bars, w=3)
+    flag = detect_bull_flag(bars, Hs, atr14(bars))
+    assert flag is not None
+    assert flag["flag_low"] < flag["anchor"]["price"] <= flag["flag_min_close"]
+    assert flag["undercut"] is True and flag["valid"] is True
+
+
+def test_detect_bull_flag_too_long_is_invalid():
+    """② 整理天数不超过 20 日（老罗 2026-09-26）：22 根旗面 ⇒ 无效。"""
+    rows = []
+    for j in range(22):
+        c = 68.6 - j * 0.13
+        rows.append((c, c + 0.9, c - 0.5, c))
+    bars = _flags_of(_pole_then(), rows)
+    Hs, _ = pivots(bars, w=3)
+    atr_v = atr14(bars)
+    assert detect_bull_flag(bars, Hs, atr_v) is None
+    d = detect_bull_flag(bars, Hs, atr_v, diagnostic=True)
+    assert d["invalid_reason"] == "flag_too_long", d
+    assert d["flag_len"] == 22
+    assert d["limit"] == 20
 
 
 if __name__ == "__main__":
@@ -200,4 +270,7 @@ if __name__ == "__main__":
     test_plan_flag_tl_break()
     test_flag_blocks_generic_dtl()
     test_detect_bull_flag_shape()
+    test_detect_bull_flag_holds_pole_low()
+    test_detect_bull_flag_undercut_intraday_is_still_valid()
+    test_detect_bull_flag_too_long_is_invalid()
     print("ok")

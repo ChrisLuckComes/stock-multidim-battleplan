@@ -13,6 +13,13 @@
      单票独立出口：`python gates/bull_flag_check.py <code> [--us]`。
      ★ flag_len 是**旗面自身长度**（旗杆末端→突破前最后一根），**不含突破后站线根数**
      —— 否则旗面 ≥18 根的票会在突破后第二天整体消失（MRNA 2026-08/09）。
+     ★★ 两条硬条件（老罗 2026-09-26：「旗形整理最好不要跌破大阳线的最低点，否则无效，
+     然后整理天数不要太长（不超过 20 日）」）：
+       ① **旗面收盘不得跌破旗杆「最后一根大阳」的最低点**（`bull_flag_anchor` +
+          `yang_floor`：普通大阳=当日最低价，真一字/跳空=缺口下沿）。**收盘破才算破**
+          —— 盘中插针破、收盘收回不判无效（实测该组表现与全程守住组无差别），
+          只在报告里以 `undercut` 标注。
+       ② **整理天数（旗面自身根数）≤ 20**（`FLAG_LEN_MAX`）。
   3. w_bottom_break W底颈线突破（优先T1）：双底后收盘站上颈线且放量，买颈线
   4. line_pullback 沿线回踩（优先T1）：沿着肉眼可见的线上升，回踩该线买；默认 P0→P1 上升趋势线，仅明显贴均线才改用该均线
   5. impulse_pause 大阳后缩量回踩（次优先T2）：大阳线之后回踩缩量找买点。
@@ -1545,14 +1552,57 @@ def detect_down_trendline(bars, atr_v, start_i=None, lookback=30, w=2,
     }
 
 
-def detect_bull_flag(bars, Hs, atr_v, lookback=45):
+FLAG_LEN_MIN = 3      # 旗面自身根数下限：更短 = 整理还没成形就突破了
+FLAG_LEN_MAX = 20     # 旗面自身根数上限：老罗 2026-09-26「整理天数不要太长（不超过 20 日）」
+
+
+def bull_flag_anchor(bars, pole_start, pole_end, atr_v):
+    """旗杆里「最后一根大阳」的最低点 —— 牛旗的失效线。
+
+    老罗 2026-09-26：「旗形整理最好不要跌破大阳线的最低点，否则无效」。
+    · 「大阳」复用 `is_yang_bar`（与「大阳后缩量回踩」同一套定义，不另造一套）；
+    · 「最低点」复用 `yang_floor` —— 普通大阳 = 当日最低价；真一字/振幅极小跳空 = 缺口
+      下沿（前收）。对 MRNA 2026-08-19 那根跳空大阳（o=116.02 前收 62.96）两者同值，
+      因为它是「大实体跳空」而非一字；
+    · 取**最后一根**：紧贴旗面之前那根启动阳线，即旗形整理真正在回踩的那根大阳
+      （老罗 2026-09-26 选定；与「实体最大那根」「旗杆末根 K 线」相比，
+      实测过滤强度分别约 47% / 16% / 69%）；
+    · 旗杆内一根大阳都没有（小阳堆叠）时退回整段旗杆最低点，此时该条件几乎不触发。
+
+    返回 {i, d, price, kind, yang_low}；`i=None` 表示走的是「整段旗杆低点」兜底。
+    """
+    for i in range(pole_end, pole_start - 1, -1):
+        if is_yang_bar(bars[i], atr_v, bars[i - 1] if i > 0 else None):
+            fl = yang_floor(bars, i, atr_v)
+            return {"i": i, "d": bars[i]["d"], "price": fl["floor"],
+                    "kind": "gap" if fl["yi_zi"] else "low",
+                    "yang_low": bars[i]["l"]}
+    return {"i": None, "d": None,
+            "price": min(bars[j]["l"] for j in range(pole_start, pole_end + 1)),
+            "kind": "pole_lo", "yang_low": None}
+
+
+def detect_bull_flag(bars, Hs, atr_v, lookback=45, diagnostic=False):
     """上升旗形：先有旗杆（短促大涨），再有下降高点连成的旗面。
 
-    返回 {pole_start, pole_end, pb, pa, tl_now, days_above_tl} 或 None。
+    返回 {pole_start, pole_end, pb, pa, tl_now, days_above_tl, flag_len,
+          flag_low, flag_min_close, undercut, anchor, valid} 或 None。
+
+    `diagnostic=True` 时**不返回 None**，而是回一份
+    `{"valid": False, "invalid_reason": <闸门名>, ...}`，供 CLI/Agent 解释
+    「为什么这只票不算牛旗」（老罗 2026-09-26 的硬条件需要能说出被哪一条否掉）。
     """
     n = len(bars)
+
+    def _fail(reason, **extra):
+        if not diagnostic:
+            return None
+        d = {"valid": False, "invalid_reason": reason}
+        d.update(extra)
+        return d
+
     if n < 20 or not atr_v or atr_v <= 0:
-        return None
+        return _fail("history_short", bars=n)
     start = max(1, n - lookback)
     best_pole = None
     # 旗杆：3–12 根内净涨幅够大，终点是局部高点
@@ -1580,7 +1630,7 @@ def detect_bull_flag(bars, Hs, atr_v, lookback=45):
                     "score": score, "d0": bars[s]["d"], "d1": bars[end]["d"],
                 }
     if best_pole is None:
-        return None
+        return _fail("no_pole")
     pe = best_pole["end"]
     # 旗面高点：旗杆结束后的下降摆动高（至少两个，后高低于前高）
     flag_hs = [(i, h) for i, h in Hs if i > pe]
@@ -1612,16 +1662,16 @@ def detect_bull_flag(bars, Hs, atr_v, lookback=45):
         else:
             seg = bars[pe + 1:]
             if len(seg) < 4:
-                return None
+                return _fail("flag_too_short", pole_start=best_pole["start"], pole_end=pe)
             mid = pe + 1 + len(seg) // 2
             hi_end = max(mid + 1, n - 1)        # 右段最高点候选不含末根
             h1 = max(range(pe + 1, mid + 1), key=lambda i: bars[i]["h"])
             h2 = max(range(mid, hi_end), key=lambda i: bars[i]["h"])
             if bars[h2]["h"] >= bars[h1]["h"]:
-                return None
+                return _fail("no_declining_high", pole_start=best_pole["start"], pole_end=pe)
             pb, pa = (h1, bars[h1]["h"]), (h2, bars[h2]["h"])
     if pb is None or pa is None:
-        return None
+        return _fail("no_flag_line", pole_start=best_pole["start"], pole_end=pe)
     # ★★ 2026-09-26：`flag_len` 是**旗面自身的长度**（旗杆末端 → 突破前最后一根），
     #   **不含突破之后连续站线的根数**。
     #
@@ -1636,27 +1686,44 @@ def detect_bull_flag(bars, Hs, atr_v, lookback=45):
     days_above = days_above_line(bars, pb, pa)
     flag_end = n - 1 - days_above
     flag_len = flag_end - pe
-    if flag_len < 3:
-        return None                     # 旗面太短 = 整理还没成形就突破了
-    if flag_len > 20:
-        return None                     # 更长是通道不是旗
+    if flag_len < FLAG_LEN_MIN:
+        return _fail("flag_too_short", flag_len=flag_len,
+                     pole_start=best_pole["start"], pole_end=pe)
+    if flag_len > FLAG_LEN_MAX:
+        # 老罗 2026-09-26：「整理天数不要太长（不超过 20 日）」。
+        return _fail("flag_too_long", flag_len=flag_len, limit=FLAG_LEN_MAX,
+                     pole_start=best_pole["start"], pole_end=pe)
     flag_bars = bars[pe + 1:flag_end + 1]
     if not flag_bars:
-        return None
+        return _fail("flag_empty", flag_len=flag_len)
     flag_low = min(x["l"] for x in flag_bars)
     if best_pole["hi"] - flag_low > 0.66 * (best_pole["hi"] - best_pole["lo"]):
-        return None
+        return _fail("retrace_too_deep", flag_len=flag_len, flag_low=flag_low,
+                     pole_hi=best_pole["hi"], pole_lo=best_pole["lo"])
+    # ★★ 硬条件 ①（老罗 2026-09-26）：旗面整理不得跌破旗杆大阳线的最低点，否则无效。
+    #   **收盘破才算破** —— 盘中插针破、收盘收回不判无效（实测「盘中破收盘守」那组
+    #   过线后 5 日表现与全程守住组无差别，砍它是白砍；与仓库既有的「结构止损=收盘破」
+    #   口径也一致）。盘中插破记进 `undercut`，由报告/CLI 提示。
+    anchor = bull_flag_anchor(bars, best_pole["start"], pe, atr_v)
+    flag_min_close = min(x["c"] for x in flag_bars)
+    undercut = bool(anchor["price"] is not None and flag_low < anchor["price"])
+    break_anchor = bool(anchor["price"] is not None and flag_min_close < anchor["price"])
+    if break_anchor:
+        return _fail("flag_break_pole_low", flag_len=flag_len, flag_low=flag_low,
+                     flag_min_close=flag_min_close, anchor=anchor, undercut=True,
+                     pole_start=best_pole["start"], pole_end=pe)
     tl_now = line_val(pb, pa, n - 1)
     if tl_now is None:
-        return None
+        return _fail("no_tl")
     # 旗面期间多数收盘应在旗杆高点之下、旗杆中点之上（未彻底破位）
     mid_pole = (best_pole["lo"] + best_pole["hi"]) / 2.0
     below_pole_hi = sum(1 for x in flag_bars if x["c"] < best_pole["hi"]) / len(flag_bars)
     above_mid = sum(1 for x in flag_bars if x["l"] > mid_pole * 0.98) / len(flag_bars)
     if below_pole_hi < 0.6:
-        return None
+        return _fail("flag_not_below_pole_hi", flag_len=flag_len,
+                     ratio=round(below_pole_hi, 3))
     if above_mid < 0.35:
-        return None
+        return _fail("flag_back_to_pole_mid", flag_len=flag_len, ratio=round(above_mid, 3))
     return {
         "pole_start": best_pole["start"],
         "pole_end": pe,
@@ -1672,6 +1739,12 @@ def detect_bull_flag(bars, Hs, atr_v, lookback=45):
         "flag_len": flag_len,
         # 旗面末根索引（突破前最后一根）。报告/CLI 用来说清「过线是从哪根开始的」。
         "flag_end": flag_end,
+        # 硬条件①：旗面低点 vs 旗杆大阳线最低点。undercut=盘中插破但收盘收回（仍有效）。
+        "flag_low": flag_low,
+        "flag_min_close": flag_min_close,
+        "anchor": anchor,
+        "undercut": undercut,
+        "valid": True,
     }
 
 
@@ -4706,6 +4779,12 @@ def evaluate(sym, data_file=None, eod=False):
             "days_above_tl": bull_flag.get("days_above_tl"),
             "pb": bull_flag.get("pb"),
             "pa": bull_flag.get("pa"),
+            # 硬条件①的取证：旗面低点 vs 旗杆「最后一根大阳」的最低点
+            "flag_len": bull_flag.get("flag_len"),
+            "flag_low": rnd(bull_flag.get("flag_low")),
+            "anchor": ({k: (rnd(v) if k == "price" else v)
+                        for k, v in (bull_flag.get("anchor") or {}).items()} or None),
+            "undercut": bull_flag.get("undercut"),
         }
     if h_a and h_b:
         out["trendline_at_last"] = rnd(line_val(h_b, h_a, meta["last_i"]))
