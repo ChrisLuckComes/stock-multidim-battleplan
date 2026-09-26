@@ -639,7 +639,7 @@ pitfalls / signal / top`。
 
 ## 9. 周线顶 / 月线顶（`week_top` / `month_top` / 月线拉黑）
 
-**定位**：日线五形态只管「这一波」。周线/月线看的是**更大的级别** —— 周线大阴宣布见顶后**不再期待趋势行情，最多短线**；月线一旦见顶，**跌幅从腰斩到三折**、可以阴跌很久不见底、套牢盘不计其数。**两者都不改日线 `level`、不否决日线买点**（`higher_top` 的普通月线顶只作背景）；**唯一例外是月线「拉黑」档**：`recommend=False`。
+**定位**：日线五形态只管「这一波」。周线/月线看的是**更大的级别** —— 周线大阴宣布见顶后**不再期待趋势行情，最多短线**；月线一旦见顶，**跌幅从腰斩到三折**、可以阴跌很久不见底、套牢盘不计其数。**两者都不改日线 `level`、不否决日线买点**（`higher_top` 的普通月线顶只作背景）；**唯一的否决档是月线「50% 大阴线」**（`month_super_yin`）⇒ `recommend=False`。**★ 2026-09-26 老罗收窄口径：「月线只看 50% 大阴线否决，其他的月线不要干预日线级别的判断」** —— 另三路（`month_one_star` / `month_star_pair` / `month_merged_star`）仍照旧计算、照旧落进 `result` / `v`（报告与 Agent 仍可看），但**不再否决、也不再改 `higher_top.horizon`**。
 
 **两个宣布函数**
 
@@ -650,7 +650,7 @@ pitfalls / signal / top`。
 
 `higher_top(week, month)` 汇总：**月线压过周线**（两档都在时只报月线）。
 
-**月线拉黑四路**（任一命中 ⇒ `recommend=False` + `blacklist=True` + verdict 前缀「拉黑｜」）
+**月线四路形态**（都识别、都落库）—— ⚠ **只有 `month_super_yin` 会 `recommend=False` + `blacklist=True` + verdict 前缀「拉黑｜」**；另三路自 2026-09-26 起**只作标注**（老罗：「其他的月线不要干预日线级别的判断」）
 
 | 函数 | 判据 | 实证锚点 |
 |---|---|---|
@@ -659,7 +659,7 @@ pitfalls / signal / top`。
 | `month_star_pair` | **连续两根**月线都是 `_month_long_star` | —— |
 | `month_merged_star` | **相邻两月合成一根**后是墓碑 / 射击之星 | ORCL 2025-09 + 2025-10 合成（开 222 / 高 345.72 / 低 218.79 / 收 262.61）⇒ 实体 0.32、上影 0.66 |
 
-**三条口径（2026-09-26 修，改之前是错的）**
+**四条口径（2026-09-26 修，改之前是错的）**
 
 1. **未走完的当根不得当信号候选，但必须参与「失效」比较。**
    - 信号侧：`_drop_open_frame` 丢掉未走完的当月（月末日 < 25 日）/ 未到周五的当周；`month_one_star` / `month_super_yin` 另要求 **i ≥ 1** —— 没有前序月线就谈不上「顶部」（i = 0 时 `peak_high` 就是这根自己的高点，「史上最高点」恒成立），一根孤立月线（次新股 / 数据窗只有两个月）不该被宣布见顶。`month_star_pair` / `month_merged_star` 本来就从 i = 1 起扫。
@@ -677,6 +677,12 @@ pitfalls / signal / top`。
    - 实测反例：`tests/report/test_review_fixes.py::_reversal_bars`（合成序列，2026-03 之后直接跳到 2026-08）—— 只有 4 根日线的「8 月」被当成完整月，判出一根假超长射击之星，把整条 `plan_entry` 打成「拉黑｜等待」。加连续性闸门 `_contiguous`（按帧 key 递推：月 `YYYY-MM` 进一位；周按 ISO 周进位，跨年用 `date(y,12,28).isocalendar()[1]` 取当年周数 —— 2025 是 53 周）后消失。
    - **代价方向是刻意选的：宁可漏报顶部，不可误报「拉黑」。**
    - 本地 52 只 A 股+美股池的拉黑数：**27（修前）→ 26（修第 1 条）→ 21（再修第 3 条）**。
+
+4. **★ 否决范围收窄到 50% 大阴线（老罗 2026-09-26 定）**：`apply_month_blacklist` 的命中条件由 `sy or one or pair or merged` 收成 **`sy`**；`top_verdict` 里同源的 `ban` 一并收成 `sy`（否则 `higher_top.horizon` 仍会被打成「拉黑」，与 `recommend` 自相矛盾）。
+   - **动因（实证）**：**ALAB**（月线 2026-08 `long_star`：实体 0.01 / 上影 0.69）与 **VEEV**（月线 2026-03 `shooting_star`：实体 0.13 / 上影 0.73）两只**日线/周线都是多头结构**的票被整条打成「拉黑·只做空不做多」；**300569 2026-09-24（过牛旗那天）也被压成 `recommend=False`**，撤掉后同日恢复 **`mode=platform_break` / `recommend=True`** —— 即真实的突破买点被月线形态**越权**拦掉。
+   - **ALAB 同时暴露了第 2 条口径的边界**：老罗指出「**8 月并不是真正的顶部了**」—— 2026-09（未走完）高点 **377.87 已超 2026-08 自己的 367.85**，但没超 2026-06 的 **499.48**（`peak_high`）⇒ 旧口径维持拉黑。收窄到 `sy` 后**这个问题自动消解**（`month_one_star` 不再否决），第 2 条口径**只需继续服务 `month_super_yin`**。
+   - **保留的标注**：三路仍写进 `result["month_one_star"]` 等键与 `v[...]`，报告/Agent 可自行引用，**但不得据此否决买点**。
+   - 回归：`tests/top/test_month_top.py::TestMonthBlacklistScope`（新增 4 项：`sy` 仍否决 / `one_star` 不再否决 / `pair`+`merged` 不再否决 / 非 dict 透传）+ 三条原「`horizon == 拉黑`」断言改为「**仍记录、不拉黑**」；`tests/entry/test_300569_bull_flag.py::test_monthly_one_star_no_longer_blacklists_the_engine`。
 
 **⚠ 刻意保留的边界**
 - `_frame_top` 的**位置闸门只认绝对最高点**（同日线口径，见 §4.3），**认不出右肩**。

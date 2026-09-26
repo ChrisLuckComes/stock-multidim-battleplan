@@ -1189,19 +1189,29 @@ def month_merged_star(bars):
 
 
 def apply_month_blacklist(result, bars):
-    """月线超大阴线，或连续超长射击之星，把做多 recommend 压掉。普通月线顶不进这里。"""
+    """**月线只有「50% 超大阴线」`month_super_yin` 够格否决做多**；其余月线形态只记录。
+
+    老罗 2026-09-26：「**月线只看 50% 大阴线否决，其他的月线不要干预日线级别的判断**」。
+    原实现把 `month_one_star`（单根超长射击之星）/ `month_star_pair`（连续两根）/
+    `month_merged_star`（两月合成上影）三种一并 `recommend=False`、加「拉黑｜」前缀、
+    作废 `pre_breakout` —— 等于让**月线形态越权否决日线级买点**。
+    实测代价（2026-09-25 基准）：**ALAB**（月线 2026-08 `long_star`，实体 0.01 / 上影 0.69）
+    与 **VEEV**（月线 2026-03 `shooting_star`）这两只日线/周线都是多头结构的票被整体打成
+    「拉黑·只做空不做多」；ALAB 更是 2026-09 的 **377.87 已超掉 08 月自己的 367.85**
+    （老罗：「8 月并不是真正的顶部了」）。
+    现在：`month_super_yin` 照旧 `recommend=False` + 「拉黑｜」前缀 + 作废 `pre_breakout`；
+    其余三种**只写进 result 供报告/Agent 查看**，不碰 `recommend` / `verdict` / `note` /
+    `pre_breakout`。
+    """
     if not isinstance(result, dict):
         return result
     sy = month_super_yin(bars)
-    one = month_one_star(bars)
-    pair = month_star_pair(bars)
-    merged = month_merged_star(bars)
     result["month_super_yin"] = sy
-    result["month_one_star"] = one
-    result["month_star_pair"] = pair
-    result["month_merged_star"] = merged
-    hit = sy or one or pair or merged
-    if not hit:
+    # ⚠ 以下三种**不再参与否决**（老罗 2026-09-26：不干预日线级别判断），只作标注落库。
+    result["month_one_star"] = month_one_star(bars)
+    result["month_star_pair"] = month_star_pair(bars)
+    result["month_merged_star"] = month_merged_star(bars)
+    if not sy:
         return result
     result["recommend"] = False
     result["blacklist"] = True
@@ -1210,21 +1220,11 @@ def apply_month_blacklist(result, bars):
         result["verdict"] = "拉黑｜%s" % verdict
     note = result.get("note") or ""
     if "月线超大阴线" not in str(note):
-        result["note"] = "【拉黑】%s。｜%s" % (hit["note"], note)
+        result["note"] = "【拉黑】%s。｜%s" % (sy["note"], note)
     pb = result.get("pre_breakout")
     if isinstance(pb, dict):
-        if sy:
-            pb["suppressed_by"] = "month_super_yin"
-            pb["status"] = "已作废（月线超大阴线拉黑）"
-        elif one:
-            pb["suppressed_by"] = "month_one_star"
-            pb["status"] = "已作废（月线超长上影拉黑）"
-        elif pair:
-            pb["suppressed_by"] = "month_star_pair"
-            pb["status"] = "已作废（连续月线射击之星拉黑）"
-        else:
-            pb["suppressed_by"] = "month_merged_star"
-            pb["status"] = "已作废（两月合成上影拉黑）"
+        pb["suppressed_by"] = "month_super_yin"
+        pb["status"] = "已作废（月线超大阴线拉黑）"
     return result
 
 
@@ -1310,16 +1310,19 @@ def top_verdict(bars, atr_v=None, veto="confirmed", live_last=False, strict=Fals
     pair = month_star_pair(bars)
     merged = month_merged_star(bars)
     ht = higher_top(wk, mo)
-    ban = sy or one or pair or merged
+    # ★ 2026-09-26 老罗定：「**月线只看 50% 大阴线否决，其他的月线不要干预日线级别的判断**」
+    #   ⇒ 只有 `month_super_yin` 把 `higher_top.horizon` 打成「拉黑」；
+    #   `month_one_star` / `month_star_pair` / `month_merged_star` 仍照旧计算并落进 `v`
+    #   （报告/Agent 可以看），但**不再改级别、不再否决**。
+    #   原实现 `ban = sy or one or pair or merged` —— ALAB / VEEV 就是被 `one_star` 打掉的。
+    ban = sy
     if ban:
         ht = {
             "horizon": "拉黑",
             "frames": ["月线"],
             "expect": ban["note"],
-            "note": ban["note"],
+            "note": "%s %.2f%%，%s" % (sy["month"], -sy["drop"] * 100, sy["note"]),
         }
-        if sy:
-            ht["note"] = "%s %.2f%%，%s" % (sy["month"], -sy["drop"] * 100, sy["note"])
 
     v = {
         "ok": bool(top.get("ok")),

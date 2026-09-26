@@ -1559,7 +1559,15 @@ def detect_down_trendline(bars, atr_v, start_i=None, lookback=30, w=2,
 
 
 FLAG_LEN_MIN = 3      # 旗面自身根数下限：更短 = 整理还没成形就突破了
-FLAG_LEN_MAX = 20     # 旗面自身根数上限：老罗 2026-09-26「整理天数不要太长（不超过 20 日）」
+# 旗面自身根数上限 = **一个月**。老罗 2026-09-26：「整理天数不要太长（不超过 20 日）」，
+# 同日晚定口径：**旗帜越长 = 动能越弱 = 有效性越差 —— 这才是设阈值的理由** ⇒ 它是
+# **动能闸门**，不是「顺手加的格式限制」；且「**不能在长了，整理一个月了**」——
+# 20 根就是「一个月」的量化（21 根 = 一个月零一根，已经不该再算旗形买点）。
+# ⚠️ 曾提出放宽到 30，**已否**（30 根 ≈ 一个半月，动能上解释不通）。
+# ⚠️ **不得绕过**：不许「把一波 K 线合并成一根」把超长旗面压进 20 根，也不许
+#    「退而求其次去试一根更晚、更短的旗杆」—— 那等于把「动能弱」藏起来。
+#    当日已就此否掉多旗杆回退方案；ANET 2026-09-25（旗面 28 根）**判无效、暂不考虑**。
+FLAG_LEN_MAX = 20
 
 
 def bull_flag_anchor(bars, pole_start, pole_end, atr_v):
@@ -1696,7 +1704,11 @@ def detect_bull_flag(bars, Hs, atr_v, lookback=45, diagnostic=False):
         return _fail("flag_too_short", flag_len=flag_len,
                      pole_start=best_pole["start"], pole_end=pe)
     if flag_len > FLAG_LEN_MAX:
-        # 老罗 2026-09-26：「整理天数不要太长（不超过 20 日）」。
+        # 老罗 2026-09-26：「整理天数不要太长（不超过 20 日）」；同日晚定：
+        # **旗帜越长 = 动能越弱 = 有效性越差**，且「**不能在长了，整理一个月了**」
+        # —— 20 根 = 一个月，这才是设阈值的理由 ⇒ 它是**动能闸门**（放宽到 30 已否）。
+        # ⚠️ 不得绕过：不许「合并 K 线缩短旗面」、也不许「改试一根更晚更短的旗杆」
+        #    （2026-09-26 否掉多旗杆回退；ANET 28 根明确判无效、暂不考虑）。
         return _fail("flag_too_long", flag_len=flag_len, limit=FLAG_LEN_MAX,
                      pole_start=best_pole["start"], pole_end=pe)
     flag_bars = bars[pe + 1:flag_end + 1]

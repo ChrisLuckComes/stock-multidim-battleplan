@@ -105,7 +105,12 @@ class TestMonthSuperYin(unittest.TestCase):
 
 
 class TestMonthOneStar(unittest.TestCase):
-    def test_aaoi_may_alone_blacklists(self):
+    def test_aaoi_may_alone_is_recorded_but_does_not_blacklist(self):
+        """老罗 2026-09-26 口径：「**月线只看 50% 大阴线否决，其他的月线不要干预日线级别的判断**」
+        ⇒ 单根超长射击之星仍被识别、仍落进 `month_one_star`（报告能看），
+        但**不再否决做多、不再把 horizon 打成「拉黑」**。
+        （原口径下 ALAB / VEEV 两只日线多头结构就是被这一条整体拦掉的。）
+        """
         bars = [
             bar("2026-04-30", 90.15, 173.41, 81.51, 164.36),
             bar("2026-05-29", 162.68, 233.67, 143.58, 158.41),
@@ -113,10 +118,11 @@ class TestMonthOneStar(unittest.TestCase):
         hit = T.month_one_star(bars)
         self.assertEqual(hit["month"], "2026-05")
         self.assertEqual(hit["peak_high"], 233.67)
-        self.assertIn("一根即拉黑", hit["note"])
+        self.assertIn("一根即拉黑", hit["note"])          # 形态描述保留
         v = T.top_verdict(bars)
         self.assertEqual(v["level"], "ok")
-        self.assertEqual(v["higher_top"]["horizon"], "拉黑")
+        self.assertIsNotNone(v["month_one_star"])        # 仍记录在案
+        self.assertNotEqual((v.get("higher_top") or {}).get("horizon"), "拉黑")
 
     def test_new_high_clears_the_blacklist(self):
         bars = [
@@ -134,10 +140,12 @@ class TestMonthOneStar(unittest.TestCase):
         self.assertEqual(hit["month"], "2025-10")
         self.assertEqual(hit["pattern"], "shooting_star")
         self.assertEqual(hit["peak_high"], 345.72)
+        v = T.top_verdict(bars)
+        self.assertNotEqual((v.get("higher_top") or {}).get("horizon"), "拉黑")
 
 
 class TestMonthStarPair(unittest.TestCase):
-    def test_aaoi_may_june_blacklists_longs(self):
+    def test_aaoi_may_june_is_recorded_but_does_not_blacklist(self):
         bars = [
             bar("2026-05-29", 162.68, 233.67, 143.58, 158.41),
             bar("2026-06-30", 149.25, 209.64, 127.01, 148.16),
@@ -148,7 +156,8 @@ class TestMonthStarPair(unittest.TestCase):
         self.assertIn("只做空不做多", hit["note"])
         v = T.top_verdict(bars)
         self.assertEqual(v["level"], "ok")
-        self.assertEqual(v["higher_top"]["horizon"], "拉黑")
+        self.assertIsNotNone(v["month_star_pair"])
+        self.assertNotEqual((v.get("higher_top") or {}).get("horizon"), "拉黑")
 
     def test_pair_needs_two_but_one_star_still_blacklists(self):
         # 必须带一根**前序月**（2026-04）：`month_one_star` 要求 i ≥ 1 —— i = 0 时
@@ -222,7 +231,69 @@ class TestMonthMergedStar(unittest.TestCase):
         self.assertGreater(hit["body_r"], 0.10)
         v = T.top_verdict(bars)
         self.assertEqual(v["level"], "ok")
-        self.assertEqual(v["higher_top"]["horizon"], "拉黑")
+        self.assertIsNotNone(v["month_merged_star"])
+        self.assertNotEqual((v.get("higher_top") or {}).get("horizon"), "拉黑")
+
+
+class TestMonthBlacklistScope(unittest.TestCase):
+    """★ 2026-09-26 老罗定：「**月线只看 50% 大阴线否决，其他的月线不要干预日线级别的判断**」。
+
+    这条直接钉住**否决范围**：`apply_month_blacklist` 里只有 `month_super_yin` 能动
+    `recommend` / `blacklist` / `verdict` / `pre_breakout`；`month_one_star` /
+    `month_star_pair` / `month_merged_star` 只作标注落库。
+    实测触发（2026-09-25 基准）：ALAB（月线 2026-08 long_star）与 VEEV（月线 2026-03
+    shooting_star）两只日线/周线多头结构被整条拦掉 —— ALAB 的 2026-09 高点 377.87
+    甚至已超掉 08 月自己的 367.85（老罗：「8 月并不是真正的顶部了」）。
+    """
+
+    def _plan(self, verdict="平台突破(优先T1)", pb=None):
+        return {"verdict": verdict, "recommend": True, "note": "原注",
+                "pre_breakout": pb if pb is not None else {"trigger": 10.0, "anchor": "flag_tl"}}
+
+    def test_super_yin_still_vetoes(self):
+        bars = [
+            bar("2026-06-30", 641.4, 980.0, 568.18, 942.9),
+            bar("2026-07-31", 945.0, 976.0, 334.0, 385.9),
+        ]
+        r = T.apply_month_blacklist(self._plan(), bars)
+        self.assertFalse(r["recommend"])
+        self.assertTrue(r["blacklist"])
+        self.assertTrue(r["verdict"].startswith("拉黑｜"))
+        self.assertIn("月线超大阴线", r["note"])
+        self.assertEqual(r["pre_breakout"]["suppressed_by"], "month_super_yin")
+
+    def test_one_star_no_longer_vetoes(self):
+        bars = [
+            bar("2026-04-30", 90.15, 173.41, 81.51, 164.36),
+            bar("2026-05-29", 162.68, 233.67, 143.58, 158.41),
+        ]
+        self.assertIsNotNone(T.month_one_star(bars))          # 形态仍被识别
+        r = T.apply_month_blacklist(self._plan(), bars)
+        self.assertIsNotNone(r["month_one_star"])             # 仍标注落库
+        self.assertTrue(r["recommend"])                       # ★ 不再否决
+        self.assertNotIn("blacklist", r)
+        self.assertFalse(r["verdict"].startswith("拉黑"))
+        self.assertEqual(r["note"], "原注")
+        self.assertNotIn("suppressed_by", r["pre_breakout"])  # 埋伏单不再被作废
+
+    def test_star_pair_and_merged_star_no_longer_veto(self):
+        pair = [
+            bar("2026-05-29", 162.68, 233.67, 143.58, 158.41),
+            bar("2026-06-30", 149.25, 209.64, 127.01, 148.16),
+        ]
+        merged = [
+            bar("2025-09-30", 222.0, 345.72, 218.79, 281.24),
+            bar("2025-10-31", 278.8, 322.54, 256.28, 262.61),
+        ]
+        self.assertIsNotNone(T.month_star_pair(pair))
+        self.assertIsNotNone(T.month_merged_star(merged))
+        for bs in (pair, merged):
+            r = T.apply_month_blacklist(self._plan(), bs)
+            self.assertTrue(r["recommend"], bs[-1]["d"])
+            self.assertNotIn("blacklist", r)
+
+    def test_non_dict_result_is_passed_through(self):
+        self.assertIsNone(T.apply_month_blacklist(None, []))
 
 
 class TestWeekTop(unittest.TestCase):

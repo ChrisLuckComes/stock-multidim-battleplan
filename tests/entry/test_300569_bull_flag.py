@@ -67,11 +67,14 @@ B 组「过线率」高得离谱，是因为**线自己贴上来、不需要价�
 `fixtures/300569_bars.json`：2026-02-12 → 2026-09-24 共 150 根，sina 前复权源，
 逐根 o/h/l/c/v 原样，不合成、不插值。
 
-## 明确不在本测试范围内
+## 月线拉黑（2026-09-26 晚改了范围）
 
 引擎当日给 300569 打了**月线拉黑**（2026-03-31 月线超长射击之星，高 8.95、上影 77%）。
-老罗 2026-09-26 明示：「这个并不是它的真顶部，真顶部在 2021-12 月，现在只是做短线，
-我举例而已，不是要买这个股」⇒ **不因本案例改月线拉黑规则**。本文件只把现状钉住。
+老罗 2026-09-26 早先表示「这个并不是它的真顶部，真顶部在 2021-12 月，现在只是做短线，
+我举例而已，不是要买这个股」；**同日晚改了口径**：「**月线只看 50% 大阴线否决，
+其他的月线不要干预日线级别的判断**」⇒ `month_one_star` / `month_star_pair` /
+`month_merged_star` 只作标注、不再否决；只有 `month_super_yin`（50% 大阴线）仍拉黑。
+本文件把**改后**的现状钉住：标注仍在、否决没了、09-24 的突破买点回来了。
 """
 import io
 import json
@@ -347,13 +350,14 @@ def test_cli_is_read_only(tmp_path, monkeypatch):
     assert set(os.listdir(HERE)) == before
 
 
-# ───────────────────────── 现状记录（不改规则）─────────────────────────
+# ───────────────────────── 月线拉黑口径（2026-09-26 晚改了范围）─────────────────────────
 
-def test_monthly_blacklist_is_still_there_unchanged():
-    """现状：月线拉黑（2026-03 超长射击之星，高 8.95）仍在，**不因本案例改规则**。
+def test_monthly_one_star_still_recorded():
+    """月线形态本身照旧识别、照旧落库（2026-03 超长射击之星，高 8.95）——**没被删掉**。
 
-    老罗 2026-09-26：「这个并不是它的真顶部，真顶部在 2021-12 月，现在只是做短线，
-    我举例而已，不是要买这个股」⇒ 记录现状，不改判定。
+    老罗 2026-09-26 早先：「这个并不是它的真顶部，真顶部在 2021-12 月，现在只是做短线，
+    我举例而已，不是要买这个股」；**当日晚改口径**：「**月线只看 50% 大阴线否决，
+    其他的月线不要干预日线级别的判断**」⇒ `month_one_star` 保留为**标注**，不再否决。
     """
     hit = TS.month_one_star(BARS_ALL)
     assert hit is not None and hit["state"] == "blacklist"
@@ -362,11 +366,19 @@ def test_monthly_blacklist_is_still_there_unchanged():
     assert "只做空不做多" in hit["note"]
 
 
-def test_engine_verdict_prefixes_blacklist_on_0924():
-    """09-24 引擎确实因月线拉黑给 recommend=False（本案例不据此改，仅钉现状）。"""
+def test_monthly_one_star_no_longer_blacklists_the_engine():
+    """★ 新口径下 `month_one_star` 不再压 `recommend`：09-24（过牛旗那天）买点回来了。
+
+    改口径前的现状是 `recommend=False` + 「拉黑｜」—— 一个**真实突破买点被月线越权拦掉**。
+    撤掉后 09-24 给 `mode=platform_break` / `recommend=True`。
+    """
     p, _b = plan_at("2026-09-24")
-    assert p.get("recommend") is False
-    assert "拉黑" in (p.get("verdict") or "") or "拉黑" in (p.get("note") or "")
+    assert p.get("recommend") is True
+    assert p.get("mode") == "platform_break"
+    assert "拉黑" not in (p.get("verdict") or "")
+    assert "拉黑" not in (p.get("note") or "")
+    # 标注仍在，只是不再否决
+    assert isinstance(p.get("month_one_star"), (dict, type(None)))
 
 
 if __name__ == "__main__":
