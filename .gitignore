@@ -5,7 +5,7 @@ out_*.txt
 out_cn/*.json
 out_us/*.json
 *_data.json
-data/
+/data/
 __pycache__/
 *.pyc
 *.tmp
