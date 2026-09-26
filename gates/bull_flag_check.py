@@ -16,7 +16,8 @@
     python bull_flag_check.py MRNA --us --holding  # 持仓视角给建议文案
 
 退出码（可直接用于流程拦截）
-    0 = 无牛旗            1 = 旗面成型·未过线（可挂埋伏单）/ 已过线但超出新鲜窗口
+    0 = 无牛旗            1 = 旗面成型·未过线（可挂埋伏单）/ **贴线待突破** /
+                             已过线但超出新鲜窗口
     2 = **已过牛旗（买点成立）**    3 = 取数失败
     4 = **旗形无效** —— 形态看似牛旗，但被老罗两条硬条件否掉
         （跌破旗杆大阳线最低点 / 整理超过 20 日）⇒ 不作牛旗买点
@@ -38,6 +39,12 @@
 · 买区 = 旗面线 ~ 旗面线 + 1.0×ATR（单边向上，与平台/W底突破同构）；结构止损看旗面线下。
 · 未过线时给 **buy-stop 埋伏单**（`pre_breakout_flag_order`，触发价 = 下一根旗面线值
   +0.05×ATR）—— 这是「过牛旗即是买点」的可预挂形式，不用盯着突破那一刻。
+· ★★ **「贴线待突破」**（老罗 2026-09-26，天能重工 300569 案例）：旗面线已**下移到
+  收盘价附近/下方**（未站上，但次日只需不低开即算过线）。此时**不给 buy-stop**：
+  实测该档（n=213）过线后 5 日中位 **−1.81%**、胜率 43.8%（「线自己贴上来」= 廉价过线），
+  只有放量才翻正 ⇒ 改给「**次日开盘不低开 且 量 ≥1.5×近5日均量**」的盯盘条件。
+· **「地量小实体（十字星）」**= 变盘临界（末根实体 ≤0.15×ATR）：只作**标注**、不作闸门
+  （实测次日 P(涨≥2%) 31.3% vs 26.5%，方向一致但分档后样本小）。
 · T1 优先级（2026-09-26 老罗定）：**平台突破 ⟷ 牛旗突破** → W底 → 沿线回踩。
 
 本脚本**只读**，不写任何文件、不下单。
@@ -246,8 +253,36 @@ def bull_flag_verdict(bars, *, ticker=None, held=None, fresh_max=FRESH_MAX,
         "len_limit": R.FLAG_LEN_MAX,
     }
     out["pre_breakout"] = plan.get("pre_breakout")
+    # 「地量小实体（十字星）」前兆（老罗 2026-09-26）：只作标注，不作闸门。
+    out["dry_body"] = R.dry_small_body(bars, atr_v)
 
     if days <= 0:
+        ke = plan.get("knife_edge")
+        if ke:
+            # ★ 2026-09-26（天能重工 300569）：旗面线已下移到收盘价附近 ⇒ 次日只需不低开
+            #   即成「过线」。这一档**不给 buy-stop**（整体负期望，见 rule123.flag_knife_edge），
+            #   只给「开盘不低开 + 放量」的盯盘条件。退出码仍为 1（未过线）。
+            out["state"] = "knife_edge"
+            out["level"], out["exit_code"] = RC_FORMING, RC_FORMING
+            out["level_cn"] = "贴线待突破·需次日放量确认"
+            out["knife_edge"] = ke
+            _d = ke.get("dry") or {}
+            _gap = ke.get("gap_atr") or 0
+            _where = ("已下移到收盘价（贴合，差 %.2f×ATR）" % abs(_gap) if abs(_gap) < 0.02
+                      else ("已下移到收盘价下方 %.2f×ATR" % abs(_gap) if _gap > 0
+                            else "仍在收盘价上方 %.2f×ATR" % abs(_gap)))
+            out["advice"] = (
+                f"旗面线{_where}（线值 {_num(ke.get('level'))} / 今收 {_num(last_c)}）"
+                f"⇒ **未站上，但次日只需不低开即算「过牛旗」**。"
+                f"⚠ 这档「线自己贴上来」的过线整体负期望（实测 n=213：过线后 5 日中位 −1.81%、"
+                f"胜率 43.8%）⇒ **必须量能确认**：次日**开盘 ≥{_num(ke.get('level'))} 且 "
+                f"量 ≥{ke.get('rvol_min')}×近5日均量**才买（放量组 +2.76%/52.6%；缩量组 "
+                f"−1.83%/42.5%）；缩量 = 不成立，不追。硬止损 {_num(ke.get('hard_stop'))}"
+                f"（线下 1×ATR）。"
+                + (f"末根（{_d.get('d')}）是**{_d.get('cn')}**（实体 {_d.get('body_atr')}×ATR）"
+                   "⇒ 临界日不猜方向，等次日放量过线。" if _d else "")
+            )
+            return out
         out["state"] = "forming"
         out["level"], out["exit_code"], out["level_cn"] = RC_FORMING, RC_FORMING, "旗面成型·未过线"
         _pb = plan.get("pre_breakout") or {}
@@ -355,6 +390,12 @@ def _render(code, name, src, bars, v, verbose=False):
     L.append(" 旗面线  : %s   线值 %s" % (f["line_from"], _num(f["tl_now"])))
     L.append(" 位置    : 收 %s，距旗面线 %s×ATR；过线第 %d 根"
              % (_num(last.get("c")), _num(f["dist_atr"]), f["days_above_tl"]))
+    _db = v.get("dry_body")
+    if _db:
+        L.append(" 变盘临界: 末根（%s）实体 %s = %s×ATR ≤ %s ⇒ **%s**（实测 P(次日涨≥2%%) 31.3%% "
+                 "vs 其余 26.5%%；方向一致但不作闸门）"
+                 % (_db.get("d"), _num(_db.get("body")), _db.get("body_atr"),
+                    _db.get("limit_atr"), _db.get("cn")))
     if v.get("buy_zone"):
         z = v["buy_zone"]
         L.append(" 买区    : %s ~ %s（旗面线 ~ +1.0×ATR，单边向上）"
@@ -378,6 +419,16 @@ def _render(code, name, src, bars, v, verbose=False):
     if verbose and v.get("plan_note"):
         L.append("-" * _WIDTH)
         L.append(" 引擎 note: %s" % v["plan_note"])
+    _ke = v.get("knife_edge")
+    if _ke:
+        L.append("-" * _WIDTH)
+        L.append(" 贴线待突破: 线值 %s · 今收 %s（未站上，次日只需不低开即算过线）"
+                 % (_num(_ke.get("level")), _num(last.get("c"))))
+        L.append(" 成立条件 : **次日开盘 ≥%s** 且 **量 ≥%s×近5日均量**；缩量 = 不成立、不追"
+                 % (_num(_ke.get("level")), _ke.get("rvol_min")))
+        L.append(" 硬止损   : %s（线下 1×ATR）" % _num(_ke.get("hard_stop")))
+        L.append(" ⚠ 依据  : 该档「线自己贴上来」的过线整体负期望（n=213：过线后 5 日中位 −1.81%、")
+        L.append("           胜率 43.8%）；放量组 +2.76%/52.6%，缩量组 −1.83%/42.5%。")
     _pb = v.get("pre_breakout") or {}
     if _pb.get("anchor") == "flag_tl":
         L.append("-" * _WIDTH)
@@ -390,8 +441,10 @@ def _render(code, name, src, bars, v, verbose=False):
     L.append("（量能只作提示，2026-09-17 老罗定「价格说明一切」）。过线 1~3 根内是新鲜窗口；")
     L.append("超出则形态已走完，改等回踩。T1 优先级：平台突破 ⟷ 牛旗突破 → W底 → 沿线。")
     L.append(" 硬条件（老罗 2026-09-26）：旗面收盘不破旗杆大阳线最低点 + 整理 ≤20 根。")
-    L.append(" 退出码 0=无 / 1=成型未过线 或 过线已久 / 2=已过牛旗（买点成立） / 3=取数失败 /")
-    L.append(" 4=旗形无效（避雷：跌破旗杆大阳线最低点 或 整理超 20 根）。")
+    L.append(" 贴线待突破（2026-09-26，天能重工 300569）：线已下移到收盘价上 ⇒ 次日不低开")
+    L.append("即算过线，但该档整体负期望 ⇒ **必须先放量**（≥1.5×近5日均量）才买。")
+    L.append(" 退出码 0=无 / 1=成型未过线（含贴线待突破）或 过线已久 / 2=已过牛旗（买点成立） /")
+    L.append(" 3=取数失败 / 4=旗形无效（避雷：跌破旗杆大阳线最低点 或 整理超 20 根）。")
     L.append("=" * _WIDTH)
     return L
 

@@ -772,6 +772,12 @@ PRE_BREAKOUT_LABEL = {
     "flag_tl": "牛旗面线",
 }
 
+# 「地量小实体（十字星）」阈值：实体/ATR ≤ 此值 ⇒ 变盘临界（老罗 2026-09-26 定）。
+# 用**实体绝对值 / ATR**，不用实体占根幅比 —— 老罗否掉了 ±0.10 那类毫厘边界。
+FLAG_DRY_BODY_ATR = 0.15
+# 「贴线待突破」的放量门槛（倍数·近 5 日均量）。低于此倍数 = 廉价过线，不做。
+KNIFE_EDGE_RVOL = 1.5
+
 # A股开盘至收盘（含午休）：当日 K 线未走完，量能不可信
 _ASH_LIVE = (9 * 60 + 30, 15 * 60)
 
@@ -2531,7 +2537,13 @@ def pre_breakout_flag_order(bars, flag, atr_v, last_c, rvol=None):
     nxt = len(bars)
     line_next = line_val(pb, pa, nxt)
     if line_next is None or last_c >= line_next:
-        return None                          # 已站上 → 交给 flag_tl_break，不挂埋伏单
+        # 线已下移到收盘价附近/下方（「贴线」）。**不在这里放宽**（老罗 2026-09-26 定）：
+        # 这一档的过线整体是**负期望**（实测 n=213：次日过线率 71.8%，但过线后 5 日中位
+        # −1.81%、胜率 43.8% —— 线自己贴上来，不需要价格涨），只有**放量**才翻正；
+        # buy-stop 表达不了量能条件 ⇒ 改由 `flag_knife_edge` 给
+        # 「次日开盘不低开 + 量 ≥1.5×近5日均量」的盯盘预警
+        # （300569 2026-09-23：线 today 4.99 / 收 4.94 / 线 next 4.94，精确相等）。
+        return None
     dist_atr = (line_next - last_c) / atr_v
     if dist_atr > 1.2:                       # 离得太远，埋伏无意义
         return None
@@ -2565,6 +2577,113 @@ def pre_breakout_flag_order(bars, flag, atr_v, last_c, rvol=None):
             f"挂 buy-stop {trigger} 于线上方埋伏，触发即「过牛旗」确认。"
             f"硬止损 {hard}（线下1×ATR=假突破）；突破后按移动止损管理，不设固定目标。"
             f"此为埋伏单，与当日买点并存、先到先做"
+        ),
+    }
+
+
+def dry_small_body(bars, atr_v, i=None):
+    """「地量小实体（十字星）」= 变盘临界：末根实体 ≤0.15×ATR。
+
+    老罗 2026-09-26（天能重工 300569）：「2026-09-23 收**地量十字星**，次日就有极大可能
+    变盘，果然次日就画了 N 字，那么**次日过牛旗的点位就是买点**」。
+
+    测出来的东西（153 组真实日线 / 1511 个「大阳后缩量」实例 / 次日与后 5 日）：
+      · 实体 ≤0.15×ATR 那组：次日 P(涨≥+2%) **31.3%** vs 其余 **26.5%**；
+        过线后 5 日中位 **+1.00%** vs **−0.18%**；滞后 5 日 t=+2.4（显著）。
+      · 「小实体 ⇒ 偏多」在各档上**单调**（0.10 / 0.20 / 0.35 方向一致）
+        ⇒ 不是某一条线的产物；老罗定口径取 **≤0.15×ATR**（比根幅口径更少毫厘边界，
+        且收得进 300569 的 0.12×ATR）。
+      · **与振幅无关**：再加「振幅 ≤0.5×ATR」反而变差（n=74、次日中位 0.00%）
+        ⇒ 只留「小实体」一条，**不要**叠振幅条件。
+      · ⚠ 这是**前兆标注**，不是闸门：实证只支持「方向一致」，且分档后样本小
+        （贴线组内 n=40）⇒ 只进 note / 报告，**不改 recommend**。
+    """
+    if not bars or not atr_v or atr_v <= 0:
+        return None
+    b = bars[i] if i is not None else bars[-1]
+    if not isinstance(b, dict) or "h" not in b:
+        return None
+    body = abs(b["c"] - b["o"])
+    if body > FLAG_DRY_BODY_ATR * atr_v:
+        return None
+    rng = b["h"] - b["l"]
+    return {
+        "d": b.get("d"),
+        "body": round(body, 3),
+        "body_atr": round(body / atr_v, 2),
+        "body_r": round(body / rng, 2) if rng > 0 else None,
+        "rng_atr": round(rng / atr_v, 2),
+        "limit_atr": FLAG_DRY_BODY_ATR,
+        "cn": "地量小实体（十字星）· 变盘临界",
+    }
+
+
+def flag_knife_edge(bars, flag, atr_v, last_c, rvol=None):
+    """「贴线待突破」预警 —— 旗面线已下移到收盘价附近/下方，**次日只需不低开**即成过线。
+
+    老罗 2026-09-26（天能重工 300569，2026-09-23）：旗面线当日 **4.99 > 收 4.94**
+    ⇒ 未站上（`days_above_tl = 0`）；但线每日下移 ⇒ **次日线值 4.94 恰好等于收盘价**。
+    09-24 开盘 4.94（不低开）、量 2.74×近 5 日均量、收 5.28（+6.88%）
+    ⇒「次日过牛旗的点位就是买点」。
+
+    ⚠ **为什么这里不给 buy-stop**（实测 153 组 / 去重后旗面成型日 n=213）：
+      这类「线自己贴上来」的过线，次日「过线率」高达 **71.8%**，但过线后 5 日中位
+      **−1.81%**、胜率 **43.8%** —— **不需要价格涨就算过线，是廉价过线**（正常组
+      「线还在上方、要涨上去才算过线」是 +1.30%/56.1%）。只有**放量**才翻正：
+
+      | 组 | 量能 | n | 过线后 5 日中位 | 胜率 |
+      |---|---|---|---|---|
+      | 贴线 | ≥1.5×近5日均量 | 19 | **+2.76%** | 52.6% |
+      | 贴线 | 缩量 | 134 | −1.83% | 42.5% |
+      | 正常 | ≥1.5× | 28 | +3.65% | 67.9% |
+      | 正常 | 缩量 | 95 | +0.70% | 52.6% |
+
+      buy-stop 表达不了量能条件 ⇒ 只给「**次日开盘不低开 + 放量**」的盯盘条件。
+      老罗 2026-09-26 定口径：**加预警 + 放量确认，不放宽守卫**。
+    """
+    if not flag or not atr_v or atr_v <= 0 or last_c is None:
+        return None
+    if not flag.get("pb") or not flag.get("pa"):
+        return None
+    if flag.get("days_above_tl"):           # 已站上 → 交给 flag_tl_break
+        return None
+    pb = (flag["pb"]["i"], flag["pb"]["price"])
+    pa = (flag["pa"]["i"], flag["pa"]["price"])
+    if pa[1] >= pb[1]:
+        return None
+    line_next = line_val(pb, pa, len(bars))
+    if line_next is None or last_c < line_next:
+        return None                          # 线仍在价上方 ⇒ 正常埋伏单那一档，不走这里
+    gap_atr = (last_c - line_next) / atr_v
+    if gap_atr > 1.0:                        # 线已明显掉到价下方 = 形态走完，不是「贴线」
+        return None
+    hard = round(line_next - 1.0 * atr_v, 2)
+    dry = dry_small_body(bars, atr_v)
+    from_txt = (f"{flag['pb']['d']}高{flag['pb']['price']:.2f}→"
+                f"{flag['pa']['d']}高{flag['pa']['price']:.2f}")
+    return {
+        "kind": "knife_edge",
+        "anchor": "flag_tl",
+        "label": "牛旗面线",
+        "line_from": from_txt,
+        "level": round(line_next, 2),
+        "gap_atr": round(gap_atr, 2),
+        "rvol_min": KNIFE_EDGE_RVOL,
+        "dry": dry,
+        "hard_stop": hard,
+        "flag_len": flag.get("flag_len"),
+        "priority": 1,
+        "tier": "T1",
+        "setup_kind": "knife_edge",
+        "role": "primary_entry",
+        "note": (
+            f"牛旗面线（{from_txt}，旗面 {flag.get('flag_len')} 根）**已下移到收盘价"
+            f"{'（贴合）' if abs(gap_atr) < 0.02 else ('下方 %.2f×ATR' % gap_atr if gap_atr > 0 else '上方 %.2f×ATR' % abs(gap_atr))}**"
+            f"（线值 {round(line_next, 2)}、今收 {round(last_c, 2)}）⇒ 未站上，但**次日只需不低开即算「过牛旗」**。"
+            f"⚠ 这类廉价过线整体负期望（实测 n=213：5 日中位 −1.81%、胜率 43.8%）"
+            f"⇒ **必须量能确认**：次日开盘 ≥{round(line_next, 2)} 且量 ≥{KNIFE_EDGE_RVOL}×近5日均量"
+            f"才买（放量组 +2.76%、胜率 52.6%；缩量组 −1.83%、42.5%）；缩量 = 不成立，不追。"
+            f"硬止损 {hard}（线下 1×ATR）。"
         ),
     }
 
@@ -3686,6 +3805,13 @@ def _plan_entry_core(bars, ev):
                         f"；另有{PRE_BREAKOUT_LABEL.get(other.get('anchor'), '备选线')}"
                         f" {other['level']} 的埋伏单同样够格（距 {other['dist_atr']}×ATR），先到先做"
                     )
+        # ★ 2026-09-26：「贴线待突破」预警。与埋伏单**几何互斥** —— 埋伏单要求线仍在价上方，
+        #   这一档是线已下移到收盘价附近（未站上，但次日只需不低开即算过线）。
+        #   老罗 2026-09-26 定：加预警 + **放量确认**，不放宽守卫（该档整体负期望）。
+        if not cands and _flag_ev:
+            ke = flag_knife_edge(bars, _flag_ev, atr_v, last_c, rvol)
+            if ke:
+                result["knife_edge"] = ke
         # ★ T0 均线收复+过昨高：**总是**计算并挂在结果上（供股池复盘/盯盘方案消费）。
         # 纯增量，不改变当日 mode —— 它回答「次日怎么挂单」，不回答「在哪买」。
         # 提升规则（2026-09-20，用户在 pack() 出口统一做，不再打分支补丁）：
@@ -4065,6 +4191,16 @@ def _plan_entry_core(bars, ev):
         else:
             zone_txt = "N/A"
         floor_txt = f"一字缺口下沿 {round(floor, 2)}" if yi_zi else f"大阳低点 {round(floor, 2)}"
+        # ★ 2026-09-26（天能重工 300569）：末根「地量小实体（十字星）」= 变盘临界。
+        #   老罗：「09-23 收地量十字星，次日就有极大可能变盘」。**标注不改 recommend**
+        #   —— 这是前兆，不是闸门（见 dry_small_body 的实测口径）。
+        _dry = dry_small_body(bars, atr_v)
+        _dry_note = (
+            f"；★ 末根（{_dry['d']}）是**{_dry['cn']}**（实体 {_dry['body']} = "
+            f"{_dry['body_atr']}×ATR ≤ {_dry['limit_atr']}）⇒ 次日方向选择概率偏向单边"
+            f"（实测 P(次日涨≥2%) 31.3% vs 26.5%）—— 等次日**过整理上沿**再动手，别在临界日猜方向"
+            if _dry else ""
+        )
         if st == "yang_today":
             return pack(
                 "wait", None, "wait", "大阳当日不追", False,
@@ -4107,7 +4243,8 @@ def _plan_entry_core(bars, ev):
         if st == "still_falling":
             return pack(
                 "wait", None, "wait", "回踩仍在创新低", False,
-                f"{y_d} 大阳后缩量了，但近 3 根仍在创新低，偏自由落体，等连续三日低点不再下移",
+                f"{y_d} 大阳后缩量了，但近 3 根仍在创新低，偏自由落体，等连续三日低点不再下移"
+                + _dry_note,
                 z,
             )
         if st == "waiting_back":
@@ -4152,6 +4289,7 @@ def _plan_entry_core(bars, ev):
                 f"次优先T2，试错仓"
                 f"{confirm_note}"
                 f"{gap_note}"
+                f"{_dry_note}"
             )
             return pack(
                 "impulse_pause", 2, "pullback", "大阳后缩量回踩(次优先T2)", True, note, z,
@@ -4253,6 +4391,10 @@ def apply_top_signal_gate(result, bars, ev=None, veto=None):
         pb["suppressed_by"] = "top_signal"
         pb["status"] = "已作废（顶部标志K线确认）"
         pb["note"] = "【已作废·顶部标志K线确认】" + str(pb.get("note") or "")
+    ke = result.get("knife_edge")
+    if isinstance(ke, dict):                 # 「贴线待突破」同属买点预告，一并作废
+        ke["suppressed_by"] = "top_signal"
+        ke["status"] = "已作废（顶部标志K线确认）"
     return result
 
 
@@ -4851,6 +4993,21 @@ def evaluate(sym, data_file=None, eod=False):
             out["verdict"] = f"命中预案单 {pb.get('fill_px')}｜{out.get('verdict')}"
         elif _t is not None and "预备突破单" not in str(out.get("verdict") or ""):
             out["verdict"] = f"预备突破单 {_t}｜{out.get('verdict')}"
+    # ★ 2026-09-26：「贴线待突破」预警透传（与 prep break 同族，但条件含量能）
+    _kesrc = (stale_plan or plan).get("knife_edge")
+    if _kesrc:
+        ke = dict(_kesrc)
+        _lv = ke.get("level")
+        if live_bar is not None and _lv is not None:
+            _o = live_bar.get("o")
+            _ok = _o is not None and _o >= _lv
+            ke["open_ok"] = bool(_ok)
+            ke["status"] = (
+                f"今日开盘 {rnd(_o)} {'≥' if _ok else '<'} 线值 {_lv} ⇒ "
+                + ("不低开，条件一成立；" if _ok else "低开 ⇒ 本档不成立；")
+                + f"条件二：量需 ≥{ke.get('rvol_min')}×近5日均量才买（缩量不追）"
+            )
+        out["knife_edge"] = ke
     return out
 
 
@@ -4928,7 +5085,7 @@ if __name__ == "__main__":
         res.append(r)
         print(f"=== {s} ===")
         for k, v in r.items():
-            if k in ("buy_zone", "stop_plan", "targets", "w_bottom", "bull_flag", "P0", "P1", "R1", "platform", "pre_breakout"):
+            if k in ("buy_zone", "stop_plan", "targets", "w_bottom", "bull_flag", "P0", "P1", "R1", "platform", "pre_breakout", "knife_edge"):
                 print(f"  {k}: {v}")
             elif k not in ("note",) and not isinstance(v, (dict, list)):
                 print(f"  {k}: {v}")
