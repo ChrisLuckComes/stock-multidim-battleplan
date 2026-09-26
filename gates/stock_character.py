@@ -33,21 +33,33 @@
      不看「反应日当天涨没涨」：当天涨停、后 5 日连跌，仍算即顶。
 
 用法：
-    python stock_character.py 688002
+    python stock_character.py 688002                 # A 股（默认，按代码自动识别）
+    python stock_character.py NOW                    # 美股（字母 ticker 自动识别）
+    python stock_character.py NOW --market us        # 显式指定市场
     python stock_character.py 688002 --n 250 --big 5 --hold 5
-    python stock_character.py 688002 --json
-    python stock_character.py 688002 --no-ann          # 跳过公告抓取（离线）
-    python stock_character.py 688002 --events 20251009,20260924   # 手动指定利好日
+    python stock_character.py NOW --json
+    python stock_character.py NOW --no-ann           # 美股默认即跳过公告层
+    python stock_character.py NOW --events 20261028  # 手动指定美股事件日（如财报）
+
+市场支持说明：
+    三层**价格行为**判据（① 突破后行为 ③ 突破后路径 ④ 当下连拉状态）是纯 OHLCV /
+    百分比逻辑，**A 股与美股通用**，阈值一致。
+    唯一 A 股耦合的是**第二层「利好兑现习惯」**（走东财公告接口）—— 美股没有等价
+    接口，故美股模式下该层默认跳过；可用 `--events YYYYMMDD` 手动指定财报/事件日，
+    复用同一套「反应日后 N 日」统计（event_metrics 只用 K 线，市场无关）。
+    ⚠ 校准 caveat：第三、四层的经验常数（RUN_BASE_RATE / RUN_ICC / 路径 P75 口径）
+    来自 A 股回测（400 只），美股尚未重拟合；先用同一组常数跑，差异显著的票再议重标定。
 """
 import argparse
 import datetime as dt
 import json
 import os
+import re
 import sys
 import time
 import urllib.request
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import bars_source  # noqa: E402
 
@@ -130,9 +142,35 @@ def prefix_of(code):
     return "sz"
 
 
-def load_bars(code, n=300):
+def detect_market(code):
+    """按代码形态判断市场：6 位数字 / sh|sz|bj 前缀 → A 股；其余（字母 ticker）→ 美股。"""
+    c = str(code).strip().lower()
+    if c.startswith(("sh", "sz", "bj")):
+        return "cn"
+    body = re.sub(r"^(sh|sz|bj|us)[:.\-]?", "", c)
+    if re.fullmatch(r"\d{6}", body):
+        return "cn"
+    return "us"
+
+
+def load_bars_cn(code, n=300):
     bars, _src, _notes = bars_source.ash_bars(prefix_of(code), str(code), n=n)
     return normalize(bars)
+
+
+def load_bars_us(sym, n=300):
+    """美股日线：复用 bars_source.us_quote（Nasdaq/Yahoo/stooq）。返回末 n 根。"""
+    q, _notes = bars_source.us_quote(str(sym).upper(), min_bars=60)
+    bars = q.get("bars") or []
+    bars = normalize(bars)
+    return bars[-n:] if n else bars
+
+
+def load_bars(code, n=300, market=None):
+    market = market or detect_market(code)
+    if market == "us":
+        return load_bars_us(code, n)
+    return load_bars_cn(code, n)
 
 
 def normalize(bars):
@@ -382,7 +420,7 @@ def run_state(bars, big=BIG_DEFAULT, streak=RUN_STREAK, min_gain=RUN_MIN_GAIN):
 
 # ─────────────────────── 第一层：突破后行为 ───────────────────────
 def analyze(bars, big=BIG_DEFAULT, hold=HOLD_DEFAULT,
-            anns=None, news_hold=NEWS_HOLD, ann_meta=None):
+            anns=None, news_hold=NEWS_HOLD, ann_meta=None, us=False):
     if len(bars) < 60:
         return None
     last = len(bars) - 1
@@ -442,8 +480,17 @@ def analyze(bars, big=BIG_DEFAULT, hold=HOLD_DEFAULT,
     a["run"] = run_state(bars, big=big)
 
     # —— 第二层：利好兑现习惯 ——
-    news = news_habit(bars, anns, hold=news_hold, meta=ann_meta)
-    a["news"] = news
+    if us and anns is None:
+        # 美股无东财公告接口 ⇒ 跳过；提示用 earnings 日历或 --events 手动指定。
+        a["news"] = {
+            "available": False,
+            "reason": "美股利好兑现层未接入（用 earnings 日历单独评估；"
+                      "如需可按 --events YYYYMMDD 手动指定财报/事件日）",
+            "events": [], "n": 0,
+        }
+    else:
+        a["news"] = news_habit(bars, anns, hold=news_hold, meta=ann_meta)
+    a["market"] = "us" if us else "cn"
     return a
 
 
@@ -855,8 +902,15 @@ def render(a):
         L.append("    ④ 当下连拉状态：%s" % rn["class_label"])
         L.append("       %s" % rn["advice"])
     L.append("-" * 66)
-    L.append("提示：股性判据决定「用哪种买法 / 能不能在公告日动手」，不决定「买不买」。")
-    L.append("      能否决交易的只有硬约束：钱不够 / 涨停买不到 / 结构已坏。以上不构成投资建议。")
+    if a.get("market") == "us":
+        L.append("提示：美股模式 —— ① 突破后行为 ③ 突破后路径 ④ 连拉状态 三层通用；"
+                 "② 利好兑现层未接入（用 earnings 日历或 --events 评估）。")
+        L.append("      校准 caveat：第三/四层的经验常数来自 A 股回测，美股尚未重拟合，"
+                 "先用同组常数跑，明显漂移的票再议重标定。")
+        L.append("      能否决交易的只有硬约束：钱不够 / 流动性不足买不到 / 结构已坏。以上不构成投资建议。")
+    else:
+        L.append("提示：股性判据决定「用哪种买法 / 能不能在公告日动手」，不决定「买不买」。")
+        L.append("      能否决交易的只有硬约束：钱不够 / 涨停买不到 / 结构已坏。以上不构成投资建议。")
     L.append("")
     return "\n".join(L)
 
@@ -920,20 +974,24 @@ def render_news(n):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="股性体检：突破后行为 + 利好兑现习惯")
-    ap.add_argument("code", help="6 位代码，如 688002")
+    ap = argparse.ArgumentParser(description="股性体检：突破后行为 + 利好兑现习惯（A 股 / 美股）")
+    ap.add_argument("code", help="A 股 6 位代码（如 688002）或美股字母 ticker（如 NOW）")
+    ap.add_argument("--market", default="auto", choices=("auto", "cn", "us"),
+                    help="市场：auto=按代码识别（默认）/ cn / us")
     ap.add_argument("--n", type=int, default=300, help="取的日线根数（默认 300，约 14 个月）")
     ap.add_argument("--big", type=float, default=BIG_DEFAULT, help="大阳阈值 %%（默认 5）")
     ap.add_argument("--hold", type=int, default=HOLD_DEFAULT, help="后续观察交易日数（默认 5）")
     ap.add_argument("--no-ann", action="store_true", help="跳过公告抓取（离线模式）")
-    ap.add_argument("--events", help="手动指定利好日，逗号分隔 YYYYMMDD")
+    ap.add_argument("--events", help="手动指定利好/事件日，逗号分隔 YYYYMMDD（美股亦可用）")
     ap.add_argument("--json", action="store_true", help="输出 JSON")
     args = ap.parse_args()
 
-    bars = load_bars(args.code, n=args.n)
+    market = None if args.market == "auto" else args.market
+    bars = load_bars(args.code, n=args.n, market=market)
     if not bars:
         print("取不到 %s 的日线数据" % args.code)
         return 2
+    mkt = detect_market(args.code) if market is None else market
 
     if args.events:
         days = [d.strip() for d in args.events.split(",") if d.strip()]
@@ -942,12 +1000,14 @@ def main():
             f = d if "-" in d else "%s-%s-%s" % (d[:4], d[4:6], d[6:8])
             anns.append((f, "手动指定利好 授权许可"))
         meta = None
-    elif args.no_ann:
+    elif args.no_ann or mkt == "us":
+        # 美股无东财公告接口 ⇒ 默认跳过（除非显式 --events 手动指定）
         anns, meta = None, None
     else:
         anns, meta = fetch_announcements_ex(args.code, until=bars[0]["d"])
 
-    a = analyze(bars, big=args.big, hold=args.hold, anns=anns, ann_meta=meta)
+    a = analyze(bars, big=args.big, hold=args.hold, anns=anns,
+                ann_meta=meta, us=(mkt == "us"))
     if not a:
         print("%s 日线样本不足（< 60 根）" % args.code)
         return 2

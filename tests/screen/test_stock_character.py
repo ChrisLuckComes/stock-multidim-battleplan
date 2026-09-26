@@ -642,6 +642,80 @@ def test_render_shows_path_line():
     assert "深调再上型" in out
 
 
+# ─────────────── 美股模式（老罗 2026-09-26「股性判断 美股也适用」） ───────────────
+# 三层价格行为判据（①③④）纯 OHLCV / 百分比逻辑，A 股美股通用；
+# 第二层利好兑现走东财接口（A 股专属），美股默认跳过，可 --events 手动指定。
+def test_detect_market():
+    assert sc.detect_market("NOW") == "us"
+    assert sc.detect_market("now") == "us"          # 大小写归一
+    assert sc.detect_market("MDB") == "us"
+    assert sc.detect_market("us:NOW") == "us"        # 显式前缀
+    assert sc.detect_market("688002") == "cn"        # 6 位数字
+    assert sc.detect_market("sh600872") == "cn"      # sh 前缀
+    assert sc.detect_market("sz300750") == "cn"      # sz 前缀
+    assert sc.detect_market("bj830799") == "cn"      # bj 前缀
+
+
+def test_analyze_us_mode_skips_news_layer():
+    """美股：三层价格判据照常，第二层因无东财接口而跳过（不得崩溃）。"""
+    bars = _mk_path(8.0)                            # >60 根，N 字信号
+    a = sc.analyze(bars, big=5.0, us=True)
+    assert a["market"] == "us"
+    assert a["class"] in ("breakout", "grind", "mixed", "unknown")
+    assert a.get("path") is not None, "路径层必须仍计算"
+    assert a.get("run") is not None, "连拉层必须仍计算"
+    assert a["news"]["available"] is False
+    assert "美股" in a["news"]["reason"], "跳过原因必须点明美股"
+    # 渲染不得因 news 缺位崩
+    a["code"] = "NOW"
+    assert "股性体检" in sc.render(a)
+
+
+def test_analyze_us_manual_events_still_runs():
+    """美股 + --events：手动指定事件日 → 仍复用同一套反应统计（event_metrics 只用 K 线）。"""
+    bars = _mk_path(8.0)
+    anns = [(bars[40]["d"], "手动指定利好 授权许可")]
+    a = sc.analyze(bars, big=5.0, us=True, anns=anns)
+    assert a["market"] == "us"
+    # anns 非 None ⇒ 走 news_habit；不得抛、不得把美股误判成「接口失败」
+    assert isinstance(a["news"], dict)
+    a["code"] = "NOW"
+    assert "股性体检" in sc.render(a)
+
+
+def test_render_us_market_tip():
+    """美股渲染：提示走「美股模式」，不得出现 A 股专属的「涨停」。"""
+    bars = _mk_path(8.0)
+    a = sc.analyze(bars, big=5.0, us=True)
+    a["code"] = "NOW"
+    txt = sc.render(a)
+    assert "美股模式" in txt
+    assert "校准 caveat" in txt, "必须提示第三/四层常数来自 A 股、美股未重拟合"
+    assert "涨停" not in txt, "美股提示不得出现 A 股专属的涨停"
+
+
+def test_load_bars_us_via_mock(monkeypatch=None):
+    """load_bars_us 走 bars_source.us_quote，取末 n 根。用假接口验证（避免联网）。"""
+    import types
+    fake = types.ModuleType("bars_source")
+    fake.ROOT = "."
+    seq = [{"d": "2026-%02d-%02d" % (i // 28 + 1, i % 28 + 1),
+            "o": 100 + i, "h": 101 + i, "l": 99 + i, "c": 100 + i, "v": 1.0}
+           for i in range(150)]
+    fake.us_quote = lambda sym, min_bars=60, **kw: ({"ticker": sym, "bars": seq}, [])
+    saved = sc.bars_source
+    sc.bars_source = fake
+    try:
+        bars = sc.load_bars_us("NOW", n=120)
+        assert len(bars) == 120, len(bars)
+        assert bars[-1]["c"] == 100 + 149
+        # load_bars 分发
+        b2 = sc.load_bars("NOW", n=120, market="us")
+        assert len(b2) == 120
+    finally:
+        sc.bars_source = saved
+
+
 def main():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     ok = bad = 0
