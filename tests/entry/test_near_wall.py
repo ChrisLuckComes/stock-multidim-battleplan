@@ -66,5 +66,67 @@ class TestNearWallExtend(unittest.TestCase):
         self.assertEqual(r["near_wall_kind"], r["resistance_kind"])
 
 
+class TestPokeWallIsNotTarget(unittest.TestCase):
+    def test_near_wall_skipped_for_the_next_one(self):
+        """101.5 距 100 只有 0.375×ATR，是门。目标用后面的 112。"""
+        bars = [{"d": "d", "o": 99, "h": 112, "l": 90, "c": 100, "v": 1}]
+        tg = R.targets(bars, "line_pullback", {}, 4.0, 100.0, [(0, 101.5), (0, 112.0)])
+        self.assertEqual(tg["target1"], 112.0)
+
+    def test_only_poke_uses_two_atr(self):
+        bars = [{"d": "d", "o": 99, "h": 101.5, "l": 90, "c": 100, "v": 1}]
+        tg = R.targets(bars, "line_pullback", {}, 4.0, 100.0, [(0, 101.5)])
+        self.assertEqual(tg["target1"], 108.0)
+
+    def test_prior_high_gate_is_not_the_target(self):
+        """下降趋势线突破的前高可以超过 0.5×ATR，仍然是门。"""
+        bars = [{"d": "d", "o": 99, "h": 112, "l": 90, "c": 100, "v": 1}]
+        plain = R.targets(bars, "line_pullback", {}, 4.0, 100.0, [(0, 103.4), (0, 112.0)])
+        self.assertEqual(plain["target1"], 103.4)
+        gated = R.targets(
+            bars, "downtrend_tl_break", {"through_gate": 103.4}, 4.0, 100.0,
+            [(0, 103.4), (0, 112.0)],
+        )
+        self.assertEqual(gated["target1"], 112.0)
+        shelf = R.targets(
+            bars, "flag_tl_break", {"through_gate": 100.0}, 4.0, 100.0,
+            [(0, 100.2), (0, 120.0)],
+        )
+        self.assertEqual(shelf["target1"], 120.0)
+
+    def test_wall_past_half_atr_stays(self):
+        """1.2×ATR 的墙不是一捅就过，仍是目标。"""
+        bars = [{"d": "d", "o": 99, "h": 120, "l": 90, "c": 100, "v": 1}]
+        tg = R.targets(bars, "line_pullback", {}, 4.0, 100.0, [(0, 104.8), (0, 120.0)])
+        self.assertEqual(tg["target1"], 104.8)
+
+    def test_new_high_opens_upside(self):
+        """前高 100，收盘 120 且上方无墙 ⇒ 目标 = 120+6×ATR，不是 +2×ATR。"""
+        bars = []
+        for i in range(25):
+            bars.append({"d": "p%d" % i, "o": 98, "h": 100, "l": 96, "c": 99, "v": 1})
+        bars.append({"d": "d", "o": 110, "h": 122, "l": 109, "c": 120, "v": 1})
+        tg = R.targets(bars, "platform_break", {}, 4.0, 120.0, [])
+        self.assertTrue(tg["upside_open"])
+        self.assertEqual(tg["target1"], 144.0)
+        # 止损放在 2×ATR 下，现价 R 仍然过 1.5
+        tg2 = R.targets(bars, "platform_break", {"hard_stop": 112.0}, 4.0, 120.0, [])
+        self.assertEqual(tg2["rr_target1"], 3.0)
+
+    def test_platform_measured_not_pulled_back_into_the_door(self):
+        """近端 101 是门。门后的 130 才是目标，不用测量涨幅把目标压在 108。"""
+        z = {"level": 100, "primary_hi": 102, "primary_lo": 98}
+        bars = [{"d": "d", "o": 99, "h": 130, "l": 90, "c": 100, "v": 1}]
+        tg = R.targets(bars, "platform_break", z, 4.0, 100.0, [(0, 101.0), (0, 130.0)])
+        self.assertEqual(tg["target1"], 130.0)
+
+    def test_breakout_without_further_wall_opens_space(self):
+        """突破后没有更远的墙，目标用入场+6×ATR，不用 2×ATR。"""
+        bars = [{"d": "d", "o": 99, "h": 101.5, "l": 90, "c": 100, "v": 1}]
+        tg = R.targets(bars, "flag_tl_break", {"through_gate": 103.4}, 4.0, 100.0, [(0, 103.4)])
+        self.assertTrue(tg["space_open"])
+        self.assertEqual(tg["target1"], 124.0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

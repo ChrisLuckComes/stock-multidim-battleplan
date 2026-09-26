@@ -120,11 +120,47 @@ class TestOdds(unittest.TestCase):
         rec = BA.pick_recommend(rows, z)
         self.assertEqual(rec["entry"], 52.0)
 
-    def test_recommend_excludes_chasing_above_zone(self):
+    def test_cn_excludes_chase_above_zone(self):
+        """A 股当日不能卖，出了买区上沿的追涨档不推荐。"""
         z = {"struct_stop": 48.0, "primary_hi": 53.0, "hard_stop": 49.0}
         rows = [{"entry": 55.0, "entry_name": "突破", "need_pct": 4.0, "risk_atr": 2.0,
                  "risk": 6.0, "r1": 5.0, "r2": 9.0, "prehang": False}]
         self.assertIsNone(BA.pick_recommend(rows, z))
+
+    def test_us_chase_when_its_r_clears(self):
+        """美股追涨自己 R≥1.5 就做，不改去等 R 更大的回踩。"""
+        z = {"struct_stop": 90.0, "primary_hi": 100.0, "hard_stop": 92.0}
+        rows = [
+            {"entry": 100.0, "entry_name": "现价", "need_pct": 0.0, "risk_atr": 1.0,
+             "r1": 1.6, "prehang": True},
+            {"entry": 96.0, "entry_name": "MA5", "need_pct": -4.0, "risk_atr": 0.8,
+             "r1": 4.0, "prehang": True},
+        ]
+        rec = BA.pick_recommend(rows, z, us=True)
+        self.assertEqual(rec["entry"], 100.0)
+
+    def test_cn_still_picks_max_r_pullback(self):
+        """A 股仍取 R 最大的可预挂回踩，不因为现价也能做就改口。"""
+        z = {"struct_stop": 90.0, "primary_hi": 110.0, "hard_stop": 92.0}
+        rows = [
+            {"entry": 100.0, "entry_name": "现价", "need_pct": 0.0, "risk_atr": 1.0,
+             "r1": 1.6, "prehang": True},
+            {"entry": 96.0, "entry_name": "MA5", "need_pct": -4.0, "risk_atr": 0.8,
+             "r1": 4.0, "prehang": True},
+        ]
+        rec = BA.pick_recommend(rows, z)
+        self.assertEqual(rec["entry"], 96.0)
+
+    def test_us_chase_below_one_point_five_falls_back(self):
+        z = {"struct_stop": 90.0, "primary_hi": 110.0, "hard_stop": 92.0}
+        rows = [
+            {"entry": 100.0, "entry_name": "现价", "need_pct": 0.0, "risk_atr": 1.0,
+             "r1": 1.2, "prehang": True},
+            {"entry": 96.0, "entry_name": "MA5", "need_pct": -3.0, "risk_atr": 0.8,
+             "r1": 2.2, "prehang": True},
+        ]
+        rec = BA.pick_recommend(rows, z, us=True)
+        self.assertEqual(rec["entry"], 96.0)
 
     def test_annotate_flags(self):
         z = {"struct_stop": 50.0, "primary_hi": 53.0, "hard_stop": 51.0}
@@ -251,7 +287,8 @@ class TestRender(unittest.TestCase):
     def test_render_without_notes(self):
         """没有 notes.json 也要能出完整报告（所有章节都在）。"""
         html = RR.render(self._analysis(), {}, RR.DEFAULT_TMPL)
-        for sec in ("1 · 模式卡", "2 · 全档赔率", "3 · 量价结论", "4 · 六维研究",
+        for sec in ("1 · 模式卡", "2 · 全档赔率", "3 · 量价分析", "3.3 量价结论",
+                    "4 · 六维研究",
                     "5 · 扫雷", "6 · 大结构", "7 · 同板块", "双轨打分",
                     "9 · 执行方案", "10 · 一页汇总", "免责声明"):
             self.assertIn(sec, html)
@@ -267,9 +304,16 @@ class TestRender(unittest.TestCase):
         self.assertTrue(ok)
 
     def _best_seg(self, html):
+        """只返回首屏「最高盈亏比路径」那一张卡。
+
+        卡止于**下一个分区注释**。原实现取到「双轨打分」，会把 1~8 节整段圈进来，
+        于是 `assertNotIn("需回落")` 撞上第 2 节表头的「需回落/上涨」、
+        `assertNotIn("999.00")` 撞上第 2 节 details 全矩阵里的任意买价 ——
+        两处假失败（本文件在 HEAD 上就是红的）。
+        """
         i = html.find("最高盈亏比路径")
-        j = html.find("双轨打分")
         self.assertGreater(i, -1)
+        j = html.find("<!-- =", i)
         self.assertGreater(j, i)
         return html[i:j]
 
@@ -298,6 +342,26 @@ class TestRender(unittest.TestCase):
         seg = self._best_seg(html)
         self.assertNotIn("999.00", seg, "最差档取了全矩阵口径")
         self.assertIn(num_of(a["odds_primary"][-1]["entry"]), seg)
+
+    def test_report_shows_fill_policy(self):
+        """成交口径必须进人读输出（2026-09-26 补）。
+
+        引擎（rule123）早已产出 `buy_zone.fills_policy="limit_reclaim"` + `limit_px`
+        与 `plan["t0_tail"]`，但渲染层一行都不打 ⇒ 老罗读不到等于没落地
+        （回放实测这两条各多买中一笔：中科飞测 688361 2026-06-15 +83.0%、
+        兆易创新 603986 2026-04-29 +74.1%，且无副作用）。
+        """
+        a = self._analysis()
+        a["plan"]["buy_zone"]["fills_policy"] = "limit_reclaim"
+        a["plan"]["buy_zone"]["limit_px"] = 52.5
+        a["plan"]["t0_tail"] = {"trigger": 54.0, "hard_stop": 50.0}
+        html = RR.render(a, {}, RR.DEFAULT_TMPL)
+        self.assertIn("成交口径（沿线限价）", html)
+        self.assertIn("52.50", html)
+        self.assertIn("T0 尾盘补救腿", html)
+        self.assertIn("成交口径", RR.build_summary(a, {}))
+        ok, detail = RR.check_html(html)
+        self.assertTrue(ok, "标签未配对：\n" + "\n".join(detail))
 
     def _exec_seg(self, html):
         i = html.find("9 · 执行方案")
@@ -497,7 +561,7 @@ class TestAnalyzeOffline(unittest.TestCase):
         self.assertIn(51.85, prim)
         self.assertAlmostEqual(prim[51.85]["r1"], 2.98, places=2)
         self.assertAlmostEqual(prim[52.01]["r1"], 2.54, places=2)
-        # 推荐档必须高于硬止损、低于买区上沿
+        # A 股推荐档必须高于硬止损、不高于买区上沿
         rec = res["odds_recommend"]
         self.assertIsNotNone(rec)
         self.assertGreater(rec["entry"], z["hard_stop"])
@@ -540,6 +604,24 @@ class TestAnalyzeOffline(unittest.TestCase):
         txt = "\n".join(BA.summarize(res))
         self.assertIn("全档赔率", txt)
         self.assertIn("模式", txt)
+
+    def test_summarize_shows_fill_policy(self):
+        """成交口径必须进人读摘要（2026-09-26 补）。
+
+        引擎（rule123）早已产出 `buy_zone.fills_policy="limit_reclaim"` + `limit_px`
+        与 `plan["t0_tail"]`，但三个展示层（渲染器 / summarize / 探针）一行都不打
+        ⇒ 老罗读不到就等于没落地（回放实测这两条各多买中一笔：中科飞测 688361
+        2026-06-15 +83.0%、兆易创新 603986 2026-04-29 +74.1%，且无副作用）。
+        """
+        res = BA.analyze("600000", account=50000, data_file=self.tmp,
+                         intraday=False, n=len(self.bars))
+        res["plan"]["buy_zone"]["fills_policy"] = "limit_reclaim"
+        res["plan"]["buy_zone"]["limit_px"] = 52.5
+        res["plan"]["t0_tail"] = {"trigger": 54.0, "hard_stop": 50.0}
+        txt = "\n".join(BA.summarize(res))
+        self.assertIn("沿线限价成交", txt)
+        self.assertIn("52.5", txt)
+        self.assertIn("T0 尾盘腿", txt)
 
 
 class TestTieLineAndCash(unittest.TestCase):

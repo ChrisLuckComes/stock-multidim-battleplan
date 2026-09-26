@@ -147,6 +147,7 @@
 
 本模块**不 import rule123**（避免循环依赖），自带一个迷你 ATR。
 """
+import datetime
 
 __all__ = [
     "PATTERNS_CN", "PATTERN_GRADE", "pattern_grade", "classify_shape", "is_wave_high",
@@ -803,6 +804,462 @@ def _advice(level, b, top, held=None):
     return "近端无顶部标志 K 线，本项不构成限制。"
 
 
+WEEK_TOP_EXPECT = "不再期待趋势行情，最多短线操作"
+MONTH_TOP_EXPECT = "跌幅从腰斩到三折都有，而且可以阴跌很久不见底。套牢盘不计其数，再走出一波大行情基本上不可能"
+MONTH_SUPER_DROP = 0.50
+
+
+def _frame_key(d, frame):
+    if frame == "week":
+        iso = datetime.date.fromisoformat(d).isocalendar()
+        return "%d-W%02d" % (iso[0], iso[1])
+    return d[:7]
+
+
+def _frame_groups(bars, frame):
+    """日线收成周线或月线。开盘取第一根，收盘取最后一根，高低取极值。
+
+    日期不可解析的根跳过（造不出周/月归属），不得抛异常 —— 顶部判定是附加项，
+    不能因为一行脏日期把整个 top_verdict 打掉（退出码会变成 3 = 取数失败）。
+    """
+    groups = []
+    cur = None
+    key = None
+    for b in bars or []:
+        d = str(b.get("d") or "")[:10]
+        if len(d) < 10:
+            continue
+        try:
+            k = _frame_key(d, frame)
+        except ValueError:
+            continue
+        o, h, l, c = _f(b.get("o")), _f(b.get("h")), _f(b.get("l")), _f(b.get("c"))
+        if cur is None or k != key:
+            if cur:
+                groups.append(cur)
+            key = k
+            cur = {"d": d, "key": k, "o": o, "h": h, "l": l, "c": c}
+        else:
+            cur["h"] = max(cur["h"], h)
+            cur["l"] = min(cur["l"], l)
+            cur["c"] = c
+            cur["d"] = d
+    if cur:
+        groups.append(cur)
+    return groups
+
+
+def _drop_open_frame(groups, frame):
+    """未走完的最后一根不参与。月线：月末日还在 25 日之前。周线：还没到周五。"""
+    if not groups:
+        return groups
+    d = groups[-1]["d"]
+    if frame == "month" and int(d[8:10]) < 25:
+        return groups[:-1]
+    try:
+        wd = datetime.date.fromisoformat(d).weekday()
+    except ValueError:          # 日期脏 ⇒ 无法判「是否到周五」，按未走完处理
+        return groups[:-1]
+    if frame == "week" and wd < 4:
+        return groups[:-1]
+    return groups
+
+
+def _month_series(bars):
+    """返回 (完整月序列, 全部月序列)。
+
+    信号候选只用**完整月**（未走完的当月不能宣布见顶）；但「其后创新高 ⇒ 失效」
+    这条比较必须用**全部月**，含未走完的当月。理由：月内高点只可能往上走，
+    当下的部分月高点就是月底高点的**下界** —— 拿它判失效是可靠的，漏掉它则会把
+    「已经创新高」的票继续标成「拉黑」。实测 300647 超频三：2026-01 月线超长
+    射击之星高 7.79、窗口前高 8.42，2026-09（未走完）高点已 **9.94**，行情在
+    创新高，而旧写法把当月丢掉 ⇒ 报告仍写「拉黑，只做空」，方向完全说反。
+
+    `_drop_open_frame` 只会砍掉最后一根，所以完整月序列是全部月序列的**前缀**，
+    下标可以直接通用。序列**缺月**时返回空序列（整个附加项静默关闭）——
+    缺月的「月线 K 线」是伪形态，见 `_contiguous`。
+    """
+    groups = _frame_groups(bars, "month")
+    kept = _drop_open_frame(groups, "month")
+    if not _contiguous(kept, "month"):
+        return [], groups
+    return kept, groups
+
+
+def _next_key(k, frame):
+    """下一帧的 key。周线按 ISO 周（一年 52 或 53 周）。"""
+    if frame == "month":
+        y, m = int(k[:4]), int(k[5:7])
+        return "%04d-%02d" % (y + m // 12, m % 12 + 1)
+    y, w = int(k[:4]), int(k[6:8])
+    if w + 1 > datetime.date(y, 12, 28).isocalendar()[1]:
+        return "%04d-W01" % (y + 1)
+    return "%04d-W%02d" % (y, w + 1)
+
+
+def _contiguous(groups, frame):
+    """帧序列是否一帧不缺。
+
+    ⚠ 缺帧时**整个周/月线附加项静默关闭**（返回空序列 ⇒ 不宣布任何顶）。理由：
+    月线 K 线的 OHLC 只有在「这个月每根日线都在」时才成立；缺月（取数缺口、
+    长停牌、合成数据）时的「月线形态」是伪形态。实测代价是**漏报顶部**，
+    收益是不再误报「拉黑」——方向上一律选前者。反例见
+    `tests/report/test_review_fixes.py::_reversal_bars`：2026-03 之后直接跳到
+    2026-08，只有 4 根日线的「8 月」被当成完整月，判出一根假超长射击之星，
+    把整条 plan_entry 打成「拉黑｜等待」。
+    """
+    key = "%s" % frame
+    for a, b in zip(groups, groups[1:]):
+        try:
+            if _next_key(a["key"], key) != b["key"]:
+                return False
+        except (ValueError, KeyError, IndexError):
+            return False
+    return True
+
+
+def _big_yin(m):
+    """大阴，口径与日线大阴线相同：阴线、实体 ≥0.55、收位 ≤0.30。"""
+    rng = m["h"] - m["l"]
+    if rng <= 0 or m["c"] >= m["o"]:
+        return None
+    body_r = abs(m["c"] - m["o"]) / rng
+    pos = (m["c"] - m["l"]) / rng
+    if body_r < BY_BODY_MIN or pos > BY_POS_MAX:
+        return None
+    return {"body_r": body_r, "pos": pos}
+
+
+def _month_announce_shape(m):
+    """月线见顶用五形态里除十字星以外的四根。十字星单独不够宣布。
+
+    高点那根月线自己就是墓碑 / 射击之星 / 大阴 / 上吊时，当月即宣布。
+    """
+    hit = classify_shape(m)
+    if not hit or hit.get("pattern") == "doji":
+        return None
+    metrics = hit.get("metrics") or {}
+    return {
+        "pattern": hit["pattern"],
+        "pattern_cn": PATTERNS_CN.get(hit["pattern"], hit["pattern"]),
+        "body_r": metrics.get("body_r"),
+        "pos": metrics.get("pos"),
+    }
+
+
+def _frame_top(bars, frame):
+    """周线：高点之后的大阴才宣布。月线：高点当月或其后的顶部形态都算。
+
+    不改日线 level，也不否决日线买点。
+    周线见顶后最多短线。月线见顶是腰斩级别，再走出一波大行情基本上不可能。
+    其后若再创出高于前高的同级别高点，这次宣布失效。
+
+    ⚠ 波峰在**含未走完当根的**全序列里找（月/周内高点只往上走，当下看到的就是
+    收盘时点的下界）。旧写法只在完整根里找波峰，于是「当月正在创新高」的票，
+    波峰还停在老位置、继续说「已见顶」——方向说反。波峰若正好落在未走完的
+    那一根上，它后面没有可宣布的完整根 ⇒ 本次不宣布。
+    """
+    all_g = _frame_groups(bars, frame)
+    groups = _drop_open_frame(all_g, frame)
+    if len(groups) < 2 or not _contiguous(groups, frame):
+        return None
+    peak_i = max(range(len(all_g)), key=lambda i: all_g[i]["h"])
+    if peak_i >= len(groups):
+        return None
+    peak = all_g[peak_i]
+    label = "周线" if frame == "week" else "月线"
+    id_key = "week" if frame == "week" else "month"
+    peak_key = "peak_week" if frame == "week" else "peak_month"
+    expect = WEEK_TOP_EXPECT if frame == "week" else MONTH_TOP_EXPECT
+    start = peak_i + 1 if frame == "week" else peak_i
+    for m in groups[start:]:
+        if frame == "week":
+            shape = _big_yin(m)
+            pattern_cn = "大阴"
+        else:
+            shape = _month_announce_shape(m)
+            pattern_cn = (shape or {}).get("pattern_cn")
+        if not shape:
+            continue
+        out = {
+            "state": "announced",
+            "frame": frame,
+            "close": round(m["c"], 2),
+            "body_r": round(shape["body_r"], 2),
+            "pos": round(shape["pos"], 2),
+            "d": m["d"][:10],
+            "peak_high": round(peak["h"], 2),
+            "note": "%s%s宣布见顶" % (label, pattern_cn),
+            "expect": expect,
+        }
+        if frame == "month":
+            out["pattern"] = shape["pattern"]
+        out[id_key] = m["key"]
+        out[peak_key] = peak["key"]
+        return out
+    return None
+
+
+def month_super_yin(bars):
+    """月线超大阴线：大阴线，且相对上月收盘的收盘跌幅 ≥50%。直接拉黑。
+
+    只看收盘，不看月内最低点。闪迪 SNDK 2026-07 收盘跌 46.57%，
+    月内低点相对上月收盘到过 56%，不过线，不拉黑。
+    其后月线高点超过这根阴线之前的高点，这次拉黑失效。
+    未走完的当月不作为信号候选，但**参与失效比较**（见 `_month_series`）。
+    普通月线顶不走这条。
+
+    ⚠ 失效判据只比「这根阴线**之后**的月线」：过去写成 `groups[i:]`（把阴线自己
+    也算进去），于是一根**先创新高再暴跌**的暴量长上影阴线反而逃掉拉黑 —— 那恰恰是
+    最典型的顶。与 month_one_star / month_star_pair / month_merged_star 口径统一。
+    """
+    groups, all_g = _month_series(bars)
+    for i, m in enumerate(groups):
+        shape = _big_yin(m)
+        if not shape or i == 0 or groups[i - 1]["c"] <= 0:
+            continue
+        drop = 1 - m["c"] / groups[i - 1]["c"]
+        if drop < MONTH_SUPER_DROP:
+            continue
+        peak_high = max(g["h"] for g in groups[:i + 1])
+        later_high = max((g["h"] for g in all_g[i + 1:]), default=0)
+        if later_high > peak_high:
+            continue
+        return {
+            "state": "blacklist",
+            "month": m["key"],
+            "d": m["d"][:10],
+            "close": round(m["c"], 2),
+            "prev_close": round(groups[i - 1]["c"], 2),
+            "drop": round(drop, 4),
+            "body_r": round(shape["body_r"], 2),
+            "pos": round(shape["pos"], 2),
+            "peak_high": round(peak_high, 2),
+            "note": "月线超大阴线，直接拉黑，看都不要看",
+        }
+    return None
+
+
+def _month_long_star(m):
+    """月线超长射击之星：上影 ≥0.60、实体 ≤0.15、收位 ≤0.35。
+
+    不套日线射击之星的下影上限。AAOI 2026-05 下影 0.17、2026-06 下影 0.26，
+    实体都接近 0，日线口径会落成上影十字。
+    """
+    rng = m["h"] - m["l"]
+    if rng <= 0:
+        return None
+    body_r = abs(m["c"] - m["o"]) / rng
+    upper_r = (m["h"] - max(m["o"], m["c"])) / rng
+    pos = (m["c"] - m["l"]) / rng
+    if upper_r < 0.60 or body_r > 0.15 or pos > 0.35:
+        return None
+    return {"body_r": body_r, "upper_r": upper_r, "pos": pos}
+
+
+def _month_one_star_shape(m):
+    """一根月线就够：墓碑线，或上影 ≥0.60 的射击之星 / 超长上影。"""
+    hit = classify_shape(m)
+    metrics = (hit or {}).get("metrics") or {}
+    pattern = (hit or {}).get("pattern")
+    if pattern == "gravestone":
+        return {
+            "pattern": "gravestone",
+            "pattern_cn": "墓碑线",
+            "body_r": metrics.get("body_r"),
+            "upper_r": metrics.get("upper_r"),
+        }
+    if pattern == "shooting_star" and metrics.get("upper_r", 0) >= 0.60:
+        return {
+            "pattern": "shooting_star",
+            "pattern_cn": "超长射击之星",
+            "body_r": metrics.get("body_r"),
+            "upper_r": metrics.get("upper_r"),
+        }
+    star = _month_long_star(m)
+    if not star:
+        return None
+    return {
+        "pattern": "long_star",
+        "pattern_cn": "超长射击之星",
+        "body_r": star["body_r"],
+        "upper_r": star["upper_r"],
+    }
+
+
+def month_one_star(bars):
+    """月线墓碑线或超长射击之星，一根就拉黑做多。不需要第二根。
+
+    其后月线高点超过这根之前（含这根）的高点，这次拉黑失效。
+    未走完的当月不作为信号候选，但**参与失效比较**（见 `_month_series`）。
+
+    ⚠ **至少要有一根前序月线**（i ≥ 1）：i = 0 时 `peak_high` 就是这根自己的高点，
+    「史上最高点」恒成立 —— 没有前序月份就谈不上「顶部」，一根孤立月线
+    （次新股 / 数据窗只有两个月）不该被宣布见顶拉黑。month_super_yin /
+    month_star_pair / month_merged_star 同理（它们本来就从 i=1 起扫）。
+    """
+    groups, all_g = _month_series(bars)
+    for i, m in enumerate(groups):
+        if i == 0:
+            continue
+        shape = _month_one_star_shape(m)
+        if not shape:
+            continue
+        peak_high = max(g["h"] for g in groups[:i + 1])
+        later_high = max((g["h"] for g in all_g[i + 1:]), default=0)
+        if later_high > peak_high:
+            continue
+        return {
+            "state": "blacklist",
+            "month": m["key"],
+            "d": m["d"][:10],
+            "pattern": shape["pattern"],
+            "pattern_cn": shape["pattern_cn"],
+            "peak_high": round(peak_high, 2),
+            "body_r": round(shape["body_r"], 2),
+            "upper_r": round(shape["upper_r"], 2),
+            "note": "月线%s一根即拉黑，只做空不做多" % shape["pattern_cn"],
+        }
+    return None
+
+
+def month_star_pair(bars):
+    """连续两根月线超长射击之星。拉黑做多，只做空。
+
+    其后月线高点超过这两根里的高点，这次拉黑失效。
+    未走完的当月不作为信号候选，但**参与失效比较**（见 `_month_series`）。
+    """
+    groups, all_g = _month_series(bars)
+    for i in range(1, len(groups)):
+        prev, cur = groups[i - 1], groups[i]
+        a, b = _month_long_star(prev), _month_long_star(cur)
+        if not a or not b:
+            continue
+        peak_high = max(prev["h"], cur["h"])
+        later_high = max((g["h"] for g in all_g[i + 1:]), default=0)
+        if later_high > peak_high:
+            continue
+        return {
+            "state": "blacklist",
+            "months": [prev["key"], cur["key"]],
+            "d": cur["d"][:10],
+            "peak_high": round(peak_high, 2),
+            "upper_r": [round(a["upper_r"], 2), round(b["upper_r"], 2)],
+            "body_r": [round(a["body_r"], 2), round(b["body_r"], 2)],
+            "note": "连续月线超长射击之星，直接拉黑，只做空不做多",
+        }
+    return None
+
+
+def month_merged_star(bars):
+    """相邻两个月合成一根。合成后是墓碑线或射击之星，拉黑做多。
+
+    射击之星就是墓碑线实体稍厚的那一档。ORCL 2025-09 与 2025-10 合成：
+    实体 0.32、上影 0.66，单月都不够，合在一起才是。
+    其后月线高点超过合成高点，这次拉黑失效。未走完的当月不参与信号、但参与失效比较。
+    """
+    groups, all_g = _month_series(bars)
+    for i in range(1, len(groups)):
+        prev, cur = groups[i - 1], groups[i]
+        merged = {
+            "o": prev["o"],
+            "h": max(prev["h"], cur["h"]),
+            "l": min(prev["l"], cur["l"]),
+            "c": cur["c"],
+        }
+        hit = classify_shape(merged)
+        if not hit or hit.get("pattern") not in ("gravestone", "shooting_star"):
+            continue
+        peak_high = merged["h"]
+        later_high = max((g["h"] for g in all_g[i + 1:]), default=0)
+        if later_high > peak_high:
+            continue
+        metrics = hit.get("metrics") or {}
+        return {
+            "state": "blacklist",
+            "months": [prev["key"], cur["key"]],
+            "d": cur["d"][:10],
+            "pattern": hit["pattern"],
+            "peak_high": round(peak_high, 2),
+            "body_r": round(metrics.get("body_r") or 0, 2),
+            "upper_r": round(metrics.get("upper_r") or 0, 2),
+            "note": "两个月合成超长上影，直接拉黑，只做空不做多",
+        }
+    return None
+
+
+def apply_month_blacklist(result, bars):
+    """月线超大阴线，或连续超长射击之星，把做多 recommend 压掉。普通月线顶不进这里。"""
+    if not isinstance(result, dict):
+        return result
+    sy = month_super_yin(bars)
+    one = month_one_star(bars)
+    pair = month_star_pair(bars)
+    merged = month_merged_star(bars)
+    result["month_super_yin"] = sy
+    result["month_one_star"] = one
+    result["month_star_pair"] = pair
+    result["month_merged_star"] = merged
+    hit = sy or one or pair or merged
+    if not hit:
+        return result
+    result["recommend"] = False
+    result["blacklist"] = True
+    verdict = result.get("verdict") or ""
+    if not str(verdict).startswith("拉黑"):
+        result["verdict"] = "拉黑｜%s" % verdict
+    note = result.get("note") or ""
+    if "月线超大阴线" not in str(note):
+        result["note"] = "【拉黑】%s。｜%s" % (hit["note"], note)
+    pb = result.get("pre_breakout")
+    if isinstance(pb, dict):
+        if sy:
+            pb["suppressed_by"] = "month_super_yin"
+            pb["status"] = "已作废（月线超大阴线拉黑）"
+        elif one:
+            pb["suppressed_by"] = "month_one_star"
+            pb["status"] = "已作废（月线超长上影拉黑）"
+        elif pair:
+            pb["suppressed_by"] = "month_star_pair"
+            pb["status"] = "已作废（连续月线射击之星拉黑）"
+        else:
+            pb["suppressed_by"] = "month_merged_star"
+            pb["status"] = "已作废（两月合成上影拉黑）"
+    return result
+
+
+def week_top(bars):
+    """周线大阴宣布见顶。见顶后不再期待趋势行情，最多短线。"""
+    return _frame_top(bars, "week")
+
+
+def month_top(bars):
+    """月线顶部形态宣布见顶。见顶后是腰斩级别，再走大行情基本上不可能。"""
+    return _frame_top(bars, "month")
+
+
+def higher_top(week, month):
+    """月线见顶的预期压过周线。两档都没有则 None。"""
+    if month:
+        frames = ["月线"]
+        if week:
+            frames.insert(0, "周线")
+        return {
+            "horizon": "无大行情",
+            "frames": frames,
+            "expect": month["expect"],
+            "note": "月线已见顶，%s" % month["expect"],
+        }
+    if week:
+        return {
+            "horizon": "短线",
+            "frames": ["周线"],
+            "expect": week["expect"],
+            "note": "周线已见顶，%s" % week["expect"],
+        }
+    return None
+
+
 def top_verdict(bars, atr_v=None, veto="confirmed", live_last=False, strict=False,
                 lookback=WAVE_LOOKBACK, scan=SCAN_BARS, vol_win=20,
                 confirm_max_age=None, tol_atr=0.0, name=None, held=None):
@@ -846,6 +1303,23 @@ def top_verdict(bars, atr_v=None, veto="confirmed", live_last=False, strict=Fals
         reason = b.get("note") or ""
     else:
         reason = top.get("summary") or ""
+    wk = week_top(bars)
+    mo = month_top(bars)
+    sy = month_super_yin(bars)
+    one = month_one_star(bars)
+    pair = month_star_pair(bars)
+    merged = month_merged_star(bars)
+    ht = higher_top(wk, mo)
+    ban = sy or one or pair or merged
+    if ban:
+        ht = {
+            "horizon": "拉黑",
+            "frames": ["月线"],
+            "expect": ban["note"],
+            "note": ban["note"],
+        }
+        if sy:
+            ht["note"] = "%s %.2f%%，%s" % (sy["month"], -sy["drop"] * 100, sy["note"])
 
     v = {
         "ok": bool(top.get("ok")),
@@ -853,7 +1327,7 @@ def top_verdict(bars, atr_v=None, veto="confirmed", live_last=False, strict=Fals
         "rank": LEVEL_RANK[level], "exit_code": LEVEL_RANK[level],
         "hit": level != "ok", "veto": veto, "strict": bool(strict),
         "live_last": bool(live_last), "name": name,
-        # 命中的那一根
+        # 命中的那一根（日线）。月线顶另挂 month_top，不改 level。
         "date": b.get("d") if b else None,
         "pattern": b.get("pattern") if b else None,
         "pattern_cn": b.get("pattern_cn") if b else None,
@@ -883,6 +1357,13 @@ def top_verdict(bars, atr_v=None, veto="confirmed", live_last=False, strict=Fals
         "n_signals": len(top.get("signals") or []),
         "n_rejected": len(top.get("rejected") or []),
         "summary": top.get("summary") or "",
+        "week_top": wk,
+        "month_top": mo,
+        "month_super_yin": sy,
+        "month_one_star": one,
+        "month_star_pair": pair,
+        "month_merged_star": merged,
+        "higher_top": ht,
         "signal": b, "rejected": top.get("rejected") or [],
         "signals": top.get("signals") or [],
         "pitfalls": list(PITFALLS),

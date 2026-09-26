@@ -2056,17 +2056,60 @@ def stop_plan(bars, mode, z, atr_v):
     return _finish(struct_name, struct, name or cands[0][0], hard, warn, note)
 
 
+# 距入场 ≤0.5×ATR 的压力位是要穿过的门，不是盈亏比的天花板。
+# 与 breakout_edge 的临近带同一宽度：一捅就到的位置，默认后面还有一段。
+POKE_ATR = 0.5
+# 创新高且上方无墙：空间已打开。6×ATR 是计算口径，不是预测能涨到这里。
+# 若仍用 2×ATR，止损稍宽时现价 R 会掉到 1.5 以下，又变成等回踩。
+OPEN_ATR = 6.0
+
+
+def _upside_open(bars, entry, atr_v, beyond):
+    """收盘创了这段行情的新高，且门后没有下一档压力。"""
+    if beyond is not None or not bars or not atr_v or entry is None:
+        return False
+    if len(bars) < 20:
+        return False
+    prior_high = max(b["h"] for b in bars[:-1])
+    return entry >= prior_high
+
+
 def targets(bars, mode, z, atr_v, entry, Hs):
-    """目标1=最近未破摆动高/测量涨幅；目标2=当前取数窗口内更高阻力（非强制 52 周）。附 rr_target1。"""
+    """目标1=门后的下一档压力。创新高且无墙时用打开空间口径。目标2=窗口内更高阻力。"""
     if entry is None or not atr_v:
         return None
-    resist = sorted({h for i, h in Hs if h > entry + 0.05 * atr_v})
-    t1 = resist[0] if resist else round(entry + 2.0 * atr_v, 2)
-    # 测量涨幅：平台/颈线突破用买区半高近似
-    if mode in ("platform_break", "w_bottom_break") and z and z.get("level") is not None:
-        measured = round(z["level"] + max(atr_v * 2.0, (z.get("primary_hi") or z["level"]) - (z.get("primary_lo") or z["level"])), 2)
-        if measured > entry:
-            t1 = min(t1, measured) if resist else measured
+    door = entry + POKE_ATR * atr_v
+    # 下降趋势线突破注明的前高是要穿过的门，可以比 0.5×ATR 更远。
+    gate = (z or {}).get("through_gate")
+    # 0.15×ATR 以内视为同一道门。再高一丁点的枢轴不是门后的下一档墙。
+    if gate is not None:
+        door = max(door, gate + 0.15 * atr_v)
+    resist = sorted({h for i, h in Hs if h > door})
+    beyond = resist[0] if resist else None
+    upside_open = _upside_open(bars, entry, atr_v, beyond)
+    extend = round(entry + 2.0 * atr_v, 2)
+    cands = []
+    space_open = False
+    if upside_open:
+        t1 = round(entry + OPEN_ATR * atr_v, 2)
+    else:
+        if beyond is not None:
+            cands.append(beyond)
+        if mode in BREAKOUT_MODES:
+            # 突破是 T1 主做，因为穿过之后空间打开。
+            # 门后有更远的摆动高点，那一档才是目标；没有就用打开空间口径，不用 2×ATR。
+            if beyond is not None:
+                t1 = beyond
+            else:
+                t1 = round(entry + OPEN_ATR * atr_v, 2)
+                space_open = True
+            if t1 <= door:
+                t1 = round(door + OPEN_ATR * atr_v, 2)
+                space_open = True
+        else:
+            t1 = min(cands) if cands else extend
+            if gate is not None and t1 <= gate:
+                t1 = round(gate + 2.0 * atr_v, 2)
     # 区间高 = 传入 bars 窗口内最高（常见约 130 根），不是严格 250 日/52 周高
     hi_all = max(b["h"] for b in bars)
     t2 = hi_all if hi_all > t1 + 0.2 * atr_v else round(t1 + 2.0 * atr_v, 2)
@@ -2081,6 +2124,8 @@ def targets(bars, mode, z, atr_v, entry, Hs):
         "target1": round(t1, 2),
         "target2": round(t2, 2),
         "rr_target1": rr,
+        "upside_open": upside_open,
+        "space_open": space_open,
     }
 
 
@@ -2138,6 +2183,14 @@ def attach_stops_targets(plan, bars, atr_v, Hs):
         z["target1"] = tg["target1"]
         z["target2"] = tg["target2"]
         z["rr_target1"] = tg["rr_target1"]
+        if tg.get("upside_open") or tg.get("space_open"):
+            z["upside_open"] = True
+            prev = plan.get("note") or ""
+            if tg.get("upside_open"):
+                open_note = "创新高，上方压力已破，上涨空间打开"
+            else:
+                open_note = "突破之后上方没有更远的墙，上涨空间打开"
+            plan["note"] = f"{prev}；{open_note}" if prev else open_note
         if tg.get("rr_target1") is not None and tg["rr_target1"] < 1.0:
             # 突破类单：头顶最近的枢轴高会天然压低静态赔率（SDGR 2026-09-15
             # rr=0.17），这是结构失真，不代表机会变差。旧措辞「赔率差」会让
@@ -2423,6 +2476,12 @@ MA_RIDE_ABOVE_MIN = 12     # 近 20 根里站上 MA5 的根数下限（≥12 = �
 # 同日突破买（1.5×ATR 止损、持有 5 日）在远锚档反而最好（均R +0.278 / 收益 +1.68%），
 # ⇒ 远锚不是「趋势中段危险」，而是「新高加速、根本没得回踩」。
 MA_RIDE_ANCHOR_MAX_ATR = 1.5
+# 日线标签保持原词。周线、月线只改称呼，判据不变。再高的级别不看。
+RIDE_FRAME_NAMES = {
+    "day": {"ma5": "五日线", "ema10": "EMA10", "sma20": "MA20", "ma5_note": "MA5"},
+    "week": {"ma5": "5周线", "ema10": "周EMA10", "sma20": "20周线", "ma5_note": "5周线"},
+    "month": {"ma5": "5月线", "ema10": "月EMA10", "sma20": "20月线", "ma5_note": "5月线"},
+}
 
 
 def _ride_line_stats(bars, closes, levels):
@@ -2445,7 +2504,52 @@ def _ride_line_stats(bars, closes, levels):
     }
 
 
-def ma_ride_state(bars, atr_v=None):
+def fold_bars(bars, frame):
+    """日线收成周线或月线。一周按 ISO 周，一月按自然月。
+
+    开盘取该组第一根，收盘取最后一根，高低取极值，量相加。
+    未走完的当周、当月也保留为一根。
+    日期不可解析的根直接跳过（造不出周/月归属），**不得抛异常** ——
+    折叠是附加信息，不能因为一行脏日期把整个 plan_entry 打掉。
+    """
+    if frame not in ("week", "month"):
+        raise ValueError("frame 只接受 week 或 month")
+    groups = []
+    cur = None
+    key = None
+    for b in bars or []:
+        d = str(b.get("d") or "")[:10]
+        if len(d) < 10:
+            continue
+        try:
+            dt = datetime.date.fromisoformat(d)
+        except ValueError:
+            continue
+        if frame == "week":
+            iso = dt.isocalendar()
+            k = (iso[0], iso[1])
+        else:
+            k = (dt.year, dt.month)
+        if cur is None or k != key:
+            if cur:
+                groups.append(cur)
+            key = k
+            cur = {
+                "d": d, "o": b["o"], "h": b["h"], "l": b["l"], "c": b["c"],
+                "v": b.get("v") or 0,
+            }
+        else:
+            cur["h"] = max(cur["h"], b["h"])
+            cur["l"] = min(cur["l"], b["l"])
+            cur["c"] = b["c"]
+            cur["d"] = d
+            cur["v"] = (cur.get("v") or 0) + (b.get("v") or 0)
+    if cur:
+        groups.append(cur)
+    return groups
+
+
+def ma_ride_state(bars, atr_v=None, frame="day"):
     """判定最后一根是刚收复，还是已经沿着某一条均线上涨。
 
     线不写死五日线。MA5、EMA10、MA20 各自算「20 根斜率 > 0 且近 20 根 ≥12 根收在线上」。
@@ -2532,7 +2636,9 @@ def ma_ride_state(bars, atr_v=None):
                      if levels[k] and 0 <= (closes[k] - levels[k]) <= 1.0 * atr_v)
     else:
         ride10 = None
-    labels = {"ma5": "五日线", "ema10": "EMA10", "sma20": "MA20"}
+    names = RIDE_FRAME_NAMES.get(frame) or RIDE_FRAME_NAMES["day"]
+    labels = {"ma5": names["ma5"], "ema10": names["ema10"], "sma20": names["sma20"]}
+    ma5_note = names["ma5_note"]
     if chosen:
         state = "line_ride"
         label = labels[chosen_key]
@@ -2558,14 +2664,14 @@ def ma_ride_state(bars, atr_v=None):
     elif ma["slope20"] <= 0 and ma["above"] <= MA_RIDE_ABOVE_MIN - 1:
         state = "fresh_reclaim"
         note = (
-            f"【均线刚收复】MA5 20 根斜率 {ma['slope20']:+.1f}%（尚未转头），近 20 根只有 "
-            f"{ma['above']} 根收在线上。EMA10 / MA20 也没有形成沿线上行。"
+            f"【均线刚收复】{ma5_note} 20 根斜率 {ma['slope20']:+.1f}%（尚未转头），近 20 根只有 "
+            f"{ma['above']} 根收在线上。{labels['ema10']} / {labels['sma20']} 也没有形成沿线上行。"
             f"正是 T0 原定的「刚收复、贴墙蓄势」场景，过昨高成立。"
         )
     else:
         state = "mixed"
         note = (
-            f"【中间态】MA5 20 根斜率 {ma['slope20']:+.1f}%、近 20 根 {ma['above']} 根收在线上"
+            f"【中间态】{ma5_note} 20 根斜率 {ma['slope20']:+.1f}%、近 20 根 {ma['above']} 根收在线上"
             f"—— 既非刚收复，也没有一条均线达到沿线上行。"
         )
     # ★ 统一口径：`line*` 系列 = **被选中的那条线**（line_ride 时 = 回踩锚；new_high 时 =
@@ -2578,7 +2684,8 @@ def ma_ride_state(bars, atr_v=None):
         "state": state,
         "anchor": (chosen_key or far_key) if (chosen or far) else "ma5",
         "line": round(_pick["level"], 2),
-        "line_label": labels[chosen_key or far_key] if (chosen or far) else "五日线",
+        "line_label": labels[chosen_key or far_key] if (chosen or far) else labels["ma5"],
+        "frame": frame if frame in RIDE_FRAME_NAMES else "day",
         "line_slope20_pct": round(_pick["slope20"], 2),
         "line_above20": _pick["above"],
         "line_bounce20": _pick["bounce"],
@@ -3583,11 +3690,16 @@ def _plan_entry_core(bars, ev):
             if price_conf:
                 z = zone_at_level(neck, atr_v, last_c, "W底颈线突破(优先T1)", ev, bars)
                 z["anchor"] = "w_neckline"
+                if plat_p is not None and plat_p > last_c:
+                    z["through_gate"] = round(plat_p, 2)
                 note = (
                     f"W底颈线 {neck_txt}："
                     f"左底 {wpat['l1']['d']}@{round(wpat['l1']['price'], 2)} / "
                     f"右底 {wpat['l2']['d']}@{round(wpat['l2']['price'], 2)}；"
-                    f"结构止损看颈线下" + vol_note()
+                    f"结构止损看颈线下"
+                + (f"；平台高点 {z['through_gate']} 是要穿过的门，不是目标"
+                   if z.get("through_gate") else "")
+                + vol_note()
                 )
                 return pack(
                     "w_bottom_break", 1, "breakout", "W底颈线突破(优先T1)", True, note, z,
@@ -3610,10 +3722,15 @@ def _plan_entry_core(bars, ev):
             tl_txt = round(f_tl, 2)
             z = zone_at_level(f_tl, atr_v, last_c, "旗形下降趋势线突破(优先T1)", ev, bars)
             z["anchor"] = "flag_tl"
+            if plat_p is not None and plat_p > last_c:
+                z["through_gate"] = round(plat_p, 2)
             note = (
                 f"旗形突破：旗杆 {flag['pole_d0']}→{flag['pole_d1']} "
                 f"({round(flag['pole_lo'], 2)}→{round(flag['pole_hi'], 2)})，"
-                f"旗面下降趋势线 @{tl_txt}；结构止损看该线下" + vol_note()
+                f"旗面下降趋势线 @{tl_txt}；结构止损看该线下"
+                + (f"；平台高点 {z['through_gate']} 是要穿过的门，不是目标"
+                   if z.get("through_gate") else "")
+                + vol_note()
             )
             return pack(
                 "flag_tl_break", 1, "breakout", "旗形下降趋势线突破(优先T1)", True, note, z,
@@ -3637,8 +3754,12 @@ def _plan_entry_core(bars, ev):
             z = zone_at_level(tl_now, atr_v, last_c, "下降趋势线突破(次优先T2)", ev, bars)
             z["anchor"] = "down_tl"
             tgt_lv = plat_p if plat_p is not None else r1p
-            tgt = f"目标1先看平台沿 {round(tgt_lv, 2)}" if tgt_lv else "目标1看最近前高"
-            note = f"次优先T2，试错仓。未过前高则{tgt}；过前高升级为平台突破" + vol_note()
+            if tgt_lv is not None:
+                z["through_gate"] = round(tgt_lv, 2)
+                gate_txt = f"前高 {z['through_gate']} 是要穿过的门，不是目标；过了这道门升级为平台突破"
+            else:
+                gate_txt = "过前高升级为平台突破"
+            note = f"次优先T2，试错仓。{gate_txt}" + vol_note()
             return pack(
                 "downtrend_tl_break", 2, "breakout", "下降趋势线突破(次优先T2)", True, note, z,
             )
@@ -3882,9 +4003,22 @@ def apply_top_signal_gate(result, bars, ev=None, veto=None):
     return result
 
 
+def attach_higher_ride(result, bars):
+    """周线、月线沿线上涨。判据与日线相同，不改日线 mode / recommend / 止损。"""
+    if not isinstance(result, dict):
+        return result
+    for frame in ("week", "month"):
+        folded = fold_bars(bars, frame)
+        atr = atr14(folded) if len(folded) >= 2 else None
+        result["ma_ride_" + frame] = ma_ride_state(folded, atr, frame=frame)
+    return result
+
+
 def plan_entry(bars, ev):
     """公开入口：`_plan_entry_core` 的结果再套一层顶部标志 K 线闸门。"""
-    return apply_top_signal_gate(_plan_entry_core(bars, ev), bars, ev, _TOP_VETO)
+    result = apply_top_signal_gate(_plan_entry_core(bars, ev), bars, ev, _TOP_VETO)
+    result = TS_TOP.apply_month_blacklist(result, bars)
+    return attach_higher_ride(result, bars)
 
 
 def _t0_takeover(result, t0):
@@ -3949,6 +4083,17 @@ def _t0_takeover(result, t0):
     result["note"] = t0["note"]
     result["exec"] = t0["exec"]
     result["alt_tail_entry"] = t0["alt_tail_entry"]
+    # ★ 2026-09-26：T0 尾盘补救腿做成可成交单（中科飞测 688361 06-15）。
+    #   规则正文 alt_tail_entry 早已写「不过昨高 → 尾盘定夺」，但从未进订单表；
+    #   过前高摸不到时整段主升前仓落空。只挂在 T0 接管（非 line_ride 改道）上。
+    result["t0_tail"] = {
+        "trigger": t0["trigger"],
+        "hard_stop": t0["hard_stop"],
+        "fill": "d1_close",
+        "require": "d1_high < trigger && above_all_ma && close > hard",
+        "note": ("次日未过昨高、收盘仍站上 MA5/MA10/MA20 且高于硬止损"
+                 "⇒ 尾盘按收盘价成交（站上均线买，不必等墙）"),
+    }
     result["tier"] = "T0"
     result["grade"] = t0["grade"]
     result["buy_zone"] = z
@@ -4065,6 +4210,12 @@ def _t0_ride_redirect(result, t0, atr_v, last_c):
     )
     result["exec"] = ("回踩类可预挂限价单（买区在现价下方），不需要盘中盯守" if _below
                       else "回踩买区与现价重叠，按限价单在区内成交")
+    # ★ 2026-09-26：沿线改道按限价回升成交（兆易 603986 04-29）。
+    #   旧口径「昨收在区内 ⇒ 次日开盘必须落在区内才算买中」会丢掉低开后回升摸到线的单。
+    #   限价挂在线上：开盘已在买区内按开盘成交；否则日内触及限价成交；
+    #   开盘已破硬止损且全天未回到限价 ⇒ 不成交。
+    z["fills_policy"] = "limit_reclaim"
+    z["limit_px"] = round(line, 2)
     result["buy_zone"] = z
     result["stop_plan"] = {
         "struct": round(line, 2),
@@ -4388,8 +4539,12 @@ def evaluate(sym, data_file=None, eod=False):
     #   纯透传，不改 mode / recommend 语义（T0 是并行执行方案，先到先做）。
     #   ★ 2026-09-24 追加 `t0_held_for_ride`：line_ride 态下 T0 不接管，若这个
     #     标记被 rebuild 丢掉，报告就看不出「T0 条件成立但不该追」的原因。
-    for _k in ("ma_reclaim", "tier_t0", "t0_held_for_ride", "ma_ride", "ride_priority",
-               "ride_redirected", "top_signal", "top_signal_veto"):
+    for _k in ("ma_reclaim", "tier_t0", "t0_held_for_ride", "t0_tail",
+               "ma_ride", "ride_priority",
+               "ride_redirected", "ma_ride_week", "ma_ride_month",
+               "top_signal", "top_signal_veto",
+               "month_super_yin", "month_one_star", "month_star_pair",
+               "month_merged_star", "blacklist"):
         if plan.get(_k) is not None:
             out[_k] = plan[_k]
 

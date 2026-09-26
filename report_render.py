@@ -190,6 +190,17 @@ def build_kpis(a, n):
                           '近 20 根 %s 根在线上）</span>'
                           % (_cls, esc(_ride_any["state"]), esc(_rl),
                              num(_rs), int(_ra or 0)))
+    for _fk, _fcn in (("ma_ride_week", "周线"), ("ma_ride_month", "月线")):
+        _fr = p.get(_fk) or {}
+        if _fr.get("state") not in ("line_ride", "new_high"):
+            continue
+        _fl = _fr.get("line_label") or _fcn
+        if _fr["state"] == "line_ride":
+            badges.append('<span class="badge b-ok">%s沿%s上升（%s）</span>'
+                          % (esc(_fcn), esc(_fl), num(_fr.get("line"))))
+        else:
+            badges.append('<span class="badge b-ok">%s新高·无回踩锚（最近%s %s）</span>'
+                          % (esc(_fcn), esc(_fl), num(_fr.get("line"))))
     if _rp:
         badges.append('<span class="badge b-ok">优先级 = %s（%s）</span>'
                       % (esc(_rp.get("winner")), esc(_rp.get("why"))))
@@ -269,8 +280,12 @@ def build_best(a, n):
     if n.get("best_note"):
         parts.append(n["best_note"])
     else:
-        parts.append("本档在「买点在下方可隔夜预挂 + 不追高 + 不贴着止损线买 + 风险≥0.25×ATR」"
-                     "四条约束下 R 最高。")
+        if is_us:
+            parts.append("美股可当日离场。追涨档自己的 R≥1.5 就推荐，"
+                         "不因为下面还有 R 更大的回踩而改去等。")
+        else:
+            parts.append("本档在「买点在下方可隔夜预挂 + 不追高 + 不贴着止损线买 + 风险≥0.25×ATR」"
+                         "四条约束下 R 最高。")
     # ★ 股数口径（2026-09-22）：赔率列的「每股风险」是**矩阵账面止损**算的（用于排序），
     #   股数用的是**计划可执行的止损腿**。两者不同时必须说明，否则首屏 925 股会和
     #   执行方案的 预案单 757 股打架。
@@ -304,6 +319,19 @@ def build_mode_rows(a):
         ("区间涨幅（日线自算）", " ｜ ".join("%s %s" % (k.replace("d", " 日"), pct_plain(v, 2, "—"))
                                       for k, v in s["range_change"].items())),
     ]
+    # ★ 成交口径（2026-09-26）：引擎早已产出这两条，但渲染层一行都不打 ⇒ 老罗读不到、
+    #   等于没落地（回放实测各多买中一笔：中科飞测 688361 06-15、兆易创新 603986 04-29）。
+    #   它们改的是**怎么挂单**，与买区价位同等重要，必须出现在「模式卡与执行口径」里。
+    if z.get("fills_policy") == "limit_reclaim":
+        out.append(("成交口径（沿线限价）",
+                    "限价 <b>%s</b> —— 开盘已在买区内按开盘成交；否则日内回升触及即成交；"
+                    "开盘破硬止损且全天未回到限价 ⇒ 不成交" % num(z.get("limit_px"))))
+    _tt = p.get("t0_tail") or {}
+    if _tt:
+        out.append(("T0 尾盘补救腿",
+                    "次日未过昨高 <b>%s</b>、收盘仍站上 MA5/MA10/MA20 且 > 硬止损 <b>%s</b> "
+                    "⇒ 尾盘按收盘价成交（站上均线买，不必等墙）"
+                    % (num(_tt.get("trigger")), num(_tt.get("hard_stop")))))
     return kv_rows(out)
 
 
@@ -665,6 +693,14 @@ def build_summary(a, n):
                    % num(_tv.get("size_factor"), 2))
     else:
         _tv_txt = "无顶部标志 K 线"
+    # 一页汇总里的成交口径（2026-09-26）：只有出现时才写一行，避免常态噪音。
+    _fills = []
+    if z.get("fills_policy") == "limit_reclaim":
+        _fills.append("沿线限价成交 @ <b>%s</b>（日内回升触及即成交）" % num(z.get("limit_px")))
+    _tt = p.get("t0_tail") or {}
+    if _tt:
+        _fills.append("T0 尾盘腿：不过昨高 %s 且收盘站上三线 ⇒ 尾盘按收盘成交"
+                      % num(_tt.get("trigger")))
     out = [
         ("模式", "%s（%s）· recommend=%s" % (esc(p.get("mode")), esc(p.get("verdict")), p.get("recommend"))),
         ("顶部硬指标", _tv_txt),
@@ -685,6 +721,8 @@ def build_summary(a, n):
         ("位置分位", " / ".join("%s 日 %s%%" % (k, num(v["pct"], 1))
                            for k, v in a["struct"]["percentile"].items())),
     ]
+    if _fills:
+        out.append(("成交口径", "；".join(_fills)))
     return rows(out)
 
 
@@ -712,6 +750,13 @@ def build_top_signal(a, n):
                 '<h3>顶部标志 K 线（硬指标 · 跑个股必看）</h3>%s</div>'
                 % (_bc, inner))
 
+    ht = tv.get("higher_top") or {}
+    ht_html = ""
+    if ht.get("horizon") == "拉黑":
+        ht_html = "<p class='note'><b>%s</b></p>" % esc(ht.get("note"))
+    elif ht.get("note"):
+        ht_html = ("<p class='note'><b>%s</b>。日线买点不因此否决。</p>"
+                   % esc(ht.get("note")))
     tail = ("<p class='note'>本项只回答「有没有顶部标志 K 线」。形态当日无预测力"
             "（回测 t=1.64、同位置对照超额 +0.70 不显著）；真正被回测支持的是"
             "「次日走弱」（−6.64% / 胜率 12.1%），反包即推翻 ⇒ "
@@ -725,7 +770,7 @@ def build_top_signal(a, n):
         extra += ("<p class='note'>本次扫描：命中形态 %s 个，因「不是这一波高点」"
                   "排除 %s 个（低位同形态属看涨反转，不算顶部信号）。</p>"
                   % (num(tv.get("n_signals"), 0), num(tv.get("n_rejected"), 0)))
-        return _wrap(head + extra + tail)
+        return _wrap(head + extra + ht_html + tail)
 
     def _p(x):
         try:
@@ -758,7 +803,7 @@ def build_top_signal(a, n):
     warns = b.get("warn") or []
     warn_html = ("<p class='note'>⚠ " + "；".join(esc(w) for w in warns) + "</p>"
                  if warns else "")
-    return _wrap(head + "<table>" + rows(rows_l) + "</table>" + warn_html
+    return _wrap(head + "<table>" + rows(rows_l) + "</table>" + warn_html + ht_html
                  + "<p class='note'>自检：命中形态 %s 个 / 因「不是这一波高点」排除 %s 个；"
                    "完整避雷清单见 <code>references/top-signals.md</code>。</p>"
                    % (num(tv.get("n_signals"), 0), num(tv.get("n_rejected"), 0))

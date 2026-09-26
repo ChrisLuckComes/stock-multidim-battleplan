@@ -106,16 +106,39 @@ ck(any("T+1" in r for r in au["reasons"]), "理由含 T+1")
 ck(len(pb["checkpoints"]) >= 6, "时点清单 ≥6 条")
 ck(any("09:30" in t for t, _ in pb["checkpoints"]), "含开盘观察窗")
 
-# ── 6. 美股口径切换
+# ── 6. 美股口径：价梯 + 持仓习惯，不套 A 股「差几个点就等回踩」
 pu = OP.build(last=100.0, entry=98.0, stop=95.0, target=104.0,
               atr=2.0, market="US", code="PANW", shares=10)
 eq(pu["market"], "US", "市场标记 US")
 ck(pu["limit_pct"] is None, "美股无板限")
-ck("无涨跌停" in OP._strip(pu["bands"][0]["title"]) or
-   "跳空" in OP._strip(pu["bands"][0]["title"]), "①档改为异常跳空")
+eq([b["key"] for b in pu["bands"]],
+   ["not_recommended", "qualified", "recommend", "strong", "abandon"],
+   "美股五档：不推荐 / 合格 / 推荐 / 强烈推荐 / 放弃")
 ck("无集合竞价" in OP._strip(pu["auction"]["verdict"]), "美股无竞价段")
-ck(any("停" not in t and "睡前" in t for t, _ in pu["checkpoints"]),
-   "美股时点含睡前挂单")
+ck(any("睡前" in t for t, _ in pu["checkpoints"]), "美股时点含睡前")
+ck("2 倍" in OP._strip(pu["t1_note"]), "写明 2 倍 ETF 睡前平仓")
+ck("盘后" in OP._strip(pu["t1_note"]), "正股起来盘后确认止损")
+ck("不能盯盘" not in OP._strip(pu["t1_note"]), "不再写成不能交易")
+grades = dict((r["rr"], r["grade"]) for r in pu["ladder"])
+eq(grades[3.0], "强烈推荐", "R≥3 强烈推荐")
+eq(grades[2.5], "推荐", "2.5 仍在推荐，不到强烈推荐")
+eq(grades[2.0], "推荐", "R≥2 推荐")
+eq(grades[1.5], "合格", "R≥1.5 合格")
+eq(grades[1.0], "不推荐", "R≥1 仍低于门槛，不推荐")
+eq(OP.price_grade(95.0, 104.0, 95.0), "放弃", "价格到止损是放弃")
+eq(pu["entry_grade"], "推荐", "98 对 104/95 的 R=2，推荐")
+# 高价股差几美元：332 是计划，335 仍在合格线上沿
+ok = [r["entry"] for r in pu["ladder"] if r["rr"] == 1.5][0]
+ck(abs(ok - 98.60) < 0.02, "合格线上沿 98.60（实际 %.2f）" % ok)
+alab = OP.build(last=340.0, entry=332.0, stop=300.0, target=387.5,
+                market="US", code="ALAB", shares=5)
+alab_ok = [r["entry"] for r in alab["ladder"] if r["rr"] == 1.5][0]
+ck(abs(alab_ok - 335.0) < 0.02, "ALAB 例合格线上沿 335")
+eq(OP.long_grade(OP.long_rr(335.0, 387.5, 300.0)), "合格",
+   "335 碰到合格线，按方向做，不死等 332")
+eq(OP.price_grade(alab_ok, 387.5, 300.0), "合格",
+   "打印出来的合格线本身必须落在合格档")
+ck("等回踩" not in OP._strip(alab["bands"][1]["act"]), "合格档不写等回踩")
 
 # ── 7. notes 覆盖生效（新强联引擎默认锚不可用，必须覆盖）
 a850 = {"meta": {"code": "300850", "name": "新强联", "basis_close": 29.25,

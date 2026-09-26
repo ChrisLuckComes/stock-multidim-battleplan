@@ -488,17 +488,20 @@ def limit_touch_rate(bars, limit_px, horizon=5):
     return {"px": round(limit_px, 2), "pct": round(hits / n * 100, 1), "n": n, "horizon": horizon}
 
 
-def pick_recommend(rows, z):
-    """从全档里挑「可执行且赔率最高」的一条。
+def pick_recommend(rows, z, us=False):
+    """推荐档。A 股、美股分开。
 
-    过滤条件（都用文档里既有的判据，不自创新闸门）：
-      · 可预挂（买点在现价下方 → A 股限价单能隔夜挂）
-      · 买价 > 结构止损位（否则是「开仓即止损」）
-      · 买价 ≤ 买区上沿（否则是追高）
-      · 风险 ≥ 0.25×ATR（纸面赔率已在矩阵里剔除，这里再挡一次）
-      · 需回落不超过 4%（成交概率的代理指标，太深等于不成交）
-    在这些里取 R→t1 最大的一条。
+    A 股当日买入不能卖，仍在可预挂的回踩档里取 R 最大的一条。
+    美股可以随时离场：现价或现价上方的档自己 R≥1.5，就推荐这档追涨，
+    不因为下面还有 R 更大的回踩而改去等。
     """
+    if us:
+        return _pick_recommend_us(rows, z)
+    return _pick_recommend_cn(rows, z)
+
+
+def _pick_recommend_cn(rows, z):
+    """A 股：可预挂、不追高、不贴着止损、风险够，里面 R 最大的一条。"""
     struct_stop = z.get("struct_stop")
     zone_hi = z.get("primary_hi")
     feas = []
@@ -516,6 +519,33 @@ def pick_recommend(rows, z):
         feas.append(r)
     feas.sort(key=lambda r: -(r["r1"] if r["r1"] is not None else -999))
     return feas[0] if feas else None
+
+
+def _pick_recommend_us(rows, z):
+    """美股：追涨档 R≥1.5 就做。没有合格的追涨档，才退回 R≥1.5 的回踩。"""
+    struct_stop = z.get("struct_stop")
+    chase, pull = [], []
+    for r in rows:
+        if r.get("r1") is None or r["r1"] < 1.5:
+            continue
+        if struct_stop is not None and r["entry"] <= struct_stop:
+            continue
+        if r.get("risk_atr") is None or r["risk_atr"] < MIN_RISK_ATR:
+            continue
+        need = r.get("need_pct")
+        if need is not None and need < -4.0:
+            continue
+        if need is None or need >= 0:
+            chase.append(r)
+        else:
+            pull.append(r)
+    if chase:
+        chase.sort(key=lambda r: (-r["r1"], abs(r.get("need_pct") or 0)))
+        return chase[0]
+    if not pull:
+        return None
+    pull.sort(key=lambda r: -r["r1"])
+    return pull[0]
 
 
 def volprice_20d(bars):
@@ -819,7 +849,7 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
     entries = entry_candidates(bars, plan, probe_out, atr_v)
     odds = odds_matrix(entries, anchors, atr_v, t1, wall_far if wall_far else t2_engine, last_c)
     odds = annotate_odds(odds, z, atr_v, last_c)
-    rec = pick_recommend(odds, z)
+    rec = pick_recommend(odds, z, us=is_us)
     touch_px = None
     if rec and rec.get("entry") is not None and rec["entry"] < last_c:
         touch_px = rec["entry"]
@@ -1092,6 +1122,11 @@ def summarize(r):
     L.append("=" * 72)
     L.append(" 模式 %s（%s）recommend=%s  regime=%s" % (
         p.get("mode"), p.get("verdict"), p.get("recommend"), p.get("regime")))
+    for _fk, _fcn in (("ma_ride_week", "周线"), ("ma_ride_month", "月线")):
+        _fr = p.get(_fk) or {}
+        if _fr.get("state") in ("line_ride", "new_high"):
+            L.append(" %s %s %s %s" % (
+                _fcn, _fr["state"], _fr.get("line_label"), _fr.get("line")))
     if m.get("plan_warning"):
         L.append(" ★★ %s" % m["plan_warning"])
     # ★ 顶部标志 K 线硬指标：跑个股必看的一项（有信号才打，避免噪音）
@@ -1103,6 +1138,11 @@ def summarize(r):
                  % (_mk, _tv.get("exit_code", 0), _tv.get("advice")))
     elif _tv.get("state") == "invalidated":
         L.append(" 顶部硬指标：曾有顶部标志K线但已被反包推翻（形态失效），不构成限制")
+    _ht = _tv.get("higher_top")
+    if _ht and _ht.get("horizon") == "拉黑":
+        L.append(" ★★ %s" % _ht.get("note"))
+    elif _ht:
+        L.append(" ★★ %s（日线买点不因此改）" % _ht.get("note"))
     # ★ 叠加计数（七层）：只汇总不裁决。放在这里是因为它和顶部硬指标同属
     #   「看一眼就知道这单成色」的首屏信息，但性质相反 —— 顶部是指标是否决权，
     #   这里是解释力，**不能互相抵消**。
@@ -1115,6 +1155,17 @@ def summarize(r):
     L.append(" 结构止损 %s(%s) / 硬止损 %s(%s)  hard_dist_atr=%s" % (
         z.get("struct_stop"), z.get("struct_anchor"), z.get("hard_stop"),
         z.get("hard_anchor"), z.get("hard_dist_atr")))
+    # ★ 2026-09-26：两条**成交口径**以前只活在引擎里、人读输出一行都不打 ——
+    #   老罗读不到就等于没落地（回放实测这两条各多买中一笔：中科飞测 06-15 +83.0%、
+    #   兆易创新 04-29 +74.1%，且无副作用）。这里与报告/探针保持同一份文案来源。
+    if z.get("fills_policy") == "limit_reclaim":
+        L.append(" 成交口径   沿线限价成交：限价 %s（开盘已在买区内按开盘成交；否则日内"
+                 "回升触及即成交；开盘破硬止损且全天未回到限价 ⇒ 不成交）"
+                 % z.get("limit_px"))
+    _tt = p.get("t0_tail") or {}
+    if _tt:
+        L.append(" ★ T0 尾盘腿：次日未过昨高 %s、收盘仍站上 MA5/MA10/MA20 且 > 硬止损 %s "
+                 "⇒ 尾盘按收盘价成交" % (_tt.get("trigger"), _tt.get("hard_stop")))
     L.append(" 目标 t1=%s  t2=%s  远端墙=%s  ATH=%s  (rr_target1=%s)" % (
         r["targets"]["t1"], r["targets"]["t2_engine"], r["targets"]["wall_far"],
         r["targets"]["ath"], (p.get("targets") or {}).get("rr_target1")))

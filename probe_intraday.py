@@ -794,6 +794,17 @@ def probe(code, qty=None, account=None, asof=None, min_scale=5, replay=False,
            else f"{z.get('primary_lo')} ~ {z.get('primary_hi')}")
     print(f" 买区       : {_zt}"
           f"   防守位 {z.get('invalidation')}")
+    # ★ 成交口径（2026-09-26）：沿线改道后限价挂在线上、日内回升触及即成交；
+    #   T0 尾盘补救腿是「不过昨高时的第二条成交路径」。两条都在引擎里，探针必须打出。
+    if z.get("fills_policy") == "limit_reclaim":
+        print(" 成交口径   : 沿线限价成交 —— 限价 "
+              f"{z.get('limit_px')}（开盘已在买区内按开盘成交；否则日内回升触及即成交；"
+              "开盘破硬止损且全天未回到限价 ⇒ 不成交）")
+    _tt = plan.get("t0_tail") or {}
+    if _tt:
+        print(" T0 尾盘腿 : 次日未过昨高 "
+              f"{_tt.get('trigger')}、收盘仍站上 MA5/MA10/MA20 且 > 硬止损 "
+              f"{_tt.get('hard_stop')} ⇒ 尾盘按收盘价成交")
     _print_top_signal(plan)
     if z.get("stop_warning"):
         print(f" ⚠ 止损冲突 : {z['stop_warning']}")

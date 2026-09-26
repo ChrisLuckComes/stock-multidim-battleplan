@@ -200,6 +200,8 @@ class TestRideRedirect(unittest.TestCase):
         self.assertGreater(z["primary_hi"], z["level"])
         self.assertEqual(self.plan["path"], "A")
         self.assertEqual(self.plan["setup"], "pullback")
+        self.assertEqual(z.get("fills_policy"), "limit_reclaim")
+        self.assertEqual(z.get("limit_px"), z["level"])
 
     def test_hard_stop_below_zone_floor(self):
         z = self.plan["buy_zone"]
@@ -501,6 +503,69 @@ class TestEvaluatePassThrough(unittest.TestCase):
         self.assertIn("t0_held_for_ride", out,
                       "evaluate 重建 out 时必须透传 t0_held_for_ride，否则报告看不出改道原因")
         self.assertEqual(out["mode"], "line_pullback")
+
+
+def _friday_series(n, step):
+    """每周一根周五 K，收盘按 step 递增。用来直接喂周线判据。"""
+    out = []
+    d = datetime.date(2024, 1, 5)
+    px = 20.0
+    for _ in range(n):
+        px += step
+        out.append({"d": d.isoformat(), "o": round(px - 0.2, 2),
+                    "h": round(px + 0.4, 2), "l": round(px - 0.4, 2),
+                    "c": round(px, 2), "v": 1.0e6})
+        d += datetime.timedelta(days=7)
+    return out
+
+
+class TestHigherFrameRide(unittest.TestCase):
+    """周线、月线用和日线同一套成线判据。日线买法不因这两级改道。"""
+
+    def test_fold_week_keeps_last_close_and_extremes(self):
+        bars = _bars([10, 11, 9, 12, 13])
+        # _bars 从 2026-06-01 起逐日，含周末分组。只检查能收成多于一根。
+        folded = R.fold_bars(bars, "week")
+        self.assertGreaterEqual(len(folded), 1)
+        self.assertEqual(folded[-1]["c"], 13)
+        self.assertEqual(folded[0]["o"], bars[0]["o"])
+        self.assertEqual(max(b["h"] for b in folded), max(b["h"] for b in bars))
+
+    def test_week_and_month_line_ride(self):
+        weeks = _friday_series(48, 0.15)
+        sw = R.ma_ride_state(weeks, R.atr14(weeks), frame="week")
+        self.assertEqual(sw["state"], "line_ride")
+        self.assertIn("周", sw["line_label"])
+        months = []
+        d = datetime.date(2022, 1, 31)
+        px = 20.0
+        for _ in range(36):
+            px += 0.4
+            months.append({"d": d.isoformat(), "o": round(px - 0.3, 2),
+                           "h": round(px + 0.5, 2), "l": round(px - 0.5, 2),
+                           "c": round(px, 2), "v": 1.0e6})
+            y, m = d.year, d.month + 1
+            if m == 13:
+                y, m = y + 1, 1
+            d = datetime.date(y, m, 28)
+        sm = R.ma_ride_state(months, R.atr14(months), frame="month")
+        self.assertEqual(sm["state"], "line_ride")
+        self.assertIn("月", sm["line_label"])
+
+    def test_daily_label_stays_day(self):
+        bars = riding_series()
+        s = R.ma_ride_state(bars, R.atr14(bars))
+        self.assertEqual(s["frame"], "day")
+        self.assertNotIn("周", s["line_label"])
+        self.assertNotIn("月", s["line_label"])
+
+    def test_plan_exposes_frames_without_mode_change(self):
+        bars = riding_series()
+        ev, used, _ = R.build_ev(bars, drop_live=False, ticker="688999")
+        plan = R.plan_entry(used, ev)
+        self.assertEqual(plan["mode"], "line_pullback")
+        self.assertIn("ma_ride_week", plan)
+        self.assertIn("ma_ride_month", plan)
 
 
 if __name__ == "__main__":

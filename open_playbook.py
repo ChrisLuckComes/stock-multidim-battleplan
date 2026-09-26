@@ -63,6 +63,11 @@ GAP_UP_MAX = 0.02
 GAP_DN_VERIFY = 0.01
 # 观察窗：开盘后这段时间内不做买卖决定（波动最大、假信号最多）
 WATCH_MIN = 15
+# 美股做多价梯（与做空卡同一组门槛）。入场越高 R 越低。
+RR_LADDER = (3.0, 2.5, 2.0, 1.5, 1.0)
+RR_QUALIFIED = 1.5
+RR_RECOMMEND = 2.0
+RR_STRONG = 3.0
 
 NOTE_HEAD = (
     "本表只回答「开盘价落在哪、该做什么」，不回答「能不能买」"
@@ -96,6 +101,57 @@ def _round_px(p, board):
     return round(float(p) + 1e-9, 2)
 
 
+def long_rr(entry, target, stop):
+    """做多 R = (目标 − 入场) / (入场 − 止损)。入场不在止损与目标之间 → None。"""
+    if entry is None or target is None or stop is None:
+        return None
+    if not (stop < entry < target):
+        return None
+    return (target - entry) / (entry - stop)
+
+
+def max_entry_for_rr(target_rr, target, stop):
+    """止损与目标固定时，达到指定 R 的最高入场价。"""
+    return (target + target_rr * stop) / (1.0 + target_rr)
+
+
+def long_grade(rr):
+    """R≥3 强烈推荐，2≤R<3 推荐，1.5≤R<2 合格，低于 1.5 不推荐。"""
+    if rr is None or rr < RR_QUALIFIED:
+        return "不推荐"
+    if rr >= RR_STRONG:
+        return "强烈推荐"
+    if rr >= RR_RECOMMEND:
+        return "推荐"
+    return "合格"
+
+
+def price_grade(price, target, stop):
+    """一个价格只落一档。用价梯上已经四舍五入的价，避免 1.499 被判成不推荐。"""
+    if price is None or target is None or stop is None or target <= stop:
+        return None
+    if price <= stop:
+        return "放弃"
+    for row in long_ladder(target, stop):
+        if price <= row["entry"]:
+            return row["grade"]
+    return "不推荐"
+
+
+def long_ladder(target, stop):
+    """价梯。目标不高于止损时不出。"""
+    if target is None or stop is None or target <= stop:
+        return []
+    rows = []
+    for rr in RR_LADDER:
+        rows.append({
+            "rr": rr,
+            "entry": round(max_entry_for_rr(rr, target, stop), 2),
+            "grade": long_grade(rr),
+        })
+    return rows
+
+
 # ---------------------------------------------------------------- 主体
 
 def build(last, entry, stop, target=None, atr=None, board=None,
@@ -109,8 +165,9 @@ def build(last, entry, stop, target=None, atr=None, board=None,
     target    目标位（用于重算实际 R，可空）
     atr       ATR14（可空，仅用于显示 ×ATR）
     board     'gem'/'star'/'main'/'bse'，空则按 code 判（仅 A 股有意义）
-    market    'CN' / 'US' —— 美股无涨跌停、无集合竞价、T+0 但**不能盯盘**
-              ⇒ 相关段落自动切换口径，不得把 A 股规则套到美股上
+    market    'CN' / 'US' —— 美股无涨跌停、无集合竞价。做多出价梯，
+              不套 A 股「差几个点就等回踩」。半夜不盯盘：正股可拿过觉，
+              起来盘后确认止损；2 倍 ETF 睡前无论盈亏都平仓。
     upper_entry  buy 区上沿（在现价上方、不可预挂、只能盯盘），可空
     """
     is_cn = str(market or "CN").upper().startswith("CN")
@@ -139,9 +196,18 @@ def build(last, entry, stop, target=None, atr=None, board=None,
     def px(p):
         return _round_px(p, board)
 
-    bands = []
+    ladder = []
+    directions = []
+    if not is_cn:
+        bands, ladder, directions = _us_bands(entry, stop, target, shares)
+        hi_gap = None
+        lo_ok = None
+    else:
+        bands = []
+        hi_gap = None
+        lo_ok = None
 
-    # ── ① 一字 / 涨停开盘：买不到（硬约束）
+    # ── ① 一字 / 涨停开盘：买不到（硬约束）。美股不走这六档。
     if is_cn:
         b1 = {
             "key": "limit_up",
@@ -150,20 +216,14 @@ def build(last, entry, stop, target=None, atr=None, board=None,
             "act": ("<b>不成交、当日放弃</b>。涨停板排队属另一套玩法，不在本计划内。"
                     "挂单留着无意义，撤。"),
         }
-    else:
-        b1 = {
-            "key": "limit_up",
-            "title": "① 异常跳空高开（> +8%）",
-            "cond": "O ≥ %.2f" % up_limit,
-            "act": ("<b>不追</b>。美股无涨跌停保护 ⇒ 这种跳空的风险无法用止损定义。"
-                    "且买点在上方时<b>睡觉期间无法成交</b>（无 buy-stop），本计划不执行。"),
-        }
-    b1.update({"pos": "0 股", "stop": "—", "tone": "off"})
-    bands.append(b1)
+        b1.update({"pos": "0 股", "stop": "—", "tone": "off"})
+        bands.append(b1)
 
-    # ── ② 跳空高开（超过小高开阈值）：不追
-    hi_gap = px(last * (1 + GAP_UP_MAX))
-    bands.append({
+    # ── ② 跳空高开（超过小高开阈值）：不追。仅 A 股。
+    if is_cn:
+        hi_gap = px(last * (1 + GAP_UP_MAX))
+    if is_cn:
+        bands.append({
         "key": "gap_up",
         "title": "② 跳空高开（> +%.0f%%）" % (GAP_UP_MAX * 100),
         "cond": "%.2f ＜ O ＜ %.2f" % (hi_gap, up_limit),
@@ -176,8 +236,9 @@ def build(last, entry, stop, target=None, atr=None, board=None,
         "tone": "off",
     })
 
-    # ── ③ 小高开 / 平开（高于挂单价）：不成交，等回踩
-    bands.append({
+    # ── ③ 小高开 / 平开（高于挂单价）：不成交，等回踩。仅 A 股。
+    if is_cn:
+        bands.append({
         "key": "flat_up",
         "title": "③ 小高开 / 平开（在挂单价上方）",
         "cond": "%.2f ＜ O ≤ %.2f" % (entry, hi_gap),
@@ -189,9 +250,10 @@ def build(last, entry, stop, target=None, atr=None, board=None,
         "tone": "wait",
     })
 
-    # ── ④ 刚好符合（开盘价落在挂单价附近）
-    lo_ok = px(entry * (1 - GAP_DN_VERIFY))
-    bands.append({
+    # ── ④ 刚好符合（开盘价落在挂单价附近）。仅 A 股。
+    if is_cn:
+        lo_ok = px(entry * (1 - GAP_DN_VERIFY))
+        bands.append({
         "key": "match",
         "title": "④ ★ 刚好符合（最理想）",
         "cond": "%.2f ≤ O ≤ %.2f" % (lo_ok, entry),
@@ -202,8 +264,9 @@ def build(last, entry, stop, target=None, atr=None, board=None,
         "tone": "on",
     })
 
-    # ── ⑤ 深低开但未破止损：成交，但必须验证性质
-    bands.append({
+    # ── ⑤ 深低开但未破止损：成交，但必须验证性质。仅 A 股。
+    if is_cn:
+        bands.append({
         "key": "gap_dn",
         "title": "⑤ 低开（更深，但仍在止损位上方）",
         "cond": "%.2f ＜ O ＜ %.2f" % (stop, lo_ok),
@@ -216,22 +279,23 @@ def build(last, entry, stop, target=None, atr=None, board=None,
         "tone": "warn",
     })
 
-    # ── ⑥ 低开破止损：不接飞刀（硬约束）
-    bands.append({
-        "key": "below_stop",
-        "title": "⑥ 低开破止损（含跌停）",
-        "cond": ("O ≤ %.2f（跌停 %.2f）" % (stop, dn_limit)) if is_cn else ("O ≤ %.2f" % stop),
-        "act": ("<b>不接飞刀，开盘前撤单</b>。开盘已破 %.2f 而止损是「收盘破」口径 ⇒ "
-                "买入当天<b>既没有止损腿也卖不掉（T+1）</b> ⇒ 硬约束，禁买。"
-                "若当日收盘收复 %.2f 之上 ⇒ 次日<b>重跑引擎</b>重新评估，不自动恢复原单。" % (stop, stop)),
-        "pos": "0 股",
-        "stop": "—（结构已坏）",
-        "tone": "off",
-    })
+    # ── ⑥ 低开破止损：不接飞刀（硬约束）。仅 A 股。
+    if is_cn:
+        bands.append({
+            "key": "below_stop",
+            "title": "⑥ 低开破止损（含跌停）",
+            "cond": "O ≤ %.2f（跌停 %.2f）" % (stop, dn_limit),
+            "act": ("<b>不接飞刀，开盘前撤单</b>。开盘已破 %.2f 而止损是「收盘破」口径 ⇒ "
+                    "买入当天<b>既没有止损腿也卖不掉（T+1）</b> ⇒ 硬约束，禁买。"
+                    "若当日收盘收复 %.2f 之上 ⇒ 次日<b>重跑引擎</b>重新评估，不自动恢复原单。" % (stop, stop)),
+            "pos": "0 股",
+            "stop": "—（结构已坏）",
+            "tone": "off",
+        })
 
-    # 买区上沿（在现价上方、只能盯盘）单独提示
+    # 买区上沿（在现价上方、只能盯盘）单独提示。仅 A 股：美股看价梯，不看上沿在不在现价上方。
     upper_note = ""
-    if upper_entry and float(upper_entry) > last:
+    if is_cn and upper_entry and float(upper_entry) > last:
         upper_note = (
             "⚠ 买区上沿 %.2f 在现价上方 ⇒ <b>不可隔夜预挂</b>（A 股无 buy-stop），"
             "只能盯盘手动。本计划的挂单是下方的 %.2f，上沿不作挂单。" % (float(upper_entry), entry)
@@ -259,20 +323,135 @@ def build(last, entry, stop, target=None, atr=None, board=None,
         "upper_entry": (float(upper_entry) if upper_entry else None),
         "upper_note": upper_note,
         "bands": bands,
+        "ladder": ladder,
+        "directions": directions,
+        "entry_grade": long_grade(r_mult) if not is_cn else None,
         "auction": _auction_rules(stop, lot, is_cn),
-        "checkpoints": _checkpoints(entry, stop, is_cn),
-        "note": NOTE_HEAD,
+        "checkpoints": _checkpoints(entry, stop, is_cn, ladder),
+        "note": NOTE_HEAD if is_cn else US_NOTE_HEAD,
         "t1_note": T1_NOTE if is_cn else US_NOTE,
         "market": "CN" if is_cn else "US",
     }
     return pb
 
 
+def _us_bands(entry, stop, target, shares):
+    """美股做多五档：不推荐 / 合格 / 推荐 / 强烈推荐 / 放弃。A 股不走这里。"""
+    ladder = long_ladder(target, stop)
+    pos = ("%d 股" % shares) if shares else "按计划仓位"
+    hold = "正股拿过半夜；起来盘后确认是否打到 %.2f，再处理" % stop
+    if not ladder:
+        bands = [{
+            "key": "no_ladder",
+            "title": "价梯不出（缺目标）",
+            "cond": "目标未给定或目标 ≤ 止损",
+            "act": "没有目标就没有合格线。先补目标再下单。",
+            "pos": "0 股",
+            "stop": hold,
+            "tone": "wait",
+        }]
+        directions = [
+            "目标缺失，不写涨到哪里只看、杀回哪里再买。",
+            "正股可以拿着睡觉。起来后在盘后确认是否打到 %.2f，再处理。" % stop,
+            "2 倍 ETF 睡觉之前无论盈亏都平仓。",
+        ]
+        return bands, [], directions
+    by_rr = {}
+    for row in ladder:
+        by_rr[row["rr"]] = row["entry"]
+    ok_px = by_rr[RR_QUALIFIED]
+    rec_px = by_rr[RR_RECOMMEND]
+    strong_px = by_rr[RR_STRONG]
+    where = _plan_where(entry, stop, strong_px, rec_px, ok_px)
+    bands = [
+        {
+            "key": "not_recommended",
+            "title": "① 不推荐",
+            "cond": "价格 &gt; %.2f" % ok_px,
+            "act": "<b>不买</b>。R 低于 1.5。%s" % _on_band(where, "不推荐"),
+            "pos": "0 股",
+            "stop": "—",
+            "tone": "off",
+        },
+        {
+            "key": "qualified",
+            "title": "② 合格",
+            "cond": "%.2f &lt; 价格 ≤ %.2f" % (rec_px, ok_px),
+            "act": "<b>买</b>。1.5 ≤ R &lt; 2。到价就做，不必死等更低一档。%s" % _on_band(where, "合格"),
+            "pos": pos,
+            "stop": hold,
+            "tone": "on",
+        },
+        {
+            "key": "recommend",
+            "title": "③ 推荐",
+            "cond": "%.2f &lt; 价格 ≤ %.2f" % (strong_px, rec_px),
+            "act": "<b>买</b>。2 ≤ R &lt; 3。%s" % _on_band(where, "推荐"),
+            "pos": pos,
+            "stop": hold,
+            "tone": "on",
+        },
+        {
+            "key": "strong",
+            "title": "④ 强烈推荐",
+            "cond": "%.2f &lt; 价格 ≤ %.2f" % (stop, strong_px),
+            "act": "<b>买</b>。R ≥ 3。%s" % _on_band(where, "强烈推荐"),
+            "pos": pos,
+            "stop": hold,
+            "tone": "on",
+        },
+        {
+            "key": "abandon",
+            "title": "⑤ 放弃",
+            "cond": "价格 ≤ %.2f" % stop,
+            "act": ("<b>不新开</b>。已经拿着的正股不必半夜砍，起来后在盘后确认"
+                    "是否打到 %.2f，再处理。" % stop),
+            "pos": "0 股",
+            "stop": hold,
+            "tone": "off",
+        },
+    ]
+    directions = [
+        "高于 %.2f：不推荐，不买。" % ok_px,
+        "高于 %.2f、不超过 %.2f：合格，买。" % (rec_px, ok_px),
+        "高于 %.2f、不超过 %.2f：推荐，买。" % (strong_px, rec_px),
+        "高于 %.2f、不超过 %.2f：强烈推荐，买。" % (stop, strong_px),
+        "不超过 %.2f：放弃，不新开。" % stop,
+    ]
+    return bands, ladder, directions
+
+
+def _on_band(where, name):
+    if where == name:
+        return "计划挂单在本档。"
+    return ""
+
+
+def _plan_where(entry, stop, strong_px, rec_px, ok_px):
+    """计划挂单价落在哪一档。返回档名，套不进就空。"""
+    if entry <= stop:
+        return "放弃"
+    if entry <= strong_px:
+        return "强烈推荐"
+    if entry <= rec_px:
+        return "推荐"
+    if entry <= ok_px:
+        return "合格"
+    return "不推荐"
+
+
 US_NOTE = (
-    "⚠ 美股没有涨跌停、没有集合竞价、T+0 可当日卖出 —— 但老罗<b>不能盯盘</b>"
-    "（北京时间 21:30–04:00）⇒ 实际只剩<b>收盘轨</b>一条止损腿。"
-    "因此这里的「不追」不只是赔率问题，更是<b>该腿不可执行</b>的问题："
-    "盘中破位无人处理，只能等次日晨起自查。"
+    "半夜不好盯盘。正股可以拿着睡觉，起来之后在盘后确认是否打到止损，再处理。"
+    "2 倍 ETF 睡觉之前无论盈亏都平仓，不拿过半夜。"
+    "日线结构只认正规时段的收盘。"
+    "盘前、盘后、夜盘到价可以交易，盈亏算数；流动性差只影响滑点。"
+    "五档：R≥3 强烈推荐，2≤R&lt;3 推荐，1.5≤R&lt;2 合格，R&lt;1.5 不推荐，价格≤止损放弃。"
+    "前三档买，后两档不买。"
+)
+
+US_NOTE_HEAD = (
+    "本表回答美股价格落在价梯的哪一档。止损和目标固定，入场越高 R 越低。"
+    "日线结构只认正规时段收盘。"
 )
 
 
@@ -280,18 +459,16 @@ def _auction_rules(stop, lot, is_cn=True):
     """集合竞价：买不买。A 股默认答案 = 不买，理由三条。"""
     if not is_cn:
         return {
-            "verdict": "美股无集合竞价 —— 只有盘前（Pre-market）与开盘连续竞价",
+            "verdict": "美股无集合竞价。盘前、盘后、夜盘都能下单",
             "reasons": [
-                "① 盘前流动性薄、价差大，成交价常偏离真实供需 ⇒ 不在盘前挂单。",
-                "② 老罗不能盯盘（北京时间 21:30–04:00）⇒ 开盘后无人处理破位，"
-                "只剩<b>收盘轨</b>一条止损腿。",
-                "③ 券商（致富）无原生条件单 / 止损单 ⇒ 买点在上方时"
-                "<b>睡觉期间根本成交不了</b>，只能用「买价替代止损」或仓位减半。",
+                "① 半夜不好盯盘。正股拿着睡觉，起来后在盘后确认是否打到止损，再处理。",
+                "② 2 倍 ETF 睡觉之前无论盈亏都平仓，不拿过半夜。",
+                "③ 盘前、盘后、夜盘流动性差只影响滑点。价格到了，盈亏都算数。",
             ],
             "rules": [
-                "挂单走 <b>GTC 限价单</b>，睡前挂好；成交与否次日晨起自查。",
-                "止损按<b>收盘破</b> %.2f 执行 ⇒ 触发则次日开盘市价清，不博反抽。" % stop,
-                "跨财报持仓另有时间闸门（财报前必须减仓或离场），不在此表范围。",
+                "合格线以内用限价买，不必死等计划挂单价那一档。",
+                "价格跌到 ≤ %.2f 不新开。已持有的正股等盘后确认再处理。" % stop,
+                "日线结构（收盘站上、收盘破）只认正规时段收盘。",
             ],
         }
     return {
@@ -313,13 +490,18 @@ def _auction_rules(stop, lot, is_cn=True):
     }
 
 
-def _checkpoints(entry, stop, is_cn=True):
+def _checkpoints(entry, stop, is_cn=True, ladder=None):
     if not is_cn:
+        ok_px = None
+        for row in ladder or []:
+            if row.get("rr") == RR_QUALIFIED:
+                ok_px = row["entry"]
+        buy = ("价格 ≤ %.2f（R≥1.5）可以买。" % ok_px) if ok_px else "合格线出来之前不买。"
         return [
-            ("睡前", "挂 GTC 限价单于 %.2f（不挂止损单 —— 券商不支持）。" % entry),
-            ("次日晨起", "查是否成交；成交则记成本，未成交不<b>下移</b>挂单价。"),
-            ("收盘后", "止损按<b>收盘破</b> %.2f 判定 ⇒ 触发则下一交易日开盘市价清。" % stop),
-            ("每周", "均线已滚动 ⇒ 挂单价与止损位<b>必须重算</b>，不得沿用旧快照。"),
+            ("睡前", "正股可以拿着睡觉。2 倍 ETF 无论盈亏都平仓，不拿过半夜。"),
+            ("起来·盘后", "确认正股是否打到止损 %.2f，打到就处理。" % stop),
+            ("全时段", buy + "盘前、盘后、夜盘到价都算数。"),
+            ("收盘", "日线结构只认正规时段收盘。收盘破 %.2f 才算结构止损。" % stop),
         ]
     return [
         ("09:15–09:20", "可撤单窗口。若要试探性挂单，只能在这段内（撤得掉）。"),
@@ -354,9 +536,17 @@ def format_md(pb):
     L.append(" 时点：")
     for t, d in pb["checkpoints"]:
         L.append("     %-12s %s" % (t, _strip(d)))
+    if pb.get("ladder"):
+        L.append(" 价梯（入场 ≤ 该价才达到对应 R）：")
+        for row in pb["ladder"]:
+            mark = " ← 门槛" if row["rr"] == RR_QUALIFIED else ""
+            L.append("     R≥%.1f  ≤ %.2f  %s%s" % (
+                row["rr"], row["entry"], row["grade"], mark))
+    for line in pb.get("directions") or []:
+        L.append("     · %s" % line)
     if pb.get("upper_note"):
         L.append(" " + _strip(pb["upper_note"]))
-    L.append(" " + pb["note"])
+    L.append(" " + _strip(pb["note"]))
     return "\n".join(L)
 
 
@@ -388,8 +578,24 @@ def format_html(pb):
                      cls, b["title"], b["cond"], b["act"], b["pos"], b["stop"]))
     h.append("</tbody></table>")
 
+    if pb.get("ladder"):
+        h.append("<h4 style='margin-top:14px'>做多价梯（止损、目标固定，入场越高 R 越低）</h4>")
+        h.append("<table class='tbl'><thead><tr>"
+                 "<th>R</th><th>入场价 ≤</th><th>档</th></tr></thead><tbody>")
+        for row in pb["ladder"]:
+            mark = " ← 门槛" if row["rr"] == RR_QUALIFIED else ""
+            h.append("<tr><td>R≥%.1f</td><td><b>%.2f</b></td><td>%s%s</td></tr>" % (
+                row["rr"], row["entry"], row["grade"], mark))
+        h.append("</tbody></table>")
+    if pb.get("directions"):
+        h.append("<ul class='li'>")
+        for line in pb["directions"]:
+            h.append("<li>%s</li>" % line)
+        h.append("</ul>")
+
     a = pb["auction"]
-    h.append("<h4 style='margin-top:14px'>集合竞价：买不买？</h4>")
+    head = "集合竞价：买不买？" if pb.get("market") != "US" else "时段与持仓"
+    h.append("<h4 style='margin-top:14px'>%s</h4>" % head)
     h.append("<p><span class='badge b-bad'>%s</span></p>" % a["verdict"])
     h.append("<ul class='li'>")
     for r in a["reasons"]:

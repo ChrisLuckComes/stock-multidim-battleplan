@@ -53,6 +53,7 @@ except Exception:
     pass
 
 import rule123 as R          # noqa: E402  指标只走引擎口径（Wilder ATR / SMA）
+from open_playbook import long_grade as OP_GRADE  # noqa: E402  五档与做多同一套
 
 # 压力/支撑/RSI/多空转换地图 —— 2026-09-24 抽到独立模块 levels.py
 # （A 股 T0 / 缩量回调同样可调，市场无关）。这里 re-export 保持旧调用名可用。
@@ -235,8 +236,9 @@ def main():
     print("── RR 临界入场价（止损锚固定时入场越低 RR 单调递减）──")
     for rr in RR_LADDER:
         e = min_entry_for_rr(rr, t1, stop)
-        tag = " ← 门槛线" if rr == 1.5 else (" ← 原空点档" if rr == 3.0 else "")
-        print(f"  RR≥{rr:.1f}  ⇔  入场价 ≥ {e:.2f}{tag}")
+        tag = " ← 门槛线" if rr == 1.5 else (" ← 强烈推荐线" if rr == 3.0 else "")
+        grade = "放弃" if e >= stop else OP_GRADE(rr)
+        print(f"  RR≥{rr:.1f}  ⇔  入场价 ≥ {e:.2f}  {grade}{tag}")
     print()
     print("── 多空转换地图（压力做空 · 支撑平空 · 收盘站稳反多）──")
     anchor = spot if spot else ref
@@ -305,7 +307,7 @@ def main():
             print(f"  {w}")
     print()
     print("纪律：① 反抽到空点才空 ② RR<1.5 不做 ③ 止损后同板块反手风险减半"
-          " ④ 日内收盘平（2x 衰减隔夜起算）")
+          " ④ 2 倍 ETF 睡觉前无论盈亏都平仓（正股可以拿过半夜，起来盘后确认止损）")
 
 
 def now_bj():
