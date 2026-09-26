@@ -4,12 +4,22 @@
 方向感知结构判定（延续 vs 反转）
 ================================
 六种买法（当日只给一种，由 plan_entry 输出 mode）：
-  1. platform_break 平台突破（优先T1）：近 3 根内收盘站上活平台沿且放量，买突破位
+  T1 内部顺序（2026-09-26 老罗改：**平台 ⟷ 牛旗 并列**，W底 退到第三）：
+  1. platform_break 平台突破（优先T1）：近 3 根内收盘站上活平台沿，买突破位
      （活沿见 living_platform；123 的 R1 仍是 P0–P1 反应高，二者不是同一个东西）
-  2. w_bottom_break W底颈线突破（优先T1）：双底后收盘站上颈线且放量，买颈线
-  3. flag_tl_break 旗形下降趋势线突破（优先T1）：主升旗杆后的下降整理旗面，收盘站上旗面下降趋势线且放量
+  2. flag_tl_break 旗形/牛旗突破（优先T1，与平台并列）：大阳/爆量旗杆后的下降整理旗面，
+     收盘站上旗面下降趋势线即买（「过牛旗即是买点」）。未过线时另给 pre_breakout 的
+     buy-stop 埋伏单（触发价 = 下一根旗面线值 +0.05×ATR，硬止损线下 1.0×ATR）。
+     单票独立出口：`python gates/bull_flag_check.py <code> [--us]`。
+     ★ flag_len 是**旗面自身长度**（旗杆末端→突破前最后一根），**不含突破后站线根数**
+     —— 否则旗面 ≥18 根的票会在突破后第二天整体消失（MRNA 2026-08/09）。
+  3. w_bottom_break W底颈线突破（优先T1）：双底后收盘站上颈线且放量，买颈线
   4. line_pullback 沿线回踩（优先T1）：沿着肉眼可见的线上升，回踩该线买；默认 P0→P1 上升趋势线，仅明显贴均线才改用该均线
-  5. impulse_pause 大阳后缩量回踩（次优先T2）：大阳线之后回踩缩量找买点
+  5. impulse_pause 大阳后缩量回踩（次优先T2）：大阳线之后回踩缩量找买点。
+     ★ 与牛旗是**同一件事的两个阶段**（老罗 2026-09-26）：本档只说明「整理成立」
+     （预测性·试错仓），**「缩量」不是买点**；确认买点 = 收盘站上整理段上沿
+     （水平→platform_break / 下倾→flag_tl_break，均 T1，判定上排在前面）。
+     买区带 confirm_edge / confirm_kind / confirm_tier 指明该盯哪条确认线。
   6. downtrend_tl_break 下降趋势线突破（次优先T2）：下跌段反转，近 3 根内站上下降高点连线；与旗形区分，无旗杆则才用本模式
   wait = 没有可执行模式，或距买位 >2×ATR
 
@@ -743,6 +753,16 @@ ANCHOR_LABEL = {
     "yang_digest": "大阳调整区",
     "yang_gap": "缺口下沿",
     "down_tl": "下降趋势线",
+}
+
+# 埋伏单候选的展示名。平台版 `pre_breakout_order` **不写 `anchor` 字段**
+# （它只有一个水平沿）⇒ 必须把 None 映射成「活平台沿」，否则「另有…同样够格」
+# 那行提示会退化成默认文案。
+PRE_BREAKOUT_LABEL = {
+    None: "活平台沿",
+    "platform_lip": "活平台沿",
+    "down_tl": "下降趋势线",
+    "flag_tl": "牛旗面线",
 }
 
 # A股开盘至收盘（含午休）：当日 K 线未走完，量能不可信
@@ -1566,12 +1586,20 @@ def detect_bull_flag(bars, Hs, atr_v, lookback=45):
     flag_hs = [(i, h) for i, h in Hs if i > pe]
     pb = pa = None
     if len(flag_hs) >= 2:
+        _cand = None
         for k in range(len(flag_hs) - 1, 0, -1):
             i2, p2 = flag_hs[k]
             i1, p1 = flag_hs[k - 1]
             if p2 < p1 and i2 > i1:
-                pb, pa = (i1, p1), (i2, p2)
+                _cand = ((i1, p1), (i2, p2))
                 break
+        # ★ 2026-09-26 新增守卫：旗面线的锚点必须落在**旗面内**。
+        #   突破之后出现的新高也会进 Hs，一旦被选成 pa，线就被拖到突破价上
+        #   —— 即 TEM 家族的「形态在突破当天自我消失」。判据用「该候选线自己的
+        #   days_above」反推旗面末根，锚点不得晚于它。
+        if _cand is not None:
+            if _cand[1][0] <= n - 1 - days_above_line(bars, _cand[0], _cand[1]):
+                pb, pa = _cand
     if pb is None or pa is None:
         # 枢轴不够（下移段内 w=3 不产生枢轴高）→ 用近端局部高点检出。
         # 旧实现取「旗杆后右半段最高点」近似，突破那根自己会成为右半段最高点，
@@ -1594,11 +1622,28 @@ def detect_bull_flag(bars, Hs, atr_v, lookback=45):
             pb, pa = (h1, bars[h1]["h"]), (h2, bars[h2]["h"])
     if pb is None or pa is None:
         return None
-    # 旗面通常 3–20 根；更长是通道不是旗。回撤不超过旗杆 2/3。
-    flag_len = n - 1 - pe
+    # ★★ 2026-09-26：`flag_len` 是**旗面自身的长度**（旗杆末端 → 突破前最后一根），
+    #   **不含突破之后连续站线的根数**。
+    #
+    #   旧口径 `flag_len = n - 1 - pe` 会随时间无限增长，于是「旗面 ≤20 根」这道
+    #   闸门会在突破后**第二天**把整个形态判死：MRNA 2026-08/09 的旗面 19 根，
+    #   09-17 过旗面线当天 flag_len=20 尚可 → 09-18 变 21 → detect_bull_flag
+    #   直接返回 None，**形态在最该被看见的时候消失**。
+    #   更要命的是这两道规则本来互相矛盾：下游 `flag_tl_break` 要求
+    #   `days_above_tl ∈ [1,3]`（3 根新鲜窗口），而 flag_len≤20 使这个窗口对
+    #   ≥18 根的旗面根本不可达（要在线上 3 根，flag_len 至少要 21）。
+    #   改口径后：旗面长度稳定（MRNA 恒为 19），新鲜度只由 days_above_tl 管。
+    days_above = days_above_line(bars, pb, pa)
+    flag_end = n - 1 - days_above
+    flag_len = flag_end - pe
+    if flag_len < 3:
+        return None                     # 旗面太短 = 整理还没成形就突破了
     if flag_len > 20:
+        return None                     # 更长是通道不是旗
+    flag_bars = bars[pe + 1:flag_end + 1]
+    if not flag_bars:
         return None
-    flag_low = min(x["l"] for x in bars[pe + 1:])
+    flag_low = min(x["l"] for x in flag_bars)
     if best_pole["hi"] - flag_low > 0.66 * (best_pole["hi"] - best_pole["lo"]):
         return None
     tl_now = line_val(pb, pa, n - 1)
@@ -1606,9 +1651,6 @@ def detect_bull_flag(bars, Hs, atr_v, lookback=45):
         return None
     # 旗面期间多数收盘应在旗杆高点之下、旗杆中点之上（未彻底破位）
     mid_pole = (best_pole["lo"] + best_pole["hi"]) / 2.0
-    flag_bars = bars[pe + 1:]
-    if not flag_bars:
-        return None
     below_pole_hi = sum(1 for x in flag_bars if x["c"] < best_pole["hi"]) / len(flag_bars)
     above_mid = sum(1 for x in flag_bars if x["l"] > mid_pole * 0.98) / len(flag_bars)
     if below_pole_hi < 0.6:
@@ -1625,9 +1667,11 @@ def detect_bull_flag(bars, Hs, atr_v, lookback=45):
         "pb": {"i": pb[0], "price": pb[1], "d": bars[pb[0]]["d"]},
         "pa": {"i": pa[0], "price": pa[1], "d": bars[pa[0]]["d"]},
         "tl_now": tl_now,
-        "days_above_tl": days_above_line(bars, pb, pa),
+        "days_above_tl": days_above,
         "mid_pole": mid_pole,
         "flag_len": flag_len,
+        # 旗面末根索引（突破前最后一根）。报告/CLI 用来说清「过线是从哪根开始的」。
+        "flag_end": flag_end,
     }
 
 
@@ -2357,6 +2401,97 @@ def pre_breakout_line_order(bars, ev, atr_v, last_c, rvol=None):
             f"收盘在线下 {dist_atr:.2f}×ATR；挂 buy-stop {trigger} 于线上方埋伏，"
             f"触发即「画斜线突破」确认。硬止损 {hard}（线下1×ATR=假突破）；"
             f"突破后按移动止损管理，不设固定目标。此为埋伏单，与当日买点并存、先到先做"
+        ),
+    }
+
+
+def _confirm_edge(plat_p, flag, last_c):
+    """整理段上沿线 —— **过它才算确认买点**（老罗 2026-09-26 合并口径）。
+
+    「大阳之后缩量不代表次日一定能涨，但是如果涨了过了牛旗就是买点」⇒
+    整理段上沿有两种几何，都是同一件事：
+      · 水平 → 活平台沿 → `platform_break`(T1)
+      · 下倾 → 牛旗面线 → `flag_tl_break`(T1)
+    取现价**上方最近**的一条作为「该盯的确认线」。返回 {level,label,tier} 或 None。
+
+    注：旗面线用 `tl_now`（当根线值），与 `flag_tl_break` 的 `f_tl` 同口径 ——
+    不要换成下一根线值，否则「确认线」与「模式触发线」会差一根。
+    """
+    if last_c is None:
+        return None
+    cands = []
+    if plat_p is not None and plat_p > last_c:
+        cands.append({"level": round(plat_p, 2),
+                      "label": "活平台沿（水平）", "tier": "平台突破·T1"})
+    if flag and flag.get("tl_now") is not None and flag["tl_now"] > last_c:
+        cands.append({"level": round(flag["tl_now"], 2),
+                      "label": "牛旗面线（下倾）", "tier": "牛旗突破·T1"})
+    if not cands:
+        return None
+    return min(cands, key=lambda x: x["level"])
+
+
+def pre_breakout_flag_order(bars, flag, atr_v, last_c, rvol=None):
+    """牛旗面线预备突破单：价格贴在**旗面下降线**下方时，在线上方挂 buy-stop。
+
+    老罗 2026-09-26：「很多时候我们并不能第一时间买到突破，而且突破放量或爆量，
+    自然回踩是非常正常的……过牛旗即是买点」。⇒「过牛旗」这个买点必须能**提前挂**，
+    否则又变成顶着突破那一刻追高。触发价取**下一根**的线值 —— 线在下移，
+    用当日线值会把单子挂高。
+
+    与 `pre_breakout_line_order`（锚 `ev["down_tl"]` 的泛化斜线）的区别：这条锚的是
+    **旗形自己的旗面线**。两者常常重合（MRNA 2026-09：旗面线 148.98 = down_tl 148.98），
+    但旗面线由「旗杆之后的下降摆动高」定义、更贴形态，且往往**更低**（MRNA 09-16：
+    旗面线 146.39 vs down_tl 148.16）—— 埋伏单越低，1R 越小、同预算仓位越大。
+    不重合时由调用方按 `dist_atr` 取更近的那条，并列挂出。
+
+    止损给线下 1.0×ATR（同斜线版口径；平台版是 0.5×ATR，因为平台沿是硬边）。
+    """
+    if not flag or not atr_v or atr_v <= 0 or last_c is None:
+        return None
+    if not flag.get("pb") or not flag.get("pa"):
+        return None                          # 手工构造的 ev 可能只写 tl_now（测试桩）
+    pb = (flag["pb"]["i"], flag["pb"]["price"])
+    pa = (flag["pa"]["i"], flag["pa"]["price"])
+    if pa[1] >= pb[1]:
+        return None                          # 必须是下移线
+    nxt = len(bars)
+    line_next = line_val(pb, pa, nxt)
+    if line_next is None or last_c >= line_next:
+        return None                          # 已站上 → 交给 flag_tl_break，不挂埋伏单
+    dist_atr = (line_next - last_c) / atr_v
+    if dist_atr > 1.2:                       # 离得太远，埋伏无意义
+        return None
+    trigger = round(line_next + 0.05 * atr_v, 2)
+    if trigger <= last_c:
+        return None
+    hard = round(line_next - 1.0 * atr_v, 2)
+    from_txt = (f"{flag['pb']['d']}高{flag['pb']['price']:.2f}→"
+                f"{flag['pa']['d']}高{flag['pa']['price']:.2f}")
+    return {
+        "order": "buy-stop",
+        "anchor": "flag_tl",
+        "level": round(line_next, 2),
+        "trigger": trigger,
+        "hard_stop": hard,
+        "risk_per_share": round(trigger - hard, 2),
+        "dist_atr": round(dist_atr, 2),
+        "line_from": from_txt,
+        "flag_len": flag.get("flag_len"),
+        "priority": 1,
+        "tier": "T1",
+        "setup_kind": "pre_breakout",
+        "role": "primary_entry",
+        "cushion_note": (
+            "★ 买点低于突破确认日收盘价：触发成交后当日收盘多半已带浮盈垫，"
+            "垫子就是次日（A股 T+1）低开的缓冲"
+        ),
+        "note": (
+            f"牛旗面线（{from_txt}，旗面 {flag.get('flag_len')} 根）下移中，"
+            f"下一根线值 {round(line_next, 2)}，收盘在线下 {dist_atr:.2f}×ATR；"
+            f"挂 buy-stop {trigger} 于线上方埋伏，触发即「过牛旗」确认。"
+            f"硬止损 {hard}（线下1×ATR=假突破）；突破后按移动止损管理，不设固定目标。"
+            f"此为埋伏单，与当日买点并存、先到先做"
         ),
     }
 
@@ -3331,6 +3466,10 @@ def _plan_entry_core(bars, ev):
     breakout_modes = (
         "platform_break", "w_bottom_break", "flag_tl_break", "downtrend_tl_break",
     )
+    # 旗形只解一次，供「牛旗面线埋伏单」与后续模式块共用（避免在 pack 闭包里重算）。
+    _flag_ev = ev.get("bull_flag")
+    if _flag_ev is None:
+        _flag_ev = detect_bull_flag(bars, Hs_all, atr_v)
 
     def pack(mode, priority, setup, verdict, recommend, note, buy_zone=None, path=None):
         z = buy_zone if buy_zone is not None else bz_line
@@ -3446,7 +3585,10 @@ def _plan_entry_core(bars, ev):
         # 两种挂法：水平平台沿（平台版）/ 下移斜线（下降趋势线版）；同时够格取更近的。
         pb_plat = pre_breakout_order(bars, ev, atr_v, plat, last_c, rvol)
         pb_line = pre_breakout_line_order(bars, ev, atr_v, last_c, rvol)
-        cands = [x for x in (pb_plat, pb_line) if x]
+        # ★ 2026-09-26：牛旗面线版埋伏单。与斜线版同族，但锚的是**旗形自己的旗面线**。
+        #   两者常常重合、旗面线往往更低（MRNA 09-16：146.39 vs 148.16）⇒ 埋伏价更好。
+        pb_flag = pre_breakout_flag_order(bars, _flag_ev, atr_v, last_c, rvol)
+        cands = [x for x in (pb_plat, pb_line, pb_flag) if x]
         if cands:
             result["pre_breakout"] = min(cands, key=lambda x: x["dist_atr"])
             # 埋伏单是独立 T1 入口，须与当日买点争夺「先成交者」。按成交价高低定先后：
@@ -3456,13 +3598,21 @@ def _plan_entry_core(bars, ev):
                 zz = z.get("level") if isinstance(z, dict) else None
                 if pb_px is not None and zz is not None and pb_px <= zz:
                     result["pre_breakout"]["beats_current_mode"] = True
-            if len(cands) == 2:
-                other = max(cands, key=lambda x: x["dist_atr"])
-                result["pre_breakout"]["note"] += (
-                    f"；另有"
-                    f"{'活平台沿' if other.get('anchor') != 'down_tl' else '下降趋势线'}"
-                    f" {other['level']} 的埋伏单同样够格（距 {other['dist_atr']}×ATR），先到先做"
-                )
+            if len(cands) > 1:
+                _picked = result["pre_breakout"]
+                _plv = _picked.get("level")
+                for other in cands:
+                    if other is _picked:
+                        continue
+                    # 同一条线（旗面线常与 down_tl 重合，MRNA 09-15 两者都是 148.98）
+                    # 不重复播报，否则提示里会出现两个一模一样的埋伏价。
+                    if _plv is not None and other.get("level") is not None \
+                            and abs(other["level"] - _plv) < 0.01:
+                        continue
+                    result["pre_breakout"]["note"] += (
+                        f"；另有{PRE_BREAKOUT_LABEL.get(other.get('anchor'), '备选线')}"
+                        f" {other['level']} 的埋伏单同样够格（距 {other['dist_atr']}×ATR），先到先做"
+                    )
         # ★ T0 均线收复+过昨高：**总是**计算并挂在结果上（供股池复盘/盯盘方案消费）。
         # 纯增量，不改变当日 mode —— 它回答「次日怎么挂单」，不回答「在哪买」。
         # 提升规则（2026-09-20，用户在 pack() 出口统一做，不再打分支补丁）：
@@ -3678,6 +3828,39 @@ def _plan_entry_core(bars, ev):
         )
         return pack("platform_break", 1, "breakout", "平台突破(优先T1)·非放量", True, note, z)
 
+    # ★ 2026-09-26 老罗定：**牛旗突破与平台突破并列 T1**，排在 W底 之前。
+    #   理由 ①「同一件事的两种几何」—— 平台与牛旗都是「大阳/爆量 → 自然回踩整理
+    #   → 过整理上沿」的第二买点，区别只在整理段上沿是「水平」（平台沿）还是
+    #   「下倾」（旗面下降线），不该分两等。
+    #   理由 ②「形态尺度」—— MRNA 2026-09-17 的 W底（08-28~09-10，9 根）是**嵌在
+    #   旗面内部**的小结构（旗面 08-19~09-16，19 根），大结构应压小结构。
+    #   当日按旧序取了 W底颈线 156.42，而「过牛旗」的真实触发位是旗面线 145.28
+    #   —— 低的那个才是牛旗给的位置，也更贴近「不追高」。
+    flag = ev.get("bull_flag")
+    if flag is None:
+        flag = detect_bull_flag(bars, Hs_all, atr_v)
+    if flag and last_c is not None:
+        f_tl = flag["tl_now"]
+        f_days = flag["days_above_tl"]
+        fresh_flag = last_c > f_tl and 1 <= f_days <= 3
+        if fresh_flag and price_conf:
+            tl_txt = round(f_tl, 2)
+            z = zone_at_level(f_tl, atr_v, last_c, "旗形下降趋势线突破(优先T1)", ev, bars)
+            z["anchor"] = "flag_tl"
+            if plat_p is not None and plat_p > last_c:
+                z["through_gate"] = round(plat_p, 2)
+            note = (
+                f"旗形突破：旗杆 {flag['pole_d0']}→{flag['pole_d1']} "
+                f"({round(flag['pole_lo'], 2)}→{round(flag['pole_hi'], 2)})，"
+                f"旗面下降趋势线 @{tl_txt}；结构止损看该线下"
+                + (f"；平台高点 {z['through_gate']} 是要穿过的门，不是目标"
+                   if z.get("through_gate") else "")
+                + vol_note()
+            )
+            return pack(
+                "flag_tl_break", 1, "breakout", "旗形下降趋势线突破(优先T1)", True, note, z,
+            )
+
     wpat = ev.get("w_bottom")
     if wpat is None:
         wpat = detect_w_bottom(bars, Hs_all, Ls_all, atr_v)
@@ -3709,31 +3892,6 @@ def _plan_entry_core(bars, ev):
                 f"近{n_neck}根站上颈线 {neck_txt}，但收盘落在当日振幅下半区"
                 f"（或收低于前收）= 上影插针式站上，不算突破" + vol_note(),
                 _empty_zone(),
-            )
-
-    flag = ev.get("bull_flag")
-    if flag is None:
-        flag = detect_bull_flag(bars, Hs_all, atr_v)
-    if flag and last_c is not None:
-        f_tl = flag["tl_now"]
-        f_days = flag["days_above_tl"]
-        fresh_flag = last_c > f_tl and 1 <= f_days <= 3
-        if fresh_flag and price_conf:
-            tl_txt = round(f_tl, 2)
-            z = zone_at_level(f_tl, atr_v, last_c, "旗形下降趋势线突破(优先T1)", ev, bars)
-            z["anchor"] = "flag_tl"
-            if plat_p is not None and plat_p > last_c:
-                z["through_gate"] = round(plat_p, 2)
-            note = (
-                f"旗形突破：旗杆 {flag['pole_d0']}→{flag['pole_d1']} "
-                f"({round(flag['pole_lo'], 2)}→{round(flag['pole_hi'], 2)})，"
-                f"旗面下降趋势线 @{tl_txt}；结构止损看该线下"
-                + (f"；平台高点 {z['through_gate']} 是要穿过的门，不是目标"
-                   if z.get("through_gate") else "")
-                + vol_note()
-            )
-            return pack(
-                "flag_tl_break", 1, "breakout", "旗形下降趋势线突破(优先T1)", True, note, z,
             )
 
     # 下降趋势线突破（与旗形同族：都是斜线突破）。必须放在「回踩类」分支之前 ——
@@ -3894,10 +4052,32 @@ def _plan_entry_core(bars, ev):
                 )
             elif yi_zi:
                 gap_note = f"；一字板，买回踩缺口，防守缺口下沿 {round(floor, 2)}"
+            # ★★ 2026-09-26 老罗口径（把「大阳后缩量回踩」与「牛旗突破」合并成一件事）：
+            #   「很多时候我们并不能第一时间买到突破，而且突破放量或爆量，自然回踩是非常
+            #    正常的……大阳之后缩量不代表次日一定能涨，但是如果涨了过了牛旗就是买点」。
+            #   ⇒ 本档只是**整理成立**（预测性买点，试错仓）；**确认买点**是收盘站上整理段
+            #   的上沿线 —— 上沿水平走 platform_break、下倾走 flag_tl_break，两条都已是 T1，
+            #   且在本分支**之前**就会被评估（真过沿了根本走不到这里）。此处把「该盯哪条线」
+            #   写进买区，避免把「缩量到位」误当成「可以买」。
+            _edge = _confirm_edge(plat_p, _flag_ev, last_c)
+            if _edge:
+                z["confirm_edge"] = _edge["level"]
+                z["confirm_kind"] = _edge["label"]
+                z["confirm_tier"] = _edge["tier"]
+                confirm_note = (
+                    f"；【确认线】收盘站上{_edge['label']} {_edge['level']}"
+                    f"（{_edge['tier']}）才是确认买点 —— 缩量到位只说明整理成立"
+                )
+            else:
+                confirm_note = (
+                    "；【确认线】上沿不可画，改为等收盘站上整理段上沿"
+                    "（水平→平台突破 / 下倾→牛旗突破，均 T1）才算确认买点"
+                )
             note = (
                 f"大阳后缩量回踩：{y_d} 阳线 {round(y_lo, 2)}-{round(y_hi, 2)}（大阳体），"
                 f"现价在买区 {zone_txt} 内、量已到近期最低，且近 3 根不再创新低。防守{floor_txt}。"
                 f"次优先T2，试错仓"
+                f"{confirm_note}"
                 f"{gap_note}"
             )
             return pack(
