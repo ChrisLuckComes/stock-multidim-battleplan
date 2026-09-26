@@ -12,6 +12,9 @@
 4. **Stop when confused.** 两种合理解释且影响产出时先问。
 5. **Touch only what you must.** 每行改动必须能追溯到用户请求。
 6. **No meaningless changes.** 能跑的原代码，非需求不重构、不「顺手优化」。
+7. **本仓库是唯一真源，skill 安装副本只是派生产物**（老罗 2026-09-27 定）。
+   见第 4 节「改代码的唯一正确流程」—— **禁止**反向同步（INST→DEV）整文件覆盖，
+   曾一次抹掉用户两天前已修好的 `from_analysis` 兜底。
 
 ---
 
@@ -58,6 +61,7 @@
 - 提交前检查 diff：业务代码不得含临时 mock / 调试残留；测试里的正式 fixture 可保留。
 - 报告类字段必须与引擎同步：`scan_all/scanner.py` 负责把新字段（`pre_breakout` / `struct_exec` / `hard_exec` / `hard_dist_atr` / `hard_noise`）导出到 `results.jsonl`，`scan_all/report.py` 负责渲染；**只改引擎不改这两处 = 全市场扫描用不到该功能**（CLI/probe 能打印不等于报表能看）。
 - 美股必须有 HTML 报告通道（2026-09-22 补）：`battle_analyze.py` 原来只收 6 位 A 股代码，美股 ticker 直接 SystemExit ⇒ 美股永远只能拿 `rule123.py --out` 的 JSON 手搓，出不了报告。现由 `is_us_code()` 分流，美股走 `bars_source.us_quote` / `probe_intraday.probe_us` / `probe_intraday.us_lots`（1 股起、无整手、`$`、无 T+1）。`report_render.py` 按 `meta.market` 切换币种、交易制度文案与「超 40% 仓位习惯线」提示（该提示是 A 股 30%×跌停 10% 倒推的，美股两条前提都不成立）。**给美股出报告一律走两步流程，禁止手写 HTML。**
+- **用户说「跑一下」某票 = 必须交付完整 HTML 报告（2026-09-27）**：流程固定为 `battle_analyze.py` → 写 `notes.json` → `report_render.py` 出 HTML。终端摘要与 `analysis.json` 只是中间产物，**不得以 JSON/终端摘要代替交付**。路径默认 `C:/Users/luoyunlai/stock-reports/<code>-<YYYYMMDD>.html`（美股 ticker 原样）。只有用户明确说「只要 JSON / 只要引擎 / 不要报告」才可停在分析步。
 - 「硬止损贴噪声带」（距买区下沿 <0.25×ATR）**只对突破类成立**（`BREAKOUT_MODES`）：突破类买区下沿＝突破位＝真实成交价；回踩类买在线上、主风控是收盘破线的结构止损，硬止损本就是 0.10×ATR 毛刺滤网，套突破类阈值会 1/3 误报（2026-09-18 样本 44 候选误报 15）。
 - **禁止把引擎 anchors 里的「基准日实体中点」当买入档**：`battle_analyze.py:219` 把这个价标注为 **断头铡刀位**（跌破即否定这根大阳，是出场参考，不是支撑位），而技能里合法的「大阳中点」是 `(高+低)/2`（`rule123.py:1944`）—— 两者不是一个价。反例 603067 振华股份 2026-09-23（涨停收 39.86，(开+收)/2 = 38.08 被当低吸档写进报告，当日撤回）。
 - **涨停/大阳次日的「回踩低吸档」在写进计划前必须先做「触发概率 + 逆选择」双检验**：在同批样本上算 P(盘中触及买入价) 与 P(盘中触及上方突破位)，再看「曾触及买入价」子样本的收盘中位/收红率。实证（603067 自身 24 个涨停样本 / `data/` 池 38 个）：触及 −4.47% 的低吸档只有 **37.5% / 13.2%** 概率给到，且该子样本收盘中位 **−2.51% / −5.49%**、收红率从无条件 58% / 61% 掉到 **22% / 20%**（日内还不修复）；同期「冲上 +2.89%」的突破档却有 **66.7% / 71.1%** 概率触发、收盘中位 **+4.76% / +3.94%**。⇒ **低价挂单成交的那一支，往往就是「这波失败」的那一支；不要用「低吸成交概率高」自欺。**
@@ -123,3 +127,28 @@
   **⚠ 边界（不得越界）**：只在**非 VETO 档**补这一格 —— `flag_too_long`（动能闸门）与 `flag_break_pole_low`（已破旗杆大阳低点）是老罗明确否决的，**不复活**；**ANET（旗面 28 根）维持判无效、暂不考虑**。`detect_bull_flag` 的闸门**一个都没改**（`FLAG_LEN_MAX` 20 仍是动能闸门）。**回归 `python tests/entry/test_ilmn_dtl_entry.py`（25 项，fixture = ILMN 275 根 + 688758 400 根真实日线）**。
 
 - **★★ 月线否决**只保留**50% 大阴线**——其余月线形态**一律不干预日线级判断**（老罗 2026-09-26 定）**：老罗原话「**月线只看 50% 大阴线否决，其他的月线不要干预日线级别的判断**」。落地两处：① `top_signals.apply_month_blacklist` 的否决条件由 `sy or one or pair or merged` 收成 **`sy`（`month_super_yin`，`MONTH_SUPER_DROP = 0.50`）**；② `top_signals.top_verdict` 里的 `ban` 同样收成 `sy`（原文 `ban = sy or one or pair or merged` 会把 `higher_top.horizon` 打成「拉黑」）。`month_one_star` / `month_star_pair` / `month_merged_star` **照旧计算、照旧落进 `result` / `v`**（报告与 Agent 仍可看），只是**不再改 `recommend` / `verdict` / `note` / `pre_breakout` / `horizon`**。**改前代价（实证）**：**ALAB**（月线 2026-08 `long_star`）与 **VEEV**（月线 2026-03 `shooting_star`）两只日线/周线都是多头结构的票被整体打成「拉黑·只做空不做多」；**300569 2026-09-24（过牛旗那天）也被压成 `recommend=False`** —— 撤掉后同一天恢复为 **`mode=platform_break` / `recommend=True`**，即**一个真实的突破买点被月线形态越权拦掉了**。回归 `tests/top/test_month_top.py`（新增 `TestMonthBlacklistScope` 4 项 + 三条原「horizon=拉黑」断言改为「仍记录、不拉黑」）+ `tests/entry/test_300569_bull_flag.py`（`test_monthly_one_star_no_longer_blacklists_the_engine`）。
+
+---
+
+## 4. 改代码的唯一正确流程（老罗 2026-09-27 定）
+
+**唯一真源 = 本仓库 `D:/code/stock-multidim-battleplan`（有 `.git`）。**
+skill 安装副本 `C:/Users/luoyunlai/.workbuddy/skills/stock-multidim-battleplan`（下文称 INST）**没有 `.git`，是派生产物**。
+
+### 顺序（不可颠倒）
+1. **先在本仓库改** —— 任何 `.py` 改动一律落到 DEV，不在 INST 改。
+2. **在本仓库跑测试** —— DEV 才是完整套件（609 passed 基线；INST 侧 test 只有一部分，且根级老测试会因写死三层目录失败）。
+3. **一件事一次 commit** —— 做完就提交，commit message 写清 "改了什么 / 为什么 / 回归在哪"。
+4. **最后才同步 INST** —— 方向恒为 **DEV → INST**。
+
+### 硬禁（踩过的坑）
+- **禁止 INST→DEV 反向同步 / 整文件 `cp` 覆盖。** 2026-09-27 就因为反向覆盖，把用户两天前修好的
+  `open_playbook.from_analysis` 两处兜底（list 防崩 + T0 无赔率档兜底）抹掉了，
+  最后靠 `__pycache__/open_playbook.cpython-311.pyc` 反汇编才还原回来。
+- **INST 里只允许跑实战脚本**，回归一律回 DEV 跑。
+- **notes_*.json / .env / rule123_all.json / out_*.txt 不入库**（public 永不入库清单）。
+- 同步前先确认 DEV 有未提交改动 —— 有就先 commit 再同步，**不要用「两边 diff 只有我的改动」当安全依据**。
+
+### 同步判据
+行尾 DEV=CRLF / INST=LF ⇒ **别用 `cmp`**（内容相同也报 DIFF）。
+可靠判据是去行尾后比 md5，或 `sync_two_copies.py --check`（本仓库根目录没有该脚本时用 md5 法）。

@@ -156,7 +156,8 @@ def long_ladder(target, stop):
 
 def build(last, entry, stop, target=None, atr=None, board=None,
           code="", name="", shares=None, lot=100, r_mult=None,
-          prev_close=None, upper_entry=None, market="CN", knife_edge=None):
+          prev_close=None, upper_entry=None, market="CN", knife_edge=None,
+          chase=None):
     """生成开盘作战方案。
 
     last      基准日收盘价（挂单是隔夜预挂，故次日开盘的参照系）
@@ -171,7 +172,17 @@ def build(last, entry, stop, target=None, atr=None, board=None,
     upper_entry  buy 区上沿（在现价上方、不可预挂、只能盯盘），可空
     knife_edge   「贴线待突破」档（`plan["knife_edge"]`，旗面线 / 下降趋势线
                  已下移到收盘价附近）。有则插在 **⓪ 档**（成本最低），并写明
-                 「开盘不低开 + 放量」两条同时成立才执行。
+                  「开盘不低开 + 放量」两条同时成立才执行。
+    chase      ★ 2026-09-27 新增 —— 「追价授权」dict，可空。字段：
+                  {"limit": 追价上限, "stop": 追价档止损, "shares": 追价档股数,
+                   "src": 授权来源说明}
+               来历：锚点迁移规则（老罗 2026-09-27 裁定）—— 旗形整理结束、
+               突破完成之后，原旗形不再适用，突破之上形成**新结构**，锚迁移
+               到新结构上沿（rule123 的 `buy_zone.through_gate`）。此时
+               「开盘价落在挂单价上方」不再一律「不追、干等回踩」，
+               而是「**新结构顶以内按授权仓位追**，越过才算追高」。
+               不传 ⇒ 行为与改动前完全一致（上界 = 前收盘 +2%，②③ 档不追），
+               故其余 45 张无 next_day_chase 的票不受影响。
     """
     is_cn = str(market or "CN").upper().startswith("CN")
     if board is None:
@@ -273,36 +284,94 @@ def build(last, entry, stop, target=None, atr=None, board=None,
         b1.update({"pos": "0 股", "stop": "—", "tone": "off"})
         bands.append(b1)
 
-    # ── ② 跳空高开（超过小高开阈值）：不追。仅 A 股。
+    # ── ②③ 档的上界：默认「前收盘 +2%」；有追价授权时改用授权上限 ──
+    #    （锚点迁移 ⇒ 新结构顶以内可追，越过才算追高。见 build() docstring）
+    _gap = None       # 美股分支保持 None（与改动前一致，hi_gap 不参与 _us_bands）
     if is_cn:
-        hi_gap = px(last * (1 + GAP_UP_MAX))
+        _gap = px(last * (1 + GAP_UP_MAX))
+    _ct = None      # chase_top：有授权则为 float，否则 None
+    _cstop = None
+    _csh = None
+    _csrc = ""
+    if is_cn and isinstance(chase, dict):
+        try:
+            _l = float(chase.get("limit"))
+        except (TypeError, ValueError):
+            _l = None
+        # 只在授权上限真的比默认 +2% 线更宽、且没顶穿涨停价时才迁移
+        if _l and _l > _gap and _l < up_limit:
+            _ct = px(_l)
+            try:
+                _cstop = float(chase.get("stop"))
+            except (TypeError, ValueError):
+                _cstop = None
+            try:
+                _csh = int(chase.get("shares")) if chase.get("shares") else None
+            except (TypeError, ValueError):
+                _csh = None
+            _csrc = str(chase.get("src") or "")
+        del _l
+    hi_gap = _ct if _ct else _gap
+
     if is_cn:
         bands.append({
         "key": "gap_up",
-        "title": "② 跳空高开（> +%.0f%%）" % (GAP_UP_MAX * 100),
+        "title": ("② 跳空高开（越过追价上限 %.2f）" % hi_gap) if _ct
+                 else ("② 跳空高开（> +%.0f%%）" % (GAP_UP_MAX * 100)),
         "cond": "%.2f ＜ O ＜ %.2f" % (hi_gap, up_limit),
-        "act": ("<b>不追</b>。挂单原样保留 —— 盘中若回踩到 ≤ %.2f 会自动成交，不用改价。"
+        "act": ("<b>不追</b>。%.2f 是%s —— 越过%s = 追高，"
+                "赔率被开票价吃掉。<b>本笔踏空、成本 = 0</b>：不追、不补、不上移。"
                 "⚑ 未成交<b>不上移</b>挂单价（铁律：不下移，也不上移）。"
-                "若全天强势不回踩 ⇒ 当日不参与，<b>次日必须重跑引擎</b>（均线已滚动，本方案失效）。"
-                % entry),
-        "pos": "0 股（等回踩）",
+                "若当日回踩到 ≤ %.2f ⇒ 按原单成交，仍照正常执行。"
+                % (hi_gap,
+                   ("<b>追价授权上限</b>（新结构顶%s）" % ("，来源：%s" % _csrc if _csrc else ""))
+                   if _ct else "<b>不追高闸门</b>（前收盘 +%.0f%%）" % (GAP_UP_MAX * 100),
+                   "上限" if _ct else "闸门",
+                   entry)),
+        "pos": "0 股",
         "stop": "—",
         "tone": "off",
     })
 
-    # ── ③ 小高开 / 平开（高于挂单价）：不成交，等回踩。仅 A 股。
+    # ── ③ 小高开 / 平开（高于挂单价）：默认不成交等回踩；有授权则改为追 ──
     if is_cn:
-        bands.append({
-        "key": "flat_up",
-        "title": "③ 小高开 / 平开（在挂单价上方）",
-        "cond": "%.2f ＜ O ≤ %.2f" % (entry, hi_gap),
-        "act": ("<b>不成交</b>，保留挂单等回踩。开盘 %.0f 分钟内不动作；"
-                "若 10:00 前回踩到 ≤ %.2f ⇒ 按原单成交；若强势横盘不回踩 ⇒ 当日放弃。"
-                % (WATCH_MIN, entry)),
-        "pos": "0 股（等回踩）",
-        "stop": "—",
-        "tone": "wait",
-    })
+        if _ct:
+            bands.append({
+                "key": "flat_up",
+                "title": "③ 小高开 / 平开（<b>含平开 %.2f</b> ⇒ 新结构顶以内）" % last,
+                "cond": "%.2f ＜ O ≤ %.2f" % (entry, hi_gap),
+                "act": ("<b>不等回踩 —— 按追价授权买入</b>（限价单挂 ≤ %.2f，"
+                        "开盘价落在本档即以 O 成交）。<b>⚠ 这是定稿口径变更</b>："
+                        "锚点迁移后 %.2f 以内属新结构、<b>不算追高</b>，死等回踩会系统性错过"
+                        "万向德农式剧本（次日 +3.8%%）。<br>"
+                        "执行（一次性判定、与原回踩单<b>互斥</b>）：先看开盘价 —— "
+                        "落在 %.2f 以下走 ④⑤ 档用原单 %d 股；落在本档则用授权 %d 股，"
+                        "<b>当日不再依赖原回踩单</b>（避免同票双档成交）。<br>"
+                        "止损收紧到 <b>%.2f</b>（追价档专用，≠ 原计划 %.2f）—— "
+                        "追高的代价就是止损更近、<b>不允许再放宽</b>。<br>"
+                        "⚠ 本档成交后<b>当日不能卖（T+1）</b>，且必须盯盘挂单（A 股无 buy-stop）。"
+                        % (hi_gap, hi_gap, entry,
+                           int(shares) if shares else 0,
+                           int(_csh) if _csh else 0,
+                           _cstop if _cstop else stop, stop)),
+                "pos": ("<b>%d 股</b>（授权仓位）" % _csh) if _csh
+                       else "授权仓位（notes 未给 shares）",
+                "stop": ("收盘破 <b>%.2f</b> ⇒ 次日开盘卖" % _cstop) if _cstop
+                        else "收盘破 %.2f ⇒ 次日开盘卖" % stop,
+                "tone": "on",
+            })
+        else:
+            bands.append({
+                "key": "flat_up",
+                "title": "③ 小高开 / 平开（在挂单价上方）",
+                "cond": "%.2f ＜ O ≤ %.2f" % (entry, hi_gap),
+                "act": ("<b>不成交</b>，保留挂单等回踩。开盘 %.0f 分钟内不动作；"
+                        "若 10:00 前回踩到 ≤ %.2f ⇒ 按原单成交；若强势横盘不回踩 ⇒ 当日放弃。"
+                        % (WATCH_MIN, entry)),
+                "pos": "0 股（等回踩）",
+                "stop": "—",
+                "tone": "wait",
+            })
 
     # ── ④ 刚好符合（开盘价落在挂单价附近）。仅 A 股。
     if is_cn:
@@ -372,6 +441,10 @@ def build(last, entry, stop, target=None, atr=None, board=None,
         "dn_limit": dn_limit,
         "hi_gap": hi_gap,
         "lo_ok": lo_ok,
+        # ★ 追价授权（锚点迁移后才有；无则 None，渲染层据此决定是否显示）
+        "chase": ({"top": _ct, "stop": _cstop, "shares": _csh, "src": _csrc}
+                  if _ct else None),
+        "chase_default_gap": _gap if is_cn else None,
         "risk_per_share": round(entry - stop, 2),
         "risk_atr": (round((entry - stop) / atr, 2) if atr else None),
         "upper_entry": (float(upper_entry) if upper_entry else None),
@@ -562,7 +635,14 @@ def _checkpoints(entry, stop, is_cn=True, ladder=None):
         ("09:15–09:20", "可撤单窗口。若要试探性挂单，只能在这段内（撤得掉）。"),
         ("09:20–09:25", "<b>不可撤</b>。此段下单必成交 ⇒ 本计划<b>不在此段操作</b>。"),
         ("09:25", "开盘价确定 ⇒ 对照上表选档，执行对应动作。"),
-        ("09:30–09:45", "<b>观察窗，不动作</b>。开盘 15 分钟波动最大、假信号最多，不追不砍。"),
+        ("09:30–09:45",
+         "观察窗：<b>不做主动决策</b>（不追涨、不砍仓、不临时改价）—— 开盘 15 分钟波动最大、"
+         "假信号最多，且盘中触及不算突破确认。<b>已预挂在下方的限价单照常被动成交</b>，"
+         "成交即按计划执行（观察窗管的是手，不是单）。"),
+        ("若一路不回头",
+         "这 15 分钟没回踩就直线上去 ⇒ 本笔<b>踏空，踏空成本 = 0</b>；"
+         "不要在这段追，改等 <b>14:57 尾盘单次判定</b>（收盘站上 + 放量才认）。"
+         "追高的成本是套住 + 次日跳空，不是踏空。"),
         ("10:00", "第一次检验：是否跌破 %.2f / 是否站回 %.2f。" % (stop, entry)),
         ("11:00 / 13:30", "若已成交：看是否出现放量下破；未成交：回踩是否出现。"),
         ("14:30–14:57", "尾盘检验：收盘位 =(收−低)/(高−低)，&lt;0.2 属尾盘走弱（次日优先处理）。"),
@@ -618,10 +698,19 @@ def format_html(pb):
         limit_txt = " ｜ 无涨跌停（异常跳空参照 %.2f / %.2f）" % (
             pb["up_limit"], pb["dn_limit"])
     h.append("<p class='note'>基准收盘 <b>%.2f</b> ｜ 挂单 <b>%.2f</b> ｜ 止损 <b>%.2f</b>"
-             " ｜ 每股风险 %.2f%s%s</p>" % (
+                 " ｜ 每股风险 %.2f%s%s</p>" % (
                  pb["last"], pb["entry"], pb["stop"], pb["risk_per_share"],
                  "（%.2f×ATR）" % pb["risk_atr"] if pb.get("risk_atr") else "",
                  limit_txt))
+    ch = pb.get("chase")
+    if ch:
+        h.append("<p class='note'>★ <b>追价授权已生效（锚点迁移）</b>：追价上限由默认"
+                 " %.2f（前收盘 +2%%）上移到 <b>%.2f</b>（新结构顶%s）"
+                 " ⇒ <b>②③ 档已据此重写</b>：上限以内<b>按授权 %s 追</b>（不等回踩），"
+                 "越过才踏空。</p>" % (
+                     pb.get("chase_default_gap") or 0, ch["top"],
+                     "，来源：%s" % ch["src"] if ch.get("src") else "",
+                     ("%d 股" % ch["shares"]) if ch.get("shares") else "仓位"))
     h.append("<table class='tbl'><thead><tr>"
              "<th style='width:19%%'>情形</th><th style='width:15%%'>开盘价区间</th>"
              "<th>动作</th><th style='width:11%%'>仓位</th><th style='width:16%%'>止损执行</th>"
@@ -697,26 +786,58 @@ def from_analysis(a, n=None):
     """从 battle_analyze 的 analysis.json（+ notes）自动取档位生成方案。
 
     档位取 `odds_recommend`（即报告里那张「推荐档」），保证与报告一致。
-    notes 可用 `open_playbook` 覆盖：{"entry":..,"stop":..,"target":..,"shares":..}
+    ⚑ 2026-09-27 老罗修复（本文件以 DEV 仓库为准，曾一度被同步覆盖、已据
+      __pycache__ 里的 pyc 反汇编还原）：
+      * `odds_recommend` 可能是 **list / 空 dict** —— 旧写法
+        `a.get("odds_recommend") or a.get("odds_primary")` 对空 list 取假尚可，
+        对**非空 list 取真却无 .get** ⇒ 直接崩。改为「必须是非空 dict 才认」。
+      * T0（`plan.mode == "ma_reclaim_break"`）**没有赔率档** —— entry/stop 会
+        全是 None，原逻辑直接 `return None` ⇒ 整份报告缺开盘作战方案。改为用
+        触发价/硬止损兜底：entry ∈ {ma_reclaim.trigger, buy_zone.primary_hi}，
+        stop ∈ {buy_zone.hard_stop, ma_reclaim.hard_stop}；target 兜
+        struct.pivots_up[1]，再兜 entry + 6×ATR。
+      * ★ 追价授权（锚点迁移规则，2026-09-27）：见下方 chase 块。
     """
     n = n or {}
     plan = a.get("plan") or {}
     meta = a.get("meta") or {}
-    od = a.get("odds_recommend") or a.get("odds_primary") or {}
+    # ⚑ 只看非空 dict —— list / 空 dict 一律回落到 odds_primary
+    od = a.get("odds_recommend")
+    if not (isinstance(od, dict) and od):
+        od = a.get("odds_primary") or {}
     ov = (n.get("open_playbook") or {}) if isinstance(n.get("open_playbook"), dict) else {}
 
     code = str(meta.get("code") or plan.get("sym") or "")
     last = ov.get("last") or meta.get("basis_close") or plan.get("last")
     entry = ov.get("entry") or od.get("entry")
     stop = ov.get("stop") or od.get("stop")
+    z = plan.get("buy_zone") or {}
+    t0 = plan.get("ma_reclaim") or {}
+    _t0 = (plan.get("mode") == "ma_reclaim_break")
+    # ── T0 无赔率档兜底：触发价 / 硬止损 ──
+    if entry is None and _t0:
+        entry = t0.get("trigger") or z.get("primary_hi")
+    if stop is None and _t0:
+        stop = z.get("hard_stop") or t0.get("hard_stop")
     target = ov.get("target")
     if target is None:
         tg = a.get("targets")
         if isinstance(tg, dict):
             target = tg.get("t1") or tg.get("target1") or tg.get("nearest")
         elif isinstance(tg, list) and tg:
-            t0 = tg[0]
-            target = t0.get("price") if isinstance(t0, dict) else t0
+            tr = tg[0]
+            target = tr.get("price") if isinstance(tr, dict) else tr
+    # ── T0 无目标档兜底：上方第二个枢轴；再兜「入场 + 6×ATR」──
+    if target is None and _t0:
+        st0 = a.get("struct") or {}
+        atr = st0.get("atr14")
+        piv = st0.get("pivots_up") or []
+        if isinstance(piv, list) and len(piv) >= 2 and isinstance(piv[1], dict):
+            target = piv[1].get("price") or piv[1].get("h")
+        elif isinstance(piv, list) and len(piv) >= 2 and isinstance(piv[1], (int, float)):
+            target = piv[1]
+        if target is None and entry is not None and atr:
+            target = round(float(entry) + 6.0 * float(atr), 2)
     shares = ov.get("shares") or od.get("qty")
     upper = ov.get("upper_entry") or od.get("buy_hi")
     if upper is None:
@@ -728,6 +849,35 @@ def from_analysis(a, n=None):
                     break
     st = a.get("struct") or {}
     atr = st.get("atr14")
+
+    # ★ 追价授权（锚点迁移规则，2026-09-27）：默认自动取引擎 rule123 算好的
+    #   buy_zone.next_day_chase —— 目的正是消除「第 6 节说可追到 X、开盘六档却
+    #   说 +2% 以上不追」的自相矛盾。notes 里给 open_playbook.chase 则覆盖。
+    chase = None
+    if isinstance(ov.get("chase"), dict):
+        chase = ov["chase"]
+    else:
+        _z = plan.get("buy_zone") or {}
+        _nc = _z.get("next_day_chase") or {}
+        if _nc.get("limit"):
+            # 授权股数：引擎给则用；没给则用「计划仓位 × size_ratio」推导
+            # （rule123 的 next_day_chase.size_ratio 正是「半仓」等折算比例，
+            #  如 601218 = 0.5 ⇒ 1000 股计划的 500 股，与 notes 口径自洽）
+            _csh = _nc.get("shares")
+            if _csh is None:
+                try:
+                    _r = float(_nc.get("size_ratio") or 1.0)
+                except (TypeError, ValueError):
+                    _r = 1.0
+                try:
+                    _csh = int(round(float(shares) * _r)) if shares else None
+                except (TypeError, ValueError):
+                    _csh = None
+            chase = {"limit": _nc.get("limit"), "stop": _nc.get("stop"),
+                     "shares": _csh,
+                     "src": (("through_gate=%.2f" % _z["through_gate"])
+                             if _z.get("through_gate") else "next_day_chase")}
+
     if last is None or entry is None or stop is None:
         return None
     # ★ 2026-09-26：「贴线待突破」档（老罗「在上沿买、不在平台顶买」）——
@@ -736,7 +886,8 @@ def from_analysis(a, n=None):
     return build(last=last, entry=entry, stop=stop, target=target, atr=atr,
                  code=code, name=meta.get("name") or "", shares=shares,
                  upper_entry=upper, market=meta.get("market") or "CN",
-                 knife_edge=_ke if isinstance(_ke, dict) else None)
+                 knife_edge=_ke if isinstance(_ke, dict) else None,
+                 chase=chase)
 
 
 # ---------------------------------------------------------------- CLI

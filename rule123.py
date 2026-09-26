@@ -3834,6 +3834,23 @@ def _plan_entry_core(bars, ev):
                     if chase_stop >= last_c:
                         chase_stop = round(last_c - 0.5 * atr_v, 2)
                     chase_cap = round(lv + 2.0 * atr_v, 2)
+                    # 2026-09-27 老罗裁定（★锚点迁移）：旗形突破完成、价格延伸后，
+                    # 原旗形线不再是锚 —— 突破之上已形成「新结构」
+                    # （through_gate = 平台高点/前高「要穿过的门」），次日追价上限
+                    # 锚迁移到新结构上沿；越过新结构顶才算「追高」。
+                    # 佐证：万向德农 600371 08-25 剧本（次日跳空 +3.81%）会被
+                    # 买位+2×ATR 的旧锚系统性错过（601218 旧 cap 5.59 = 仅 +1.64%）。
+                    # 平台突破类 mode 的 level 本身就是平台沿（through_gate 多为
+                    # None），不受本条影响。
+                    # ⚑ 口径（老罗 2026-09-27 复核纠正）：旧公式 lv+2×ATR 本身没有
+                    # 计算问题（单锚 + 固定容差，与「不追高」同一条线，内部自洽）；
+                    # 本条改的不是算法，是**锚的时效** —— 突破完成后结构迁移，
+                    # 旧锚（旗形线）失效，改挂新结构锚（through_gate）。
+                    # 实证对照（老罗提供）：ILMN 09-15 突破完成 → 锚=08-27 高
+                    # 231.81；TEM 同日突破 → 锚=08-24 高 72.96；601218 → 锚=5.89。
+                    _gate = z.get("through_gate")
+                    if _gate is not None and _gate > chase_cap and _gate > last_c:
+                        chase_cap = round(float(_gate), 2)
                     why = (f"RVOL={rvol:.2f}≥2.5" if _vol_strong
                            else f"实体{(yang['c'] - yang['o']) / atr_v:.2f}ATR 宽幅强阳")
                     z["next_day_chase"] = {
@@ -4527,10 +4544,19 @@ def attach_higher_ride(result, bars):
     return result
 
 
-def plan_entry(bars, ev):
-    """公开入口：`_plan_entry_core` 的结果再套一层顶部标志 K 线闸门。"""
+def plan_entry(bars, ev, sym=None):
+    """公开入口：`_plan_entry_core` 的结果再套一层顶部标志 K 线闸门。
+
+    ★ `sym` 用于永久黑名单的**出口兜底**（CLI 已在 player入口拦截，这里防的是
+    有人绕过 CLI 直接调本函数——回测脚本 / probe / 其他编排入口）。
+    """
     result = apply_top_signal_gate(_plan_entry_core(bars, ev), bars, ev, _TOP_VETO)
     result = TS_TOP.apply_month_blacklist(result, bars)
+    try:  # 黑名单缺失/未部署也不该让主流程崩
+        import blacklist as BL
+        result = BL.apply_user_blacklist(result, sym)
+    except Exception:
+        pass
     return attach_higher_ride(result, bars)
 
 
