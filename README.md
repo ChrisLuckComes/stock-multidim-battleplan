@@ -89,6 +89,7 @@ stock-multidim-battleplan/
 ├── confluence.py        # 叠加计数（被报告引用）
 ├── levels.py            # 多空参考位（被引擎引用）
 ├── gates/               # 闸门 CLI
+│   ├── stock_character.py  # 股性体检：① 突破加速型 vs 拉高消化型 ② 利好兑现习惯（是否出消息即顶）③ 突破后路径 V型/N字 + 坑深 P75（止损宽度依据）；输出顶部先给【结论】
 ├── watch/               # 盯盘与股池
 ├── fetch/               # 备用取数、通达信快照、财务解析
 ├── library/             # 资料库同步

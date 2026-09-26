@@ -151,6 +151,102 @@ def test_render_smoke():
     assert "股性体检" in txt and "股性判定" in txt
 
 
+# ─────────────── 第四层：当下连拉状态（老罗 2026-09-26「连续拉升型」） ───────────────
+# 实证前提（research_streak_type_2026-09-26.py，376 票 / 2385 信号）：
+#   股性存在 ICC(1)=+0.066，但单票历史估不准（split-half corr 不显著）
+#   ⇒ 历史连拉率只能给 ~30% 权重（经验贝叶斯），**不能拿来预判这次会不会连拉**。
+#   正确用法：不做预判，持仓后按「是否已走成连拉」切换出场规则。
+def test_now_streak_last_run():
+    bars = mk([10, 11, 12, 13])
+    s, gain, base = sc.now_streak(bars)
+    assert s == 3                     # 11/12/13 三连阳
+    assert base == 10 and abs(gain - 30.0) < 1e-6
+
+
+def test_now_streak_zero_when_last_down():
+    bars = mk([10, 11, 12, 13, 12.5])
+    s, gain, base = sc.now_streak(bars)
+    assert s == 0 and base == 13 and gain < 0
+
+
+def _running_bars():
+    """末段走出连拉：一根 +6% 大阳，之后一路连阳到最后一根（总长 > 60 且留够前瞻窗口）。"""
+    closes = [100] * 40 + [106]
+    closes += [106 * (1 + 0.01 * k) for k in range(1, 12)]
+    closes += [closes[-1] * (1 + 0.005 * k) for k in range(1, 12)]
+    return mk(closes)
+
+
+def test_hist_run_rate_all_streak():
+    rate, n = sc.hist_run_rate(_running_bars())
+    assert n >= 1 and rate == 1.0
+
+
+def test_hist_run_rate_no_signal():
+    rate, n = sc.hist_run_rate(mk([100] * 80))
+    assert rate is None and n == 0
+
+
+def test_run_state_running():
+    r = sc.run_state(_running_bars())
+    assert r["class"] == "running"
+    assert "移动止损" in r["advice"], "连拉中必须撤掉固定目标位"
+    assert r["streak_now"] >= sc.RUN_STREAK
+
+
+def test_run_state_building():
+    # 未连拉（末根回落）但收盘仍在 MA5/MA20 上方 ⇒ 蓄势中 = 不在主升浪
+    bars = mk([100] * 56 + [105, 106, 107, 106.5])
+    r = sc.run_state(bars)
+    assert r["class"] == "building"
+    assert "不在主升浪" in r["advice"]
+
+
+def test_run_state_fading():
+    bars = mk([100] * 56 + [101, 100.5, 99, 98])
+    r = sc.run_state(bars)
+    assert r["class"] == "fading"
+    assert "不新开仓" in r["advice"]
+
+
+def test_run_state_short_history():
+    assert sc.run_state(mk([10, 11, 12])) is None
+
+
+def _multi_signal_bars():
+    """多个大阳信号（每 5 根一个 +6% 大阳 + 之后 3 连阳）⇒ 历史连拉率 = 100%。"""
+    seq = []
+    for _ in range(15):
+        seq += [100, 106, 107, 108, 109]
+    return mk(seq)
+
+
+def test_shrunk_rate_stays_inside_bounds():
+    """缩水后必须落在「个股原始率」与「全市场基准」之间 —— 极端样本也不得照抄。"""
+    r = sc.run_state(_multi_signal_bars())
+    assert r["hist_n"] >= sc.RUN_MIN_SIG
+    assert sc.RUN_BASE_RATE < r["shrunk_run_rate"] < r["hist_run_rate"]
+    assert 0 < r["shrink_w"] < 1, "样本再少也只能给部分权重"
+
+
+def test_shrunk_rate_falls_back_when_thin():
+    """信号数不足 ⇒ 完全退回全市场基准（w=0），不许拿 1 个信号当股性。"""
+    r = sc.run_state(_running_bars())     # 只有 1 个信号
+    assert r["hist_n"] < sc.RUN_MIN_SIG
+    assert r["shrink_w"] == 0.0
+    assert abs(r["shrunk_run_rate"] - sc.RUN_BASE_RATE) < 1e-9
+
+
+def test_render_shows_run_line():
+    bars = mk([10 + i * 0.1 for i in range(80)])
+    a = sc.analyze(bars)
+    a["code"] = "000000"
+    txt = sc.render(a)
+    assert "【结论 · 连拉】" in txt
+    assert "④ 当下连拉状态" in txt
+    assert "缩水后" in txt, "必须提示历史连拉率已缩水、不作预判"
+
+
 # ─────────────── 人读输出：给结论，不给看不懂的指标 ───────────────
 # 老罗 2026-09-24：「冲击率这个指标我看不懂啊，打出来没意义，我要的是结论。」
 def test_render_leads_with_conclusion():
@@ -460,6 +556,90 @@ def test_real_ruichuang_regression():
     print("  睿创 odds=%.2f class=%s big_count=%d"
           % (a["odds"], a["class"], a["big_count"]))
     assert a["class"] in ("grind", "mixed")     # 不得判为加速型
+
+
+def _mk_path(dip_pct, break_at=3, n_sig=8):
+    """造「大阳 +6% → 盘中挖 dip_pct% 的坑 → 第 break_at 日突破大阳高点」的合成日线。
+
+    收盘几乎不动（仅 -0.5%），坑深只体现在最低价上 —— 避免收盘跳变又生成新的大阳信号。
+    break_at=None ⇒ 永不突破（FAIL 路径）。
+    """
+    bars = []
+
+    def push(c, hi=None, lo=None):
+        bars.append({"d": "2026-%02d-%02d" % (len(bars) // 28 + 1, len(bars) % 28 + 1),
+                     "o": c, "h": hi if hi is not None else c * 1.005,
+                     "l": lo if lo is not None else c * 0.995,
+                     "c": c, "v": 1.0})
+
+    base = 100.0
+    for _ in range(n_sig):
+        for _ in range(3):
+            push(base)
+        c0 = base * 1.06
+        push(c0, hi=c0 * 1.005)                       # 大阳日（H0）
+        for k in range(1, 11):
+            if break_at is None or k < break_at:
+                push(c0 * 0.995, hi=c0 * 1.0, lo=c0 * (1 - dip_pct / 100.0))
+            elif k == break_at:
+                push(c0 * 1.02, hi=c0 * 1.03)         # 突破 H0
+            else:
+                push(c0 * 1.02, hi=c0 * 1.025)
+        base = c0 * 1.02
+    return bars
+
+
+def test_path_habit_v_shape():
+    """浅调就上 ⇒ V 型占 100%，判为短调续攻型。"""
+    p = sc.path_habit(_mk_path(1.0), big=5.0)
+    assert p and p["n"] >= 5
+    assert p["v_rate"] == 1.0, p
+    assert p["n_rate"] == 0.0
+    assert p["class"] == "v"
+    assert p["depth_p50"] < 1.5
+
+
+def test_path_habit_n_shape():
+    """深挖再上 ⇒ N 型占 100%，判为深调再上型，且坑深 P75 ≥ 中位。"""
+    p = sc.path_habit(_mk_path(8.0), big=5.0)
+    assert p and p["n"] >= 5
+    assert p["n_rate"] == 1.0, p
+    assert p["class"] == "n"
+    assert 7.5 <= p["depth_p50"] <= 8.5
+    assert p["depth_p75"] >= p["depth_p50"] >= 0
+
+
+def test_path_habit_fail_shape():
+    """永不突破 ⇒ FAIL 占 100%，不判类（neither v nor n）。"""
+    p = sc.path_habit(_mk_path(8.0, break_at=None), big=5.0)
+    assert p["fail_rate"] == 1.0, p
+    assert p["break_rate"] == 0.0
+    assert p["v_rate"] == 0.0 and p["n_rate"] == 0.0
+
+
+def test_classify_path_thresholds():
+    assert sc.classify_path({"n": 3, "v_rate": 0.8, "n_rate": 0.1,
+                             "depth_p50": 1, "depth_p75": 2})[0] == "unknown"
+    assert sc.classify_path({"n": 10, "v_rate": 0.40, "n_rate": 0.30,
+                             "depth_p50": 2, "depth_p75": 3})[0] == "v"
+    assert sc.classify_path({"n": 10, "v_rate": 0.10, "n_rate": 0.60,
+                             "depth_p50": 7, "depth_p75": 11})[0] == "n"
+    assert sc.classify_path({"n": 10, "v_rate": 0.25, "n_rate": 0.40,
+                             "depth_p50": 5, "depth_p75": 8})[0] == "mixed"
+
+
+def test_path_depth_percentile_order():
+    p = sc.path_habit(_mk_path(6.0), big=5.0)
+    assert p["depth_p90"] >= p["depth_p75"] >= p["depth_p50"] > 0
+
+
+def test_render_shows_path_line():
+    bars = _mk_path(8.0)
+    a = sc.analyze(bars, big=5.0, hold=5)
+    out = sc.render(a)
+    assert "路径形状" in out
+    assert "习惯回撤深度" in out
+    assert "深调再上型" in out
 
 
 def main():

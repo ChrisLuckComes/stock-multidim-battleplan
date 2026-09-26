@@ -68,6 +68,32 @@ NEWS_WIN = 0.55          # 后 hold 日为正比例 ≥ 此值 ⇒ 利好有效�
 NEWS_MIN_EVENTS = 3      # 判定所需最小事件数（不足只标「仅供参考」）。不是抓取早停门槛。
 ANN_TTL_HOURS = 24       # 公告缓存有效期（小时）—— 公告习惯是历史统计，日级陈旧无害
 
+# ── 第三层：突破后「路径」形状（老罗 2026-09-26：「有的股短调一下就上，有的喜欢画N字」）──
+# 与第一层的分工：第一层回答「追了能不能赚」（结果维度），第三层回答「会不会先挖个坑
+# 把止损扫掉」（路径维度）。睿创微纳 688002 的亏损就是路径问题 —— 方向没错（89% 最终
+# 突破），但习惯先回撤 6.97%（中位），窄止损必被扫。
+PATH_WIN = 10            # 路径观察窗口（交易日）
+PATH_DD_SPLIT = -3.0     # 回撤分界（%）：最大回撤 ≤ 此值 ⇒ N 型（先挖坑再上）
+PATH_MIN_SIG = 5         # 路径层判定所需最小信号数
+PATH_V_RATE = 0.35       # V 型占比 ≥ 此值 ⇒ 短调续攻型
+PATH_N_RATE = 0.50       # N 型占比 ≥ 此值 ⇒ 深调再上型（画 N 字）
+
+# ── 第四层：当下是不是「连拉中」（老罗 2026-09-26：「还有那种连续拉升型」）──
+# 与前三层的分工：前三层是**历史习惯**（这票过去怎么走），第四层是**当下状态**
+# （这票现在正怎么走）。实证见 research_streak_type_2026-09-26.py（376 票 / 2385 信号）：
+#   · 股性**存在**：ICC(1) = +0.066（收阳天数）vs 随机置换基准 ≈ 0 ⇒ 个股间确有稳定差异
+#   · 但**单票估不准**：split-half corr = +0.064（t=0.74 不显著），
+#     高 habit 组后半期实测连拉率 42% vs 低 habit 组 44%（方向还是反的）
+#   ⇒ 经验贝叶斯最优权重 w = n·ICC/(n·ICC+1−ICC)：300 根 K 线只够 n≈6 ⇒ **w≈30%**，
+#     即「历史连拉率」只能给 30% 权重，其余 70% 用全市场基准
+# ⇒ **不要拿历史 habit 预判这次会不会连拉**。连拉是**进行时可观测**的：正确做法是
+#   先按原计划入场，持仓后按「是否已走成连拉」切换出场规则（**状态机，不是股性标签**）。
+RUN_STREAK = 3           # 连阳 ≥ 此值 = 连拉中
+RUN_MIN_GAIN = 4.0       # 连拉段累计涨幅下限（%）
+RUN_BASE_RATE = 0.404    # 全市场基准：信号后 10 日内最长连阳 ≥3 的比例
+RUN_ICC = 0.066          # 收阳天数的 ICC(1)，用于 shrinkage 权重
+RUN_MIN_SIG = 3          # 历史连拉率的最小样本（不足则退回全市场基准）
+
 # 利好类关键词（命中任一即进入候选）
 ANN_GOOD = (
     "授权许可", "许可协议", "license", "licence",
@@ -156,6 +182,204 @@ def mean(xs):
     return sum(xs) / len(xs) if xs else None
 
 
+def pct(xs, p):
+    """分位数（xs 为负数集合时按升序取，p=0.5 即中位数）。"""
+    xs = sorted(xs)
+    if not xs:
+        return None
+    return xs[min(len(xs) - 1, int(len(xs) * p))]
+
+
+def path_habit(bars, big=BIG_DEFAULT, win=PATH_WIN, dd_split=PATH_DD_SPLIT):
+    """第三层：大阳之后是「短调一下就上」(V) 还是「先挖坑再上」(N)，以及坑有多深。
+
+    口径全部从「大阳日收盘 C0」起算，只用前瞻 win 日的最低价/最高价：
+        max_dd  = min_k (low_k - C0)/C0      ← 习惯回撤深度（负数）
+        break   = 首个 high_k > H0 的 k      ← 突破信号日高点的日子
+        V 型：突破 且 max_dd > dd_split（浅调续攻）
+        N 型：突破 且 max_dd ≤ dd_split（深调再上 / 画 N 字）
+        FAIL：win 日内未突破
+    返回 dd_p50 / dd_p75 —— **止损宽度的直接依据**：止损窄于 |dd_p75| 大概率被扫。
+    """
+    n = len(bars)
+    if n < 60:
+        return None
+    close = [b["c"] for b in bars]
+    types, dds, bottoms, breaks = [], [], [], []
+    for i in range(1, n):
+        if i + win >= n:
+            break
+        if close[i - 1] <= 0:
+            continue
+        if (close[i] / close[i - 1] - 1) * 100 < big:
+            continue
+        if bars[i]["l"] == bars[i]["h"]:      # 一字板：买不到，剔除
+            continue
+        C0, H0 = close[i], bars[i]["h"]
+        dd, bottom, brk = 0.0, None, None
+        for k in range(1, win + 1):
+            d = (bars[i + k]["l"] - C0) / C0 * 100
+            if d < dd:
+                dd, bottom = d, k
+            if brk is None and bars[i + k]["h"] > H0:
+                brk = k
+        dds.append(dd)
+        bottoms.append(bottom)
+        if brk is not None:
+            breaks.append(brk)
+            types.append("V" if dd > dd_split else "N")
+        else:
+            types.append("FAIL")
+    ns = len(types)
+    if ns == 0:
+        return None
+    brk_days = [b for b in breaks if b]
+    # 回撤「深度」= -dd（正数，越大坑越深）。深度的 P75 = 75% 的信号回撤不超过此值
+    # ⇒ 止损宽度要 ≥ 深度 P75，才能扛住 75% 的路径（否则必被扫）。
+    depths = [-d for d in dds]
+    p = {
+        "big": big, "win": win, "dd_split": dd_split, "n": ns,
+        "v_rate": sum(1 for t in types if t == "V") / ns,
+        "n_rate": sum(1 for t in types if t == "N") / ns,
+        "fail_rate": sum(1 for t in types if t == "FAIL") / ns,
+        "break_rate": len(breaks) / ns,
+        "dd_mean": mean(dds),
+        "dd_p50": pct(dds, 0.50),
+        "depth_p50": pct(depths, 0.50),
+        "depth_p75": pct(depths, 0.75),
+        "depth_p90": pct(depths, 0.90),
+        "bottom_mean": mean(bottoms),
+        "break_mean": mean(brk_days) if brk_days else None,
+    }
+    p.update({"class": None, "class_label": None, "advice": None})
+    p.update(zip(("class", "class_label", "advice"), classify_path(p)))
+    return p
+
+
+def classify_path(p):
+    """路径层判定。只回答「用哪种买法 + 止损留多宽」，不否决交易。"""
+    if not p or p["n"] < PATH_MIN_SIG:
+        return ("unknown", "样本不足（< %d 个信号）" % PATH_MIN_SIG,
+                "大阳样本不足，路径层不作判定；按第一层结论执行")
+    d50 = p["depth_p50"] or 0     # 中位坑深
+    d75 = p["depth_p75"] or 0     # 75% 的路径坑不超过此深 ⇒ 止损最小宽度
+    if p["v_rate"] >= PATH_V_RATE:
+        return ("v", "短调续攻型（V 型占 %.0f%%）" % (p["v_rate"] * 100),
+                "习惯浅调就走 —— 突破买 / 次日买可用；止损宽度 ≥ %.1f%%（坑深 P75）即可覆盖大部分路径"
+                % d75)
+    if p["n_rate"] >= PATH_N_RATE:
+        return ("n", "深调再上型（画 N 字，占 %.0f%%）" % (p["n_rate"] * 100),
+                "习惯先挖坑再上（中位坑深 %.1f%%）⇒ 禁止突破追与次日追，只在回踩接；"
+                "回踩位按 %.1f%% 量级设，止损要容得下 %.1f%%（坑深 P75），容不下就别用这个买法"
+                % (d50, d50, d75))
+    return ("mixed", "路径混合型（V %.0f%% / N %.0f%%）"
+            % (p["v_rate"] * 100, p["n_rate"] * 100),
+            "两种路径都常见 ⇒ 不做预判，统一按回踩买；止损宽度按 %.1f%%（坑深 P75）留" % d75)
+
+
+# ─────────────────────── 第四层：连拉状态（当下） ───────────────────────
+def now_streak(bars):
+    """(连阳天数, 连阳段累计涨幅%, 段起点前一日收盘) —— 只看最后一段。"""
+    n = len(bars)
+    if n < 2:
+        return 0, 0.0, None
+    s = 0
+    for k in range(n - 1, 0, -1):
+        if bars[k]["c"] > bars[k - 1]["c"]:
+            s += 1
+        else:
+            break
+    start = n - 1 - s                       # 连阳段第一根的下标
+    base = bars[start - 1]["c"] if start > 0 else bars[start]["c"]
+    gain = (bars[-1]["c"] / base - 1) * 100 if base else 0.0
+    return s, gain, base
+
+
+def hist_run_rate(bars, big=BIG_DEFAULT, win=PATH_WIN, streak=RUN_STREAK):
+    """历史「大阳信号后 win 日内最长连阳 ≥ streak」的比例 + 样本数（用于 shrinkage）。
+
+    注意：返回的是**原始比例**，调用方必须自己缩水，见 run_state()。
+    """
+    n = len(bars)
+    if n < 60:
+        return None, 0
+    close = [b["c"] for b in bars]
+    runs, tot = 0, 0
+    for i in range(1, n):
+        if i + win >= n:
+            break
+        if close[i - 1] <= 0:
+            continue
+        if (close[i] / close[i - 1] - 1) * 100 < big:
+            continue
+        if bars[i]["l"] == bars[i]["h"]:      # 一字板：买不到
+            continue
+        cur = best = 0
+        for k in range(1, win + 1):
+            if close[i + k] > close[i + k - 1]:
+                cur += 1
+                best = max(best, cur)
+            else:
+                cur = 0
+        tot += 1
+        if best >= streak:
+            runs += 1
+    if tot == 0:
+        return None, 0
+    return runs / tot, tot
+
+
+def run_state(bars, big=BIG_DEFAULT, streak=RUN_STREAK, min_gain=RUN_MIN_GAIN):
+    """第四层：**当下**处于连拉中 / 蓄势中 / 退潮中 —— 决定「出场用固定目标还是移动止损」。
+
+    ⚠ 这一层**不做预测**。历史连拉率会一并给出，但已按经验贝叶斯缩水（w = n·ICC/(n·ICC+1−ICC)），
+    且缩水后仍只作参考 —— 实证里用历史 habit 选不出该用哪种出场法。
+    """
+    n = len(bars)
+    if n < 60:
+        return None
+    s, gain, base = now_streak(bars)
+    last = n - 1
+    close = bars[last]["c"]
+    ma5, ma10, ma20 = ma(bars, last, 5), ma(bars, last, 10), ma(bars, last, 20)
+
+    raw, nsig = hist_run_rate(bars, big=big, streak=streak)
+    if raw is None or nsig < RUN_MIN_SIG:
+        w = 0.0
+    else:
+        w = nsig * RUN_ICC / (nsig * RUN_ICC + 1 - RUN_ICC)
+    shrunk = (w * raw + (1 - w) * RUN_BASE_RATE) if raw is not None else RUN_BASE_RATE
+
+    if s >= streak and gain >= min_gain:
+        klass = "running"
+        label = "连拉中（已连阳 %d 天，段内 %+.1f%%）" % (s, gain)
+        advice = ("已走成一波流 ⇒ **撤掉固定目标位**，改移动止损（MA5 收盘破 / −1×ATR），"
+                  "让利润跑；此时禁止加仓追高" )
+    elif ma5 and close < ma5:
+        klass = "fading"
+        label = "退潮中（收盘 %.2f < MA5 %.2f）" % (close, ma5)
+        advice = "短线已转弱 ⇒ 不新开仓；持仓按既有止损执行，等重新站回 MA5 再谈"
+    elif ma20 and close > ma20:
+        klass = "building"
+        label = "蓄势中（未连拉：连阳 %d 天，收盘在 MA20 上方）" % s
+        advice = ("不在主升浪 ⇒ 固定目标位 + 回踩买是正确用法；"
+                  "但入场后一旦走出 %d 连阳且段内 ≥%.0f%%，立刻切换成移动止损" % (streak, min_gain))
+    else:
+        klass = "chop"
+        label = "无明确状态（MA20 下方震荡）"
+        advice = "既不在连拉也不在趋势中 ⇒ 维持原计划，不做状态切换"
+
+    return {
+        "class": klass, "class_label": label, "advice": advice,
+        "streak_now": s, "run_gain": gain, "run_base": base,
+        "close": close, "ma5": ma5, "ma10": ma10, "ma20": ma20,
+        "hist_run_rate": raw, "hist_n": nsig, "shrink_w": w,
+        "shrunk_run_rate": shrunk, "base_rate": RUN_BASE_RATE,
+        "note": "历史连拉率已缩水：w=%.0f%% 个股 + %.0f%% 全市场基准；只作参考，不作预判"
+                % (w * 100, (1 - w) * 100),
+    }
+
+
 # ─────────────────────── 第一层：突破后行为 ───────────────────────
 def analyze(bars, big=BIG_DEFAULT, hold=HOLD_DEFAULT,
             anns=None, news_hold=NEWS_HOLD, ann_meta=None):
@@ -210,6 +434,12 @@ def analyze(bars, big=BIG_DEFAULT, hold=HOLD_DEFAULT,
 
     klass, label, advice = classify(a)
     a.update({"class": klass, "class_label": label, "advice": advice})
+
+    # —— 第三层：突破后路径形状（V 型 / N 字）——
+    a["path"] = path_habit(bars, big=big)
+
+    # —— 第四层：当下连拉状态（决定出场用固定目标还是移动止损）——
+    a["run"] = run_state(bars, big=big)
 
     # —— 第二层：利好兑现习惯 ——
     news = news_habit(bars, anns, hold=news_hold, meta=ann_meta)
@@ -524,6 +754,12 @@ def render_conclusion(a):
     if NEWS_CONCL.get(nb.get("news_class")):
         L.append("【结论 · 出消息】%s"
                  % NEWS_CONCL[nb["news_class"]])
+    pth = a.get("path")
+    if pth and pth.get("n", 0) >= PATH_MIN_SIG:
+        L.append("【结论 · 路径】%s —— %s" % (pth["class_label"], pth["advice"]))
+    rn = a.get("run")
+    if rn:
+        L.append("【结论 · 连拉】%s —— %s" % (rn["class_label"], rn["advice"]))
     if a.get("big_count"):
         L.append("        依据：大阳 %d 根 ／ 后 %s 日赔率 %s（上 %s / 下 %s）、延续率 %s、"
                  "收盘为正 %s"
@@ -571,6 +807,20 @@ def render(a):
         #   该指标既不是 published 判据（赔率 / 延续率才是），也不单独改类
         #   （见 classify() 注释）⇒ 从人读输出里撤掉，只在 JSON 里留着供研究。
         #   它原来的位置由顶部【结论】块回答。
+        # ★ 2026-09-26 老罗换了种方式问同一个东西：「有的股短调一下就上，有的喜欢画N字」。
+        #   ⇒ 冲击率其实就是「画 N 字」的比例，只是当年没翻译成「止损该留多宽」。
+        #   现在由下面的「路径形状」行回答（同一份数据，换成能直接用的口径）。
+        pth = a.get("path")
+        if pth and pth["n"] >= 3:
+            L.append("    路径形状                V型 %.0f%% ／ N字 %.0f%% ／ 未突破 %.0f%%"
+                     % (pth["v_rate"] * 100, pth["n_rate"] * 100, pth["fail_rate"] * 100))
+            L.append("          （V=浅调就上 / N=先挖坑再上；%d 个信号，前瞻 %d 日）"
+                     % (pth["n"], pth["win"]))
+            L.append("    习惯回撤深度（正数，越大坑越深）中位 %.2f%% ／ P75 %.2f%% ／ P90 %.2f%%"
+                     % (pth["depth_p50"], pth["depth_p75"], pth["depth_p90"]))
+            L.append("          ← 止损宽度 ≥ P75 才能扛住 75% 的路径；窄于此 = 大概率被扫")
+            L.append("    平均见底 T+%.1f 日     突破信号日高点 T+%.1f 日（%.0f%% 会突破）"
+                     % (pth["bottom_mean"], pth["break_mean"] or 0, pth["break_rate"] * 100))
     else:
         L.append("    （无大阳样本）")
     L.append("-" * 66)
@@ -579,6 +829,13 @@ def render(a):
              % (("n/a" if a["atr_pct"] is None else "%.2f%%" % a["atr_pct"]),
                 a["max_up_streak"]))
     L.append("    MA10 %s     MA20 %s" % (pn(a["ma10"]), pn(a["ma20"])))
+    rn = a.get("run")
+    if rn:
+        L.append("    当前连阳 %d 天（段内 %+.2f%%，起点前收 %s）"
+                 % (rn["streak_now"], rn["run_gain"], pn(rn["run_base"])))
+        L.append("    历史连拉率 %.0f%%（n=%d）→ 缩水后 %.0f%%（%s；全市场基准 %.0f%%）"
+                 % ((rn["hist_run_rate"] or 0) * 100, rn["hist_n"],
+                    rn["shrunk_run_rate"] * 100, rn["note"], rn["base_rate"] * 100))
     L.append("-" * 66)
     L.extend(render_news(a.get("news") or {"available": False}))
     L.append("-" * 66)
@@ -589,6 +846,14 @@ def render(a):
     if nb.get("label") and nb.get("n"):
         L.append("    ② 利好兑现  ：%s" % nb["label"])
         L.append("       %s" % nb["advice"])
+    pth = a.get("path")
+    if pth and pth.get("n", 0) >= PATH_MIN_SIG:
+        L.append("    ③ 突破后路径：%s" % pth["class_label"])
+        L.append("       %s" % pth["advice"])
+    rn = a.get("run")
+    if rn:
+        L.append("    ④ 当下连拉状态：%s" % rn["class_label"])
+        L.append("       %s" % rn["advice"])
     L.append("-" * 66)
     L.append("提示：股性判据决定「用哪种买法 / 能不能在公告日动手」，不决定「买不买」。")
     L.append("      能否决交易的只有硬约束：钱不够 / 涨停买不到 / 结构已坏。以上不构成投资建议。")
