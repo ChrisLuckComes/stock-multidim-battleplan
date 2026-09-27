@@ -25,6 +25,16 @@ us_proxy.txt
 # 仓库为 public，notes_*.json 含持仓/成本/买点，不得收录。
 notes_*.json
 
+# 单次分析中间产物（battle_analyze 落根目录的原始 JSON，含行情明细，2026-09-28 补）
+analysis_*.json
+
+# 每日作战计划 / 备忘（含具体买点、止损、持仓，私人生成物，2026-09-28 补）
+open_plan_*.md
+open_memo_*.md
+
+# 编辑器私有配置
+.cursor/
+
 # 工作区记忆 / 自动化文件，勿入仓库（2026-09-18）
 .workbuddy/
 
