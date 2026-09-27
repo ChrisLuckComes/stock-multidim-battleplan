@@ -230,13 +230,20 @@ def build_best(a, n):
         if lot:
             qty = (qty // lot) * lot
     amt = rec.get("amount") if rec.get("amount") is not None else qty * rec["entry"]
+    # ★ R 标签必须反映它真实用的目标口径（2026-09-27 修，老罗要求这张卡「必须正确」）：
+    #   t1 算不出时引擎会回落到远端墙 t2 算 R（battle_analyze.odds_matrix 的 r1_basis
+    #   字段标明）。这张卡是首屏决策依据，标签写死「R → t1」等于把远端墙 R 冒充 t1 R，
+    #   读者会以为目标位就是 t1 —— 必须按实际口径改标签，且回落时不再重复列 r2。
+    _rb = rec.get("r1_basis")
+    _r1_is_t1 = (not _rb) or str(_rb).startswith("t1")
     kpis = [
         ("买入", "<b>%s</b>（%s）" % (num(rec["entry"]), esc(rec["entry_name"]))),
         ("结构止损", "<b>%s</b>（%s）" % (num(rec["stop"]), esc(rec["stop_name"]))),
         ("每股风险", "<b>%s</b>（%s×ATR · %s%%）" % (num(rec["risk"]), num(rec["risk_atr"]),
                                                 num(rec["risk_pct"]))),
-        ("R → t1", "<b>%s</b>" % num(rec["r1"])),
-        ("R → 远端墙", "<b>%s</b>" % num(rec["r2"])),
+        ("R → t1" if _r1_is_t1 else "R（t1缺失·按远端墙）",
+         "<b>%s</b>" % num(rec["r1"])),
+        ("R → 远端墙", "<b>%s</b>" % (num(rec["r2"]) if _r1_is_t1 else "同上")),
         ("需回落", "<b>%s</b>" % pct_plain(rec["need_pct"])),
         ("仓位", ("%s 股 / %s%s（账户 %s%%%s）%s"
                  % (num(qty, 0), cur, num(amt, 0),

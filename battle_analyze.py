@@ -312,7 +312,15 @@ def odds_matrix(entries, anchors, atr_v, t1, t2, last_c):
             risk = buy - stp
             if atr_v and risk < MIN_RISK_ATR * atr_v:
                 continue
-            r1 = round((t1 - buy) / risk, 2) if t1 else None
+            # ★ 2026-09-27 修（老罗质疑「推荐 57.77 为何变 57.60」定位到的 bug）：
+            #   原写法 t1 缺失时 r1 恒为 None ⇒ 下面排序 key 的第一项全部相等，
+            #   排序退化成第二项 `-(risk_atr)` = **risk_atr 降序 = 止损最宽优先**，
+            #   推荐档因此反向选中「近 10 根最低」这类远锚（688581 实测 stop 50.2 =
+            #   4.06×ATR，200 股风险 1514 元 = 超预算 2 倍；而执行口径 56.69 仅 186 元）。
+            #   修法：t1 算不出时回落到 t2（远端墙），让 R 有值、排序回到「赔率优先」。
+            #   回落时标记 r1_basis，报告端可据此说明「R 用的是远端墙而非 t1」。
+            _t1 = t1 if t1 else t2
+            r1 = round((_t1 - buy) / risk, 2) if _t1 else None
             r2 = round((t2 - buy) / risk, 2) if t2 else None
             rows.append({
                 "entry_name": e["name"], "entry": buy, "entry_kind": e["kind"],
@@ -321,6 +329,8 @@ def odds_matrix(entries, anchors, atr_v, t1, t2, last_c):
                 "risk": _f(risk, 2), "risk_atr": _f(risk / atr_v, 2) if atr_v else None,
                 "risk_pct": _f(risk / buy * 100, 2),
                 "r1": r1, "r2": r2,
+                "r1_basis": ("t1" if t1 else
+                             ("t2·远端墙（t1 缺失回落）" if t2 else None)),
                 # 可预挂 = 买点在现价下方（A 股限价单可隔夜挂）
                 "prehang": buy <= last_c,
             })
@@ -500,52 +510,97 @@ def pick_recommend(rows, z, us=False):
     return _pick_recommend_cn(rows, z)
 
 
+def _primary_pool(rows, struct_stop):
+    """「止损 = 引擎结构止损」的子集 —— 即报告主表 odds_primary 的口径。
+
+    ★ 2026-09-27 新增：全矩阵里混着「近 10/20 根最低」这类远锚（688581 实测
+      50.2 = 4.06×ATR），与 `plan.stop_plan.struct`（真正会执行的那条腿）不是一回事。
+    推荐档必须先在**执行口径**里挑，挑不到才回落到全矩阵，否则报告首屏的
+    「最高盈亏比路径」会给出虚高风险 / 超预算的股数。
+    """
+    if struct_stop is None:
+        return []
+    # ⚑ 用 .get + 类型检查：老 fixture / 极简 row 不一定带 stop 键，
+    #   直接 r["stop"] 会 KeyError（tests/report/test_battle_report.py 实测）。
+    #   取不到就返回空 ⇒ 上层回落到全矩阵，行为与修复前一致。
+    return [r for r in rows
+            if isinstance(r.get("stop"), (int, float))
+            and abs(r["stop"] - struct_stop) < 0.005]
+
+
 def _pick_recommend_cn(rows, z):
-    """A 股：可预挂、不追高、不贴着止损、风险够，里面 R 最大的一条。"""
+    """A 股：可预挂、不追高、不贴着止损、风险够，里面 R 最大的一条。
+
+    ★ 2026-09-27 修：优先在「止损 = 引擎结构止损」的口径里挑（与 odds_primary
+      和执行方案同一套数），挑不到才回落全矩阵。原实现直接在全矩阵里挑，
+      688581 因此选中 stop 50.2（4.06×ATR，200 股 1514 元超预算 2 倍）。
+    """
     struct_stop = z.get("struct_stop")
     zone_hi = z.get("primary_hi")
-    feas = []
-    for r in rows:
-        if not r["prehang"]:
-            continue
-        if struct_stop is not None and r["entry"] <= struct_stop:
-            continue
-        if zone_hi is not None and r["entry"] > zone_hi:
-            continue
-        if r["risk_atr"] is None or r["risk_atr"] < MIN_RISK_ATR:
-            continue
-        if r["need_pct"] is not None and r["need_pct"] < -4.0:
-            continue
-        feas.append(r)
-    feas.sort(key=lambda r: -(r["r1"] if r["r1"] is not None else -999))
+
+    def _feas(pool):
+        out = []
+        for r in pool:
+            if not r["prehang"]:
+                continue
+            if struct_stop is not None and r["entry"] <= struct_stop:
+                continue
+            if zone_hi is not None and r["entry"] > zone_hi:
+                continue
+            if r["risk_atr"] is None or r["risk_atr"] < MIN_RISK_ATR:
+                continue
+            if r["need_pct"] is not None and r["need_pct"] < -4.0:
+                continue
+            out.append(r)
+        out.sort(key=lambda r: -(r["r1"] if r["r1"] is not None else -999))
+        return out
+
+    primary = _primary_pool(rows, struct_stop)
+    if primary:
+        feas = _feas(primary)
+        if feas:
+            return feas[0]
+    feas = _feas(rows)
     return feas[0] if feas else None
 
 
 def _pick_recommend_us(rows, z):
-    """美股：追涨档 R≥1.5 就做。没有合格的追涨档，才退回 R≥1.5 的回踩。"""
+    """美股：追涨档 R≥1.5 就做。没有合格的追涨档，才退回 R≥1.5 的回踩。
+
+    ★ 2026-09-27 修：同 CN，优先在「止损 = 引擎结构止损」的口径里挑。
+    """
     struct_stop = z.get("struct_stop")
-    chase, pull = [], []
-    for r in rows:
-        if r.get("r1") is None or r["r1"] < 1.5:
+
+    def _split(pool):
+        chase, pull = [], []
+        for r in pool:
+            if r.get("r1") is None or r["r1"] < 1.5:
+                continue
+            if struct_stop is not None and r["entry"] <= struct_stop:
+                continue
+            if r.get("risk_atr") is None or r["risk_atr"] < MIN_RISK_ATR:
+                continue
+            need = r.get("need_pct")
+            if need is not None and need < -4.0:
+                continue
+            if need is None or need >= 0:
+                chase.append(r)
+            else:
+                pull.append(r)
+        return chase, pull
+
+    pools = [_primary_pool(rows, struct_stop), rows]
+    for pool in pools:
+        if not pool:
             continue
-        if struct_stop is not None and r["entry"] <= struct_stop:
-            continue
-        if r.get("risk_atr") is None or r["risk_atr"] < MIN_RISK_ATR:
-            continue
-        need = r.get("need_pct")
-        if need is not None and need < -4.0:
-            continue
-        if need is None or need >= 0:
-            chase.append(r)
-        else:
-            pull.append(r)
-    if chase:
-        chase.sort(key=lambda r: (-r["r1"], abs(r.get("need_pct") or 0)))
-        return chase[0]
-    if not pull:
-        return None
-    pull.sort(key=lambda r: -r["r1"])
-    return pull[0]
+        chase, pull = _split(pool)
+        if chase:
+            chase.sort(key=lambda r: (-r["r1"], abs(r.get("need_pct") or 0)))
+            return chase[0]
+        if pull:
+            pull.sort(key=lambda r: -r["r1"])
+            return pull[0]
+    return None
 
 
 def volprice_20d(bars):
