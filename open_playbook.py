@@ -391,6 +391,26 @@ def build(last, entry, stop, target=None, atr=None, board=None,
                         else "收盘破 %.2f ⇒ 次日开盘卖" % stop,
                 "tone": "on",
             })
+        elif entry >= hi_gap:
+            # ── 挂单价本身就在不追高闸门之上（如「突破确认后回踩接」类买点）：
+            #    (entry, hi_gap] 是空区间，照抄会打印出「33.70 < O ≤ 33.57」
+            #    这种下界>上界的假档位（洪都 600316 2026-09-28 实测）。
+            #    本档显式标空，并说清这单只能盯盘手动、不存在「开盘更高也成交」。
+            bands.append({
+                "key": "flat_up",
+                "title": ("③ 小高开 / 平开（<b>空档</b> —— 挂单价 %.2f 已在不追高闸门之上）"
+                          % entry),
+                "cond": "—（无价格可落：%.2f ≥ %.2f）" % (entry, hi_gap),
+                "act": ("<b>本档不存在</b>：挂单价 %.2f 高于不追高闸门 %.2f（前收盘 +%.0f%%）"
+                        " ⇒ 它是<b>突破确认后的回踩接单价</b>，不是低吸单，"
+                        "A 股无 buy-stop ⇒ <b>只能盯盘手动挂</b>，不能隔夜预挂。<br>"
+                        "开盘价 ≥ %.2f 一律<b>不追</b>（那已是 ② 档）；"
+                        "只有盘中回踩到 ≤ %.2f 才成交。"
+                        % (entry, hi_gap, GAP_UP_MAX * 100, entry, entry)),
+                "pos": "0 股（等回踩）",
+                "stop": "—",
+                "tone": "wait",
+            })
         else:
             bands.append({
                 "key": "flat_up",

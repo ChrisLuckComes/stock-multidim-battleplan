@@ -124,6 +124,25 @@ def test_no_chase_keeps_legacy_two_percent_gap():
     assert b3["tone"] == "wait"
 
 
+def test_entry_above_no_chase_gap_makes_band_three_empty():
+    """挂单价 ≥ 不追高闸门（前收 +2%）⇒ ③ 档是**空档**，不得打印假区间。
+
+    出处：洪都航空 600316（2026-09-28 计划）挂单 33.70、前收 32.91 ⇒
+    +2% 闸门 = 33.57 < 挂单价 33.70 —— 旧代码原样套区间，打出
+    「33.70 ＜ O ≤ 33.57」这种下界 > 上界、根本无价格可落的假档位。
+    这类「突破确认后回踩接」的买点本就在现价上方，只能盯盘手动。
+    """
+    a = _mk(entry=33.70, stop=33.00, last=32.91, shares=100)
+    pb = OP.from_analysis(a, {})
+    assert pb["chase"] is None
+    b3 = _band(pb, "flat_up")
+    assert "空档" in b3["title"], "挂单价在闸门之上时③档必须显式标空档"
+    assert "无价格可落" in b3["cond"]
+    assert "33.70 ＜ O ≤ 33.57" not in b3["cond"], "不得再出现下界>上界的假区间"
+    assert b3["tone"] == "wait"
+    assert b3["pos"] == "0 股（等回踩）"
+
+
 def test_chase_narrower_than_default_gap_is_ignored():
     """授权上限比默认 +2% 线还窄 ⇒ 不迁移（不得把授权弄得更保守）。"""
     a = _mk(chase={"limit": 5.55, "stop": 5.21, "size_ratio": 0.5})
