@@ -154,6 +154,23 @@ def analyze(code, name, prefix):
 
 def main():
     codes = json.load(open("scan_all/codes.json", encoding="utf-8"))
+
+    # ★ 永久黑名单过滤（2026-09-27）：命中的连候选池都不进，
+    #   省下的是抓取时间 + 新浪 456 限流的重试预算（全市场扫描最贵的资源）。
+    try:
+        import os as _os
+        import sys as _sys
+        _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+        import blacklist as BL
+        _ban = BL.load("cn")
+        _before = len(codes)
+        codes = [it for it in codes if str(it.get("c")) not in _ban]
+        if len(codes) != _before:
+            print("黑名单过滤：候选 %d → %d（剔除永久黑名单 %d 只）"
+                  % (_before, len(codes), _before - len(codes)))
+    except Exception as e:  # 黑名单不该成为扫描的单点故障
+        print("（黑名单未加载，本次不过滤：%r）" % (e,))
+
     out = open("scan_all/results.jsonl", "w", encoding="utf-8")
     done = 0
     skipped = 0

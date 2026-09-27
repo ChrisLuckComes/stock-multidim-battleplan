@@ -207,6 +207,10 @@ def main():
     ap.add_argument("--no-cache", action="store_true", help="不用缓存（强制联网）")
     a = ap.parse_args()
 
+    # ★ 永久黑名单前置闸门。
+    import blacklist as BL
+    BL.gate_any_or_exit(a.codes)
+
     if a.data and len(a.codes) != 1:
         ap.error("--data 只支持单票")
     held = True if a.holding else (False if a.flat else None)

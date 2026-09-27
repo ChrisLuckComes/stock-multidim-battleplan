@@ -986,6 +986,12 @@ def main():
     ap.add_argument("--json", action="store_true", help="输出 JSON")
     args = ap.parse_args()
 
+    # ★ 永久黑名单前置闸门：股性体检要抓 ~200 条公告，命中就不该动。
+    import os as _os, sys as _sys
+    _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+    import blacklist as BL
+    BL.gate_or_exit(args.code, None if args.market == "auto" else args.market)
+
     market = None if args.market == "auto" else args.market
     bars = load_bars(args.code, n=args.n, market=market)
     if not bars:

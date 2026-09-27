@@ -1076,6 +1076,10 @@ def main():
     ap.add_argument("--quiet", action="store_true")
     a = ap.parse_args()
 
+    # ★ 永久黑名单前置闸门（2026-09-27）：命中后直接退出，连日线都不拉。
+    import blacklist as BL
+    BL.gate_any_or_exit(a.codes)
+
     if a.data and len(a.codes) != 1:
         ap.error("--data 只支持单票")
     peers = [x.strip() for x in (a.peers or "").split(",") if x.strip()]
