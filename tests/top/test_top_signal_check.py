@@ -67,11 +67,22 @@ def _snap_path(kind):
     return p
 
 
+def _cli_script():
+    """布局无关地定位 top_signal_check.py：DEV 在 gates/ 子目录，INST 扁平在根。"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for c in (os.path.join(here, "..", "..", "gates", "top_signal_check.py"),
+              os.path.join(here, "top_signal_check.py"),
+              os.path.join(ROOT, "gates", "top_signal_check.py")):
+        if os.path.exists(c):
+            return os.path.abspath(c)
+    raise FileNotFoundError("top_signal_check.py 未找到")
+
+
 def _run_cli(args):
     env = dict(os.environ)
     env["PYTHONIOENCODING"] = "utf-8"
     return subprocess.run(
-        [sys.executable, os.path.join(ROOT, "gates", "top_signal_check.py")] + args,
+        [sys.executable, _cli_script()] + args,
         capture_output=True, text=True, encoding="utf-8", errors="replace",
         env=env, timeout=120)
 
