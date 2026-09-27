@@ -59,7 +59,8 @@ import sys
 import time
 import urllib.request
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # 本目录（INST 扁平布局 = 根）
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))  # 父目录（DEV gates/ 子布局 = 根）
 
 import bars_source  # noqa: E402
 
