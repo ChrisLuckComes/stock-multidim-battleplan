@@ -54,12 +54,19 @@ def _band(pb, key):
 
 # ---------------------------------------------------------------- 自动接线
 def test_chase_auto_wired_from_next_day_chase():
-    """analysis 里有 next_day_chase ⇒ from_analysis 必须自动接上，不需 notes。"""
+    """analysis 里有 next_day_chase ⇒ from_analysis 必须自动接上，不需 notes。
+
+    ⚑ 2026-09-28 起上界不再直接等于结构顶 5.89 —— 老罗「追 ≤5.89 太草率」
+    裁定后新增**赔率闸**（R≥1.5），两闸取严：
+        结构顶 5.89  vs  R≥1.5 门槛 (5.99+1.5×5.21)/2.5 = 5.52  ⇒ 取 5.52
+    """
     a = _mk(chase={"limit": 5.89, "stop": 5.21, "size_ratio": 0.5},
             through_gate=5.89)
     pb = OP.from_analysis(a, {})
     assert pb["chase"] is not None, "有 next_day_chase 却没接上追价授权"
-    assert pb["chase"]["top"] == 5.89
+    assert pb["chase"]["struct_top"] == 5.89, "结构顶应保留为 5.89 备查"
+    assert pb["chase"]["rr_cap"] == 5.52, "R≥1.5 门槛应为 5.52"
+    assert pb["chase"]["top"] == 5.52, "两闸取严 ⇒ 生效上界 5.52（非 5.89）"
     assert pb["chase"]["stop"] == 5.21
     # size_ratio 0.5 × 计划 1000 股 = 500 股（引擎 note 原文「可半仓」）
     assert pb["chase"]["shares"] == 500
@@ -74,19 +81,20 @@ def test_chase_band_three_becomes_buy_not_wait():
     assert b3 is not None
     assert b3["tone"] == "on", "③ 档应为可执行（on），不是 wait/off"
     assert "500 股" in b3["pos"]
-    assert "5.30 ＜ O ≤ 5.89" in b3["cond"], "③ 档上界应是追价上限 5.89"
+    # 上界 = 两闸取严后的 5.52（R≥1.5 门槛），不是结构顶 5.89
+    assert "5.30 ＜ O ≤ 5.52" in b3["cond"], "③ 档上界应是两闸取严后的 5.52"
     assert "等回踩" not in b3["pos"]
     # 止损必须收紧到追价档专用锚（≠ 原计划 5.00）
     assert "5.21" in b3["stop"]
 
 
 def test_chase_band_two_rejects_only_above_top():
-    """② 档：越过追价上限（5.89 ~ 涨停）才不追；且必须点明「踏空成本=0」。"""
+    """② 档：越过追价上限（两闸取严后 5.52 ~ 涨停）才不追；且要点明「踏空成本=0」。"""
     a = _mk(chase={"limit": 5.89, "stop": 5.21, "size_ratio": 0.5},
             through_gate=5.89)
     pb = OP.from_analysis(a, {})
     b2 = _band(pb, "gap_up")
-    assert "5.89 ＜ O ＜ 6.05" in b2["cond"]
+    assert "5.52 ＜ O ＜ 6.05" in b2["cond"]
     assert b2["pos"] == "0 股"
     assert "踏空" in b2["act"]
 
@@ -132,15 +140,62 @@ def test_chase_above_limit_up_is_ignored():
 
 
 def test_notes_override_wins():
-    """notes 的 open_playbook.chase 优先于 analysis 自动推导。"""
+    """notes 的 open_playbook.chase 优先于 analysis 自动推导 —— 但**仍受赔率闸约束**。
+
+    人工裁定 limit 5.70 / stop 5.10 ⇒ R≥1.5 门槛 = (5.99+1.5×5.10)/2.5 = 5.46
+    ⇒ 生效上界 5.46。人工可以改锚，但改不出 R<1.5 的追价（防手痒追高）。
+    """
     a = _mk(chase={"limit": 5.89, "stop": 5.21, "size_ratio": 0.5},
             through_gate=5.89)
     n = {"open_playbook": {"chase": {"limit": 5.70, "stop": 5.10,
                                      "shares": 300, "src": "人工裁定"}}}
     pb = OP.from_analysis(a, n)
-    assert pb["chase"]["top"] == 5.70
+    assert pb["chase"]["top"] == 5.46, "人工裁定 5.70 被赔率闸压到 5.46"
     assert pb["chase"]["shares"] == 300
     assert "300 股" in _band(pb, "flat_up")["pos"]
+
+
+# ------------------------------------------------------- 赔率闸（2026-09-28）
+def test_rr_gate_inactive_without_target():
+    """无 target ⇒ 赔率闸不启用（与改动前一致），上界 = 结构顶。"""
+    a = _mk(chase={"limit": 5.89, "stop": 5.21, "size_ratio": 0.5},
+            through_gate=5.89)
+    a["targets"]["t1"] = None          # 断掉目标位
+    pb = OP.from_analysis(a, {})
+    assert pb["chase"]["rr_cap"] is None
+    assert pb["chase"]["top"] == 5.89, "无 target 时不得擅自启用赔率闸"
+
+
+def test_rr_gate_inactive_without_chase_stop():
+    """无 chase.stop ⇒ 算不出 R ⇒ 赔率闸不启用。"""
+    a = _mk(chase={"limit": 5.89, "size_ratio": 0.5}, through_gate=5.89)
+    pb = OP.from_analysis(a, {})
+    assert pb["chase"]["rr_cap"] is None
+    assert pb["chase"]["top"] == 5.89
+
+
+def test_rr_gate_voids_chase_below_entry():
+    """R 门槛 ≤ 挂单价 ⇒ 追价档没有可执行空间 ⇒ 授权作废。
+
+    构造：stop 抬到 5.60 ⇒ 门槛 = (5.99+1.5×5.60)/2.5 = 5.756 → 仍 > entry 5.30；
+    再把 target 压到 5.40 ⇒ 门槛 = (5.40+8.4)/2.5 = 5.52 … 改 target=5.20 才 ≤ entry。
+    用 stop=4.60、target=5.10 ⇒ 门槛 = (5.10+6.90)/2.5 = 4.80 < entry 5.30 ⇒ 作废。
+    """
+    a = _mk(chase={"limit": 5.89, "stop": 4.60, "size_ratio": 0.5},
+            through_gate=5.89, target=5.10)
+    a["targets"]["t1"] = 5.10
+    pb = OP.from_analysis(a, {})
+    assert pb["chase"] is None, "门槛 4.80 ≤ 挂单价 5.30 ⇒ 追价档不成立"
+
+
+def test_rr_gate_never_widens_beyond_struct_top():
+    """赔率闸只能把上界压得更严，绝不能放宽到结构顶之上。"""
+    a = _mk(chase={"limit": 5.89, "stop": 5.21, "size_ratio": 0.5},
+            through_gate=5.89)
+    pb = OP.from_analysis(a, {})
+    assert pb["chase"]["top"] <= pb["chase"]["struct_top"]
+    # 且严于默认 +2% 线时也要保留更严者，不得回退到 5.61
+    assert pb["chase"]["top"] == 5.52 < 5.61
 
 
 def test_us_market_has_no_chase_bands():
@@ -154,8 +209,8 @@ def test_us_market_has_no_chase_bands():
 
 
 # ---------------------------------------------------------------- 真数据
-def test_real_601218_wires_589_and_500_shares():
-    """用真实 analysis.json + notes_601218.json 端到端校验。"""
+def test_real_601218_wires_552_and_500_shares():
+    """用真实 analysis.json + notes_601218.json 端到端校验（上界已改 5.52）。"""
     fa = os.path.join(os.path.dirname(HERE), "..", "out_cn",
                       "analysis_601218.json")
     fn = os.path.join(os.path.dirname(HERE), "..", "notes_601218.json")
@@ -165,7 +220,7 @@ def test_real_601218_wires_589_and_500_shares():
     n = json.load(open(fn, encoding="utf-8"))
     pb = OP.from_analysis(a, n)
     assert pb["chase"] is not None, "真数据下必须接上追价授权"
-    assert pb["chase"]["top"] == 5.89
+    assert pb["chase"]["top"] == 5.52, "真数据下两闸取严后应为 5.52"
     b3 = _band(pb, "flat_up")
     assert b3["tone"] == "on"
     assert "500 股" in b3["pos"], "notes 给 1000 股 × size_ratio 0.5 = 500 股"

@@ -293,23 +293,54 @@ def build(last, entry, stop, target=None, atr=None, board=None,
     _cstop = None
     _csh = None
     _csrc = ""
+    _rr_cap = None      # ★ 追价档的「赔率闸门」上限（R≥RR_QUALIFIED 的最高入场价）
+    _ct0 = None         # 结构顶（锚点迁移原始授权价），与 rr_cap 取严后得 _ct
     if is_cn and isinstance(chase, dict):
         try:
             _l = float(chase.get("limit"))
         except (TypeError, ValueError):
             _l = None
+        try:
+            _cstop = float(chase.get("stop"))
+        except (TypeError, ValueError):
+            _cstop = None
         # 只在授权上限真的比默认 +2% 线更宽、且没顶穿涨停价时才迁移
         if _l and _l > _gap and _l < up_limit:
-            _ct = px(_l)
-            try:
-                _cstop = float(chase.get("stop"))
-            except (TypeError, ValueError):
-                _cstop = None
+            _ct0 = px(_l)
+            # ── ★★ 第二道闸：赔率闸（2026-09-28 老罗「追 ≤5.89 太草率」定）──
+            #   chase.limit（锚点迁移后的新结构顶）只回答「结构上能不能追」，
+            #   **不回答「这个价追划不划算」**。实测吉鑫 601218：through_gate
+            #   5.89 处 R 仅 0.15（买的是全天最贵的价），而 R≥1.5 的临界只有
+            #   5.50 —— 两道闸必须**取严者**。
+            #   公式 = max_entry_for_rr(RR_QUALIFIED, target, chase_stop)
+            #        = (target + RR×stop) / (1 + RR)   ← 与 build() 价梯同一算法
+            #   ⚠ 无 target 或 chase_stop（或 target ≤ stop）⇒ 不启用本闸，
+            #     行为与改动前完全一致（不误伤既有 45 张 chase 票）。
+            if target and _cstop and target > _cstop and _cstop > 0:
+                _rr_cap = px(max_entry_for_rr(RR_QUALIFIED, target, _cstop))
+                _ct = min(_ct0, _rr_cap)
+                if _ct <= entry:
+                    # 门槛比挂单价还低 ⇒ 追价档根本没有可执行空间，授权作废
+                    # （此时回退默认 +2% 线；吉鑫这类「门槛 5.52 > 挂单 5.30」
+                    #   不属此列，保留压低后的门槛）
+                    _ct = None
+                    _csrc = ("R≥%.1f 门槛 %.2f ≤ 挂单价 %.2f ⇒ 追价档不成立"
+                             % (RR_QUALIFIED, _rr_cap, entry))
+                elif _ct < _ct0:
+                    # ⚠ 即使门槛比默认 +2% 线（_gap）更严，也**取严者**，
+                    #   绝不回退到更宽的默认线 —— 否则会在 R<1.5 的区间放行。
+                    _csrc = ("%s · <b>R≥%.1f 门槛 %.2f（两闸取严，结构顶 %.2f 被压低%s）</b>"
+                             % (str(chase.get("src") or ""), RR_QUALIFIED, _ct, _ct0,
+                                "，且严于默认线 %.2f" % _gap if _ct < _gap else ""))
+                else:
+                    _csrc = str(chase.get("src") or "")
+            else:
+                _ct = _ct0
+                _csrc = str(chase.get("src") or "")
             try:
                 _csh = int(chase.get("shares")) if chase.get("shares") else None
             except (TypeError, ValueError):
                 _csh = None
-            _csrc = str(chase.get("src") or "")
         del _l
     hi_gap = _ct if _ct else _gap
 
@@ -442,7 +473,11 @@ def build(last, entry, stop, target=None, atr=None, board=None,
         "hi_gap": hi_gap,
         "lo_ok": lo_ok,
         # ★ 追价授权（锚点迁移后才有；无则 None，渲染层据此决定是否显示）
-        "chase": ({"top": _ct, "stop": _cstop, "shares": _csh, "src": _csrc}
+        "chase": ({"top": _ct, "stop": _cstop, "shares": _csh, "src": _csrc,
+                   # ★ 赔率闸：R≥RR_QUALIFIED 的最高入场价；None=未启用
+                   "rr_cap": _rr_cap,
+                   # 结构顶（锚点迁移原始授权），用于报告显示「是否被赔率闸压低」
+                   "struct_top": (_ct0 if _ct else None)}
                   if _ct else None),
         "chase_default_gap": _gap if is_cn else None,
         "risk_per_share": round(entry - stop, 2),
