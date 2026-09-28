@@ -4,6 +4,8 @@ out_*.json
 out_*.txt
 out_cn/*.json
 out_us/*.json
+out_cn/*.html
+out_us/*.html
 *_data.json
 /data/
 __pycache__/
