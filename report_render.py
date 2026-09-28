@@ -1024,6 +1024,13 @@ def render(a, n, tmpl_path=DEFAULT_TMPL, vp_from=None, vp_to=None):
                       "tape_review 未运行（无代码或非 A 股路径），已用引擎/notes 数据兜底。")
             verd_note = '<span class="flat">⚠ %s</span>' % reason
 
+    def _caliber_html(x):
+        # notes.caliber_notes 支持两种形态：纯 HTML 字符串，或 {dim,verdict,basis} 结构。
+        # 600206 曾因 dict 被直接 % 进 <p> 显示成 Python repr 乱码 —— 此处统一归一化。
+        if isinstance(x, dict):
+            return "<b>%s</b>：%s —— %s" % (esc(x.get("dim", "")), esc(x.get("verdict", "")), esc(x.get("basis", "")))
+        return x
+
     slots = {
         "TITLE": esc(n.get("title") or "%s %s · 多维度作战计划 · %s"
                      % (m["name"], m["code"], m["basis_date"])),
@@ -1041,7 +1048,7 @@ def render(a, n, tmpl_path=DEFAULT_TMPL, vp_from=None, vp_to=None):
         "MODE_NOTE": note(n.get("mode_note"), ""),
         "PLAN_ROWS": build_plan_rows(a),
         "PLAN_NOTE": note(n.get("plan_note"), ""),
-        "CALIBER_NOTES": "".join("<p>%s</p>" % x for x in caliber),
+        "CALIBER_NOTES": "".join("<p>%s</p>" % _caliber_html(x) for x in caliber),
         "TOP_SIGNAL_BLOCK": build_top_signal(a, n),
         "CONFLUENCE_BLOCK": build_confluence(a, n),
         "OPEN_PLAYBOOK_BLOCK": build_open_playbook(a, n),
