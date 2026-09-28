@@ -354,6 +354,55 @@ def load_day(code):
     }
 
 
+def load_day_fast(code, timeout=5):
+    """盘中决策用：只拉报价+分时+资金，三路并行，不拉逐笔和指数分时。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    secid = secid_of(code)
+    _, bench_name = bench_of(code)
+    quote_url = (
+        "http://push2.eastmoney.com/api/qt/stock/get?fltt=2&secid=%s"
+        "&fields=f43,f44,f45,f46,f47,f48,f50,f57,f58,f60,f161,f168,f169,f170" % secid
+    )
+    minutes_url = (
+        "http://push2his.eastmoney.com/api/qt/stock/trends2/get?secid=%s"
+        "&fields1=f1,f2,f3,f4,f5,f6,f7,f8"
+        "&fields2=f51,f52,f53,f54,f55,f56,f57,f58&iscr=0&ndays=1" % secid
+    )
+    flow_url = (
+        "http://push2.eastmoney.com/api/qt/stock/fflow/kline/get?lmt=0&klt=1"
+        "&secid=%s&fields1=f1,f2,f3,f7&fields2=f51,f52,f53,f54,f55,f56" % secid
+    )
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        f_quote = pool.submit(fetch_json, quote_url, timeout)
+        f_min = pool.submit(fetch_json, minutes_url, timeout)
+        f_flow = pool.submit(fetch_json, flow_url, timeout)
+        quote = (f_quote.result() or {}).get("data") or {}
+        minutes_raw = f_min.result() or {}
+        flow_raw = f_flow.result() or {}
+    md = minutes_raw.get("data") or {}
+    minutes = [parse_minute(x) for x in (md.get("trends") or [])]
+    flows = [parse_flow(x) for x in ((flow_raw.get("data") or {}).get("klines") or [])]
+    return {
+        "code": str(code),
+        "name": quote.get("f58") or "",
+        "quote": quote,
+        "pre": (md.get("preClose") if md.get("preClose") is not None else quote.get("f60")),
+        "date": (md.get("trends") or ["?"])[0][:10] if (md.get("trends") or []) else "?",
+        "minutes": minutes,
+        "bench_name": bench_name,
+        "bench_minutes": [],
+        "indexes": {},
+        "flows": flows,
+        "ticks": [],
+        "session_done": bool(minutes) and minutes[-1]["t"] >= "15:00",
+        "frame": "minute",
+        "bars_n": len(minutes),
+        "top_days": [],
+        "fast": True,
+    }
+
+
 def _kline(secid, lmt=250):
     raw = fetch_json(
         "http://push2his.eastmoney.com/api/qt/stock/kline/get?secid=%s"

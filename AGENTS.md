@@ -24,14 +24,51 @@
 - 无外部付费数据源；A 股东方财富，美股 Yahoo
 - 测试：`python -m pytest test_*.py -q` 或单文件 `python test_review_fixes.py`
 - 探测：`python probe_intraday.py <code>`；账户额度见 `account_config.py` / `.env.example`
+- **盘中「现在能上吗」**（快速决策，2026-09-28）：见下条；命令入口 `python gates/session_decide.py`
 
 ---
 
-## 2. 账户配置边界
+## 1b. 盘中口令 → session_decide（强制识别）
+
+**主口令（固化，所有模型必须识别）**：
+
+> 「这个股票 **[name]** 现在能上吗？」  
+> （name = 票名或代码）
+
+命中后 **立刻**跑 `gates/session_decide.py`，不要先开完整 HTML 报告，也不要只口头估。同义口令一并触发（意思对即可，不必字面一致）：
+
+- 「现在能上吗 / 能不能上 / 上不上得去 / 现在上车吗」
+- 「能不能买 / 可以买吗 / 现在能不能买 / 这个价能买吗 / 盘中能不能进」
+
+命令（计划锚必须来自昨晚作战计划或用户当场给出的 entry/stop/target）：
+
+```bash
+python gates/session_decide.py <code> --entry <挂单价> --stop <止损> --target <目标> [--cap <上限>] [--risk-scale 0.25]
+# 或
+python gates/session_decide.py <code> --plan out_cn/analysis_<code>.json [--notes out_cn/notes_<code>.json]
+```
+
+**能买 / 不买与「派发」的关系（回答用户时必须清楚）**：
+
+1. **先过分时资金关**（`tape_so_far`）：至今偏派发 / 偏弱 ⇒ 直接 **不买**（未收盘不下「全天派发」结论，但偏派发就先不买）。
+2. **「能买」= 已经判定至今没有偏派发**，再叠加：现价在止损上方、不超过买入上限、现价 R≥1.5、不追涨停附近。四者缺一不可。
+3. **「不买」不一定是派发** —— 也可能是现价还没到挂单价、超买入上限、R<1.5、贴涨停；输出里会写明原因，并给 **盯价**（涨到哪一档按计划买）。
+4. 取数用 `load_day_fast`（报价+分时+资金三路并行，不拉逐笔），优先快出结果。
+5. 不打板；止损目标沿用计划；T+1 当日无止损腿。
+
+完整复盘（拉升还是派发、区间日线）仍用 `python gates/tape_review.py <code>`；「跑一下」完整报告仍走 battle_analyze → notes → report_render。
+
+---
+
+## 2. 账户配置边界 / Forbidden
 
 - **人与钱**（账户、主力/备用、单笔硬顶、风险预算%）→ `env` / `.env`（`account_config.py`）。
-- **策略常数**（ATR 倍数、通道阈值、`ASH_RESERVE_TIER`、均线闸门等）→ 代码，不进 `.env`。
+- **策略常数**（ATR 倍数、通道参数、`ASH_RESERVE_TIER`、均线闸门等）→ 代码，不进 `.env`。
 - 美股无额外单笔比例上限：仓位只受 `US_ACCOUNT` 全额约束（默认 $5000）；旧 50% 闸门已移除。
+- 禁止编造行情、成交、新闻；取不到就写「未知」并停手
+- 禁止无硬止损的「能买」结论；禁止盘中破止损后换更宽锚
+- A 股账户规则见 `account_config.py`：单票上限、科创板门槛、T+1、涨跌停不可成交等，结论必须遵守
+- 临时产物（`out_*.json`、cache）不入库；审查修复类做完测试通过后直接 commit + push（本仓库惯例）
 
 ---
 
