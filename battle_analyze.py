@@ -278,9 +278,9 @@ def entry_candidates(bars, plan, probe_out, atr_v, odds_from_probe=None):
     add("买区下沿", z.get("primary_lo"), "below", "引擎最低可买价")
     lo10 = min(b["l"] for b in bars[-10:])
     add("近 10 根低点", lo10, "below", "")
-    add("EMA10 上方 0.5×ATR", (z.get("struct_stop") or 0) + 0.5 * atr_v if z.get("struct_stop") else None,
+    add("结构止损 上方 0.5×ATR", (z.get("struct_stop") or 0) + 0.5 * atr_v if z.get("struct_stop") else None,
         "below", "回踩深一档")
-    add("EMA10（回踩锚）", z.get("struct_stop"), "below", "贴线买")
+    add("结构止损（回踩锚）", z.get("struct_stop"), "below", "贴线买")
     lo20 = min(b["l"] for b in bars[-20:])
     add("近 20 根低点", lo20, "below", "深回踩")
     # 去重
@@ -991,7 +991,7 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
                     % (round(_sz_stop, 2), z.get("hard_dist_atr"), round(_st, 2),
                        rec["qty"], "%d" % _loss,
                        (_loss / (account * _rp)) if account else 0, rec["qty_if_struct"]))
-    # ★ 主表口径：止损统一取引擎结构锚（与原报告的「止损统一取结构锚 EMA10」一致）——
+    # ★ 主表口径：止损统一取引擎结构锚（ma_reclaim_break 取 MA5、其他战法多为 EMA10，以 z["struct_stop"] 为准，不写死 EMA10）——
     #   全矩阵 70+ 行走附录，主表只留「一个入场一行」，否则表格没法读。
     struct_stop = z.get("struct_stop")
     odds_primary = [r for r in odds
@@ -1214,6 +1214,21 @@ def summarize(r):
     L.append(" 结构止损 %s(%s) / 硬止损 %s(%s)  hard_dist_atr=%s" % (
         z.get("struct_stop"), z.get("struct_anchor"), z.get("hard_stop"),
         z.get("hard_anchor"), z.get("hard_dist_atr")))
+    # ★ 2026-09-29：hard_dist_atr 的语义是「硬止损距结构止损线的余量」
+    #   （rule123 回踩类 hard = 回踩线 −0.10×ATR ⇒ 该值恒 ≈0.10），**不是**「现价距止损」。
+    #   它打在止损价后面，已被连续误读两次（东富龙 300171 打印 0.04、华森 002907 打印 0.1，
+    #   都被当成「现价贴止损 0.0x×ATR」写进 notes；按现价实算真值是 0.39 / 0.31×ATR）。
+    #   这里补一列真正的「现价距止损 ×ATR」——「止损塞在噪声带内」要读的是这一列。
+    _last_px = m.get("basis_close")
+    _atr_v = ((r.get("struct") or {}).get("atr14") or 0)
+    _dist_txt = []
+    for _nm, _sv in (("结构", z.get("struct_stop")), ("硬", z.get("hard_stop"))):
+        if _last_px and _sv and _atr_v:
+            _dist_txt.append("距%s止损 %.2f×ATR" % (_nm, (_last_px - _sv) / _atr_v))
+    if _dist_txt:
+        L.append(" ★ 现价 %s：%s —— 这才是「止损塞噪声带」要读的口径"
+                 "（hard_dist_atr 是硬止损距结构线的余量，别混用）"
+                 % (_last_px, " ／ ".join(_dist_txt)))
     # ★ 2026-09-26：两条**成交口径**以前只活在引擎里、人读输出一行都不打 ——
     #   老罗读不到就等于没落地（回放实测这两条各多买中一笔：中科飞测 06-15 +83.0%、
     #   兆易创新 04-29 +74.1%，且无副作用）。这里与报告/探针保持同一份文案来源。
