@@ -2197,6 +2197,10 @@ POKE_ATR = 0.5
 # 创新高且上方无墙：空间已打开。6×ATR 是计算口径，不是预测能涨到这里。
 # 若仍用 2×ATR，止损稍宽时现价 R 会掉到 1.5 以下，又变成等回踩。
 OPEN_ATR = 6.0
+# 突破买法选目标的最低赔率（2026-09-29 老罗：做盈亏比最高的事，风险用仓位控制，
+# 而不是算出一个根本买不上的安全牌）。目标要能给出这个 R，否则那道阻力
+# 只算「要穿过的门」、不算目标。与追价上限的赔率闸同一档 1.5。
+RR_GATE = 1.5
 
 
 def _upside_open(bars, entry, atr_v, beyond):
@@ -2223,6 +2227,11 @@ def targets(bars, mode, z, atr_v, entry, Hs):
     beyond = resist[0] if resist else None
     upside_open = _upside_open(bars, entry, atr_v, beyond)
     extend = round(entry + 2.0 * atr_v, 2)
+    # 止损与风险提前算：突破买法要靠它挑目标（2026-09-29 修目标口径）
+    hard = (z or {}).get("hard_stop") or (z or {}).get("hard")
+    if isinstance(hard, dict):
+        hard = hard.get("hard")
+    risk = (entry - hard) if hard is not None else None
     cands = []
     space_open = False
     if upside_open:
@@ -2232,13 +2241,15 @@ def targets(bars, mode, z, atr_v, entry, Hs):
             cands.append(beyond)
         if mode in BREAKOUT_MODES:
             # 突破是 T1 主做，因为穿过之后空间打开。
-            # 门后有更远的摆动高点，那一档才是目标；没有就用打开空间口径，不用 2×ATR。
-            if beyond is not None:
-                t1 = beyond
+            # 目标 = 能给到 RR_GATE 的「最近真阻力」，不是「最近的真阻力」。
+            # 旧逻辑是二元判据 t1<=door：差 0.17 元结果差 10 倍（688152：40.88
+            # 刚过 door 40.71 ⇒ R 0.83；再低一档就跳到 +6ATR ⇒ R 9.5），断崖式
+            # 不连续，等于把突破买法系统性废掉（全样本向上档合格率仅 11.3%）。
+            need = entry + RR_GATE * risk if (risk and risk > 0) else None
+            wall = next((h for h in resist if need is None or h >= need), None)
+            if wall is not None:
+                t1 = wall
             else:
-                t1 = round(entry + OPEN_ATR * atr_v, 2)
-                space_open = True
-            if t1 <= door:
                 t1 = round(door + OPEN_ATR * atr_v, 2)
                 space_open = True
         else:
@@ -2250,10 +2261,6 @@ def targets(bars, mode, z, atr_v, entry, Hs):
     t2 = hi_all if hi_all > t1 + 0.2 * atr_v else round(t1 + 2.0 * atr_v, 2)
     if abs(t2 - t1) < 0.15 * atr_v:
         t2 = round(t1 + 2.0 * atr_v, 2)
-    hard = (z or {}).get("hard_stop") or (z or {}).get("hard")
-    if isinstance(hard, dict):
-        hard = hard.get("hard")
-    risk = (entry - hard) if hard is not None else None
     rr = round((t1 - entry) / risk, 2) if risk and risk > 0 else None
     return {
         "target1": round(t1, 2),
@@ -3980,7 +3987,8 @@ def _plan_entry_core(bars, ev):
                 #   21 只锚非 MA5）。写死 `ride["ma5"]` 会让 50% 的票报错价位。
                 _rd = t0["ride"]
                 _rd_line = _rd.get("line") if _rd.get("line") is not None else _rd.get("ma5")
-                _rd_label = _rd.get("line_label") or "五日线"
+                _rd_label = (_rd.get("line_label")
+                              or ANCHOR_LABEL.get(_rd.get("anchor")) or "均线")
                 result["t0_held_for_ride"] = {
                     "reason": f"line_ride（沿{_rd_label}上升，非均线刚收复）",
                     "preferred": "line_pullback",
@@ -4685,8 +4693,14 @@ def _t0_ride_redirect(result, t0, atr_v, last_c):
     """
     ride = t0.get("ride") or {}
     line = ride.get("line") if ride.get("line") is not None else ride.get("ma5")
-    label = ride.get("line_label") or "五日线"
-    anchor = ride.get("anchor") or "ma5"
+    # ★ 2026-09-29 老罗：「T0 最近的一根均线不一定是 MA5，写死 MA5 是不正确的」。
+    #   被选中的回踩线可能是 EMA10/MA20，原写法把 label 兜底成「五日线」、anchor
+    #   兜底成 "ma5" ⇒ 显示与实质不符；更糟的是 stop_plan 的 line_pullback 分支
+    #   只读 z["ma5"]（真 MA5）当硬止损锚，造成「回踩锚用选中线、止损锚用真 MA5」
+    #   两条线打架。故：label 按 anchor 如实映射、兜底称「均线」不冒充五日线。
+    _an = ride.get("anchor")
+    label = ride.get("line_label") or ANCHOR_LABEL.get(_an) or "均线"
+    anchor = _an or "ma5"
     if line is None or not atr_v or atr_v <= 0:
         return result
     lo = round(line - 0.05 * atr_v, 2)      # 下沿只留毛刺（与 line_pullback 同口径）
@@ -4706,6 +4720,10 @@ def _t0_ride_redirect(result, t0, atr_v, last_c):
         # ★ `ma5` 字段保持「真的 MA5」语义 —— 被选中的线可能是 EMA10/MA20，
         #   池表（watch_cn / pool_us / scanner）拿它当「MA5」列显示，写成 line 会串价。
         "ma5": ride.get("ma5"),
+        # ★ 被选中那条线的**真实价格与标签**，供 stop_plan 取硬止损锚 —— 它原本只读
+        #   z["ma5"]（真 MA5），在选中 EMA10/MA20 时会配出另一条线的止损。
+        "ride_line": round(line, 2),
+        "ride_line_label": label,
         "in_zone": bool(last_c is not None and lo <= last_c <= hi),
         "dist_atr": (round((last_c - line) / atr_v, 2) if last_c is not None else None),
         # ★ 命中数取**被选中那条线**的回踩次数（line_bounce20），不是 MA5 的。
