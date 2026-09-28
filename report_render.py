@@ -989,6 +989,7 @@ def render(a, n, tmpl_path=DEFAULT_TMPL, vp_from=None, vp_to=None):
         caliber.append("本次引擎未报出口径冲突。")
 
     pack = None
+    pack_err = None
     if m.get("code") and not _is_us:
         try:
             from gates.tape_review import report_pack
@@ -999,8 +1000,9 @@ def render(a, n, tmpl_path=DEFAULT_TMPL, vp_from=None, vp_to=None):
                 end=vp_end or m.get("basis_date"),
                 start=vp_start or None,
             )
-        except Exception:
+        except Exception as e:
             pack = None
+            pack_err = "%s: %s" % (type(e).__name__, e)
     if pack:
         intra_html = kv_rows(pack["intraday"])
         vp_html = kv_rows(pack["vp20"])
@@ -1014,6 +1016,13 @@ def render(a, n, tmpl_path=DEFAULT_TMPL, vp_from=None, vp_to=None):
         vp_html = build_vp(a)
         verd_html = build_vp_verdict(a, n)
         verd_note = note(n.get("vp_verdict_note"), "")
+        if not n.get("vp_verdict_note"):
+            # 量价结论不许静默降级：tape_review 失败原因必须写进报告，否则查不到为什么只有数据没有结论。
+            reason = ("gates/tape_review 拉取失败（%s），已用引擎/notes 数据兜底；"
+                      "请人工补写 vp_verdict_note 结论。" % esc(pack_err)
+                      if pack_err else
+                      "tape_review 未运行（无代码或非 A 股路径），已用引擎/notes 数据兜底。")
+            verd_note = '<span class="flat">⚠ %s</span>' % reason
 
     slots = {
         "TITLE": esc(n.get("title") or "%s %s · 多维度作战计划 · %s"
