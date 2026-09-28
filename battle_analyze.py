@@ -1262,12 +1262,30 @@ def summarize(r):
     L.append("   %-22s %7s %8s %-18s %7s %6s %7s %7s %5s %s" % (
         "买法", "买价", "需变动", "止损锚", "止损", "风险", "R→t1", "R→墙", "预挂", "风控标注"))
     rec = r.get("odds_recommend")
-    for i, o in enumerate(r["odds"][:10]):
-        star = "★" if (rec and o is rec) else " "
-        L.append(" %s %-22s %7s %7s%% %-18s %7s %6s %7s %7s %5s %s" % (
-            star, o["entry_name"][:22], o["entry"], o["need_pct"],
-            o["stop_name"][:18], o["stop"], o["risk"], o["r1"], o["r2"],
-            "✓" if o["prehang"] else "✗", "; ".join(o.get("warn") or [])))
+
+    def _odds_rows(sub, n):
+        out = []
+        for o in sub[:n]:
+            star = "★" if (rec and o is rec) else " "
+            out.append(" %s %-22s %7s %7s%% %-18s %7s %6s %7s %7s %5s %s" % (
+                star, o["entry_name"][:22], o["entry"], o["need_pct"],
+                o["stop_name"][:18], o["stop"], o["risk"], o["r1"], o["r2"],
+                "✓" if o["prehang"] else "✗", "; ".join(o.get("warn") or [])))
+        return out
+
+    # ★ 2026-09-29 规则 21：向上/向下两组**都必须可见**，不许只报一边。
+    #   旧写法 `odds[:10]` 按 R→t1 降序截断 —— 回踩档买价更低、R 天然更高，
+    #   会把向上档**整组挤掉**（麒麟 688152：22 个 above 档一个都不显示），
+    #   观感就变成「只给低吸」，正是用户批评的「粗暴只给一个区间」。
+    _dn = [o for o in r["odds"] if o.get("entry_kind") != "above"]
+    _up = [o for o in r["odds"] if o.get("entry_kind") == "above"]
+    L.append("   【向下 / 回踩档】买点在现价下方 ⇒ 可隔夜预挂限价")
+    L.extend(_odds_rows(_dn, 6))
+    if _up:
+        L.append("   【向上 / 突破档】★ 触发价在现价上方 ⇒ A股无 buy-stop，只能盯盘手动打")
+        L.extend(_odds_rows(_up, 6))
+    else:
+        L.append("   【向上 / 突破档】⚠ 本模式未给出上方触发档（应复核，规则 21 要求双向）")
     if rec:
         L.append(" ★ 推荐（可执行且赔率最高）：%s 买 %s / %s 止损 %s → 风险 %s（%s×ATR）R→t1=%s"
                  % (rec["entry_name"], rec["entry"], rec["stop_name"], rec["stop"],

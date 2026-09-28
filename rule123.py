@@ -2276,9 +2276,19 @@ def attach_stops_targets(plan, bars, atr_v, Hs):
     z = plan.get("buy_zone") or {}
     mode = plan.get("mode") or "wait"
     last_c = bars[-1]["c"] if bars else None
-    sp = stop_plan(bars, mode, z, atr_v) if mode != "wait" and plan.get("recommend") else None
-    if sp is None and mode != "wait" and z.get("level") is not None:
-        sp = stop_plan(bars, mode, z, atr_v)
+    # ★ 2026-09-29 规则 21：mode=wait 时也要给 buy_zone 挂止损。
+    #   旧写法对 wait 一律不算 ⇒ 「向下档」只有价、没有止损，双向档位缺一半
+    #   （麒麟 688152 基准 9/24：向下档 35.65 无止损；而 9/28 实盘高开 36.74 后
+    #    回落至 35.21，那一档本可成交，却因缺止损无从评估风险 ⇒ 只能去追
+    #    37.83 的 buy-stop，凭空多付 7%）。
+    #   ⚠ 只补信息，**不改 mode/recommend 语义**：wait 仍是不推荐，
+    #     此止损仅供「备用低吸档」评估风险用。
+    sp = stop_plan(bars, mode, z, atr_v) if z.get("level") is not None else None
+    if sp and mode == "wait":
+        plan["stop_wait_note"] = (
+            "mode=wait（未推荐）：本止损仅供「备用低吸档」评估风险，"
+            "不构成买入建议；是否挂单仍按 wait 口径自行判断。"
+        )
     if sp:
         z["struct_stop"] = sp["struct"]
         z["struct_anchor"] = sp["struct_anchor"]
@@ -2855,6 +2865,57 @@ def find_ma_reclaim_bar(bars):
     if j <= 0:
         return None          # 定位不到突破日（历史全程在均线上方）
     return j
+
+
+# ── ★ T0 突破「第一道墙」的经验概率（2026-09-29 全市场回测实测）────────────
+# 来源 `bt_t0_reclaim_2026-09-29.py`：457 只本地缓存滚动扫描，**20,541 个 T0 信号**，
+# 无未来函数（base=bars[:i+1]）。统计触发价上方第一道墙在 **10 日内被吃掉**的比例：
+#     贴墙组（grade=贴墙，n=4394 已成交）: **87.9%**
+#     半路组（grade=半路，n=12733 已成交）: **64.2%**
+# ⇒ 这直接验证了用户口径「越贴墙越好」—— 贴墙的**胜率**确实更高。
+# ⚠ 用途边界：只用于算期望值 E（放行与排序），**不是**承诺收益。
+#   实测 T0 整体（无选股层）10 日收益中位 +0.0%、均值 +1.2% —— 那是抛硬币，
+#   真收益来自基本面+板块+题材筛选层，回测系统性低估用户。
+T0_P_BREAK = {"贴墙": 0.879, "半路": 0.642}
+
+
+def _t0_ext_target(bars, trigger, hard, atr_v):
+    """T0 第二段目标：能给 RR_GATE 的**最近真阻力**（在「要穿过的门」之上）。
+
+    与突破类 `targets()` 的连续判据同一口径（2026-09-29 修）：
+    目标不是「最近的墙」，而是「能给到 R>=RR_GATE 的最近那道墙」。
+
+    ⚠ 为什么必须把 near_wall 从「天花板」降成「第一目标」：
+      回测里贴墙组旧合格率仅 10.6%（半路 48.8%），根因就是贴墙时
+      第一道墙就在头顶，拿它当天花板算 R 必然塌 —— 引擎在系统性否决
+      用户认为最好的那一组。而实测那道墙 **87.9% 会被吃掉**，
+      它是「要穿过的门」，不是盈亏比的天花板。
+
+    返回 (price, date, space_open)。space_open=True 表示上方没有
+    能给 RR_GATE 的真阻力、已回落远景口径 —— **远景不作买点依据**
+    （实测远景组到目标率 0%、10 日收益中位 −0.7%）。
+    """
+    risk = trigger - hard
+    if risk <= 0 or not atr_v or atr_v <= 0:
+        return None, None, True
+    door = trigger + POKE_ATR * atr_v
+    resist = []
+    seg = bars[:-1]
+    for i in range(2, len(seg) - 2):
+        b = seg[i]
+        if b["h"] <= door:
+            continue
+        if (seg[i - 1]["h"] <= b["h"] and seg[i - 2]["h"] <= b["h"]
+                and seg[i + 1]["h"] <= b["h"] and seg[i + 2]["h"] <= b["h"]):
+            resist.append((b["h"], b["d"]))
+    if not resist:
+        return round(door + OPEN_ATR * atr_v, 2), None, True
+    resist.sort()
+    need = trigger + RR_GATE * risk
+    for p, d in resist:
+        if p >= need:
+            return round(p, 2), d, False
+    return round(door + OPEN_ATR * atr_v, 2), None, True
 
 
 def _near_wall_above(bars, trigger, win=250):
@@ -3520,6 +3581,25 @@ def ma_reclaim_break(bars, ev, atr_v, last_c, res_win=25):
     _rr_nw = (round((_nw_price - trigger) / (trigger - hard), 2)
               if trigger > hard else None)
 
+    # ── ★ 2026-09-29 方案 A：T0 双目标 + 期望值判据 ────────────────────
+    # 旧判据「rr_near_wall >= 1.5」的问题（回测 20,541 个信号实测）：
+    #   贴墙组合格率 **10.6%** vs 半路 48.8% —— 而贴墙是用户定的优选，
+    #   且实测「墙被吃掉」概率贴墙 **87.9%** > 半路 64.2%。
+    #   ⇒ 用「离墙最近」当优点，同时又用「离墙近 ⇒ R 小」当否决理由，自相矛盾。
+    # 改法（三条）：
+    #   ① near_wall 降级为**第一目标 / 减仓参考**（到达率 87.9%，很好用），
+    #      不再当盈亏比天花板；
+    #   ② 真正的持仓目标 = `target_ext`（能给 RR_GATE 的最近真阻力）；
+    #   ③ 判据从单一 R>=1.5 换成**期望值** E = P_break × R_ext − (1−P_break) × 1。
+    #      E > 0 即可做（风险用仓位控，不用否决控）；远景(space_open) 一律不给 E。
+    _ext_price, _ext_from, _ext_open = _t0_ext_target(bars, trigger, hard, atr_v)
+    _rr_ext = (round((_ext_price - trigger) / (trigger - hard), 2)
+               if (_ext_price and trigger > hard) else None)
+    # 远景不作买点依据 ⇒ 不给期望值（实测到目标率 0%、收益中位 −0.7%）
+    _p_break = None if _ext_open else T0_P_BREAK.get(grade)
+    _exp_r = (round(_p_break * _rr_ext - (1.0 - _p_break) * 1.0, 2)
+              if (_p_break is not None and _rr_ext is not None) else None)
+
     # 买点前置幅度：过昨高买 vs 现价
     prem_pct = (trigger - last_c) / last_c * 100
 
@@ -3575,6 +3655,16 @@ def ma_reclaim_break(bars, ev, atr_v, last_c, res_win=25):
         "near_wall_kind": _nw_kind,           # 枢轴高 / 窗口最高 / 顺延枢轴高
         "near_wall_extended": _nw_ext,
         "rr_near_wall": _rr_nw,
+        # ★ 2026-09-29 方案 A：双目标 + 期望值判据
+        #   rr_near_wall 是「第一道墙」的赔率 —— 到达率高（贴墙 87.9%/半路 64.2%），
+        #   但贴墙时它就在头顶，R 天然小 ⇒ **只作减仓/移动止损参考，不作否决依据**。
+        #   rr_ext 是「持仓目标」的赔率；expected_r 是准入判据（E>0 即可做）。
+        "target_ext": _ext_price,
+        "target_ext_from": _ext_from,
+        "rr_ext": _rr_ext,
+        "p_break": _p_break,
+        "expected_r": _exp_r,
+        "ext_space_open": _ext_open,
         "resistance_alt": round(resistance_alt, 2) if resistance_alt else None,
         "resistance_alt_from": resistance_alt_from,
         # ★ 左侧平台质量（2026-09-20 新增，联瑞新材案例）：< 50% 直接不出 T0
@@ -3659,6 +3749,17 @@ def ma_reclaim_break(bars, ev, atr_v, last_c, res_win=25):
                   if _nw_ext else "")
                if _rr_nw is not None else "")
             + "）。"
+            # ★ 2026-09-29 方案 A：双目标 —— 第一目标(近端墙)作减仓参考，
+            #   持仓目标取能给 R>=1.5 的真阻力，判据用期望值 E。
+            + (f" ★双目标：第一目标(减仓参考) {round(_nw_price, 2)}"
+               f" R={_rr_nw:.2f}"
+               f"／持仓目标 {_ext_price}"
+               + (f"（{_ext_from}）" if _ext_from else "")
+               + (f" R={_rr_ext:.2f}" if _rr_ext is not None else "")
+               + (f" ⇒ 期望值 E={_exp_r:+.2f}R（突破概率 {_p_break:.0%}）"
+                  if _exp_r is not None else
+                  " ⇒ 上方无能给 R≥1.5 的真阻力（远景口径），**不作买点依据**")
+               if _ext_price and _rr_nw is not None else "")
             + (f" ★ 止损锚取自**触发日前一根K低点 {round(_pk_low, 2)}**"
                f"（{d0['d']} 低点，距触发价 {_pk_low_atr}×ATR）—— "
                f"它才是突破前最后一道支撑；前五条锚（均线/突破日）离触发价更远，"
