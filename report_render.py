@@ -555,18 +555,24 @@ def build_vp(a):
 
 
 def build_vp_verdict(a, n):
+    """tape_review 取数失败时的兜底。成功时第 3 节不走这里。"""
     rows_in = n.get("vp_verdict")
     if rows_in:
-        return rows([[esc(x.get("dim")), x.get("verdict"), x.get("basis")] for x in rows_in])
+        return rows([[esc(x.get("dim")), esc(x.get("verdict")), esc(x.get("basis"))]
+                     for x in rows_in])
     d = a.get("intraday") or {}
     v = a["struct"].get("volprice20") or {}
-    day_txt = ("尾盘收在日内 %s 位置%s" % (num(d.get("close_pos")),
-                                     "，下影 %s" % num(d.get("lower_shadow")) if d else ""))
+    day_txt = "尾盘收在日内 %s 位置" % num(d.get("close_pos"))
+    up_dn = v.get("up_dn_vol_ratio")
+    if up_dn is None:
+        trend = "—"
+    elif up_dn > 1:
+        trend = "涨日量能更大"
+    else:
+        trend = "跌日量能不弱"
     return rows([
-        ["当日", "强势高开回落、收在日内中部偏下", "%s；分钟涨跌量比 %s（>1 为承接占优）"
-         % (day_txt, num(d.get("up_dn_vol_ratio")))],
-        ["近 20 日", "涨跌量比 %s —— %s" % (num(v.get("up_dn_vol_ratio")),
-                                      "买盘量能占优" if (v.get("up_dn_vol_ratio") or 0) > 1 else "卖盘量能不弱"),
+        ["当日", "复盘未取到", "%s；分钟涨跌量比 %s" % (day_txt, num(d.get("up_dn_vol_ratio")))],
+        ["近 20 日", "涨跌量比 %s，%s" % (num(up_dn), trend),
          "20 日振幅 %s%%；量能趋势 %s%%" % (num(v.get("swing_pct"), 1), num(v.get("vol_trend_pct")))],
     ])
 
@@ -927,7 +933,7 @@ def build_confluence(a, n):
 # ───────────────────────── 主流程 ─────────────────────────
 
 SLOT_RE = re.compile(r"\{\{([A-Z0-9_]+)\}\}")
-def render(a, n, tmpl_path=DEFAULT_TMPL):
+def render(a, n, tmpl_path=DEFAULT_TMPL, vp_from=None, vp_to=None):
     m, s, p = a["meta"], a["struct"], a["plan"]
     n = n or {}
     with open(tmpl_path, encoding="utf-8") as f:
@@ -982,6 +988,33 @@ def render(a, n, tmpl_path=DEFAULT_TMPL):
     if not caliber:
         caliber.append("本次引擎未报出口径冲突。")
 
+    pack = None
+    if m.get("code") and not _is_us:
+        try:
+            from gates.tape_review import report_pack
+            vp_start = vp_from if vp_from not in (None, "") else n.get("vp_from")
+            vp_end = vp_to if vp_to not in (None, "") else n.get("vp_to")
+            pack = report_pack(
+                m["code"],
+                end=vp_end or m.get("basis_date"),
+                start=vp_start or None,
+            )
+        except Exception:
+            pack = None
+    if pack:
+        intra_html = kv_rows(pack["intraday"])
+        vp_html = kv_rows(pack["vp20"])
+        verd_html = rows([[esc(x.get("dim")), esc(x.get("verdict")), esc(x.get("basis"))]
+                          for x in pack["verdict"]])
+        verd_note = "判定就是结论：派发、正常回调、趋势延续，以及能不能买。数据和结论都来自 gates/tape_review.py。"
+        if n.get("vp_verdict_note"):
+            verd_note = verd_note + " " + n["vp_verdict_note"]
+    else:
+        intra_html = build_intraday(a)
+        vp_html = build_vp(a)
+        verd_html = build_vp_verdict(a, n)
+        verd_note = note(n.get("vp_verdict_note"), "")
+
     slots = {
         "TITLE": esc(n.get("title") or "%s %s · 多维度作战计划 · %s"
                      % (m["name"], m["code"], m["basis_date"])),
@@ -1008,12 +1041,12 @@ def render(a, n, tmpl_path=DEFAULT_TMPL):
         "ODDS_ROWS": build_odds_rows(a),
         "ODDS_APPENDIX": build_odds_appendix(a),
         "ODDS_NOTE": note(n.get("odds_note"), ""),
-        "INTRADAY_ROWS": build_intraday(a),
+        "INTRADAY_ROWS": intra_html,
         "INTRADAY_NOTE": note(n.get("intraday_note"), ""),
-        "VP_ROWS": build_vp(a),
+        "VP_ROWS": vp_html,
         "VP_NOTE": note(n.get("vp_note"), ""),
-        "VP_VERDICT_ROWS": build_vp_verdict(a, n),
-        "VP_VERDICT_NOTE": note(n.get("vp_verdict_note"), ""),
+        "VP_VERDICT_ROWS": verd_html,
+        "VP_VERDICT_NOTE": verd_note,
         "FUND_BODY": n.get("fund_body") or "<p class='flat'>（未提供 —— 需检索一手来源后补写）</p>",
         "FIN_ROWS": rows(n.get("fin_rows") or [["—", "未提供", ""]]),
         "VALUATION_ROWS": rows(n.get("valuation_rows") or [["—", "未提供", ""]]),
@@ -1079,6 +1112,8 @@ def main():
     ap.add_argument("--notes", default=None, help="判断/叙述 notes.json")
     ap.add_argument("--out", required=True, help="输出 HTML 路径")
     ap.add_argument("--template", default=DEFAULT_TMPL)
+    ap.add_argument("--vp-from", default=None, help="量价结论起始日。不传则用近 20 日")
+    ap.add_argument("--vp-to", default=None, help="量价结论结束日。不传则用基准日")
     a_ = ap.parse_args()
 
     with open(a_.data, encoding="utf-8") as f:
@@ -1088,7 +1123,7 @@ def main():
         with open(a_.notes, encoding="utf-8") as f:
             notes = json.load(f)
 
-    html = render(data, notes, a_.template)
+    html = render(data, notes, a_.template, vp_from=a_.vp_from, vp_to=a_.vp_to)
     od = os.path.dirname(os.path.abspath(a_.out))
     if od:
         os.makedirs(od, exist_ok=True)
