@@ -121,11 +121,13 @@ class TestPokeWallIsNotTarget(unittest.TestCase):
         self.assertEqual(tg["target1"], 130.0)
 
     def test_breakout_without_further_wall_opens_space(self):
-        """突破后没有更远的墙，目标用入场+6×ATR，不用 2×ATR。"""
+        """突破后没有更远的墙，目标用「门后打开空间」= door+6×ATR（2026-09-29 口径：
+        through_gate 103.4 视为要穿过的门，door=gate+0.15×ATR=104，空间从门后算起）。
+        旧期望 124（entry+6×ATR）为门概念引入前的口径，已废。"""
         bars = [{"d": "d", "o": 99, "h": 101.5, "l": 90, "c": 100, "v": 1}]
         tg = R.targets(bars, "flag_tl_break", {"through_gate": 103.4}, 4.0, 100.0, [(0, 103.4)])
         self.assertTrue(tg["space_open"])
-        self.assertEqual(tg["target1"], 124.0)
+        self.assertEqual(tg["target1"], 128.0)
 
 
 if __name__ == "__main__":

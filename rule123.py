@@ -1930,6 +1930,37 @@ HARD_EXEC = ("盘中口径 — 需要盯盘或券商条件单；两者都没有�
 # SKILL 硬止损锚名；禁止静默改写成「买区下沿」
 SKILL_HARD_ANCHORS = ("突破位", "阳线下沿", "大阳中点", "MA5", "缺口下沿")
 
+# ★★ 止损的**成本口径**（2026-09-29 老罗纠正，推翻旧「买入即止损 = 无效档」）
+#   ① **不存在无效档**。任何买价都配得出止损：技术锚能用就用，用不了就按成本给，
+#      最差给一个浮亏上限比例。旧逻辑把**买价当常量**、让止损去迁就它，方向反了 ——
+#      正确顺序是「止损先定（成本可承受）→ 买价贴着止损买」。
+#   ② **止损首先是成本管理，其次才是技术点位**。打板买入的人不会把止损挂到涨停板
+#      低点（−10%），而是改用大阳中点 —— 锚的选取服务于「这单最多亏多少」，
+#      不是「图上哪个低点最近」。
+#   ③ 收紧永远合法、放宽才需要理由 ⇒ 止损宽度一律 ≤ STOP_MAX_PCT。
+STOP_MAX_PCT = 0.05
+# 止损定好后，买价贴着线买所需的最小缓冲（防止「买在止损上」= 零风险假赔率）
+STOP_HUG_ATR = 0.5
+
+
+def cost_capped_stop(level, px, name):
+    """把止损收敛到「成本可承受」：宽度 ≤ STOP_MAX_PCT。
+
+    px 缺失或过宽时按 level×(1−STOP_MAX_PCT) 兜底。
+    返回 (止损价, 锚名, 是否被成本上限收紧/兜底)。
+    """
+    if not level or level <= 0:
+        return (round(px, 2) if px is not None else None), name, False
+    floor = level * (1 - STOP_MAX_PCT)
+    if px is None:
+        return round(floor, 2), "成本兜底(浮亏≤%d%%)" % round(STOP_MAX_PCT * 100), True
+    if px < floor:
+        return (round(floor, 2),
+                "%s→成本上限(原%.2f 宽%.1f%%＞%d%%)" % (
+                    name, px, (level - px) / level * 100, round(STOP_MAX_PCT * 100)),
+                True)
+    return round(px, 2), name, False
+
 
 def stop_plan(bars, mode, z, atr_v):
     """两档止损：结构（收盘破）+ 硬止损（SKILL 合法锚 − 0.10×ATR）。
@@ -1939,12 +1970,17 @@ def stop_plan(bars, mode, z, atr_v):
     铁律二：硬止损必须落在买区下沿之下。若 SKILL 的合法锚都做不到（买区与锚冲突），
             如实挂 stop_warning，并把买区下沿抬到硬止损之上 —— 让路的是买区，
             不是止损数值，也不是锚名。
-    铁律零（2026-09-18 SNDK）：**任何止损锚都必须低于现价**。锚价 ≥ 现价 = 买入的那一刻
-            就已经在止损之下（买入即止损），这个锚不是"宽一点/紧一点"的问题，是
-            根本不可用 —— 必须先剔除，再谈铁律一/二。剔除后无处可去的，如实不给止损，
-            由 attach_stops_targets 的总闸门撤销 recommend，绝不靠抬买区去迁就。
-            触发场景：SNDK 9/14~9/16，价格从 1764 跌到 1519，MA5=1676/1634/1586
-            全在收盘价之上，旧代码仍拿它当「收盘破」的结构止损。
+    铁律零（2026-09-18 SNDK，2026-09-29 老罗纠正后重写）：**任何止损锚都必须低于买价**
+            —— 这是唯一不可让的。**「锚低于现价」不是判据**：向上突破档的买价本就在
+            现价之上，其止损高于现价是正常形态，用现价判「买入即止损」会误杀所有突破档。
+            锚不可用（缺失 / 在买价之上 / 宽于 STOP_MAX_PCT）时**不构成否决**：
+            ① 止损先按成本定（技术锚 → 更紧的锚 → 浮亏上限 STOP_MAX_PCT 兜底，
+               见 cost_capped_stop）；② 买价贴着止损买（买区下沿 ≥ 止损 +
+               STOP_HUG_ATR×ATR）。老罗原话：「永远不会存在无效挡，止损除了技术点之外
+               更多的是针对自己的成本……哪怕贴着线买，做大阳线也罢」。
+            历史触发场景：SNDK 9/14~9/16，价格从 1764 跌到 1519，MA5=1676/1634/1586
+            全在收盘价之上，旧代码仍拿它当「收盘破」的结构止损（锚本身选错，
+            该换锚 / 走成本兜底，而不是判整单无效）。
     """
     if not bars or not atr_v or not z or z.get("level") is None:
         return None
@@ -1962,8 +1998,9 @@ def stop_plan(bars, mode, z, atr_v):
     last_c = y["c"]
 
     def _usable(px):
-        """铁律零：锚价必须低于现价，否则买入即止损。"""
-        return px is not None and px < last_c
+        """2026-09-29 成本口径：锚价必须低于**买价 level**（不是现价）。
+        向上突破档的锚可以介于现价与买价之间 —— 那是合法的贴线买形态。"""
+        return px is not None and px < level
 
     def _rej_txt(rejected):
         return "、".join(f"{n}@{round(p, 2)}" for n, p in rejected)
@@ -2003,7 +2040,7 @@ def stop_plan(bars, mode, z, atr_v):
             if first is None or h < first[2]:
                 first = (name, px, h)
         rej_note = (
-            f"已剔除不低于现价 {round(last_c, 2)} 的锚 {_rej_txt(rejected)}（买入即止损）"
+            f"已剔除不低于买价 {round(level, 2)} 的锚 {_rej_txt(rejected)}（止损必须低于买价）"
             if rejected else None
         )
         if ok:
@@ -2027,7 +2064,8 @@ def stop_plan(bars, mode, z, atr_v):
         if usable_n == 0:
             return None, None, None, (
                 f"SKILL 合法锚（{_rej_txt([(n, p) for n, p in cands if p is not None])}）"
-                f"全不低于现价 {round(last_c, 2)} —— 买入即止损，本档不给出硬止损"
+                f"全不低于现价 {round(last_c, 2)} —— 技术锚此刻不可用；按成本口径回落"
+                f"浮亏上限 {STOP_MAX_PCT:.0%} 兜底（**非否决**：止损先按成本定，买价贴着止损买）"
             ), rej_note
         return name, px, h, (
             f"SKILL 合法锚（{' / '.join(str(c[0]) for c in cands)}）中最低的 "
@@ -2037,39 +2075,41 @@ def stop_plan(bars, mode, z, atr_v):
         ), rej_note
 
     def _finish(struct_name, struct, hard_name, hard, warn, note=None):
-        # 结构止损自身就在现价之上 = 买入即止损。这里不给任何止损，交总闸门撤销
-        # 整单 —— 不能靠抬买区去迁就一个错误的锚（铁律零）。
-        if struct is None or not _usable(struct):
-            return {
-                "struct_anchor": struct_name,
-                "struct": round(struct, 2) if struct is not None else None,
-                "hard_anchor": None,
-                "hard": None,
-                "trigger": HARD_STOP_TRIGGER,
-                "struct_exec": STRUCT_EXEC,
-                "hard_exec": HARD_EXEC,
-                "hard_dist_atr": None,
-                "hard_noise": False,
-                "warning": (
-                    f"结构止损锚 {struct_name}@{round(struct, 2)} 不低于现价 "
-                    f"{round(last_c, 2)} —— 买入即止损，该锚当前不可用"
-                ),
-            }
-        if hard is None:
-            # SKILL 合法锚全部不可用：只保留结构止损那一档，并如实说明没有硬止损
-            return {
-                "struct_anchor": struct_name,
-                "struct": round(struct, 2),
-                "hard_anchor": None,
-                "hard": None,
-                "trigger": HARD_STOP_TRIGGER,
-                "struct_exec": STRUCT_EXEC,
-                "hard_exec": HARD_EXEC,
-                "hard_dist_atr": None,
-                "hard_noise": False,
-                "hard_note": note,
-                "warning": warn or "无可用硬止损锚 —— 保护只剩收盘轨（结构止损）",
-            }
+        # ★★ 2026-09-29 老罗纠正：**不存在「买入即止损 = 无效档」**。
+        #   旧逻辑把买价 level 当常量，要求止损必须同时低于买价与现价，做不到就
+        #   不给止损、交总闸门撤销整单 —— 方向反了。**正确顺序是「止损先按成本定，
+        #   买价贴着止损买」**：技术锚在买价之上 / 缺失 / 过宽，都不构成否决，
+        #   只是改用成本兜底（浮亏 ≤ STOP_MAX_PCT）；买区下沿随之抬到止损之上。
+        #   ⚑ 这条同时修掉了「向上突破档被误杀」：突破档买价本就在现价之上，
+        #     其止损高于现价是**正常形态**，用 last_c 判「买入即止损」必误伤。
+        _notes = []
+        if struct is None or struct >= level:
+            struct, struct_name, _ = cost_capped_stop(level, None, "结构锚")
+            _notes.append(
+                f"技术锚不可用（缺失或在买价 {round(level, 2)} 之上）⇒ 按成本口径兜底："
+                f"浮亏上限 {STOP_MAX_PCT:.0%} ⇒ 结构止损 {struct}"
+            )
+        else:
+            struct, struct_name, _c = cost_capped_stop(level, struct, struct_name or "结构锚")
+            if _c:
+                _notes.append(f"结构锚宽于 {STOP_MAX_PCT:.0%} ⇒ 按成本上限收紧到 {struct}")
+        if hard is None or hard >= level:
+            hard, hard_name = struct, struct_name
+        else:
+            hard, hard_name, _c = cost_capped_stop(level, hard, hard_name or "硬止损锚")
+            if _c:
+                _notes.append(f"硬止损锚宽于 {STOP_MAX_PCT:.0%} ⇒ 按成本上限收紧到 {hard}")
+        if hard is not None and struct is not None and hard > struct:
+            hard, hard_name = struct, struct_name
+        # 贴线买：买区下沿至少在止损之上 STOP_HUG_ATR×ATR（防止「买在止损上」）
+        _hug = round(struct + STOP_HUG_ATR * atr_v, 2) if struct is not None else None
+        if _hug is not None and z.get("primary_lo") is not None and z["primary_lo"] < _hug:
+            z["primary_lo"] = _hug
+            if z.get("primary_hi") is not None and z["primary_hi"] <= _hug:
+                z["primary_hi"] = round(_hug + 0.5 * atr_v, 2)
+            _notes.append(f"买区下沿贴线抬到 {_hug}（止损 {struct} + {STOP_HUG_ATR}×ATR）")
+        if _notes:
+            note = ((note + "；") if note else "") + "；".join(_notes)
         if warn:
             z["stop_warning"] = warn
             # last_c 用外层 stop_plan 的那个（此处不可再赋值，否则会把上面两个
@@ -2309,26 +2349,26 @@ def attach_stops_targets(plan, bars, atr_v, Hs):
         if sp.get("warning"):
             z["stop_warning"] = sp["warning"]
             plan["stop_warning"] = sp["warning"]
-        # 总闸门（铁律零的最后一道防线，2026-09-18 SNDK）：
-        # 止损 ≥ 现价 = 买入即止损，无论它是怎么算出来的都撤销整单。
-        # 之前同类错误的共同点是「锚点逻辑正确 ≠ 锚点数值可用」，单点修补总会
-        # 有下一个锚踩坑，所以在出口统一拦一道：recommend=True 必须自带一个
-        # 真正位于现价之下的止损。
-        if plan.get("recommend"):
+        # 总闸门（2026-09-29 重写）：唯一不可让的是「**止损 < 买价**」。
+        # ⚑ 旧判据用 last_c（现价）：向上突破档的买价本就在现价之上，其止损高于现价
+        #   是**正常形态**，用现价判「买入即止损」会误杀全部突破档 —— 这正是
+        #   「10 次有 9 次向上不能买」的一部分来源。改用买价 level 判；
+        #   触发 = 成本兜底失效的内部不一致，如实撤销并留痕。
+        _lvl = z.get("level")
+        if plan.get("recommend") and _lvl is not None:
             bad = [
                 f"{nm} {round(v, 2)}"
                 for nm, v in (("结构止损", sp.get("struct")), ("硬止损", sp.get("hard")))
-                if v is not None and last_c is not None and v >= last_c
+                if v is not None and v >= _lvl
             ]
             if bad:
                 plan["recommend"] = False
                 plan["stop_above_price"] = True
-                plan["verdict"] = "止损锚在现价之上·买入即止损·不接"
+                plan["verdict"] = "止损未落在买价之下·成本兜底失效·不接"
                 _prev = plan.get("note") or ""
                 plan["note"] = (_prev + "；" if _prev else "") + (
-                    f"{'、'.join(bad)} 均不低于现价 {round(last_c, 2)} —— 买入即止损"
-                    f"（买进去就已经在止损之下），该锚当前不可用"
-                    f"（多为价格急跌、均线滞后所致），本单撤销"
+                    f"{'、'.join(bad)} 未落在买价 {round(_lvl, 2)} 之下 —— "
+                    f"成本兜底失效（内部不一致），本单撤销"
                 )
     tg = targets(bars, mode, z, atr_v, last_c, Hs or []) if mode != "wait" else None
     if tg:
