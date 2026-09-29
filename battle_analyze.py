@@ -257,11 +257,21 @@ def entry_candidates(bars, plan, probe_out, atr_v, odds_from_probe=None):
     def add(name, price, kind, note=""):
         if price is None:
             return
-        cands.append({"name": name, "price": _f(price, 2), "kind": kind,
+        p = _f(price, 2)
+        # 规则 21：向上/向下以相对现价为准；标签不得与价位矛盾
+        # （例：大阳后「引擎挂单价」仍标 above，但价已落在现价下方）
+        if kind in ("above", "below"):
+            if p > c0:
+                kind = "above"
+            elif p < c0:
+                kind = "below"
+            else:
+                kind = "now"
+        cands.append({"name": name, "price": p, "kind": kind,
                       "dist_pct": _pct(price, c0),
                       "dist_need": _pct(price, c0), "note": note})
 
-    # 上方
+    # 上方（意图）；实际 kind 由 add() 按相对现价改写
     hi10 = max(b["h"] for b in bars[-10:])
     add("近 10 根高点（突破跟单）", hi10, "above", "突破确认价")
     add("买区上沿", z.get("primary_hi"), "above", "引擎买区上沿")
@@ -1275,10 +1285,13 @@ def summarize(r):
 
     # ★ 2026-09-29 规则 21：向上/向下两组**都必须可见**，不许只报一边。
     #   旧写法 `odds[:10]` 按 R→t1 降序截断 —— 回踩档买价更低、R 天然更高，
-    #   会把向上档**整组挤掉**（麒麟 688152：22 个 above 档一个都不显示），
-    #   观感就变成「只给低吸」，正是用户批评的「粗暴只给一个区间」。
-    _dn = [o for o in r["odds"] if o.get("entry_kind") != "above"]
-    _up = [o for o in r["odds"] if o.get("entry_kind") == "above"]
+    #   会把向上档**整组挤掉**（麒麟 688152：22 个 above 档一个都不显示）。
+    #   分组以「买价 vs 现价」为准（与 entry_kind 一致，但防旧标签漂到现价下方）。
+    _last = (r.get("meta") or {}).get("basis_close")
+    if _last is None:
+        _last = 0
+    _dn = [o for o in r["odds"] if o.get("entry") is not None and o["entry"] < _last]
+    _up = [o for o in r["odds"] if o.get("entry") is not None and o["entry"] > _last]
     L.append("   【向下 / 回踩档】买点在现价下方 ⇒ 可隔夜预挂限价")
     L.extend(_odds_rows(_dn, 6))
     if _up:
