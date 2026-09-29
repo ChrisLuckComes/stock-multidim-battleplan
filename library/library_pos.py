@@ -97,7 +97,8 @@ def _lib_script(name: str) -> str:
     return os.path.join(LIBRARY_SKILL_DIR, "database", name)
 
 
-def _run(script_name: str, args: list[str], token: str | None) -> str:
+def _run(script_name: str, args: list[str], token: str | None,
+         stdin_content: str | None = None) -> str:
     script = _lib_script(script_name)
     if not os.path.exists(script):
         raise SystemExit(
@@ -106,9 +107,12 @@ def _run(script_name: str, args: list[str], token: str | None) -> str:
         )
     env = dict(os.environ)
     env.setdefault("CODEBUDDY_SKILL_DIR", LIBRARY_SKILL_DIR)
+    # stdin 内容优先级：显式传入的 body > token（delete 脚本读 --stdin 的 JSON body，
+    # 不接受 --token-stdin，鉴权由 proxy 注入，故 token 对其无意义）
+    inp = stdin_content if stdin_content is not None else (token if token is not None else None)
     p = subprocess.run(
         [sys.executable, script, *args],
-        input=token if token is not None else None,
+        input=inp,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -246,9 +250,19 @@ def do_write(script: str, token, db_id, records: list[dict], dry_run: bool) -> N
     print(out)
 
 
+def do_delete(token, db_id, record_ids: list[str], dry_run: bool) -> None:
+    body = json.dumps({"database_id": db_id, "record_ids": record_ids}, ensure_ascii=False)
+    if dry_run:
+        print("（--dry-run 未落库）将删除 record_ids：", record_ids)
+        return
+    # batch_delete_database_records.py 走 --stdin 读 JSON body；鉴权由 proxy 注入
+    out = _run("batch_delete_database_records.py", ["--stdin"], token, stdin_content=body)
+    print(out)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="资料库「股池配置」读写")
-    ap.add_argument("cmd", choices=["list", "find", "set", "note", "add"])
+    ap.add_argument("cmd", choices=["list", "find", "set", "note", "add", "delete"])
     ap.add_argument("--market", choices=["cn", "us"], default="cn")
     ap.add_argument("--code")
     ap.add_argument("--name")
@@ -310,10 +324,18 @@ def main() -> int:
         props = parse_sets(args.sets)
         title = ("%s %s" % (args.code, args.name)).strip()
         props["标的"] = {"text": title}
-        props.setdefault("类别", {"select": "交易候选"})
         check_fields(fetch_schema(token, db_id), props)     # ★ 先校验列名
         print("新增：%s" % title)
         do_write("batch_add_database_records.py", token, db_id, [props], args.dry_run)
+        return 0
+
+    if args.cmd == "delete":
+        rec = resolve(query_all(token, db_id), args.code, args.name)
+        rid = rec.get("record_id")
+        if not rid:
+            raise SystemExit("记录缺少 record_id，无法删除")
+        print("目标：%s  [%s]" % (rec.get("标的"), rid))
+        do_delete(token, db_id, [rid], args.dry_run)
         return 0
 
     return 0
