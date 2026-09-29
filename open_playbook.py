@@ -815,6 +815,18 @@ def format_html(pb):
     if pb.get("upper_note"):
         h.append("<p class='note'>%s</p>" % pb["upper_note"])
     h.append("<p class='note'>%s</p>" % pb["t1_note"])
+    up = pb.get("up_plan")
+    if up:
+        _lvl = ("%.2f" % up["level"]) if up.get("level") is not None else "—"
+        _dst = ("%.2f" % up["dist_atr"]) if up.get("dist_atr") is not None else "0"
+        h.append("<h4 style='margin-top:14px'>★ 向上突破分支（埋伏单·需盯盘）</h4>")
+        h.append(
+            "<p class='note'>埋伏触发价 <b>%.2f</b>（突破 %s 平台沿 / 下降趋势线确认）｜ "
+            "硬止损 <b>%.2f</b>（跌回突破位下方 = 假突破离场）｜ 每股风险 %.2f（%s×ATR）<br>"
+            "突破后按<b>移动止损</b>管理、不设固定目标；与当日回踩买点<b>先到先做</b>。"
+            "<br>⚠ 现价在埋伏价下方，A 股无原生 buy-stop，此单只能券商条件单触发或"
+            "<b>盯盘手动</b>成交，非盯盘时段不可隔夜预挂。</p>"
+            % (up["trigger"], _lvl, up["stop"], up["risk"], _dst))
     h.append("<p class='note'>%s</p>" % pb["note"])
     h.append("</div>")
     return "".join(h)
@@ -836,6 +848,26 @@ def _strip(s):
 
 
 # ---------------------------------------------------------------- 从 analysis 取
+
+def _up_plan(plan):
+    """提取向上突破埋伏单（plan['pre_breakout']）用于开盘作战方案并列展示。
+
+    与 §2 全档赔率枚举 / report_render「作战计划」统一口径：向上突破档必须并列给出。
+    非突破型票 pre_breakout 为 None（如 wait / 已突破延伸），返回 None 即不渲染，
+    不硬塞占位、避免静默降级。
+    """
+    pb = (plan or {}).get("pre_breakout")
+    if not (isinstance(pb, dict) and pb.get("trigger")):
+        return None
+    return {
+        "trigger": pb.get("trigger"),
+        "level": pb.get("level"),
+        "stop": pb.get("hard_stop"),
+        "risk": pb.get("risk_per_share"),
+        "dist_atr": pb.get("dist_atr"),
+        "note": pb.get("note") or "",
+    }
+
 
 def from_analysis(a, n=None):
     """从 battle_analyze 的 analysis.json（+ notes）自动取档位生成方案。
@@ -938,11 +970,16 @@ def from_analysis(a, n=None):
     # ★ 2026-09-26：「贴线待突破」档（老罗「在上沿买、不在平台顶买」）——
     #   直接取 plan 上已算好的那一档，作为 ⓪ 插入开盘作战方案。
     _ke = plan.get("knife_edge")
-    return build(last=last, entry=entry, stop=stop, target=target, atr=atr,
-                 code=code, name=meta.get("name") or "", shares=shares,
-                 upper_entry=upper, market=meta.get("market") or "CN",
-                 knife_edge=_ke if isinstance(_ke, dict) else None,
-                 chase=chase)
+    pb = build(last=last, entry=entry, stop=stop, target=target, atr=atr,
+               code=code, name=meta.get("name") or "", shares=shares,
+               upper_entry=upper, market=meta.get("market") or "CN",
+               knife_edge=_ke if isinstance(_ke, dict) else None,
+               chase=chase)
+    # ★ 向上突破分支（2026-09-29 补）：与 §2 全档枚举 / report_render「作战计划」统一口径。
+    #   向上突破是「埋伏 buy-stop + 盯盘」逻辑，不等同开盘价落点的 bands，故作为独立分支
+    #   附加到 pb，不混入主方案 bands（避免改写「开盘价落在哪→动作」的判定）。
+    pb["up_plan"] = _up_plan(plan)
+    return pb
 
 
 # ---------------------------------------------------------------- CLI
