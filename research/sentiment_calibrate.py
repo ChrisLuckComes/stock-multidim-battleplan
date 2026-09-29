@@ -29,7 +29,11 @@ import glob
 import json
 import os
 import sys
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, _ROOT)
+# market_sentiment.py 实际位于 gates/（不在仓库根目录），必须把 gates 也加入搜索路径，
+# 否则 import 恒失败 → 当前常数恒为 None → 样本够了以后建议偏离也打印不出来。
+sys.path.insert(0, os.path.join(_ROOT, "gates"))
 
 try:
     import market_sentiment as ms
@@ -143,7 +147,10 @@ def render(r):
     L.append(f"当前常数：WIDTH_CENTER {c['WIDTH_CENTER']} | WIDTH_SLOPE {c['WIDTH_SLOPE']} "
              f"| MONEY_SLOPE {c['MONEY_SLOPE']}")
     if r["enough"]:
-        L.append(f"建议中性点：{s['WIDTH_CENTER']}（与当前偏离 {s['deviation_pp']:+.1f} 个百分点）")
+        if s["deviation_pp"] is None:
+            L.append(f"建议中性点：{s['WIDTH_CENTER']}（当前常数读取失败，无法算偏离）")
+        else:
+            L.append(f"建议中性点：{s['WIDTH_CENTER']}（与当前偏离 {s['deviation_pp']:+.1f} 个百分点）")
         L.append(f"建议斜率：{s['WIDTH_SLOPE']}（让 p10~p90 的宽度跨度映射到 60 分）")
         if abs(s["deviation_pp"] or 0) >= 3:
             L.append("⚠ 偏离 ≥3 个百分点：建议按上面数值调整 market_sentiment.py 顶部常数并加注释说明依据。")
