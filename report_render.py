@@ -478,6 +478,21 @@ def build_plan_rows(a):
                 "↑ 与当日买点<b>先到先做</b>；T0 是趋势单：用移动止损（MA5 / 大阳中点）管理，"
                 "不设固定目标。<br>模式判别：%s" % esc(_ride.get("note") or "—"))
         out.insert(5, ("T0 并行入口" + ("（已改道·见下）" if _redirect else ""), _body))
+    # ★ 向上突破方案（2026-09-29 补）：plan["pre_breakout"] 是引擎算出的「向上突破埋伏单」，
+    #   与回踩主方案（probe.pre_order）并存、先到先做。作战计划必须并列给出（MEMORY §3.5 铁律：
+    #   「向上突破档必须并列算出并给价」）。recommend=False / 非突破型票的 pre_breakout 为 None，
+    #   此时不渲染——不硬塞占位、避免静默降级。
+    pb = p.get("pre_breakout")
+    if pb and pb.get("trigger"):
+        out.append(("★ 向上突破方案（埋伏单·需盯盘）",
+                     "埋伏触发价 <b>%s</b>（突破 %s 平台沿 / 下降趋势线确认）｜ 硬止损 <b>%s</b>"
+                     "（跌回突破位下方 = 假突破离场）｜ 每股风险 %s（%s×ATR）<br>"
+                     "突破后按<b>移动止损</b>管理、不设固定目标；与当日回踩买点<b>先到先做</b>。"
+                     "<br>⚠ A 股无原生 buy-stop：此单只能券商条件单触发或<b>盯盘手动</b>成交，"
+                     "非盯盘时段<b>不可隔夜预挂</b>（现价在埋伏价下方）。"
+                     % (num(pb.get("trigger")), num(pb.get("level")),
+                        num(pb.get("hard_stop")), num(pb.get("risk_per_share")),
+                        num(pb.get("dist_atr")))))
     return kv_rows(out)
 
 
