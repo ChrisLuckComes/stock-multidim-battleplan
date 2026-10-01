@@ -213,7 +213,7 @@ def build_kpis(a, n):
 
 
 def build_best(a, n):
-    rec = a.get("odds_recommend") or a.get("odds_top")
+    rec = a.get("odds_top") or a.get("odds_recommend")
     if not rec:
         return ("（全档枚举为空）", "", "没有算出可执行档位 —— 请先确认结构与买区是否成立。")
     m = a["meta"]
@@ -227,6 +227,11 @@ def build_best(a, n):
         lot = m.get("lot") or 100
         risk_pct = m.get("risk_pct") or 0.015
         qty = int(account * risk_pct // rec["risk"]) if rec["risk"] else 0
+        # ★ 金额上限保护（2026-10-01 修）：odds_top 等缺 qty 的档位走兜底时，按风险
+        #   预算算出的股数可能让金额超过账户（高价股尤甚）。夹一道硬上限，避免
+        #   首屏卡/执行卡算出「买不起」的股数。
+        if rec.get("entry") and qty * rec["entry"] > account:
+            qty = int(account // rec["entry"])
         if lot:
             qty = (qty // lot) * lot
     amt = rec.get("amount") if rec.get("amount") is not None else qty * rec["entry"]
@@ -497,12 +502,17 @@ def build_plan_rows(a):
 
 
 def build_odds_rows(a):
-    rec = a.get("odds_recommend")
+    rec = a.get("odds_top") or a.get("odds_recommend")
     out = []
     for o in (a.get("odds_primary") or a.get("odds") or []):
         hl = ' style="background:#fffdf0"' if (rec and o is rec) else ""
         marks = esc("; ".join(o.get("warn") or []))
-        verdict = "推荐" if (rec and o is rec) else ("赔率偏弱·不建议" if o.get("weak") else "可行")
+        if rec and o is rec:
+            verdict = "回踩最优·推荐等待" if o.get("weak") else "推荐"
+        elif o.get("weak"):
+            verdict = "赔率偏弱·不建议"
+        else:
+            verdict = "可行"
         out.append(
             '<tr%s><td><b>%s</b></td><td><b>%s</b></td><td>%s</td><td>%s</td>'
             '<td>%s</td><td>%s</td><td><b>%s</b></td><td>%s</td><td>%s</td><td>%s</td></tr>'
@@ -623,7 +633,7 @@ def build_peers(a, n):
 
 
 def build_exec(a, n):
-    rec = a.get("odds_recommend") or a.get("odds_top") or {}
+    rec = a.get("odds_top") or a.get("odds_recommend") or {}
     m, z = a["meta"], a["plan"].get("buy_zone") or {}
     lot = m.get("lot") or 100
     account = m.get("account") or 50000
@@ -634,6 +644,8 @@ def build_exec(a, n):
     qty = rec.get("qty")
     if qty is None:
         qty = int(account * risk_pct // rec["risk"]) if rec.get("risk") else 0
+        if rec.get("entry") and qty * rec["entry"] > account:
+            qty = int(account // rec["entry"])
         if lot:
             qty = (qty // lot) * lot
     amt = rec.get("amount") if rec.get("amount") is not None else qty * (rec.get("entry") or 0)
@@ -709,7 +721,7 @@ def build_summary(a, n):
     if n.get("summary_rows"):
         return rows([[k, v] for k, v in n["summary_rows"]])
     p, z = a["plan"], a["plan"].get("buy_zone") or {}
-    rec = a.get("odds_recommend")
+    rec = a.get("odds_top") or a.get("odds_recommend")
     top = a.get("odds_top")
     _tv = a.get("top_verdict") or {}
     if _tv.get("level") == "block":
@@ -956,7 +968,7 @@ def render(a, n, tmpl_path=DEFAULT_TMPL, vp_from=None, vp_to=None):
 
     kpi_items, kpi_badges = build_kpis(a, n)
     best_title, best_kpis, best_note = build_best(a, n)
-    rec = a.get("odds_recommend") or a.get("odds_top") or {}
+    rec = a.get("odds_top") or a.get("odds_recommend") or {}
     # ★ 市场口径（2026-09-22 加）：美股报告过去根本出不来（battle_analyze 只收 A 股），
     #   现在分流后币种/交易制度文案必须跟着走，否则美股报告会写「元 / T+1 / 最小申报 100 股」。
     _mak = (m.get("market") or "CN").upper()

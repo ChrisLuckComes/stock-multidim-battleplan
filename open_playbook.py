@@ -892,11 +892,16 @@ def from_analysis(a, n=None):
     od = a.get("odds_recommend")
     if not (isinstance(od, dict) and od):
         od = a.get("odds_primary") or {}
+    # ★ 回踩最优档（2026-10-01 修）：与 report_render 主推口径统一——优先 odds_top
+    #   （回踩最优、赔率更高），回退 odds_recommend（现价可买）。避免报告主推 434.94
+    #   现价档、notes 推荐 428.1 回踩档两套价打架，老罗要求口径统一。
+    top = a.get("odds_top")
+    top = top if (isinstance(top, dict) and top) else None
     ov = (n.get("open_playbook") or {}) if isinstance(n.get("open_playbook"), dict) else {}
 
     code = str(meta.get("code") or plan.get("sym") or "")
     last = ov.get("last") or meta.get("basis_close") or plan.get("last")
-    entry = ov.get("entry") or od.get("entry")
+    entry = ov.get("entry") or (top and top.get("entry")) or od.get("entry")
     stop = ov.get("stop") or od.get("stop")
     z = plan.get("buy_zone") or {}
     t0 = plan.get("ma_reclaim") or {}
@@ -925,7 +930,24 @@ def from_analysis(a, n=None):
             target = piv[1]
         if target is None and entry is not None and atr:
             target = round(float(entry) + 6.0 * float(atr), 2)
-    shares = ov.get("shares") or od.get("qty")
+    shares = ov.get("shares")
+    if shares is None and top:
+        shares = top.get("qty")
+    if shares is None and top:
+        # odds_top 无 qty：按风险预算重算 + 金额上限保护（与 report_render.build_exec 一致）
+        _acct = meta.get("account") or 50000
+        _rpct = meta.get("risk_pct") or 0.015
+        _rk = top.get("risk") or od.get("risk")
+        if _rk:
+            shares = int(_acct * _rpct // _rk)
+            if entry and shares * entry > _acct:
+                shares = int(_acct // entry)
+    if shares is None:
+        shares = od.get("qty")
+    # ★ 按最小申报单位取整（A 股 100/200 股，美股 1 股）—— 避免显示 438 这类非整手数
+    _lot = meta.get("lot") or 1
+    if shares and _lot > 1:
+        shares = max(_lot, (int(shares) // _lot) * _lot)
     upper = ov.get("upper_entry") or od.get("buy_hi")
     if upper is None:
         ents = a.get("entries")
