@@ -425,32 +425,45 @@ def build(last, entry, stop, target=None, atr=None, board=None,
             })
 
     # ── ④ 刚好符合（开盘价落在挂单价附近）。仅 A 股。
+# ── ④ ★ 刚好符合（最理想）
     if is_cn:
+        # ★ 2026-10-07：notes 显式给 shares=0（结论=不做）时，④⑤ 两档不能还写
+        #   「按计划成交 / N 股」—— 那会让报告第 1 节写「不做」、第 9 节写「买 N 股」。
+        _no_trade = (shares == 0)
         lo_ok = px(entry * (1 - GAP_DN_VERIFY))
         bands.append({
         "key": "match",
         "title": "④ ★ 刚好符合（最理想）",
         "cond": "%.2f ≤ O ≤ %.2f" % (lo_ok, entry),
-        "act": ("<b>按计划成交</b>（限价单成交于 O 或 %.2f）。这是计划设计的那档："
-                "回踩到位、未破结构。成交后<b>当日不能卖</b>，止损按次日执行（见下）。" % entry),
-        "pos": ("%d 股" % shares) if shares else "按计划仓位",
-        "stop": "收盘破 %.2f ⇒ 次日开盘卖" % stop,
-        "tone": "on",
+        "act": (("<b>本计划结论=不做，不成交</b>。价格正好落到观察位 %.2f 也不买 —— "
+                 "买入的前置条件是「资金面翻正 + 放量承接」，不是「价格到了」。"
+                 "详见上方执行方案的三条必要条件。" % entry)
+                if _no_trade else
+                ("<b>按计划成交</b>（限价单成交于 O 或 %.2f）。这是计划设计的那档："
+                "回踩到位、未破结构。成交后<b>当日不能卖</b>，止损按次日执行（见下）。" % entry)),
+        "pos": ("0 股（本计划不做）" if _no_trade
+                else ("%d 股" % shares) if shares else "按计划仓位"),
+        "stop": ("—" if _no_trade else "收盘破 %.2f ⇒ 次日开盘卖" % stop),
+        "tone": "off" if _no_trade else "on",
     })
 
     # ── ⑤ 深低开但未破止损：成交，但必须验证性质。仅 A 股。
     if is_cn:
         bands.append({
-        "key": "gap_dn",
-        "title": "⑤ 低开（更深，但仍在止损位上方）",
-        "cond": "%.2f ＜ O ＜ %.2f" % (stop, lo_ok),
-        "act": ("<b>成交（以更低价）</b>，但必须分性质："
-                "<b>缩量低开</b>（竞价量明显小于前日均量）⇒ 情绪回落，接受；"
-                "<b>放量低开</b> ⇒ 出逃嫌疑，等 %.0f 分钟看能否站回 %.2f，"
-                "站不回 ⇒ 次日开盘先减半。<b>不因便宜加仓</b>。" % (WATCH_MIN, entry)),
-        "pos": ("%d 股（不加仓）" % shares) if shares else "按计划仓位（不加仓）",
-        "stop": "收盘破 %.2f ⇒ 次日开盘卖" % stop,
-        "tone": "warn",
+            "key": "gap_dn",
+            "title": "⑤ 低开（更深，但仍在止损位上方）",
+            "cond": "%.2f ＜ O ＜ %.2f" % (stop, lo_ok),
+            "act": ("<b>不买。</b>低开不是买入理由 —— 本计划结论=不做，"
+                    "低开只说明前面判断的资金问题还没解决。"
+                    if shares == 0 else
+                    "<b>成交（以更低价）</b>，但必须分性质："
+                    "<b>缩量低开</b>（竞价量明显小于前日均量）⇒ 情绪回落，接受；"
+                    "<b>放量低开</b> ⇒ 出逃嫌疑，等 %.0f 分钟看能否站回 %.2f，"
+                    "站不回 ⇒ 次日开盘先减半。<b>不因便宜加仓</b>。" % (WATCH_MIN, entry)),
+            "pos": ("0 股（本计划不做）" if shares == 0
+                    else ("%d 股（不加仓）" % shares) if shares else "按计划仓位（不加仓）"),
+            "stop": ("—" if shares == 0 else "收盘破 %.2f ⇒ 次日开盘卖" % stop),
+            "tone": "off" if shares == 0 else "warn",
     })
 
     # ── ⑥ 低开破止损：不接飞刀（硬约束）。仅 A 股。
@@ -925,7 +938,17 @@ def from_analysis(a, n=None):
             target = piv[1]
         if target is None and entry is not None and atr:
             target = round(float(entry) + 6.0 * float(atr), 2)
-    shares = ov.get("shares") or od.get("qty")
+    # ★ 2026-10-07修：**显式0 必须能覆盖**。原写`ov.get("shares") or od.get("qty")`
+    #   把notes 里刻意写的 shares=0（「本票结论=不做」）当成假值吃掉，回落到引擎 qty，
+    #   于是开盘作战方案照旧打印「2100 股买入」—— 报告内部自相矛盾
+    #   （第 1 节写「不做」、第 9 节写「买 2100 股」），且是一个**静默降级**：
+    #   notes 明明给了值却没生效。只在 key缺失时才回落。
+    shares = ov["shares"] if "shares" in ov else od.get("qty")
+    if shares is not None:
+        try:
+            shares = int(shares)
+        except (TypeError, ValueError):
+            shares = None
     upper = ov.get("upper_entry") or od.get("buy_hi")
     if upper is None:
         ents = a.get("entries")
