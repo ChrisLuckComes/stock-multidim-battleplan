@@ -9,6 +9,13 @@
 
 不写 --date 就取最后一个交易日的分时。
 
+★ 触发门槛（不满足直接跳过，不给结论）—— 本脚本只判「涨停板是谁打的」，
+  非涨停票跑它等于拿当日最高价当涨停价，会算出假结论。触发后再分档：
+    A 高危  首板 + 流通市值 ≤100亿 + 股价 ≤20元   （三板组高发区，必看）
+    B 普通  首板，但盘子/价格不符                （也跑，三板组概率低）
+    C 接力  已 ≥2 连板                           （更该看：正进入出货窗口）
+  --force 可绕过门槛（复盘历史某日、或人工确认要跑时用）。
+
 判的是「钱的性质」，不是「票好不好」。四层证据，逐层都能缺，缺了要写明：
 
     A 席位  龙虎榜买方前五（最硬，但只有挤进当日前三才上榜，缺很正常）
@@ -54,8 +61,73 @@ def _get(url, hdr=_H, tries=3, timeout=20):
     raise RuntimeError("取数失败 %s: %s" % (url[:80], last))
 
 
+# 触发档阈值（小盘低价 = 三板组高发区）
+SMALL_FLOAT_CAP = 1e10      # 流通市值 ≤ 100 亿
+LOW_PRICE_CAP = 20.0        # 股价 ≤ 20 元
+
+
 def is_sh(code):
     return str(code).startswith(("5", "6", "9"))
+
+
+def limit_pct(code, name=""):
+    """涨跌幅上限：主板10% / 双创20% / 北交所30% / ST 5%。"""
+    c = str(code)
+    if "ST" in (name or "").upper():
+        return 0.05
+    if c.startswith(("300", "688")):
+        return 0.20
+    if c.startswith(("4", "8", "92")):
+        return 0.30          # 北交所
+    return 0.10
+
+
+def zt_state(bars, code, name=""):
+    """当日是否涨停 + 连板数。只看收盘，盘中不判。
+
+    返回 {date, close, prev_close, limit, limit_price, pct, is_zt, streak}
+    """
+    lim = limit_pct(code, name)
+    if not bars or len(bars) < 2:
+        return None
+    tol = 0.008              # 浮点/四舍五入容差
+
+    def _is_zt(prev_c, c):
+        if prev_c <= 0:
+            return False
+        lp = round(prev_c * (1 + lim), 2)
+        return (c / prev_c - 1) >= lim - tol and c >= lp - 0.005
+
+    last, prev = bars[-1], bars[-2]
+    streak = 0
+    i = len(bars) - 1
+    while i >= 1 and _is_zt(bars[i - 1]["c"], bars[i]["c"]):
+        streak += 1
+        i -= 1
+    return {"date": last["d"], "close": last["c"], "prev_close": prev["c"],
+            "limit": lim, "limit_price": round(prev["c"] * (1 + lim), 2),
+            "pct": last["c"] / prev["c"] - 1,
+            "is_zt": _is_zt(prev["c"], last["c"]), "streak": streak}
+
+
+def trigger_tier(zs, float_cap=None, price=None):
+    """触发档：A 高危 / B 普通 / C 接力 / None 不触发。"""
+    if not zs or not zs["is_zt"]:
+        return None, "当日未涨停（%+.2f%%），不适用本脚本" % (
+            (zs["pct"] * 100) if zs else 0)
+    if zs["streak"] >= 2:
+        return "C", "已 %d 连板 —— 正进入接力/出货窗口" % zs["streak"]
+    small = (float_cap is not None and float_cap <= SMALL_FLOAT_CAP)
+    low = (price is not None and price <= LOW_PRICE_CAP)
+    if small and low:
+        return "A", "首板 + 小盘低价（流通 %.0f 亿 / %.2f 元）—— 三板组高发区" % (
+            float_cap / 1e8, price)
+    if small or low:
+        return "B", "首板 + %s（流通 %s / 价 %s）" % (
+            "小盘" if small else "低价",
+            ("%.0f亿" % (float_cap / 1e8)) if float_cap is not None else "缺失",
+            ("%.2f元" % price) if price is not None else "缺失")
+    return "B", "首板，但盘子/价格不符合小盘低价特征（三板组概率低）"
 
 
 def fmt_t(t):
@@ -77,17 +149,22 @@ def minute_rows(code):
     return {"date": d.get("date"), "rows": rows, "amt": rows[-1]["amt"] if rows else 0.0}
 
 
-def board_structure(rows):
-    """封板时点 / 封板后量密度 / 炸板 / 拉升斜率。以当日最高价作涨停价。"""
+def board_structure(rows, lim_px=None):
+    """封板时点 / 封板后量密度 / 炸板 / 拉升斜率。
+
+    lim_px 给真实涨停价时用真实值（推荐）；缺失才回落到当日分时最高价，
+    那时「封板」只是「摸到当日高点」，结论不可靠 —— 调用方必须先过涨停自检。
+    """
     hi = max(r["px"] for r in rows)
     lo = min(r["px"] for r in rows)
+    lp = lim_px if lim_px else hi
     tot_v = sum(r["v"] for r in rows) or 1.0
     first = None
     segs = opens = lim_min = 0
     inl = False
     lim_v = 0.0
     for r in rows:
-        isl = r["px"] >= hi - 1e-9
+        isl = r["px"] >= lp - 1e-9
         if isl:
             lim_min += 1
             lim_v += r["v"]
@@ -243,6 +320,8 @@ def main():
     ap.add_argument("code")
     ap.add_argument("--date", default="", help="YYYYMMDD，默认最后交易日")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--force", action="store_true",
+                    help="绕过「必须涨停」的触发门槛（复盘/人工确认时用）")
     a = ap.parse_args()
     code = str(a.code).strip().zfill(6)
 
@@ -256,8 +335,9 @@ def main():
     if not rows:
         print("【结论】没有分时数据，不给结论")
         return 3
-    st = board_structure(rows)
 
+    # ── 触发自检：不涨停就不跑（拿最高价当涨停价会算出错的结论）
+    bars = []
     volx = None
     try:
         import bars_source
@@ -269,8 +349,30 @@ def main():
     except Exception as e:                      # noqa: BLE001
         print("⚠ 日线量能取数失败（%s），该项标缺失" % e)
 
+    zs = zt_state(bars, code)
     pool, pool_err = zt_pool(date)
     it = pool.get(code)
+    float_cap = float(it["ltsz"]) if (it and it.get("ltsz")) else None
+    px = (bars[-1]["c"] if bars else None)
+    tier, tier_why = (None, ""), ""
+    if zs:
+        tier, tier_why = trigger_tier(zs, float_cap, px)
+    if tier is None and not a.force:
+        msg = ("【不适用 · 跳过】%s %s 当日 %+.2f%%（涨停价 %.2f）未封板 —— "
+               "本脚本只判涨停板的资金成分，非涨停票跑它会拿当日最高价当涨停价、算出假结论。\n"
+               "  触发门槛：当日收盘涨停（首板=A/B 档，≥2 连板=C 档）。确需复盘请加 --force。"
+               % (code, date, zs["pct"] * 100 if zs else 0,
+                  zs["limit_price"] if zs else 0))
+        print(msg if not a.json else json.dumps(
+            {"code": code, "date": date, "applicable": False,
+             "skip_reason": tier_why, "close": zs["close"] if zs else None,
+             "pct": (zs["pct"] * 100) if zs else None}, ensure_ascii=False))
+        return 0
+    if tier is None:
+        tier, tier_why = "F", "未涨停，--force 强制执行（结论仅供参考）"
+
+    st = board_structure(rows, zs["limit_price"] if zs else None)
+
     hs = it.get("hs") if it else None
     peers = None
     if pool:
@@ -295,7 +397,9 @@ def main():
     kind, risk, act = verdict(score)
 
     out = {
-        "code": code, "date": date, "score": score, "kind": kind, "risk": risk,
+        "code": code, "date": date, "applicable": True, "tier": tier,
+        "tier_why": tier_why, "streak": zs["streak"] if zs else None,
+        "float_cap": float_cap, "score": score, "kind": kind, "risk": risk,
         "action": act, "first_seal": fmt_t(st["first"]), "opens": st["opens"],
         "density": st["density"], "volx": volx, "turnover": hs,
         "seal_ratio": seal_ratio, "peers_zt": peers, "lhb": lhbinfo,
@@ -306,6 +410,10 @@ def main():
         return 0
 
     print("=" * 64)
+    print("【触发档 %s】%s ｜ %s 连板 ｜ %s" % (
+        tier, tier_why, ("首板" if (zs and zs["streak"] <= 1) else
+                         ("%d 板" % zs["streak"] if zs else "未知")),
+        ("流通 %.0f 亿" % (float_cap / 1e8)) if float_cap else "流通市值缺失"))
     print("【结论】%s %s ｜ 资金性质：%s ｜ 三板组风险：%s" % (code, date, kind, risk))
     print("        %s" % act)
     print("        打分 %+d（正分越高越像游资接力盘）" % score)
