@@ -91,6 +91,35 @@ PATH_MIN_SIG = 5         # 路径层判定所需最小信号数
 PATH_V_RATE = 0.35       # V 型占比 ≥ 此值 ⇒ 短调续攻型
 PATH_N_RATE = 0.50       # N 型占比 ≥ 此值 ⇒ 深调再上型（画 N 字）
 
+# ── 第三层补充：regime 分层（老罗 2026-10-08：「启动之后连续性还挺好的，
+#    所以不能指望回调太深」）──
+# 实证见 research_regime_split_2026-10-08.py（600 票 / 8780 个大阳信号，单日涨幅 ≥5%）：
+#   把大阳信号按「信号日是否处于上升段（收盘>MA20 且 MA5>MA10>MA20）」分层后：
+#     · 回撤**幅度**反而更深：中位 6.47% vs 5.05%（Welch t=+6.92 显著），
+#       ATR 归一化 1.30×ATR vs 0.92×ATR —— 涨得多，波动也大
+#     · 但**回踩落点**完全不同（这才是老罗直觉的真身）：
+#         盘中触及 MA20   上升段 22.7%  vs  其余 70.8%   （差 −48.1%）
+#         盘中触及 MA10   上升段 59.2%  vs  其余 69.3%
+#         盘中触及 MA5    上升段 96.3%  vs  其余 96.1%  （无差）
+#     · 延续率只多 2.75%（72.8% vs 70.0%，t=+2.85）、赔率几乎无差（1.30 vs 1.27）
+#   ⇒ ① **上升段里等 MA20 接 = 77% 概率等不到**，违反「等不到的价 = 0」铁律。
+#        老罗直觉的正确表述是「**别等深均线**」，而**不是**「回撤幅度更小」。
+#      ② 上升段**不能**据此放开「禁止突破追」——延续率/赔率差异太小，不足以翻案。
+#   ⇒ 用法：回踩位按 regime 选均线（上升段挂 MA5/MA10，非上升段才可能等到 MA20）；
+#     止损宽度按对应 regime 的回撤 P75。个股子样本不足时向全市场基准收缩。
+REGIME_TOUCH_WIN = 5         # 回踩落点观察窗口（与实证一致，交易日）
+REGIME_UP_DEPTH_P50 = 6.47   # 全市场基准：上升段大阳后回撤中位（%）
+REGIME_UP_DEPTH_P75 = 10.85  # 全市场基准：上升段回撤 P75 ⇒ 止损最小宽度
+REGIME_OT_DEPTH_P50 = 5.05   # 全市场基准：非上升段
+REGIME_OT_DEPTH_P75 = 9.35
+# 触及率基准：(上升段, 非上升段)
+REGIME_TOUCH_MA5 = (0.963, 0.961)
+REGIME_TOUCH_MA10 = (0.592, 0.693)
+REGIME_TOUCH_MA20 = (0.227, 0.708)
+REGIME_MIN_SIG = 5           # regime 子样本最小信号数；不足则主要用全市场基准
+REGIME_PSEUDO = 8            # 经验贝叶斯伪计数：w = n/(n+PSEUDO)（n=8 ⇒ w=50%）
+REGIME_MA20_TOUCH_LOW = 0.35  # 触及 MA20 概率低于此值 ⇒ 明确「不要等 MA20」
+
 # ── 第四层：当下是不是「连拉中」（老罗 2026-09-26：「还有那种连续拉升型」）──
 # 与前三层的分工：前三层是**历史习惯**（这票过去怎么走），第四层是**当下状态**
 # （这票现在正怎么走）。实证见 research_streak_type_2026-09-26.py（376 票 / 2385 信号）：
@@ -229,6 +258,42 @@ def pct(xs, p):
     return xs[min(len(xs) - 1, int(len(xs) * p))]
 
 
+def regime_up(bars, i):
+    """上升段：收盘 > MA20 且 MA5 > MA10 > MA20（多头排列）。只用 i 及之前的数据。
+
+    ⚠ 不得用前瞻数据——这是实证里 regime 标签的定义，含未来会直接污染结论。
+    """
+    m5, m10, m20 = ma(bars, i, 5), ma(bars, i, 10), ma(bars, i, 20)
+    if m5 is None or m10 is None or m20 is None:
+        return False
+    return bars[i]["c"] > m20 and m5 > m10 > m20
+
+
+def _shrink(vals, base):
+    """经验贝叶斯收缩：个股子样本 n 越小，越向全市场基准靠。w = n/(n+PSEUDO)。
+
+    只对「直接用于设价位」的量（坑深、均线触及率）收缩；
+    V/N 比率**不收缩**（无实测基准，收缩只会制造虚假精度）。
+    """
+    v = [x for x in vals if x is not None]
+    if not v:
+        return base
+    w = len(v) / (len(v) + REGIME_PSEUDO)
+    return w * (sum(v) / len(v)) + (1 - w) * base
+
+
+def _touch_ma(bars, i, nn, win):
+    """从 i+1 起 win 日内，盘中最低价是否触及过 MA(nn)。1/0。"""
+    for k in range(1, win + 1):
+        j = i + k
+        if j >= len(bars):
+            break
+        m = ma(bars, j, nn)
+        if m is not None and bars[j]["l"] <= m:
+            return 1
+    return 0
+
+
 def path_habit(bars, big=BIG_DEFAULT, win=PATH_WIN, dd_split=PATH_DD_SPLIT):
     """第三层：大阳之后是「短调一下就上」(V) 还是「先挖坑再上」(N)，以及坑有多深。
 
@@ -239,12 +304,18 @@ def path_habit(bars, big=BIG_DEFAULT, win=PATH_WIN, dd_split=PATH_DD_SPLIT):
         N 型：突破 且 max_dd ≤ dd_split（深调再上 / 画 N 字）
         FAIL：win 日内未突破
     返回 dd_p50 / dd_p75 —— **止损宽度的直接依据**：止损窄于 |dd_p75| 大概率被扫。
+
+    ★ regime 分层（2026-10-08 新增）：每个大阳信号额外标记「信号日是否处于上升段」
+      （regime_up），并统计后 REGIME_TOUCH_WIN 日盘中触及 MA5/MA10/MA20 的概率。
+      全市场实证：上升段触及 MA20 仅 22.7% vs 非上升段 70.8%
+      ⇒ 上升段里「按中位坑深等深回踩」大概率等不到价（等不到的价 = 0）。
     """
     n = len(bars)
     if n < 60:
         return None
     close = [b["c"] for b in bars]
     types, dds, bottoms, breaks = [], [], [], []
+    recs = []                      # 分层明细：(reg, type, depth, touch5/10/20)
     for i in range(1, n):
         if i + win >= n:
             break
@@ -264,11 +335,18 @@ def path_habit(bars, big=BIG_DEFAULT, win=PATH_WIN, dd_split=PATH_DD_SPLIT):
                 brk = k
         dds.append(dd)
         bottoms.append(bottom)
+        t = "FAIL"
         if brk is not None:
             breaks.append(brk)
-            types.append("V" if dd > dd_split else "N")
-        else:
-            types.append("FAIL")
+            t = "V" if dd > dd_split else "N"
+        types.append(t)
+        recs.append({
+            "reg": "up" if regime_up(bars, i) else "other",
+            "type": t, "depth": -dd,
+            "t5": _touch_ma(bars, i, 5, REGIME_TOUCH_WIN),
+            "t10": _touch_ma(bars, i, 10, REGIME_TOUCH_WIN),
+            "t20": _touch_ma(bars, i, 20, REGIME_TOUCH_WIN),
+        })
     ns = len(types)
     if ns == 0:
         return None
@@ -290,30 +368,124 @@ def path_habit(bars, big=BIG_DEFAULT, win=PATH_WIN, dd_split=PATH_DD_SPLIT):
         "bottom_mean": mean(bottoms),
         "break_mean": mean(brk_days) if brk_days else None,
     }
+    p["regime"] = _regime_split(recs)
+    p["regime_now"] = "up" if regime_up(bars, len(bars) - 1) else "other"
     p.update({"class": None, "class_label": None, "advice": None})
     p.update(zip(("class", "class_label", "advice"), classify_path(p)))
     return p
 
 
+def _regime_split(recs):
+    """把大阳信号按 regime 分成 up / other 两堆，各算坑深与均线触及率。
+
+    坑深/触及率向全市场基准收缩；V/N 比率给原始值 + 样本数（不收缩）。
+    """
+    out = {}
+    for key, i in (("up", 0), ("other", 1)):
+        rs = [r for r in recs if r["reg"] == key]
+        if not rs:
+            out[key] = {"n": 0}
+            continue
+        d50b = REGIME_UP_DEPTH_P50 if key == "up" else REGIME_OT_DEPTH_P50
+        d75b = REGIME_UP_DEPTH_P75 if key == "up" else REGIME_OT_DEPTH_P75
+        out[key] = {
+            "n": len(rs),
+            "v_rate": sum(1 for r in rs if r["type"] == "V") / len(rs),
+            "n_rate": sum(1 for r in rs if r["type"] == "N") / len(rs),
+            "depth_p50": _shrink([r["depth"] for r in rs], d50b),
+            "depth_p75": _shrink([r["depth"] for r in rs], d75b),
+            "touch_ma5": _shrink([r["t5"] for r in rs], REGIME_TOUCH_MA5[i]),
+            "touch_ma10": _shrink([r["t10"] for r in rs], REGIME_TOUCH_MA10[i]),
+            "touch_ma20": _shrink([r["t20"] for r in rs], REGIME_TOUCH_MA20[i]),
+            "shrunk": len(rs) < REGIME_PSEUDO,   # True ⇒ 基准占主导，别当个股特性
+        }
+    return out
+
+
+def _pullback_anchor(p, reg, sub):
+    """回踩挂单该挂哪条均线：**按实测触及率**给，而不是按「中位坑深 %」。
+
+    实证（600 票 / 8780 信号）：上升段触及 MA20 仅 22.7%，非上升段 70.8%。
+    ⇒ 上升段里「按中位坑深等深回踩」≈ 等 MA20，77% 概率等不到（等不到的价 = 0）。
+
+    ⚠ 措辞必须按触及率分档：37% 触及 = 63% 等不到，**不能**说成「大概率会给到」。
+    """
+    if not sub or sub.get("n", 0) < REGIME_MIN_SIG:
+        return None
+    t5, t10, t20 = sub["touch_ma5"], sub["touch_ma10"], sub["touch_ma20"]
+    tag = "启动段" if reg == "up" else "非启动段"
+    s = ["回踩落点（%s，%d 信号）：盘中触及 MA5 %.0f%% ／ MA10 %.0f%% ／ MA20 %.0f%%"
+         % (tag, sub["n"], t5 * 100, t10 * 100, t20 * 100)]
+    if t20 < REGIME_MA20_TOUCH_LOW:                 # < 35%：大概率等不到
+        s.append("⇒ **别等 MA20**（约 %.0f%% 概率等不到）；回踩挂 MA5~MA10 区间"
+                 % ((1 - t20) * 100))
+    elif t20 < 0.50:                                # 35%~50%：一半以上等不到
+        s.append("⇒ MA20 只有 %.0f%% 会给到（过半概率等不到）⇒ 主挂 MA5~MA10，"
+                 "MA20 只能当次要挂单，不许当唯一路径" % (t20 * 100))
+    else:                                           # ≥50%
+        s.append("⇒ MA20 会给到（%.0f%%），可挂 MA10~MA20" % (t20 * 100))
+    if sub.get("shrunk"):
+        s.append("⚠ 子样本不足，已向全市场基准收缩，别当个股特性")
+    return "；".join(s)
+
+
+def _regime_lines(L, pth):
+    """人读输出：regime 分层（启动段 / 非启动段）的坑深与回踩触及率。"""
+    rg = pth.get("regime") or {}
+    up, ot = rg.get("up") or {}, rg.get("other") or {}
+    now = pth.get("regime_now") or "other"
+    if not up.get("n") and not ot.get("n"):
+        return
+    L.append("    ── regime 分层（老罗 2026-10-08：启动后别指望回调太深）──")
+    L.append("       当前处于：%s（收盘>MA20 且 MA5>MA10>MA20）"
+             % ("启动段" if now == "up" else "非启动段"))
+    for tag, d in (("启动段", up), ("非启动段", ot)):
+        if not d.get("n"):
+            L.append("       %s：无信号" % tag)
+            continue
+        L.append("       %s n=%d：回撤 中位 %.2f%% ／ P75 %.2f%%"
+                 % (tag, d["n"], d["depth_p50"], d["depth_p75"]))
+        L.append("           回踩触及率 MA5 %.0f%% ／ MA10 %.0f%% ／ MA20 %.0f%%%s"
+                 % (d["touch_ma5"] * 100, d["touch_ma10"] * 100, d["touch_ma20"] * 100,
+                    "（已向全市场基准收缩）" if d.get("shrunk") else ""))
+    L.append("           ← 触及率 = 该均线「会给到价」的概率；"
+             "过低的线不许当唯一挂单（等不到的价 = 0）")
+
+
 def classify_path(p):
-    """路径层判定。只回答「用哪种买法 + 止损留多宽」，不否决交易。"""
+    """路径层判定。只回答「用哪种买法 + 回踩挂哪条线 + 止损留多宽」，不否决交易。
+
+    ★ 2026-10-08：坑深口径按 regime 取（启动段回撤反而更深，实测中位 6.47% vs 5.05%），
+      并新增「回踩挂哪条均线」—— 原来只给「按中位坑深 % 设回踩位」，在启动段会
+      把价挂到 MA20 去，77% 等不到。
+    """
     if not p or p["n"] < PATH_MIN_SIG:
         return ("unknown", "样本不足（< %d 个信号）" % PATH_MIN_SIG,
                 "大阳样本不足，路径层不作判定；按第一层结论执行")
-    d50 = p["depth_p50"] or 0     # 中位坑深
+    d50 = p["depth_p50"] or 0     # 中位坑深（全样本）
     d75 = p["depth_p75"] or 0     # 75% 的路径坑不超过此深 ⇒ 止损最小宽度
+    reg = p.get("regime_now") or "other"
+    sub = (p.get("regime") or {}).get(reg) or {}
+    # 启动段子样本够 ⇒ 用它的坑深（回撤更深，止损要更宽）
+    if reg == "up" and sub.get("n", 0) >= REGIME_MIN_SIG:
+        d50 = sub.get("depth_p50") or d50
+        d75 = sub.get("depth_p75") or d75
+    anchor = _pullback_anchor(p, reg, sub)
+    tail = ("  ｜" + anchor) if anchor else ""
+
     if p["v_rate"] >= PATH_V_RATE:
         return ("v", "短调续攻型（V 型占 %.0f%%）" % (p["v_rate"] * 100),
-                "习惯浅调就走 —— 突破买 / 次日买可用；止损宽度 ≥ %.1f%%（坑深 P75）即可覆盖大部分路径"
-                % d75)
+                "习惯浅调就走 —— 突破买 / 次日买可用；止损宽度 ≥ %.1f%%（坑深 P75）"
+                % d75 + tail)
     if p["n_rate"] >= PATH_N_RATE:
         return ("n", "深调再上型（画 N 字，占 %.0f%%）" % (p["n_rate"] * 100),
                 "习惯先挖坑再上（中位坑深 %.1f%%）⇒ 禁止突破追与次日追，只在回踩接；"
-                "回踩位按 %.1f%% 量级设，止损要容得下 %.1f%%（坑深 P75），容不下就别用这个买法"
-                % (d50, d50, d75))
+                "止损要容得下 %.1f%%（坑深 P75），容不下就别用这个买法"
+                % (d50, d75) + tail)
     return ("mixed", "路径混合型（V %.0f%% / N %.0f%%）"
             % (p["v_rate"] * 100, p["n_rate"] * 100),
-            "两种路径都常见 ⇒ 不做预判，统一按回踩买；止损宽度按 %.1f%%（坑深 P75）留" % d75)
+            "两种路径都常见 ⇒ 不做预判，统一按回踩买；止损宽度按 %.1f%%（坑深 P75）留"
+            % d75 + tail)
 
 
 # ─────────────────────── 第四层：连拉状态（当下） ───────────────────────
@@ -869,6 +1041,7 @@ def render(a):
             L.append("          ← 止损宽度 ≥ P75 才能扛住 75% 的路径；窄于此 = 大概率被扫")
             L.append("    平均见底 T+%.1f 日     突破信号日高点 T+%.1f 日（%.0f%% 会突破）"
                      % (pth["bottom_mean"], pth["break_mean"] or 0, pth["break_rate"] * 100))
+            _regime_lines(L, pth)
     else:
         L.append("    （无大阳样本）")
     L.append("-" * 66)
