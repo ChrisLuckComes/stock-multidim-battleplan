@@ -30,6 +30,9 @@ notes_*.json
 # 单次分析中间产物（battle_analyze 落根目录的原始 JSON，含行情明细，2026-09-28 补）
 analysis_*.json
 
+# 根目录报告（2026-10-09 补）：HTML 应落 reports/，这条只作兜底防误入库
+/report_*.html
+
 # 每日作战计划 / 备忘（含具体买点、止损、持仓，私人生成物，2026-09-28 补）
 open_plan_*.md
 open_memo_*.md

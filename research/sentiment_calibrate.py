@@ -21,6 +21,10 @@
 
 口径：
   - 同一交易日落盘多次时，取 **asof 最晚**的一条（收盘口径优先于盘中）。
+  - **只统计有实际交易时段数据的落盘**：`pre_open=True` 或 `traded_minutes==0`
+    的文件被排除（盘前跑 / 休市日跑出来的当日文件，宽度是集合竞价口径、
+    资金面取不到主力净额恒为 0 → 该项被记成 50 分占位，量能按 0.01x 记满分）。
+    这类假样本会直接污染 WIDTH_CENTER / MONEY_SLOPE 的分位数校准，故不计入。
   - 样本 < min-days 时只报分布、不给建议（统计意义不足）。
 """
 import argparse
@@ -53,7 +57,13 @@ def pct(xs, q):
 
 
 def load_history(dirpath):
-    """→ 每个交易日一条（取 asof 最晚的落盘）。"""
+    """→ 每个交易日一条（取 asof 最晚的落盘）。
+
+    返回 (rows, skipped_preopen)。**非交易时段的落盘直接排除**：
+    `pre_open=True` 或 `traded_minutes==0` 的文件里，资金面维度取不到主力净额
+    （恒为 0，脚本记成 50 分占位），量能按「成交额/5日均」≈0.01x 记满分，
+    宽度是集合竞价口径 —— 三者都与收盘口径无关，混进分位数会让建议中性点失真。
+    """
     rows = {}
     for p in sorted(glob.glob(os.path.join(dirpath, "sentiment_*.json"))):
         try:
@@ -80,7 +90,14 @@ def load_history(dirpath):
         }
         if day not in rows or rec["asof"] > rows[day]["asof"]:
             rows[day] = rec
-    return [rows[k] for k in sorted(rows)]
+    kept, skipped = [], 0
+    for k in sorted(rows):
+        r = rows[k]
+        if r["pre_open"] or r["traded_minutes"] <= 0:
+            skipped += 1
+            continue
+        kept.append(r)
+    return kept, skipped
 
 
 def summarize(rows, min_days):
@@ -132,6 +149,8 @@ def render(r):
     L.append("=" * 62)
     L.append(f"样本：{r['days']} 个交易日（阈值 {r['min_days']} 日"
              f"{'，已达统计门槛' if r['enough'] else '，**样本不足，只报分布不给建议**'}）")
+    if r.get("skipped_preopen"):
+        L.append(f"（另有 {r['skipped_preopen']} 个非交易时段落盘（pre_open / 0 分钟）已排除，不计入样本）")
     for key, label, unit in (("width", "上涨占比(宽度)", "%"),
                              ("money", "主力净额占比(资金)", "%"),
                              ("score", "情绪总分", "")):
@@ -171,13 +190,19 @@ def main():
     ap.add_argument("--json", action="store_true", help="输出 JSON")
     a = ap.parse_args()
 
-    rows = load_history(a.dir)
+    rows, skipped = load_history(a.dir)
     if not rows:
-        print(f"未在 {a.dir} 找到 sentiment_*.json 落盘。先跑："
-              f"python market_sentiment.py --out {a.dir}/sentiment_"
-              f"{datetime.datetime.now():%Y%m%d}.json")
+        if skipped:
+            print(f"{a.dir} 内有 {skipped} 个落盘但全部是非交易时段"
+                  f"（pre_open / 0 分钟），无有效交易日样本；请在收盘后重跑："
+                  f"python market_sentiment.py --out-dir {a.dir}")
+        else:
+            print(f"未在 {a.dir} 找到 sentiment_*.json 落盘。先跑："
+                  f"python market_sentiment.py --out {a.dir}/sentiment_"
+                  f"{datetime.datetime.now():%Y%m%d}.json")
         return 1
     res = summarize(rows, a.min_days)
+    res["skipped_preopen"] = skipped
     if a.json:
         print(json.dumps(res, ensure_ascii=False, indent=2))
     else:

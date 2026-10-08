@@ -15,6 +15,10 @@
 7. **本仓库是唯一真源，skill 安装副本只是派生产物**（老罗 2026-09-27 定）。
    见第 4 节「改代码的唯一正确流程」—— **禁止**反向同步（INST→DEV）整文件覆盖，
    曾一次抹掉用户两天前已修好的 `from_analysis` 兜底。
+8. **根目录洁净：产物一律归目录，禁止落仓库根目录**（老罗 2026-10-09 定）。
+   `analysis_*.json` / `notes_*.json` / `report_*.html` / 扫雷缓存 / 运行日志 / 一次性草稿
+   等中间产物一律按第 2b 节落点表归集；**中间数据用完即删**。
+   ⚠ 这些文件已被 `.gitignore` 忽略 ⇒ 落根目录既不入库又污染工作区，只能靠人工清理。
 
 ---
 
@@ -69,6 +73,45 @@ python gates/session_decide.py <code> --plan out_cn/analysis_<code>.json [--note
 - 禁止无硬止损的「能买」结论；禁止盘中破止损后换更宽锚
 - A 股账户规则见 `account_config.py`：单票上限、科创板门槛、T+1、涨跌停不可成交等，结论必须遵守
 - 临时产物（`out_*.json`、cache）不入库；审查修复类做完测试通过后直接 commit + push（本仓库惯例）
+
+---
+
+## 2b. 产物落盘规范 · 根目录洁净（老罗 2026-10-09 定）
+
+**根目录只放代码、文档、配置。任何运行产物一律不得落在根目录。**
+
+**硬禁**：不得在仓库根目录新建或留存下列文件 ——
+
+`analysis_*.json`、`notes_*.json`（模板 `notes.example.json` 除外）、`report_*.html`、
+`sweep_*.json`、`out_*.txt`、`*_raw.txt`、一次性探查输出、`_gen_*.py` 草稿。
+
+> ⚠ 这些文件已被 `.gitignore` 忽略 ⇒ 落在根目录**既不入库、又污染工作区**，
+> 只能靠事后人工清理。本条规范的目的就是**别让它产生**。
+
+### 落点表（唯一，不另行发明目录）
+
+| 产物 | 落点 | 产生方式 |
+|---|---|---|
+| 引擎分析 `analysis_<code>.json` | `out_cn/`（A股）/ `out_us/`（美股） | `battle_analyze.py <code> --out out_cn/analysis_<code>.json` |
+| 判断叙述 `notes_<code>.json` | **与 analysis 同目录**（`out_cn/` / `out_us/`） | 手写后用 `--notes out_cn/notes_<code>.json` 传给渲染 |
+| HTML 作战计划 | `reports/cn_<code>_<date>.html` | `report_render.py --out reports/cn_<code>_<date>.html` |
+| 扫雷缓存 `sweep_<code>.json` | `data/cache/`（minesweep 默认即此处） | `minesweep.py <code>`，**不传 `--out`** |
+| 运行日志 / stderr | `out_cn/run_<code>.txt`、`data/cache/*.txt` | shell 重定向 |
+| 一次性草稿、探查输出、临时脚本 | `scratch/` | **用完删除** |
+| 研究脚本 + 实证输出 | 脚本 `research/*.py`；输出 json → `data/cache/` | 脚本入库，输出不入库 |
+
+### 执行规则
+
+1. **跑之前先看目录**：`out_cn/analysis_<code>.json` 已存在就直接用，别重跑一遍再落一份。
+2. **notes 必须与 analysis 同目录**：`session_decide` / `report_render` 的 `--notes` 一律传
+   `out_cn/notes_<code>.json`，与第 1b 节的命令模板一致。
+3. **中间数据用完即删**：只服务于当次结论的（临时 kline 快照、raw 拉取结果、一次性统计）
+   结论给出后即删；需要留在磁盘的只放上表目录，**不入库**。
+4. **存量顺手归集**：发现根目录有存量产物 ⇒ `mv` 到对应目录，而不是留着；确认无用则删。
+5. **存量同名冲突：按 mtime 保留较新的那份，另一份删除**（2026-10-09 修正）。
+   ⚠ 不要默认「目标目录那份更新」—— 实证 `analysis_688581.json`：根目录 09-27 23:53 的新，
+   `out_cn/` 23:14 的旧（先跑落 out_cn、后重跑落根目录）。**先 `stat` 比时间再决定谁覆盖谁**。
+   禁止自造 `notes_<code>_2.json` / `<code>_v2` 之类的副本 —— 同一票永远只有一份。
 
 ---
 
