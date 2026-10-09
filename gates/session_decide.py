@@ -400,6 +400,42 @@ def trend_shape(minutes, win=30):
             "chg30": round(chg30, 2)}
 
 
+def volume_burst(minutes, lookback=20, ratio=8.0, gap_min=1.0):
+    """★ 起涨异动：量能突然放大 + 价格离开均价（老罗「直线起涨前提示」的真抓手）。
+
+    2026-10-09 麒麟信安 688152 实测暴露的缺陷（这正是老罗出题要考的东西）：
+        直线拉升的**第一分钟**缺口只有 +0.25%，按 rally 的 gap≥1.0 门槛会漏掉；
+        但那一分钟成交量已从 179 手放大到 1523 手。
+        ⇒ **「刚起涨」的可测特征不是涨幅，是「量能突然放大 + 价格开始离开均价」。**
+
+    判据（只用 [0..i]）：
+        ① 本分钟量 ≥ 前 lookback 分钟均量的 ratio 倍
+        ② 现价在分时均价上方（缺口 ≥ gap_min）
+
+    阈值由 2026-10-09 六票全分钟扫描标定（见 commit 消息）：
+        ratio≥3 / gap≥0.3 → 六票全部报，且一路报到收盘（噪声过大）
+        ratio≥5 / gap≥1.0 → 芒果首个信号变成 14:18（已涨停，失效）
+        **ratio≥8 / gap≥1.0 → 麒麟精确落在 13:02（真起涨，+16.37%）；
+          芒果/金徽/兖矿/三夫 全天不报（不误报）；斯菱只报 13:01 一次**
+        ⇒ 取 8.0 / 1.0。仍属单日样本，明日须复测。
+    """
+    n = len(minutes or [])
+    if n < lookback + 2:
+        return {"hit": False, "why": "数据不足"}
+    m = minutes
+    i = n - 1
+    cur = float(m[i]["v"])
+    base = sum(float(x["v"]) for x in m[max(0, i - lookback):i]) / float(lookback)
+    vr = (cur / base) if base > 0 else 0.0
+    c = float(m[i]["c"])
+    avg = float(m[i]["avg"])
+    gap = (c / avg - 1.0) * 100 if avg else 0.0
+    return {"hit": bool(vr >= ratio and gap >= gap_min),
+            "vr": round(vr, 2), "gap": round(gap, 2), "px": c,
+            "avg_vol": round(base, 1), "ratio_need": ratio,
+            "gap_need": gap_min}
+
+
 def decide(day, summary, entry, stop, target, cap=None, account=None,
             risk_scale=1.0, quality=None):
     """核心判定。返回结构化结果，供 CLI 与测试用。
@@ -432,6 +468,7 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
     rally = rally_state(day["minutes"])
     struct_ok = trend_structure(day["minutes"])
     shape = trend_shape(day["minutes"])
+    burst = volume_burst(day["minutes"])
     dip_n = count_dip_minutes(day["minutes"], pre)
     wait_px, wait_note = arm_price(entry, stop, target, buy_cap, limit_px, limit_dn)
 
@@ -464,6 +501,7 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
         "rally": rally,
         "structure": struct_ok,
         "shape": shape,
+        "burst": burst,
     }
 
     def _reject(reason):
@@ -588,6 +626,15 @@ def render(d):
     r = d.get("rally") or {}
     st = d.get("structure") or {}
     sh = d.get("shape") or {}
+    vb = d.get("burst") or {}
+    if vb.get("vr") is not None:
+        if vb.get("hit"):
+            lines.append("◆ 起涨异动：本分钟量为前20分均量的 **%.1f 倍**，缺口 %+.2f%% "
+                         "⇒ 直线拉升的起涨瞬间，这是唯一该抢的位置（拉起来后按纪律第21条不追）。"
+                         % (vb["vr"], vb["gap"]))
+        else:
+            lines.append("· 起涨异动：量能 %.1f 倍于前20分均量、缺口 %+.2f%%"
+                         "（起涨阈值 8.0 倍 / +1.00%%）" % (vb["vr"], vb["gap"]))
     if sh.get("label") and sh["label"] != "数据不足":
         lines.append("◆ 形态：%s  R²=%s 回撤%s次 缺口%+.2f%% 近30分%+.2f%%"
                      % (sh["label"], sh.get("r2"), sh.get("steps"),
