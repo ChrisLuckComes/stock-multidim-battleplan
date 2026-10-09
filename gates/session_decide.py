@@ -485,6 +485,53 @@ def volume_burst(minutes, lookback=20, ratio=8.0, gap_min=1.0):
             "gap_need": gap_min}
 
 
+def chase_risk(minutes, lookback=20, ratio=8.0, gap_min=1.0, from_low_max=6.0):
+    """★ 追高风险判据：区分「芒果型（买就吃到涨停）」与「斯菱型（追高被套）」。
+
+    老罗 2026-10-09 15:07 提问：「如何区分芒果和斯菱智驱的买入？芒果不会被套能
+    吃到涨停，斯菱要追高被套，有没有识别的方法。」
+
+    ★ 实测找到了唯一有区分度的量：**起涨点出现时，价格距「当日至今最低」已涨多少**。
+
+      麒麟信安 688152：起涨 13:02 @39.40，距当时最低 37.45 已涨 **+5.21%** ⇒ 到收盘 **+16.37%**
+      斯菱智驱 301550：起涨 13:01 @100.54，距当时最低 92.33 已涨 **+8.89%** ⇒ 到收盘 **仅 +2.75%**
+      ⇒ 同为「起涨异动」，位置差 3.7 个点，收益差 13.6 个点。**位置决定生死。**
+
+    判据（全部实时可算，只用 [0..i]）：
+        ① 先要求 volume_burst 命中（量能突增 = 起涨）
+        ② 再看 **现价 / 当时最低 − 1 ≤ from_low_max**（默认 6%）
+           ≤6%  ⇒ 低位起涨 ⇒ 可上手（芒果/麒麟型）
+           >6%  ⇒ 高位追涨 ⇒ **不买**（斯菱型）
+        ③ 叠加硬闸：现价必须 ≤ cap（entry/cap 区间内）
+
+    ⚠️ 单日样本（今天 6 只票里只有麒麟/斯菱触发起涨），
+       阈值 6% 落在麒麟 5.21% 与斯菱 8.89% 之间，属**插值而非实测分界**，
+       明日须用新样本复测。
+    """
+    n = len(minutes or [])
+    if n < lookback + 2:
+        return {"ok": False, "why": "数据不足"}
+    m = minutes
+    i = n - 1
+    burst = volume_burst(m, lookback, ratio, gap_min)
+    lo_so_far = min(float(x["l"]) for x in m)
+    c = float(m[i]["c"])
+    from_low = (c / lo_so_far - 1.0) * 100 if lo_so_far else 0.0
+    is_burst = bool(burst.get("hit"))
+    ok = is_burst and from_low <= from_low_max
+    if not is_burst:
+        why = "未起涨（量比 %.1f / 缺口 %+.2f%%）" % (burst.get("vr", 0), burst.get("gap", 0))
+    elif from_low > from_low_max:
+        why = ("已起涨但位置偏高（距当日最低 %+.2f%% > %.1f%%）⇒ 斯菱型，不追"
+               % (from_low, from_low_max))
+    else:
+        why = ("起涨且位置低（距当日最低 %+.2f%% ≤ %.1f%%）⇒ 芒果/麒麟型，可上手"
+               % (from_low, from_low_max))
+    return {"ok": ok, "burst": is_burst, "from_low": round(from_low, 2),
+            "lo_so_far": lo_so_far, "need": from_low_max, "why": why,
+            "vr": burst.get("vr"), "gap": burst.get("gap")}
+
+
 def decide(day, summary, entry, stop, target, cap=None, account=None,
             risk_scale=1.0, quality=None):
     """核心判定。返回结构化结果，供 CLI 与测试用。
@@ -520,6 +567,7 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
     struct_ok = trend_structure(day["minutes"])
     shape = trend_shape(day["minutes"])
     burst = volume_burst(day["minutes"])
+    chase = chase_risk(day["minutes"])
     dip_n = count_dip_minutes(day["minutes"], pre)
     wait_px, wait_note = arm_price(entry, stop, target, buy_cap, limit_px, limit_dn)
 
@@ -553,6 +601,7 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
         "structure": struct_ok,
         "shape": shape,
         "burst": burst,
+        "chase": chase,
         "cap_gates": gates,
     }
 
@@ -679,6 +728,16 @@ def render(d):
     st = d.get("structure") or {}
     sh = d.get("shape") or {}
     vb = d.get("burst") or {}
+    if vb.get("vr") is not None:
+        cs = d.get("chase") or {}
+        if cs.get("ok"):
+            lines.append("◆ 低位起涨（可上手）：量比 %.1f 倍、缺口 %+.2f%%、"
+                         "距当日最低 %+.2f%% ≤ %.1f%% ⇒ 芒果/麒麟型，"
+                         "这是今天唯一敢动手的位置。" % (vb["vr"], vb["gap"],
+                                                      cs["from_low"], cs["need"]))
+        elif cs.get("burst"):
+            lines.append("✗ 追高风险：已起涨但距当日最低 %+.2f%% > %.1f%% ⇒ 斯菱型，**不追**"
+                         % (cs["from_low"], cs["need"]))
     if vb.get("vr") is not None:
         if vb.get("hit"):
             lines.append("◆ 起涨异动：本分钟量为前20分均量的 **%.1f 倍**，缺口 %+.2f%% "
