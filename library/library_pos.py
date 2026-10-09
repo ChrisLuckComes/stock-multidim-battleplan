@@ -266,6 +266,8 @@ def main() -> int:
     ap.add_argument("--market", choices=["cn", "us"], default="cn")
     ap.add_argument("--code")
     ap.add_argument("--name")
+    ap.add_argument("--record-id", dest="record_id",
+                    help="delete 专用：按 record_id 精确删除（代码消歧失败时用）")
     ap.add_argument("--set", dest="sets", action="append", help="字段=值，可重复")
     ap.add_argument("--text", help="note 用的文本")
     ap.add_argument("--token-stdin", action="store_true")
@@ -321,6 +323,16 @@ def main() -> int:
     if args.cmd == "add":
         if not args.code:
             raise SystemExit("add 需要 --code")
+        # ★ 查重（2026-10-09 老罗纠正后新增）：同一 code 已存在时直接拒绝，
+        #   否则重复 add 会造出两条同代码记录，之后 find/set/delete 全部因「匹配到多条」失败。
+        #   口径：**绝不静默新增第二份**；要更新已有记录请显式用 set。
+        dup = [r for r in query_all(token, db_id) if args.code in (r.get("标的") or "")]
+        if dup:
+            lines = ["该 code 已存在，add 拒绝（避免重复记录）："]
+            for r in dup:
+                lines.append("    %s  [%s]" % (r.get("标的"), r.get("record_id")))
+            lines.append("  要更新它请用： set --code %s --set 字段=值" % args.code)
+            raise SystemExit("\n".join(lines))
         props = parse_sets(args.sets)
         title = ("%s %s" % (args.code, args.name)).strip()
         props["标的"] = {"text": title}
@@ -330,6 +342,11 @@ def main() -> int:
         return 0
 
     if args.cmd == "delete":
+        # ★ --record-id 精确删除（2026-10-09 新增）：代码消歧失败时（重复记录）用它。
+        if args.record_id:
+            print("按 record_id 删除：%s" % args.record_id)
+            do_delete(token, db_id, [args.record_id], args.dry_run)
+            return 0
         rec = resolve(query_all(token, db_id), args.code, args.name)
         rid = rec.get("record_id")
         if not rid:
