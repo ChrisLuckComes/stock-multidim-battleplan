@@ -39,20 +39,42 @@
 > 那次踩坑：`note` 打美股表被拒 `invalid fields (not found in schema): [操作记录]`，
 > 而 `--dry-run` 当时**没拦**（它不查 schema）⇒ 现已给 `set`/`note`/`add` 都加了 schema 校验。
 
+## 脚本位置与前置环境变量（2026-10-09 实测·必读）
+
+⚠️ **`library_pos.py` 实际在 `library/` 子目录**，不在仓库根目录：
+
+```bash
+python library/library_pos.py <子命令> ...
+```
+
+⚠️ **必须先设 `LIBRARY_SKILL_DIR`**，否则报「找不到资料库脚本 query_database_record.py」——
+脚本靠这个变量定位 library skill 的运行期依赖（`runtime_context.py` 等）：
+
+```bash
+export LIBRARY_SKILL_DIR="<...>/plugins/workbuddy-builtin/skills/library"
+python library/library_pos.py find --market cn --code 601975
+```
+
+设好后走**免 token 模式**即可用（`list` / `find` / `set` / `note` / `add` 全支持，oneof 字段自动包装正确）。
+
+> ⚑ 别和 `sync_pos_from_library.py` 搞混：**读**资料库用**根目录**的 `sync_pos_from_library.py`（路径原本就对，且根目录版是新版）；**写**资料库用 **`library/library_pos.py`**。
+
 ## 鉴权
 
 1. `python3 "<library skill>/runtime_context.py"` → `mode=client` 或 `sandbox`。
 2. **client**：`ToolSearch connect_open_platform` → `DeferExecuteTool(skill_id="library")` 拿 token（**不落盘、不进回复**），脚本用 stdin 首行传：
    ```bash
-   printf '%s' "<token>" | python library_pos.py list --market cn --token-stdin
+   printf '%s' "<token>" | python library/library_pos.py list --market cn --token-stdin
    ```
-3. **sandbox**：免 token，去掉 `--token-stdin`。
+3. **sandbox**：免 token，去掉 `--token-stdin`（本项目实测走这条即可）。
 
 ## 命令
 
+⚠️ 下列命令里的 `library_pos.py` **全部要写全 `library/library_pos.py`**，且需先设好 `LIBRARY_SKILL_DIR`。
+
 ```bash
 # 列出全部（record_id / 标的 / 状态 / 持仓数量 / 成本 / 止损价）
-python library_pos.py list --market cn --token-stdin
+python library/library_pos.py list --market cn --token-stdin
 
 # 定位某票（拿到 record_id，含全部字段）
 python library_pos.py find --market cn --code 688758 --token-stdin

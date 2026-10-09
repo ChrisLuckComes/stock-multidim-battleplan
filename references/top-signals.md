@@ -7,7 +7,7 @@
 > ③ 追加「配合巨量概率更大，而且需要次日确认，次日走弱 100% 是顶部了，如果反包了就推翻结论」。
 > **第二批**：④「顶部十字星作为**次级**的高危信号」；⑤「巨量大阴线作为**顶级**的高危信号」。
 > **实现**：`top_signals.py`（不 import `rule123`，避免循环依赖，自带迷你 ATR）。
-> **单票硬指标**（同日追加）：`top_verdict()` + `python top_signal_check.py <code>` —— 跑个股时**单独打出来**的一项，退出码 `ok=0 / alert=1 / block=2`（见 §6.3）。
+> **单票硬指标**（同日追加）：`top_verdict()` + `python gates/top_signal_check.py <code>` —— 跑个股时**单独打出来**的一项，退出码 `ok=0 / alert=1 / block=2`（见 §6.3）。
 > **一句话结论**：**形态当日不是判据，次日走弱才是** —— 五根形态都只是「提醒你盯次日」的触发器。
 > ⚠️ **第二批给出的「次级 / 顶级」分级，回测不支持**：它作为清单标签保留（用户要看得见），
 > 但**不得拿来排序预测力** —— 两类形态当日都无预测力，且都走**同一条**次日确认制。详见 §0 第 4 条、§4.2。
@@ -566,13 +566,13 @@ plan_entry(bars, ev) = apply_top_signal_gate(_plan_entry_core(bars, ev))
 | 终端摘要 | `battle_analyze.summarize()` | 有信号才打：`★★ 顶部硬指标 [X] 顶部已确认·避雷（退出码 2）：…` |
 | HTML 报告 | `report_render.build_top_signal()` | 首屏「最高盈亏比路径」下方独立卡片（左边框 block 红 / alert 橙）+ 首屏徽标 + §10 一页汇总一行 |
 | probe 终端 | `probe_intraday._print_top_signal(plan)` | A 股 `probe()` / 美股 `probe_us()` 的买区行下方；并放进 `out["top_signal"]` |
-| **独立 CLI** | `top_signal_check.py` | `python top_signal_check.py <code> [--us] [--strict] [--json] [-v]` |
+| **独立 CLI** | `gates/top_signal_check.py` | `python gates/top_signal_check.py <code> [--us] [--strict] [--json] [-v]` |
 
 **`level` 与 `exit_code` 同值**（多票取最大；取数失败 = 3）⇒ 可直接用于流程拦截：
 
 ```bash
-python top_signal_check.py 601208 || echo "顶部硬指标命中 → 先别下单"   # block=2 / alert=1
-python top_signal_check.py 601208 --json | python -c "import json,sys;print(json.load(sys.stdin)['verdict']['level'])"
+python gates/top_signal_check.py 601208 || echo "顶部硬指标命中 → 先别下单"   # block=2 / alert=1
+python gates/top_signal_check.py 601208 --json | python -c "import json,sys;print(json.load(sys.stdin)['verdict']['level'])"
 ```
 
 | level | exit | 触发条件 | 处置 |
