@@ -9,6 +9,19 @@
     严格 avoid lookahead：判 t 时刻，只用 [0, t] 的分钟线，不读 t 之后。
 
 输出：对每只票逐时点给出 signal / 后续涨幅，供人工核对识别能力。
+
+★★ 本工具实测得出的最重要结论（2026-10-09，六票样本，务必先读）：
+    **「识别出拉升」不等于「能赚到拉升那一段」。**
+    实测对照（按信号价买入 vs 当日最低价买入）：
+        斯菱 301550  首个信号 10:48 @95.82 → +7.58%  vs 最低 92.33 → +11.64%（差 −4.07）
+        芒果 300413  首个信号 13:36 @19.64 → +17.11% vs 最低 18.79 → +22.41%（差 −5.30）
+    且用更宽松的「震荡爬升」判据（低点抬高+放量，detect_grind），
+    斯菱首个信号**仍是 10:48** —— 放宽判据并没有换来更早的买点。
+    ⇒ 原因：拉升判据是**「确认」不是「先知」**，任何形式的「已经在涨」判据
+      都必然在价格抬升之后才成立。**买点只能来自盘前定好的 entry/cap 区间，
+      不能靠盘中识别赚取启动段。**
+    ⇒ 本工具的正确用途：① 验证「方向对，可以按计划执行」；
+      ② **反例提醒**（别把拉升信号当买点，见 chase_vs_low）。
 """
 from __future__ import annotations
 
@@ -85,6 +98,34 @@ def scan(code, name, step=1, forward=30):
             "bars": len(m), "hits": hits, "day_low": min(x["l"] for x in m)}
 
 
+def detect_grind(m, i):
+    """★ 「震荡爬升」判据（老罗 14:42 提出：上午一直在震荡拉高，不是一段拉升）。
+
+    与 detect() 的区别：detect 抓「加速拉升」（缺口大、20分涨得快）；
+    本判据抓「低点抬高的震荡爬升」：近 60 分钟内两个 20 分钟窗口的低点抬高，
+    且近 20 分钟有量、现价在均价上方。
+
+    实测 2026-10-09 斯菱 301550：首个信号 10:48 @95.82 —— **与 detect() 同一时点**。
+    ⇒ 即使用了更宽的「爬升」判据，**买点仍在 10:48，仍比当日最低 92.33 少赚 4.07 个点**。
+    这条实测是本工具最重要的一条结论，见 MODULE 顶部说明。
+    """
+    if i < 30:
+        return False, {}
+    w60 = m[max(0, i - 60):i + 1]
+    w20 = m[max(0, i - 20):i + 1]
+    lo_a = min(x["l"] for x in w60[:40])
+    lo_b = min(x["l"] for x in w60[20:])
+    lift = (lo_b / lo_a - 1.0) * 100 if lo_a else 0.0
+    c = float(m[i]["c"])
+    r20 = (c / float(w20[0]["c"]) - 1.0) * 100
+    gap = (c / float(m[i]["avg"]) - 1.0) * 100 if m[i]["avg"] else 0.0
+    v20 = sum(x["v"] for x in w20) / 20.0
+    v60 = sum(x["v"] for x in w60) / 60.0
+    ok = lift >= 0.3 and r20 >= 1.0 and gap > 0 and v20 > v60
+    return ok, {"px": c, "lift": round(lift, 2), "r20": round(r20, 2),
+                "gap": round(gap, 2), "vr": round(v20 / v60, 2) if v60 else 0}
+
+
 def chase_vs_low(code, name):
     """★ 反例检验：按「首个拉升信号」买入，与「当日最低价」买入的收益差。
 
@@ -145,6 +186,10 @@ def main():
             print("   特征：缺口 %+.2f%%  10分 %+.2f%%  20分 %+.2f%%  近20分收均价上 %.0f%%"
                   % (f.get("gap", 0), f.get("rise10", 0), f.get("rise20", 0),
                      f.get("above", 0) * 100))
+            g_ok, g = detect_grind(m, len(m) - 1)
+            if g_ok:
+                print("   震荡爬升：低点抬高 %+.2f%%  20分 %+.2f%%  量比 %.2f"
+                      % (g["lift"], g["r20"], g["vr"]))
             continue
         r = scan(code, name, step=args.step, forward=args.forward)
         print("=" * 66)
