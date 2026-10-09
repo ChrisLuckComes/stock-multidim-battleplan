@@ -19,6 +19,7 @@ import sys
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, ROOT)
 
+from gates import quality_gate  # noqa: E402
 from gates.session_decide import (  # noqa: E402
     decide, load_day_fast, plan_from_files, summarize, truncate_day,
 )
@@ -86,22 +87,31 @@ def scan(code, step=1, date="2026-10-09"):
     try:
         d0 = load_day_fast(code)
     except Exception as e:  # 取数失败不中断整体扫描
-        return None, "取数失败：%s" % e
+        return None, None, "取数失败：%s" % e
     if not d0 or not d0.get("minutes"):
-        return None, "无分时数据"
+        return None, None, "无分时数据"
     if d0.get("date", "")[:10] != date:
-        return None, "非 %s 数据（%s）" % (date, d0.get("date"))
+        return None, None, "非 %s 数据（%s）" % (date, d0.get("date"))
 
     plan, err = load_plan(code, date=date)
     if err:
-        return None, err
+        return None, None, err
+
+    quality = quality_gate.assess(code, spot=float(d0["minutes"][-1]["c"]))
+    if quality["level"] == "block":   # 仅 --quality-strict 才可能 BLOCK
+        return ({"code": code, "name": d0.get("name"),
+                 "entry": plan["entry"], "stop": plan["stop"],
+                 "target": plan["target"], "close": d0["minutes"][-1]["c"],
+                 "quality_scale": quality["scale"]},
+                [], "质量否决：" + "；".join(quality["blocks"]))
 
     hits = []
     for i in range(0, len(d0["minutes"]), step):
         t = d0["minutes"][i]["t"]
         d = truncate_day(d0, t)
         r = decide(d, summarize(d), entry=plan["entry"], stop=plan["stop"],
-                   target=plan["target"], cap=plan.get("cap"), account=50000)
+                   target=plan["target"], cap=plan.get("cap"), account=50000,
+                   quality=quality)
         if r["action"] == "能买":
             hits.append({
                 "t": t,
@@ -126,7 +136,7 @@ def scan(code, step=1, date="2026-10-09"):
         # ★ 没有目标价 ⇒ R 恒为 None，赔率无从谈起。这类「能买」不算可执行信号，
         #   必须在输出里显式标出，否则会被误读成「引擎说可以买」。
         meta["no_target"] = True
-    return (meta, hits), None
+    return meta, hits, None
 
 
 def main(argv=None):
@@ -151,19 +161,25 @@ def main(argv=None):
     print("全池盘中回放扫描 · %s · 每 %d 分钟采样" % (args.date, args.step))
     print("=" * 74)
     for code in codes:
-        res, err = scan(code, step=args.step, date=args.date)
-        if err:
+        res, hits, err = scan(code, step=args.step, date=args.date)
+        if err and res is None:
             print("\n%s %s —— 跳过：%s" % (code, "", err))
             continue
-        meta, hits = res
+        meta = res
         name = meta["name"] or ""
         warn = "  ⚠该计划无目标价，R 不可算，信号不可执行" if meta.get("no_target") else ""
+        if err:
+            print("\n%s %s —— %s" % (code, name, err))
+            continue
+        q = meta.get("quality_scale")
+        qtxt = ("  [质量闸系数 ×%.2f]" % q) if q is not None else ""
         if not hits:
             print("\n%s %s  全天无「能买」时点（收盘 %.2f）%s"
                   % (code, name, meta["close"], warn))
             continue
-        print("\n%s %s  引擎判「能买」%d 个时点（entry %.2f / stop %.2f / 收盘 %.2f）%s"
-              % (code, name, len(hits), meta["entry"], meta["stop"], meta["close"], warn))
+        print("\n%s %s  引擎判「能买」%d 个时点（entry %.2f / stop %.2f / 收盘 %.2f）%s%s"
+              % (code, name, len(hits), meta["entry"], meta["stop"], meta["close"],
+                 warn, qtxt))
         for h in hits[:20]:
             rr_s = ("%5.2f" % h["rr"]) if h["rr"] is not None else "  —  "
             print("   %s  价 %6.2f  均价 %6.2f  R %s  限价 %6.2f  %5s 股  %7.0f 元%s"

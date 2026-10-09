@@ -260,8 +260,15 @@ def arm_price(entry, stop, target, buy_cap, limit_px, limit_dn=None):
         floor, ("%.2f" % ceiling) if ceiling is not None else "—")
 
 
-def decide(day, summary, entry, stop, target, cap=None, account=None, risk_scale=1.0):
-    """核心判定。返回结构化结果，供 CLI 与测试用。"""
+def decide(day, summary, entry, stop, target, cap=None, account=None,
+            risk_scale=1.0, quality=None):
+    """核心判定。返回结构化结果，供 CLI 与测试用。
+
+    quality: gates.quality_gate.assess() 的返回值。传入后：
+        level=="block" ⇒ 硬否决（标的质量，不因价格达标而放行）
+        level=="warn"  ⇒ risk_scale 乘以质量系数（降权不否决）
+    2026-10-09 起 CLI 默认接入；不传则只跑价格闸（保持测试与回放兼容）。
+    """
     entry = float(entry)
     stop = float(stop)
     target = float(target) if target is not None else None
@@ -275,6 +282,8 @@ def decide(day, summary, entry, stop, target, cap=None, account=None, risk_scale
     limit_dn = limit_down_price(pre, code)
     rr = long_rr(price, target, stop) if target is not None else None
     rr_at_entry = long_rr(entry, target, stop) if target is not None else None
+    if quality and quality.get("level") == "warn":
+        risk_scale = risk_scale * float(quality.get("scale") or 1.0)
     pct_pre, in_dip = zone_vs_pre(price, pre)
     tape = tape_so_far(day, summary)
     dip_n = count_dip_minutes(day["minutes"], pre)
@@ -305,6 +314,7 @@ def decide(day, summary, entry, stop, target, cap=None, account=None, risk_scale
         "caution": "",
         "arm_price": wait_px,
         "arm_note": wait_note,
+        "quality": quality,
     }
 
     def _reject(reason):
@@ -330,6 +340,12 @@ def decide(day, summary, entry, stop, target, cap=None, account=None, risk_scale
         return _reject("已涨停，买不到。")
     if limit_px is not None and price >= limit_px * (1.0 - LIMIT_NEAR):
         return _reject("离涨停不足 %.1f%%，不追板。" % (LIMIT_NEAR * 100))
+    # ★ 标的质量闸（2026-10-09 老罗定调「不评估标的质量属于甩锅」后新增）：
+    #   放在价格闸之后、cap/R 之前——价格再合规，标的质量 BLOCK 就是不买。
+    if quality and quality.get("level") == "block":
+        out["arm_price"] = None
+        out["arm_note"] = "标的质量否决，价格到位也不买"
+        return _reject("标的质量否决：" + "；".join(quality.get("blocks") or []))
     # 分时资金是软约束（老罗 2026-10-09 定）：它只否决「追高」，不否决「回踩到价」。
     # 能否决的硬约束只有：跌破止损 / 涨停买不到 / 超买入上限 / R 不足 —— 各自在别处判。
     # 依据：主力净流出在盘中会反转（斯菱 301550 于 13:37 由 −1922 万转 +4435 万，
@@ -420,8 +436,21 @@ def render(d):
             lines.append(s["warn"])
     if d["action"] == "能买" and d.get("caution"):
         lines.append("⚠ 资金读数偏弱，回踩档可接但建议减半仓（软约束不否决买入）")
-    lines.append("本闸门只判断「这笔计划该不该在此价执行」，不评估标的质量：")
-    lines.append("  能否买这只票须另看 扫雷 / 股性体检 / 估值 / 月线 / 板块。R 高≠好票（世名 2026-10-09 引擎给 R=10.15，当天 −2.6%）。")
+    lines.append("价格闸只判断「这笔计划该不该在此价执行」，标的质量由独立质量闸评估：")
+    q = d.get("quality")
+    if not q:
+        lines.append("  ⚠ 质量闸未接入（--no-quality 或 --plan 缺失）。"
+                     "能否买这只票须另看 扫雷 / 股性体检 / 估值 / 月线 / 板块。")
+    else:
+        try:
+            from gates import quality_gate
+            lines.append(quality_gate.render(q).replace("\n", "\n  "))
+        except Exception:
+            lines.append("  质量闸 %s / 系数 %.2f" % (q.get("level"), q.get("scale", 1.0)))
+        lines.append("  质量闸盲区：经营现金流 / 商誉 / 股东户数 / 合同负债不在 analysis 内，"
+                     "且估值读的是 basis_date（昨收口径），今日大涨后 PE 已失真。")
+        lines.append("  R 高≠好票（世名 2026-10-09 价格闸给 R=10.15，当天 −2.6%；"
+                     "质量闸默认只提示，要否决须加 --quality-strict）。")
     lines.append("不打板。止损目标沿用计划。T+1：当日买入当日没有止损腿。")
     return "\n".join(lines)
 
@@ -441,6 +470,11 @@ def main(argv=None):
     ap.add_argument("--risk-scale", type=float, default=1.0,
                     help="情绪缩放，极弱可传 0.25")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--no-quality", action="store_true",
+                    help="不接标的质量闸（只跑价格闸；调试用）")
+    ap.add_argument("--quality-strict", action="store_true",
+                    help="质量闸严格模式：允许否决（默认只提示+降权，"
+                         "老罗 14:21 定调「盘中决策重点在技术面和资金流向」）")
     args = ap.parse_args(argv)
 
     entry, stop, target, cap = args.entry, args.stop, args.target, args.cap
@@ -472,9 +506,20 @@ def main(argv=None):
         return 3
 
     t1 = time.perf_counter()
+    quality = None
+    if not args.no_quality:
+        try:
+            from gates import quality_gate
+            quality = quality_gate.assess(args.code, analysis_path=args.plan,
+                                          spot=float(summary["last"]["c"]),
+                                          strict=args.quality_strict)
+        except Exception as e:                      # 质量闸不得因自身故障挡住决策
+            quality = {"level": "unknown", "scale": 1.0,
+                       "blocks": [], "notes": ["质量闸异常：%s" % e], "facts": {}}
     d = decide(
         day, summary, entry, stop, target,
         cap=cap, account=args.account, risk_scale=args.risk_scale,
+        quality=quality,
     )
     decide_ms = (time.perf_counter() - t1) * 1000.0
     d["elapsed_ms"] = round(fetch_ms + decide_ms, 1)
