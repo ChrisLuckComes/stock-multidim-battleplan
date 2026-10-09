@@ -94,8 +94,52 @@ def test_reject_near_limit_and_supply():
     assert d2["action"] == "不买"
 
 
+def test_soft_tape_does_not_veto_pullback_entry():
+    """回归：主力净流出是软约束，只否决「追高」，不否决「回踩到价」。
+
+    2026-10-09 斯菱智驱 301550 实证：10:38 主力 −2308 万被判「至今偏派发」，
+    旧实现直接 _reject → 误杀；当日实际 92.33 → 103.78（+12.4%），
+    且主力于 13:37 转正至 +4435 万。
+    ⇒ 价格在挂单价及以下时，软读数不得阻断「能买」，只给 caution 提示减半仓。
+    """
+    minutes = [
+        {"t": "09:30", "o": 5.50, "h": 5.55, "l": 5.20, "c": 5.25, "v": 400, "avg": 5.40},
+        {"t": "10:00", "o": 5.26, "h": 5.30, "l": 5.18, "c": 5.20, "v": 300, "avg": 5.33},
+        {"t": "10:30", "o": 5.22, "h": 5.26, "l": 5.19, "c": 5.21, "v": 200, "avg": 5.30},
+    ]
+    day = _day(minutes, [{"t": "10:30", "main": -2e7, "super": -2e7,
+                          "large": 0, "mid": 0, "small": 2e7}],
+               pre=5.50, code="301550", name="斯菱智驱")
+    s = _summary(day, main=-2e7, small=2e7)
+    # 分时读数本身是「偏弱」类
+    assert tape_so_far(day, s)["ok"] is False
+    # 关键：现价 5.21 在挂单价 5.30 及以下（回踩档），软读数不得否决
+    d = decide(day, s, entry=5.30, stop=5.00, target=6.50, cap=5.40)
+    assert d["action"] == "能买", d["reason"]
+    assert d["caution"], "软约束必须留下 caution 供模型提示减半仓"
+    assert "偏弱" in d["caution"] or "派发" in d["caution"] or "净卖" in d["caution"]
+
+
+def test_soft_tape_still_blocks_chasing():
+    """同一软读数下，现价高于挂单价 = 追高，仍应被拦（口径不得放松到无脑买）。"""
+    minutes = [
+        {"t": "09:30", "o": 5.50, "h": 5.60, "l": 5.45, "c": 5.55, "v": 300, "avg": 5.50},
+        {"t": "10:00", "o": 5.56, "h": 5.62, "l": 5.50, "c": 5.58, "v": 200, "avg": 5.53},
+        {"t": "10:30", "o": 5.57, "h": 5.59, "l": 5.52, "c": 5.54, "v": 150, "avg": 5.55},
+    ]
+    day = _day(minutes, [{"t": "10:30", "main": -2e7, "super": -2e7,
+                          "large": 0, "mid": 0, "small": 2e7}],
+               pre=5.50, code="301550", name="斯菱智驱")
+    s = _summary(day, main=-2e7, small=2e7)
+    d = decide(day, s, entry=5.30, stop=5.00, target=6.50, cap=5.60)
+    assert d["action"] == "不买", d["reason"]
+    assert "不追高" in d["reason"] or "回踩" in d["reason"]
+
+
 if __name__ == "__main__":
     test_dip_zone_and_cap()
     test_buy_in_0_2_window()
     test_reject_near_limit_and_supply()
+    test_soft_tape_does_not_veto_pullback_entry()
+    test_soft_tape_still_blocks_chasing()
     print("ok 3")

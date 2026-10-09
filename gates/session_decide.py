@@ -286,6 +286,7 @@ def decide(day, summary, entry, stop, target, cap=None, account=None, risk_scale
         "limit_buy": None,
         "reason": "",
         "size": None,
+        "caution": "",
         "arm_price": wait_px,
         "arm_note": wait_note,
     }
@@ -306,8 +307,14 @@ def decide(day, summary, entry, stop, target, cap=None, account=None, risk_scale
         return _reject("已涨停，买不到。")
     if limit_px is not None and price >= limit_px * (1.0 - LIMIT_NEAR):
         return _reject("离涨停不足 %.1f%%，不追板。" % (LIMIT_NEAR * 100))
+    # 分时资金是软约束（老罗 2026-10-09 定）：它只否决「追高」，不否决「回踩到价」。
+    # 能否决的硬约束只有：跌破止损 / 涨停买不到 / 超买入上限 / R 不足 —— 各自在别处判。
+    # 依据：主力净流出在盘中会反转（斯菱 301550 于 13:37 由 −1922 万转 +4435 万，
+    # 当日 92.33→103.78），把软读数当硬闸门会误杀整段行情。
     if not tape["ok"]:
-        return _reject(tape["text"])
+        out["caution"] = tape["text"]
+        if price > entry:
+            return _reject(tape["text"] + " 只接计划内回踩，不追高。")
     if buy_cap is not None and price > buy_cap + 1e-9:
         return _reject("现价 %.2f 高于买入上限 %.2f。" % (price, buy_cap))
     if target is not None and (rr is None or rr < RR_QUALIFIED):
@@ -341,6 +348,8 @@ def decide(day, summary, entry, stop, target, cap=None, account=None, risk_scale
            ("%.2f" % target) if target is not None else "—",
            ("%.2f" % rr) if rr is not None else "—")
     )
+    if out["caution"]:
+        out["reason"] += " ⚠ " + out["caution"] + "（资金读数偏弱，建议减半仓）"
     return out
 
 
@@ -378,6 +387,8 @@ def render(d):
         )
         if s.get("warn"):
             lines.append(s["warn"])
+    if d["action"] == "能买" and d.get("caution"):
+        lines.append("⚠ 资金读数偏弱，回踩档可接但建议减半仓（软约束不否决买入）")
     lines.append("不打板。止损目标沿用计划。T+1：当日买入当日没有止损腿。")
     return "\n".join(lines)
 
