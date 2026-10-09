@@ -119,7 +119,11 @@ chk("标题不带「N档」计数（老罗 2026-09-24）",
     all("档" not in t for k, t in lines if k in ("res_title", "sup_title")))
 lv_fx["rsi14"] = 22.0
 lines2 = L.flex_map(spot_up, lv_fx)
-chk("超卖时头部含禁追空", any("禁追空" in t for k, t in lines2 if k == "head"))
+# ⚑ 2026-10-10 老罗定：RSI 超卖会钝化（一直超卖一直跌），**不作禁空依据**。
+#   旧断言「超卖含禁追空」已废弃；此处反向固化：全文不得出现禁空类措辞。
+chk("超卖不作禁空（2026-10-10 老罗定）",
+    not any(("禁追空" in t or "禁空：" in t) for _, t in lines2),
+    str([t for _, t in lines2]))
 # 旧签名兼容：三参调用不炸
 L.flex_map(spot_up, lv_fx, spot_up)
 chk("flex_map 三参签名兼容", True)

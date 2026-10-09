@@ -144,7 +144,14 @@ def layer_market(market):
 
 
 def layer_sector(sector):
-    """板块/主题。sector = {'count': 3, 'bucket': '半导体', 'peers': [...]}"""
+    """板块/主题。sector = {'count': 3, 'bucket': '半导体', 'peers': [...]}
+
+    两种口径（`basis` 区分，**不许互相冒充**）：
+      · 缺省/池层  —— `同日 N 只出信号`（板块级共振，池层 watch_cn / pool_us 才有）
+      · peer_20d   —— `同行近 20 日 N/M 只与本票同向`（单票报告兜底口径）
+        2026-10-10 加：单票报告拿不到池层共振，以前直接记 unknown ⇒ 板块层永远
+        「无数据」、分母静默缩水。用同行同向近似可以补上，但必须写明是近似。
+    """
     if not sector or sector.get("count") is None:
         return _layer("sector", "unknown",
                       "无板块共振数据（单票报告不产出；池层复盘 watch_cn / pool_us 才有）")
@@ -154,12 +161,18 @@ def layer_sector(sector):
         return _layer("sector", "unknown", "板块共振只数不可解析")
     bk = sector.get("bucket") or sector.get("theme") or "—"
     state = "on" if n >= SECTOR_ON else "off"
-    if state == "on":
-        peers = [x for x in (sector.get("peers") or []) if x][:4]
-        extra = ("：" + "、".join(peers)) if peers else ""
-        det = "[%s] 同日 %d 只出信号 —— 板块级共振%s" % (bk, n, extra)
+    peers = [x for x in (sector.get("peers") or []) if x][:4]
+    extra = ("：" + "、".join(peers)) if peers else ""
+    if sector.get("basis") == "peer_20d":
+        tot = sector.get("total") or "?"
+        det = ("[%s] 同行近 20 日 <b>%d/%s</b> 只与本票同向%s —— "
+               "口径＝同行同向近似（单票无池层共振），阈值 ≥%d"
+               % (bk, n, tot, extra, SECTOR_ON))
     else:
-        det = "[%s] 同日仅 %d 只出信号（阈值 ≥%d 才算共振）" % (bk, n, SECTOR_ON)
+        if state == "on":
+            det = "[%s] 同日 %d 只出信号 —— 板块级共振%s" % (bk, n, extra)
+        else:
+            det = "[%s] 同日仅 %d 只出信号（阈值 ≥%d 才算共振）" % (bk, n, SECTOR_ON)
     return _layer("sector", state, det)
 
 
@@ -332,6 +345,10 @@ def from_analysis(data, market=None, sector=None, catalyst=None):
     # ── leader：本票 20 日涨幅 vs 同行最强者（都用日线自算口径）
     leader = _leader_from_peers(data)
 
+    # ── sector：没显式注入就用「同行近 20 日同向只数」近似（2026-10-10）
+    if sector is None:
+        sector = _sector_from_peers(data)
+
     # ── market：没显式注入就去 data/sentiment_<基准日>.json 找
     if market is None:
         market = sentiment_for_date(meta.get("basis_date"))
@@ -382,6 +399,35 @@ def from_pool_row(row, market=None, bucket_rows=None, catalyst=None):
 
     return build(market=market, sector=sector, leader=leader,
                  catalyst=catalyst, setup=setup, volume=volume, execution=execution)
+
+
+def _sector_from_peers(data):
+    """板块层兜底（2026-10-10 老罗「2. 叠加概率：板块主题没有」修）。
+
+    单票报告拿不到池层的「同日共振只数」，以前直接记 unknown ⇒ 板块层长期
+    「无数据」、分母静默缩水，读者以为「没这层」。改用**同行近 20 日同向只数**
+    近似：同板块 ≥SECTOR_ON 只与本票同向 ⇒ 主题有效。
+
+    ⚑ 口径与池层不同（池层是「同日出信号」，这里是「近 20 日同向」），
+    通过 `basis="peer_20d"` 传给 layer_sector，**在 detail 里写明是近似**，
+    不冒充池层口径 —— 冒充比缺失更贵。
+    """
+    peers = [p for p in (data.get("peers") or [])
+             if isinstance(p, dict) and p.get("d20") is not None]
+    if not peers:
+        return None
+    rc = (data.get("struct") or {}).get("range_change") or {}
+    self_pct = _f(rc.get("20d"))
+    if self_pct is None:
+        return None
+    up = self_pct >= 0
+    same = [p for p in peers if (((_f(p.get("d20")) or 0.0) >= 0) == up)]
+    meta = data.get("meta") or {}
+    bk = meta.get("theme") or meta.get("theme_auto") or "同板块"
+    return {"count": len(same), "total": len(peers),
+            "bucket": bk,
+            "peers": [(p.get("name") or p.get("code")) for p in same][:4],
+            "basis": "peer_20d"}
 
 
 def _leader_from_peers(data):

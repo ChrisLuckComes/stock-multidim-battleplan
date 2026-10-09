@@ -665,6 +665,46 @@ def peer_row(prefix, code, name=None, n=150):
     return row
 
 
+def auto_peer_codes(code, limit=5):
+    """★ 自动同板块对照（2026-10-10 老罗「7. 无对照」修）。
+
+    未传 `--peers` 时报告的同板块表是空表、叠加概率的「板块主题 / 领导者」两层
+    也一起变 `无数据` —— 这是**静默降级**：读者看到空表只会以为「没有同行」。
+    本函数用东财板块成分自动补上：
+        个股所属板块 → 挑最具体的那个（成分家数最少且 ≥BOARD_MEMBER_MIN）
+        → 按 60 日涨幅降序取前 `limit` 只（排除自己）
+    返回 `(板块名, [(code, name), ...])`；任何一步失败返回 `(None, [])`，
+    **不抛异常、不影响主流程** —— 自动对照是增强，不是前置条件。
+    """
+    if not (str(code).isdigit() and len(str(code)) == 6):
+        return None, []
+    try:
+        from gates import surge_pick as SP
+    except Exception:                                  # noqa: BLE001
+        return None, []
+    try:
+        cands = SP.pick_boards(SP.boards_of(code), limit=6, drop_event=True)
+        if not cands:
+            return None, []
+        # ⚑ 取东财返回的**第一个（主板块）**，不用 order_boards 挑「成分家数最少」——
+        #   后者是为「定领头羊」设计的（越具体越好），用到同行对照上会跑偏：
+        #   金石亚药 300434 兼营管道机械 ⇒ 被归到「地下管网」，
+        #   对照出来是雄塑科技/金洲管道，与它的主营（化学制剂）毫无关系。
+        bk, bname = cands[0]["bk"], cands[0]["name"]
+        _tot, mem = SP.board_members(bk, pz=80)
+        out = []
+        for r in mem or []:
+            c = str(r.get("f12") or "")
+            if not (c.isdigit() and len(c) == 6) or c == str(code):
+                continue
+            out.append((c, str(r.get("f14") or c)))
+            if len(out) >= limit:
+                break
+        return bname, out
+    except Exception:                                  # noqa: BLE001
+        return None, []
+
+
 def peer_row_us(code, name=None, n=150):
     """美股同行行：与 peer_row 同口径，日线走 bars_source.us_quote。
 
@@ -765,7 +805,8 @@ def is_us_code(code):
 
 def analyze(code, account=None, peers=None, data_file=None, n=330,
             intraday=True, min_scale=5, name=None, theme=None,
-            peer_names=None, no_cache=False, cash=None):
+            peer_names=None, no_cache=False, cash=None,
+            auto_peers=True, auto_peer_n=5):
     # ★ 账户 / 现金口径一律从 account_config 现取（env > .env > DEFAULTS），
     #   不在签名里写 50000 —— 那是「代码写死」，改配置还得改代码。
     code = str(code).strip()
@@ -1039,6 +1080,19 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
             return {"code": pcode, "name": pname or pcode, "error": str(e)}
 
     peer_list = list(peers or [])
+    # ★ 自动补同板块对照（2026-10-10）：只有显式 --peers 为空时才补，
+    #   手工给的优先级更高 —— 自动结果永远不覆盖人工选择。
+    auto_theme = None
+    if not peer_list and auto_peers and not is_us:
+        auto_theme, _acodes = auto_peer_codes(code, limit=auto_peer_n)
+        if _acodes:
+            peer_list = [{"code": c, "name": nm} for c, nm in _acodes]
+            for c, nm in _acodes:
+                peer_names.setdefault(c, nm)
+            notes_all.append("同行对照自动补：板块[%s] 取 %d 只"
+                             % (auto_theme, len(_acodes)))
+        else:
+            notes_all.append("同行对照自动补失败（板块成分取不到），对照表为空")
     peer_rows = []
     if peer_list:
         workers = min(PEER_WORKERS, len(peer_list))
@@ -1064,7 +1118,9 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
             "generated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "code": code, "sym": sym, "market": "US" if is_us else "CN",
             "name": name or market_data.get("name") or code,
-            "theme": theme,
+            # 板块名：显式 --theme 优先；否则用自动对照查到的板块（供叠加概率板块层用）
+            "theme": theme or auto_theme,
+            "theme_auto": (None if theme else auto_theme),
             "basis_date": last["d"],
             "basis_close": _f(last_c),
             "prev_close": _f(bars[-2]["c"]) if len(bars) > 1 else None,
@@ -1134,6 +1190,10 @@ def main():
     ap.add_argument("--n", type=int, default=330, help="取多少根日线")
     ap.add_argument("--name", default=None, help="覆盖股票名")
     ap.add_argument("--theme", default=None, help="主线概念/板块（写进 meta 供报告用）")
+    ap.add_argument("--no-auto-peers", action="store_true",
+                    help="关闭自动同板块对照（默认开：未传 --peers 时用东财板块成分自动取）")
+    ap.add_argument("--auto-peer-n", type=int, default=5,
+                    help="自动对照取几只同行（默认 5）")
     ap.add_argument("--no-intraday", action="store_true", help="跳过 5 分钟复盘")
     ap.add_argument("--no-cache", action="store_true", help="不用磁盘/进程缓存")
     ap.add_argument("--min-scale", type=int, default=5)
@@ -1165,7 +1225,9 @@ def main():
         res = analyze(code, account=account, peers=peers, data_file=a.data,
                       n=a.n, intraday=not a.no_intraday, min_scale=a.min_scale,
                       name=a.name, theme=a.theme, peer_names=pnames,
-                      no_cache=a.no_cache, cash=cash)
+                      no_cache=a.no_cache, cash=cash,
+                      auto_peers=not a.no_auto_peers,
+                      auto_peer_n=a.auto_peer_n)
         out_path = a.out or os.path.join(HERE, "out_us" if _is_us else "out_cn",
                                         "analysis_%s.json" % _c.upper())
         md = os.path.dirname(out_path)

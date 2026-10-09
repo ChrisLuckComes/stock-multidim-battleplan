@@ -103,8 +103,13 @@ def lis(items, empty="<li>—</li>"):
     return "\n        ".join("<li>%s</li>" % x for x in items)
 
 
-def note(txt, fallback):
-    return txt if txt else '<span class="flat">（未提供判断文字 —— 本节仅列数据）</span>'
+def note(txt, fallback=""):
+    """2026-10-10 老罗：删掉「（未提供判断文字 —— 本节仅列数据）」占位文案。
+
+    它既没信息量又占位置 —— 写了等于告诉读者「这里本该有结论但没有」，
+    不如**留空**。有判断就显示，没有就不占位。
+    """
+    return txt if txt else fallback
 
 
 def card_list(items, empty="<li>—</li>"):
@@ -209,11 +214,47 @@ def build_kpis(a, n):
             badges.append('<span class="badge %s">%s</span>' % (x.get("cls", "b-ok"), x.get("txt", "")))
         else:
             badges.append('<span class="badge b-ok">%s</span>' % esc(x))
+    # ★ 总否决 TAG（2026-10-10）：原来占一整节（原第 6 节），老罗判「多余」。
+    #   但否决权不能丢 ⇒ 压成首屏一个红 TAG，与顶部标志 K 线并列。
+    #   「通过」的条目不是风险，不生成 TAG —— 只有真被否决才报警。
+    _veto_bad = []
+    for v in (n.get("veto") or []):
+        _vd = str((v or {}).get("verdict") or "")
+        if _vd.startswith("✗") or "否决" in _vd:
+            _veto_bad.append(str((v or {}).get("item") or ""))
+    if _veto_bad:
+        badges.append('<span class="badge b-no">总否决 %d 项：%s</span>'
+                      % (len(_veto_bad), esc("、".join(_veto_bad))))
     return html, " ".join(badges)
 
 
+def pick_rec(a):
+    """★ 主推档位（2026-10-10 修）：`odds_top` 是「全档 R 最高」，但 R 最高 ≠ 可执行。
+
+    实测 可孚医疗 301087：odds_top = 买 54.77 / 止损 54.15 / **R 33.77** ——
+    止损距仅 0.62 元（0.13×ATR），正是 MEMORY「买点三坑」里的**紧止损假赔率**：
+    容不下日内波动，必被毛刺扫掉；且 `r1_basis` 不是 t1（t1 缺失、回落到远端墙
+    算的）⇒ 那个 33.77 是虚高，不是真赔率。
+
+    拿这种档当首屏主推 = 同时给了一个「买不到的价」和一份「假赔率」。
+    ⇒ 两道校验任一不过就回退 `odds_recommend`（引擎推荐的可执行档）。
+    """
+    top = a.get("odds_top")
+    rec = a.get("odds_recommend")
+
+    def _ok(r):
+        if not (isinstance(r, dict) and r):
+            return False
+        if (r.get("risk_atr") or 0) < 0.35:
+            return False                     # 噪声带：止损贴太近
+        if not str(r.get("r1_basis") or "t1").startswith("t1"):
+            return False                     # t1 缺失 ⇒ R 是按远端墙算的虚高值
+        return True
+    return top if _ok(top) else (rec or top)
+
+
 def build_best(a, n):
-    rec = a.get("odds_top") or a.get("odds_recommend")
+    rec = pick_rec(a)
     if not rec:
         return ("（全档枚举为空）", "", "没有算出可执行档位 —— 请先确认结构与买区是否成立。")
     m = a["meta"]
@@ -310,40 +351,26 @@ def build_best(a, n):
 
 
 def build_mode_rows(a):
+    """★ 2026-10-10 精简（老罗 4：表格内容过多，要一眼看出怎么买）。
+
+    只留**下单要看的那几行**：模式、买区、止损锚、均线方向、ATR、分位。
+    区间涨幅 / 成交口径 / T0 尾盘腿 / 现价位置这些「解释性」行全部砍掉 ——
+    它们在别处能看到，堆在这里只会让人找不到买价。
+    """
     m, s, p = a["meta"], a["struct"], a["plan"]
     z = p.get("buy_zone") or {}
-    prio = p.get("priority")
-    ma = {x["name"]: x for x in s["ma"]}
+    _pc = s.get("percentile") or {}
     out = [
-        ("mode / priority", "<code>%s</code> / T%s" % (esc(p.get("mode")), prio)),
-        ("regime / setup", "%s / %s" % (esc(p.get("regime")), esc(p.get("setup")))),
+        ("模式", "<code>%s</code>　%s" % (esc(p.get("mode")), esc(p.get("verdict") or ""))),
         ("买区（下单带）", "<b>%s ~ %s</b>" % (num(z.get("primary_lo")), num(z.get("primary_hi")))),
-        ("回踩锚 / 支撑", "%s = <b>%s</b>（近 %d 根触及 %s 次）"
-         % (esc(z.get("struct_anchor") or z.get("anchor")), num(z.get("level")),
-            z.get("hits") and 12 or 12, num(z.get("hits"), 0))),
-        ("现价位置", "区内 %s，dist = %s×ATR" % (esc(z.get("in_zone")), num(z.get("dist_atr")))),
-        ("均线方向", " ｜ ".join("%s %s（%s，距 %s%%）" % (x["name"], num(x["value"]),
-                                                        x["dir_txt"], num(x["dist_pct"]))
+        ("回踩锚", "%s = <b>%s</b>" % (esc(z.get("struct_anchor") or z.get("anchor")),
+                                    num(z.get("level")))),
+        ("均线方向", " ｜ ".join("%s %s（%s）" % (x["name"], num(x["value"]), x["dir_txt"])
                               for x in s["ma"])),
         ("ATR14", "<b>%s</b>（%s%%）" % (num(s["atr14"]), num(s["atr_pct"]))),
-        ("多周期分位", " / ".join("%s 日 %s%%" % (k, num(v["pct"], 1))
-                              for k, v in s["percentile"].items())),
-        ("区间涨幅（日线自算）", " ｜ ".join("%s %s" % (k.replace("d", " 日"), pct_plain(v, 2, "—"))
-                                      for k, v in s["range_change"].items())),
+        ("分位 60/120/250 日", " / ".join("%s%%" % num((_pc.get(k) or {}).get("pct"), 1)
+                                      for k in ("60", "120", "250"))),
     ]
-    # ★ 成交口径（2026-09-26）：引擎早已产出这两条，但渲染层一行都不打 ⇒ 老罗读不到、
-    #   等于没落地（回放实测各多买中一笔：中科飞测 688361 06-15、兆易创新 603986 04-29）。
-    #   它们改的是**怎么挂单**，与买区价位同等重要，必须出现在「模式卡与执行口径」里。
-    if z.get("fills_policy") == "limit_reclaim":
-        out.append(("成交口径（沿线限价）",
-                    "限价 <b>%s</b> —— 开盘已在买区内按开盘成交；否则日内回升触及即成交；"
-                    "开盘破硬止损且全天未回到限价 ⇒ 不成交" % num(z.get("limit_px"))))
-    _tt = p.get("t0_tail") or {}
-    if _tt:
-        out.append(("T0 尾盘补救腿",
-                    "次日未过昨高 <b>%s</b>、收盘仍站上 MA5/MA10/MA20 且 > 硬止损 <b>%s</b> "
-                    "⇒ 尾盘按收盘价成交（站上均线买，不必等墙）"
-                    % (num(_tt.get("trigger")), num(_tt.get("hard_stop")))))
     return kv_rows(out)
 
 
@@ -396,108 +423,28 @@ def build_plan_rows(a):
                    "用移动止损（MA5 / 大阳中点）管理，<b>不设固定目标</b>"
                    + ("<br>上方参考阻力：" + " ｜ ".join(_ref) if _ref else ""))
         rr_row = ("rr_target1（引擎）", "—（趋势单不设目标）")
+    # ★ 2026-10-10 精简（老罗 4）：只留「止损 / 目标 / 怎么下单」三件事。
+    #   噪声度、离场纪律、量价研判、预案单类型这些要么在别处（口径问题 / 量价结论）
+    #   已出现，要么只在对账时才有意义 —— 重复堆在表里就是噪音。
     out = [
         ("结构止损", "<b>%s</b>（%s · 收盘破）" % (num(z.get("struct_stop")), esc(z.get("struct_anchor")))),
         ("硬止损", "<b>%s</b>（%s · 盘中触价）" % (num(z.get("hard_stop")), esc(z.get("hard_anchor")))),
-        ("硬止损噪声度", "%s×ATR %s" % (num(z.get("hard_dist_atr")),
-                                    '<span class="badge b-no">噪声带内</span>'
-                                    if z.get("hard_noise") else "")),
         tgt_row,
-        rr_row,
-        ("预案单类型", esc(po.get("kind") or "—")),
-        ("预案单挂价", "<b>%s</b>%s" % (num(po.get("limit")),
-                                    "（上限 %s）" % num(po.get("cap")) if po.get("cap") else "")),
-        ("预案单数量", "%s 股" % num(po.get("qty"), 0) if po.get("qty") else "不做"),
-        ("撤单线", "开盘跳空 > %s" % num(po.get("cancel_above"))),
-        ("离场纪律", "结构轨：%s<br>盘中轨：%s" % (esc(z.get("struct_exec")), esc(z.get("hard_exec")))),
+        ("预案单", "限价 <b>%s</b>　%s 股　撤单线：跳空 &gt; %s"
+         % (num(po.get("limit")),
+            num(po.get("qty"), 0) if po.get("qty") else "不做",
+            num(po.get("cancel_above")))),
     ]
-    # 量价研判（probe 的 vp）
-    vp = a.get("probe", {}).get("vp") or {}
-    if vp:
-        out.append(("量价研判（引擎）", esc(json.dumps(vp, ensure_ascii=False)[:220])))
     # ★ T0 并行入口（2026-09-22）：均线收复 + 过昨高，与当日买点**并存、先到先做**。
-    #   以前这里没有这一段（evaluate 重建 out 时漏了 ma_reclaim），于是「昨天收复均线、
-    #   今天继续涨」的票在报告里只剩一条回踩单 —— 用户当场反问「为什么像 T0 的变种」。
+    #   2026-10-10 精简：原实现把 ride/改道/优先级判据整段塞进表格（几十行），
+    #   读者找不到买价。这里压成一行 —— 判据细节仍在首屏徽标上（未删，只是不重复）。
     t0 = p.get("ma_reclaim") or {}
-    if t0 and p.get("mode") != "ma_reclaim_break":
-        _c = (a.get("meta") or {}).get("basis_close") or 0
-        _trig = t0.get("trigger")
-        if _c and _trig:
-            _dist = "现价%s %s%%" % ("上方" if _trig > _c else "下方",
-                                    num(abs(_trig / _c - 1) * 100))
-        else:
-            _dist = "—"
-        # ★ 2026-09-24：`line_ride`（沿线上行）态且当日别无买点 ⇒ T0 已改道给回踩。
-        #   ★ 当晚补：锚线不写死五日线 —— 名称/斜率/站上根数/价位一律取 `line*`。
-        #   ★ 三轮补：若当日已有客观突破（事件），改道**不执行** —— 沿线只是背景，
-        #     不能吃掉客观形态。此时标题写「突破优先」，不写「已改道」。
-        _ride = t0.get("ride") or {}
-        _redirect = bool(_ride.get("state") == "line_ride" and p.get("ride_redirected"))
-        _rlabel = _ride.get("line_label") or "五日线"
-        _cline = _ride.get("line") if _ride.get("line") is not None else _ride.get("ma5")
-        _head = ("过昨高 <b>%s</b>（D0 最高价 · %s）· 止损 <b>%s</b>（%s）· "
-                 "每股风险 %s（%s%%）<br>"
-                 "阻力墙 %s（%s）距 %s%% ｜ 档位 %s ｜ 「收复全部均线」那根 = <b>%s</b><br>"
-                 % (num(_trig), esc(_dist), num(t0.get("hard_stop")),
-                    esc(t0.get("stop_anchor") or "锚"), num(t0.get("risk_per_share")),
-                    num(t0.get("risk_pct")), num(t0.get("resistance")),
-                    esc(t0.get("resistance_from") or "—"),
-                    num(t0.get("dist_to_wall_pct")),
-                    esc(t0.get("grade") or "—"), esc(t0.get("kanchor_date") or "—")))
-        if _redirect:
-            _bz = p.get("buy_zone") or {}
-            _body = _head + (
-                "⚠ <b>本票处于【沿%s上升】态</b>（%s 20 根斜率 %s%%、近 20 根 %s 根"
-                "收在线上），且<b>当日没有其他买点</b> ⇒ T0 改道：<b>首选回踩 %s %s 低吸</b>"
-                "（买区 %s~%s，已改道为当日首选入口）；若仍走 T0，硬止损锚须换成更宽的"
-                "「阳线下沿 / 大阳中点」——问题不在「追高」，而在 T0 的窄止损锚会被毛刺扫掉"
-                "（全池回放 5 日均R −0.29、胜率 19%%、77%% 被扫）。<br>模式判别：%s"
-                % (esc(_rlabel), esc(_rlabel), num(_ride.get("line_slope20_pct")),
-                   int(_ride.get("line_above20") or 0), esc(_rlabel), num(_cline),
-                   num(_bz.get("primary_lo")),
-                   num(_bz.get("primary_hi")), esc(_ride.get("note") or "—")))
-        elif _ride.get("state") == "line_ride":
-            _rp = p.get("ride_priority") or {}
-            if p.get("mode") == "line_pullback":
-                # 当日**本来就有**回踩买区（demand 路径，非沿线改道）—— 东材 601208 09-24 即此：
-                # mode=line_pullback 锚 EMA10 52.23，同时 ma_ride 是 line_ride 锚 MA5。
-                # 两个回踩位并存，不许把沿线那个说成「T0 已改道」。
-                _body = _head + (
-                    "✅ <b>当日已有回踩买区（%s）—— T0 未接管，沿线也未改道</b>（沿线是背景、"
-                    "当日买区是事件/既有计划）。<br>沿%s上升的锚 %s 只是<b>并列的第二个回踩位</b>"
-                    "（先到先做）。<br>模式判别：%s%s"
-                    % (esc(p.get("mode")), esc(_rlabel), num(_cline),
-                       esc(_ride.get("note") or "—"),
-                       ("<br>优先级判据：%s" % esc(_rp.get("why"))) if _rp.get("why") else ""))
-            else:
-                _body = _head + (
-                    "✅ <b>优先级：当日 %s（事件）优先于「沿%s上升」（背景）</b> —— 沿线不改道"
-                    "客观形态。依据：同日突破买（1.5×ATR 止损）均R +0.21 / 收益 +1.16%%、胜 44%%，"
-                    "而「等回踩」只有 31%% 的日子等得到。<br>沿%s锚 %s 仅作<b>次选</b>。"
-                    "<br>模式判别：%s%s"
-                    % (esc(p.get("mode")), esc(_rlabel), esc(_rlabel), num(_cline),
-                       esc(_ride.get("note") or "—"),
-                       ("<br>优先级判据：%s" % esc(_rp.get("why"))) if _rp.get("why") else ""))
-        else:
-            _body = _head + (
-                "↑ 与当日买点<b>先到先做</b>；T0 是趋势单：用移动止损（MA5 / 大阳中点）管理，"
-                "不设固定目标。<br>模式判别：%s" % esc(_ride.get("note") or "—"))
-        out.insert(5, ("T0 并行入口" + ("（已改道·见下）" if _redirect else ""), _body))
-    # ★ 向上突破方案（2026-09-29 补）：plan["pre_breakout"] 是引擎算出的「向上突破埋伏单」，
-    #   与回踩主方案（probe.pre_order）并存、先到先做。作战计划必须并列给出（MEMORY §3.5 铁律：
-    #   「向上突破档必须并列算出并给价」）。recommend=False / 非突破型票的 pre_breakout 为 None，
-    #   此时不渲染——不硬塞占位、避免静默降级。
-    pb = p.get("pre_breakout")
-    if pb and pb.get("trigger"):
-        out.append(("★ 向上突破方案（埋伏单·需盯盘）",
-                     "埋伏触发价 <b>%s</b>（突破 %s 平台沿 / 下降趋势线确认）｜ 硬止损 <b>%s</b>"
-                     "（跌回突破位下方 = 假突破离场）｜ 每股风险 %s（%s×ATR）<br>"
-                     "突破后按<b>移动止损</b>管理、不设固定目标；与当日回踩买点<b>先到先做</b>。"
-                     "<br>⚠ A 股无原生 buy-stop：此单只能券商条件单触发或<b>盯盘手动</b>成交，"
-                     "非盯盘时段<b>不可隔夜预挂</b>（现价在埋伏价下方）。"
-                     % (num(pb.get("trigger")), num(pb.get("level")),
-                        num(pb.get("hard_stop")), num(pb.get("risk_per_share")),
-                        num(pb.get("dist_atr")))))
+    if t0 and p.get("mode") != "ma_reclaim_break" and t0.get("trigger"):
+        out.append(("T0 并行入口（过昨高）",
+                    "过昨高 <b>%s</b> 追 · 止损 <b>%s</b>（%s）；"
+                    "与当日回踩买点<b>先到先做</b>"
+                    % (num(t0.get("trigger")), num(t0.get("hard_stop")),
+                       esc(t0.get("stop_anchor") or "锚"))))
     return kv_rows(out)
 
 
@@ -602,6 +549,48 @@ def build_vp_verdict(a, n):
     ])
 
 
+def _fund_fallback(a):
+    """六维研究 4.1 兜底（2026-10-10）：notes 没写也**不许交白卷**。
+
+    用 analysis 里已有的板块 / 市值 / 区间涨幅 / 分位拼一版，缺的只有主营叙述，
+    并如实标注 —— 「本节未提供」是静默降级，六维研究是必答项。
+    """
+    m, s = a["meta"], a["struct"]
+    val = a.get("valuation") or {}
+    peers = a.get("peers") or []
+    rc = s.get("range_change") or {}
+    pc = s.get("percentile") or {}
+    _pn = "、".join((p.get("name") or p.get("code")) for p in peers[:4]) or "—"
+    return ("<p><b>%s</b>（%s）· 板块 <b>%s</b> · 总市值 <b>%.1f 亿</b> / 流通 %.1f 亿。</p>"
+            "<p>近 20 日 <b>%+.2f%%</b> ｜ 近 60 日 <b>%+.2f%%</b> ｜ 近 250 日 <b>%+.2f%%</b>；"
+            "60 日分位 <b>%s%%</b>。当前结构 <code>%s</code>（%s）。</p>"
+            "<p>同板块对照：<b>%s</b></p>"
+            "<p class='note'>主营与业务描述未取到（需补一手来源），"
+            "本节其余维度均为引擎实算值。</p>"
+            % (esc(m.get("name")), esc(m.get("code")),
+               esc(m.get("theme") or "—"),
+               (val.get("market_cap") or 0) / 1e8, (val.get("float_cap") or 0) / 1e8,
+               rc.get("20d") or 0, rc.get("60d") or 0, rc.get("250d") or 0,
+               num((pc.get("60") or {}).get("pct"), 1),
+               esc((a.get("plan") or {}).get("mode")),
+               esc((a.get("plan") or {}).get("verdict") or ""),
+               esc(_pn)))
+
+
+def _valuation_fallback(a):
+    """六维研究 4.3 兜底：直接用 analysis 的 valuation（fetch_ash_valuation 已算好）。"""
+    val = a.get("valuation") or {}
+    rows_l = [["PE(动/静/TTM)", "%s / %s / %s"
+               % (num(val.get("pe_dynamic")), num(val.get("pe_static")),
+                  num(val.get("pe_ttm")))],
+              ["PB", num(val.get("pb"))],
+              ["总市值 / 流通", "%.1f 亿 / %.1f 亿"
+               % ((val.get("market_cap") or 0) / 1e8, (val.get("float_cap") or 0) / 1e8)]]
+    if not val:
+        rows_l = [["估值", "接口未返回，需人工补"]]
+    return rows(rows_l)
+
+
 def build_peers(a, n):
     out = []
     for x in (a.get("peers") or []):
@@ -629,6 +618,13 @@ def build_peers(a, n):
                   pct_plain(rc.get("20d")), pct(rc.get("60d")),
                   pct(num(s["percentile"].get("250", {}).get("gap_hi_pct"), 2)),
                   num(s["atr_pct"])))
+    if not (a.get("peers") or []):
+        # ★ 2026-10-10（老罗 7「无对照」）：空表过去只有主标的一行，读者以为
+        #   「这只票没有同行」。现在明说是取数没开/失败，并给出补救命令。
+        out.append('<tr><td colspan="10" class="note">无同行对照数据 —— '
+                   'battle_analyze 默认已开启自动板块对照，'
+                   '若仍为空说明板块成分接口失败；可手工指定：'
+                   '<code>--peers 代码1,代码2</code></td></tr>')
     return "\n      ".join(out)
 
 
@@ -715,6 +711,30 @@ def build_exec(a, n):
         #   notes 需要能给「两方向预案」这类行补第三列说明；kv_rows 只接受 2 元组，会直接报错。
         core = [tuple(x) for x in n["exec_rows"]]
     return rows(core + tail)
+
+
+def build_oneline(a, n):
+    """一句话结论（2026-10-10 老罗 10：一页汇总「多余、可读性不强」）。
+
+    原来那张表把模式/结论/止损/目标/分位/打分十几行再抄一遍 —— 全是上面各节
+    已经出现过的数字，读者已经看过一遍了。压成一句**可执行的话**：
+    买什么价、止损在哪、什么情况不做。
+    """
+    if n.get("thesis_plain"):
+        return n["thesis_plain"]
+    p = a.get("plan") or {}
+    rec = pick_rec(a) or {}
+    if not rec:
+        return ("结论：<b>不做</b> —— 引擎未给出合格档（mode=%s · recommend=%s），"
+                "不凭形态硬凑一个价。" % (esc(p.get("mode")), p.get("recommend")))
+    # ⚑ R 标签必须反映真实口径（MEMORY §3.5）：t1 算不出时引擎会回落到远端墙算 R，
+    #   东岳硅材 300821 那样会得出 33.78 这种数字 —— 写在结论第一句而不标注，
+    #   等于拿虚高赔率当决策依据。
+    _r1_is_t1 = not rec.get("r1_basis") or str(rec["r1_basis"]).startswith("t1")
+    _rlbl = "R→t1" if _r1_is_t1 else "R（t1 缺失·按远端墙）"
+    return ("结论：<b>%s 挂限价买</b>，止损 <b>%s</b>，%s <b>%s</b>；"
+            "收盘破止损即离场；<b>不追价</b> —— 等不到的价等于 0。"
+            % (num(rec.get("entry")), num(rec.get("stop")), _rlbl, num(rec.get("r1"))))
 
 
 def build_summary(a, n):
@@ -908,6 +928,12 @@ def build_confluence(a, n):
     if n.get("catalyst_has") is not None:
         catalyst = {"has": n.get("catalyst_has"),
                     "note": n.get("catalyst_note")}
+    elif n.get("catalysts"):
+        # ★ 2026-10-10（老罗 2「催化剂层没有」）：六维研究写了催化剂清单却仍记
+        #   `无数据`，是渲染层没接上 —— notes 有清单就按「有催化剂」计入分母，
+        #   并附上清单原文作依据。清单为空才保持 unknown（不把「没写」当「没有」）。
+        catalyst = {"has": True,
+                    "note": "；".join(str(x)[:80] for x in n["catalysts"])[:240]}
     try:
         conf = CF.from_analysis(a, sector=sector, catalyst=catalyst)
     except Exception:                        # noqa: BLE001
@@ -1066,7 +1092,7 @@ def render(a, n, tmpl_path=DEFAULT_TMPL, vp_from=None, vp_to=None):
         "META_LINE": meta_line,
         "KPI_ITEMS": kpi_items,
         "KPI_BADGES": kpi_badges,
-        "THESIS": note(n.get("thesis_html"), ""),
+        "THESIS": note(n.get("thesis_html"), build_oneline(a, n)),
         "BEST_TITLE": esc(best_title),
         "BEST_KPIS": best_kpis,
         "BEST_NOTE": best_note,
@@ -1090,11 +1116,14 @@ def render(a, n, tmpl_path=DEFAULT_TMPL, vp_from=None, vp_to=None):
         "VP_NOTE": note(n.get("vp_note"), ""),
         "VP_VERDICT_ROWS": verd_html,
         "VP_VERDICT_NOTE": verd_note,
-        "FUND_BODY": n.get("fund_body") or "<p class='flat'>（未提供 —— 需检索一手来源后补写）</p>",
-        "FIN_ROWS": rows(n.get("fin_rows") or [["—", "未提供", ""]]),
-        "VALUATION_ROWS": rows(n.get("valuation_rows") or [["—", "未提供", ""]]),
+        # ★ 2026-10-10（老罗 6「六维研究不可省略，必须有」）：兜底不再写「未提供」，
+        #   而是用 analysis 里已有的数据**先给出一版**，缺的只是叙述性细节。
+        #   「未提供」四个字等于把一节交白卷 —— 六维是必答项，不是选答项。
+        "FUND_BODY": n.get("fund_body") or _fund_fallback(a),
+        "FIN_ROWS": rows(n.get("fin_rows") or [["财务", "接口未返回，需人工补"]]),
+        "VALUATION_ROWS": rows(n.get("valuation_rows") or _valuation_fallback(a)),
         "VALUATION_NOTE": note(n.get("valuation_note"), ""),
-        "CATALYST_LIST": lis(n.get("catalysts"), "<li class='flat'>（未提供）</li>"),
+        "CATALYST_LIST": lis(n.get("catalysts"), "<li>未识别到明确催化剂（本层记无，不编造叙事）</li>"),
         "MINESWEEP_LIST": lis(n.get("minesweep"), "<li class='flat'>（未提供 —— 扫雷必须检索一手来源）</li>"),
         "MINESWEEP_NOTE": note(n.get("minesweep_note"), ""),
         "BIGSTRUCT_ROWS": rows(n.get("bigstruct_rows") or []),
@@ -1106,8 +1135,10 @@ def render(a, n, tmpl_path=DEFAULT_TMPL, vp_from=None, vp_to=None):
         "PEER_NOTE": note(n.get("peers_note"), ""),
         "SCORE_INVEST": num(n.get("score_invest"), 1),
         "SCORE_TRADE": num(n.get("score_trade"), 1),
-        "SCORE_INVEST_LI": lis(n.get("score_invest_li")),
-        "SCORE_TRADE_LI": lis(n.get("score_trade_li")),
+        "SCORE_INVEST_LI": lis(n.get("score_invest_li"),
+                               "<li>未评分 —— 需补财务/估值数据</li>"),
+        "SCORE_TRADE_LI": lis(n.get("score_trade_li"),
+                              "<li>未评分 —— 需补量价/赔率数据</li>"),
         "EXEC_ROWS": build_exec(a, n),
         "EXEC_RHYTHM": lis(n.get("exec_rhythm")),
         "EXEC_INVALID": lis(n.get("exec_invalid")),

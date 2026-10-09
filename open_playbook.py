@@ -157,7 +157,7 @@ def long_ladder(target, stop):
 def build(last, entry, stop, target=None, atr=None, board=None,
           code="", name="", shares=None, lot=100, r_mult=None,
           prev_close=None, upper_entry=None, market="CN", knife_edge=None,
-          chase=None):
+          chase=None, up_plan=None):
     """生成开盘作战方案。
 
     last      基准日收盘价（挂单是隔夜预挂，故次日开盘的参照系）
@@ -284,6 +284,39 @@ def build(last, entry, stop, target=None, atr=None, board=None,
         b1.update({"pos": "0 股", "stop": "—", "tone": "off"})
         bands.append(b1)
 
+    # ── ★ 向上突破档（2026-10-10 老罗 3：向上档原在表外单独一段，内容分散）──
+    #   「跌破/突破平台就是空/多」是趋势派主触发，必须和回踩档**并列在同一张表**里，
+    #   而不是做成表底的一段补充说明 —— 分开写的结果就是读者只看回踩、永远踏空。
+    #   判据：开盘价已站上突破触发价 ⇒ 突破成立 ⇒ 按向上突破单执行（盯盘手动）。
+    #   ⚠ 区间与②重叠时②让位（突破位以内不算「追高」，那是有授权的突破买点）。
+    _trg = None
+    if is_cn and isinstance(up_plan, dict) and up_plan.get("trigger"):
+        try:
+            _trg = float(up_plan["trigger"])
+        except (TypeError, ValueError):
+            _trg = None
+    if _trg and _trg < up_limit:
+        _ustop = up_plan.get("stop")
+        _urisk = up_plan.get("risk")
+        _uat = up_plan.get("dist_atr")
+        bands.append({
+            "key": "breakout_up",
+            "title": "★ 向上突破档（开盘已站上突破位 %.2f）" % _trg,
+            "cond": "%.2f ≤ O ＜ %.2f" % (_trg, up_limit),
+            "act": ("<b>按向上突破单执行</b>：突破 <b>%.2f</b> 成立 ⇒ 手动买入（A 股无原生 "
+                    "buy-stop，<b>只能盯盘</b>或券商条件单）。硬止损 <b>%s</b>"
+                    "（跌回突破位下方 = 假突破离场）｜ 每股风险 %s（%s×ATR）。<br>"
+                    "突破后按<b>移动止损</b>管理、不设固定目标；与回踩单<b>互斥</b>，"
+                    "先到先做、不两档都成交。"
+                    % (_trg,
+                       ("%.2f" % _ustop) if _ustop else "—",
+                       ("%.2f" % _urisk) if _urisk is not None else "—",
+                       ("%.2f" % _uat) if _uat is not None else "—")),
+            "pos": ("%d 股" % shares) if shares else "计划仓位",
+            "stop": ("收盘破 <b>%.2f</b>" % _ustop) if _ustop else "跌回突破位下方离场",
+            "tone": "on",
+        })
+
     # ── ②③ 档的上界：默认「前收盘 +2%」；有追价授权时改用授权上限 ──
     #    （锚点迁移 ⇒ 新结构顶以内可追，越过才算追高。见 build() docstring）
     _gap = None       # 美股分支保持 None（与改动前一致，hi_gap 不参与 _us_bands）
@@ -345,11 +378,16 @@ def build(last, entry, stop, target=None, atr=None, board=None,
     hi_gap = _ct if _ct else _gap
 
     if is_cn:
+        # 上界：有向上突破档时收到突破位为止 —— 突破位以内归★向上突破档，
+        # 本档只管「高开但还没到突破位」的情形，两档区间不重叠。
+        _hi_bound = up_limit
+        if _trg and hi_gap < _trg < up_limit:
+            _hi_bound = _trg
         bands.append({
         "key": "gap_up",
         "title": ("② 跳空高开（越过追价上限 %.2f）" % hi_gap) if _ct
                  else ("② 跳空高开（> +%.0f%%）" % (GAP_UP_MAX * 100)),
-        "cond": "%.2f ＜ O ＜ %.2f" % (hi_gap, up_limit),
+        "cond": "%.2f ＜ O ＜ %.2f" % (hi_gap, _hi_bound),
         "act": ("<b>不追</b>。%.2f 是%s —— 越过%s = 追高，"
                 "赔率被开票价吃掉。<b>本笔踏空、成本 = 0</b>：不追、不补、不上移。"
                 "⚑ 未成交<b>不上移</b>挂单价（铁律：不下移，也不上移）。"
@@ -808,15 +846,15 @@ def format_html(pb):
     a = pb["auction"]
     head = "集合竞价：买不买？" if pb.get("market") != "US" else "时段与持仓"
     h.append("<h4 style='margin-top:14px'>%s</h4>" % head)
-    h.append("<p><span class='badge b-bad'>%s</span></p>" % a["verdict"])
-    h.append("<ul class='li'>")
-    for r in a["reasons"]:
-        h.append("<li>%s</li>" % r)
-    h.append("</ul>")
-    h.append("<ul class='li'>")
-    for r in a["rules"]:
-        h.append("<li>%s</li>" % r)
-    h.append("</ul>")
+    # ★ 2026-10-10（老罗 3）：三条理由 + 三条规则原本各占一个 ul，六行横在表里。
+    #   答案本身只有一句话（默认不在竞价买），依据属于「想知道再看」⇒ 收进 hover
+    #   气泡，正文只留徽标，不再占位。
+    _tip = " &#10; ".join(_strip(x) for x in (list(a["reasons"]) + list(a["rules"])))
+    _tip = (_tip.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                .replace('"', "&quot;").replace("'", "&#39;"))
+    h.append("<p><span class='badge b-bad' style='cursor:help' title='%s'>%s ⓘ</span>"
+             "<span class='note' style='margin-left:6px'>（悬停看依据）</span></p>"
+             % (_tip, a["verdict"]))
 
     h.append("<h4 style='margin-top:14px'>时点清单</h4>")
     h.append("<table class='tbl'><thead><tr><th style='width:16%'>时点</th><th>做什么</th>"
@@ -828,18 +866,8 @@ def format_html(pb):
     if pb.get("upper_note"):
         h.append("<p class='note'>%s</p>" % pb["upper_note"])
     h.append("<p class='note'>%s</p>" % pb["t1_note"])
-    up = pb.get("up_plan")
-    if up:
-        _lvl = ("%.2f" % up["level"]) if up.get("level") is not None else "—"
-        _dst = ("%.2f" % up["dist_atr"]) if up.get("dist_atr") is not None else "0"
-        h.append("<h4 style='margin-top:14px'>★ 向上突破分支（埋伏单·需盯盘）</h4>")
-        h.append(
-            "<p class='note'>埋伏触发价 <b>%.2f</b>（突破 %s 平台沿 / 下降趋势线确认）｜ "
-            "硬止损 <b>%.2f</b>（跌回突破位下方 = 假突破离场）｜ 每股风险 %.2f（%s×ATR）<br>"
-            "突破后按<b>移动止损</b>管理、不设固定目标；与当日回踩买点<b>先到先做</b>。"
-            "<br>⚠ 现价在埋伏价下方，A 股无原生 buy-stop，此单只能券商条件单触发或"
-            "<b>盯盘手动</b>成交，非盯盘时段不可隔夜预挂。</p>"
-            % (up["trigger"], _lvl, up["stop"], up["risk"], _dst))
+    # ★ 2026-10-10：向上突破分支已并入主表（★向上突破档），此处不再重复渲染 ——
+    #   同一内容出现两处 = 分散，老罗明确反对。
     h.append("<p class='note'>%s</p>" % pb["note"])
     h.append("</div>")
     return "".join(h)
@@ -904,7 +932,14 @@ def from_analysis(a, n=None):
     # ⚑ 只看非空 dict —— list / 空 dict 一律回落到 odds_primary
     od = a.get("odds_recommend")
     if not (isinstance(od, dict) and od):
-        od = a.get("odds_primary") or {}
+        # ⚑ odds_primary 也可能是 **list**（battle_analyze 按止损锚过滤后的列表），
+        #   直接 `od.get()` 会 AttributeError → 整份报告的开盘方案块变成「生成失败」。
+        #   （2026-10-10 同步后实测命中）⇒ list 一律取首个元素再当 dict 用。
+        _op = a.get("odds_primary")
+        if isinstance(_op, list):
+            od = _op[0] if _op and isinstance(_op[0], dict) else {}
+        else:
+            od = _op if isinstance(_op, dict) else {}
     # ★ 回踩最优档（2026-10-01 修）：与 report_render 主推口径统一——优先 odds_top
     #   （回踩最优、赔率更高），回退 odds_recommend（现价可买）。避免报告主推 434.94
     #   现价档、notes 推荐 428.1 回踩档两套价打架，老罗要求口径统一。
@@ -914,7 +949,21 @@ def from_analysis(a, n=None):
 
     code = str(meta.get("code") or plan.get("sym") or "")
     last = ov.get("last") or meta.get("basis_close") or plan.get("last")
-    entry = ov.get("entry") or (top and top.get("entry")) or od.get("entry")
+
+    # ★ 主推口径与 report_render.pick_rec 一致（2026-10-10）：odds_top 可能是
+    #   「R 最高但止损距 <0.35×ATR / R 按远端墙虚算」的纸面档（301087 实测
+    #   54.77 / R 33.77），直接拿它生成开盘方案会给一份买不到也站不住的计划。
+    #   校验不过就回退 odds_recommend —— 与报告首屏同一个价，不许两套价打架。
+    def _usable(r):
+        if not (isinstance(r, dict) and r):
+            return False
+        if (r.get("risk_atr") or 0) < 0.35:
+            return False
+        if not str(r.get("r1_basis") or "t1").startswith("t1"):
+            return False
+        return True
+    _pref = top if _usable(top) else (od if isinstance(od, dict) else {})
+    entry = ov.get("entry") or _pref.get("entry") or od.get("entry")
     stop = ov.get("stop") or od.get("stop")
     z = plan.get("buy_zone") or {}
     t0 = plan.get("ma_reclaim") or {}
@@ -952,13 +1001,13 @@ def from_analysis(a, n=None):
             shares = None
     else:
         shares = None
-    if shares is None and top:
-        shares = top.get("qty")
-    if shares is None and top:
+    if shares is None and _pref:
+        shares = _pref.get("qty")
+    if shares is None and _pref:
         # odds_top 无 qty：按风险预算重算 + 金额上限保护（与 report_render.build_exec 一致）
         _acct = meta.get("account") or 50000
         _rpct = meta.get("risk_pct") or 0.015
-        _rk = top.get("risk") or od.get("risk")
+        _rk = _pref.get("risk") or od.get("risk")
         if _rk:
             shares = int(_acct * _rpct // _rk)
             if entry and shares * entry > _acct:
@@ -1018,15 +1067,16 @@ def from_analysis(a, n=None):
     # ★ 2026-09-26：「贴线待突破」档（老罗「在上沿买、不在平台顶买」）——
     #   直接取 plan 上已算好的那一档，作为 ⓪ 插入开盘作战方案。
     _ke = plan.get("knife_edge")
+    # ★ 2026-10-10 改：向上突破**并入主表**作为「★向上突破档」，不再挂成表外分支
+    #   （老罗 3：单独一段 = 内容分散，读者只看回踩档）。plan 里没有 pre_breakout 时
+    #   _up_plan 返回 None ⇒ build 不生成该档，行为与旧版一致。
+    _up = _up_plan(plan)
     pb = build(last=last, entry=entry, stop=stop, target=target, atr=atr,
                code=code, name=meta.get("name") or "", shares=shares,
                upper_entry=upper, market=meta.get("market") or "CN",
                knife_edge=_ke if isinstance(_ke, dict) else None,
-               chase=chase)
-    # ★ 向上突破分支（2026-09-29 补）：与 §2 全档枚举 / report_render「作战计划」统一口径。
-    #   向上突破是「埋伏 buy-stop + 盯盘」逻辑，不等同开盘价落点的 bands，故作为独立分支
-    #   附加到 pb，不混入主方案 bands（避免改写「开盘价落在哪→动作」的判定）。
-    pb["up_plan"] = _up_plan(plan)
+               chase=chase, up_plan=_up)
+    pb["up_plan"] = _up
     return pb
 
 

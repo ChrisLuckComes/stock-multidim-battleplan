@@ -279,6 +279,12 @@ def analyze(now=None, force_minutes=None):
             if b:
                 score_date = ymd(b[-1]["d"])
                 break
+        # ★ 2026-10-10 修：指数日线取不到（接口失败 / 休市）时 score_date 为空 ⇒
+        #   落盘按 asof 系统日命名 ⇒ 盘前/周末跑会写成「明天的文件名、昨天的读数」
+        #   ⇒ confluence 按基准日永远找不到，市场层长期「无数据」。
+        #   涨停池日期本来就是行情日，比系统日准，用它兜底。
+        if score_date is None and qdate:
+            score_date = ymd(qdate)
 
     pool_ok = ymd(qdate) == score_date and score_date is not None
     if pool_ok:

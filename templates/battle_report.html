@@ -45,10 +45,12 @@
   ul{margin:6px 0 6px 20px;padding:0}
   li{margin:3px 0}
   .note{font-size:12.5px;color:var(--dim)}
-  .disc{background:#fbfbfc;border:1px dashed var(--line);border-radius:8px;padding:12px 14px;
-    font-size:11.5px;color:var(--dim);margin-top:26px;line-height:1.6}
   code{background:#f0f3f6;padding:1px 5px;border-radius:4px;font-size:12px}
   .sec-no{color:var(--dim2);font-weight:400;font-size:14px}
+  /* ★ 一句话结论（2026-10-10）：一页汇总那张十几行的表可读性差，压成一句话。 */
+  .oneline{background:#eef7ef;border:1px solid #b7dfc0;border-left:5px solid var(--dn);
+    border-radius:8px;padding:11px 14px;margin:10px 0 0;font-size:15px;line-height:1.7}
+  .tagbar{margin:10px 0 0;line-height:2}
 </style>
 </head>
 <body>
@@ -62,8 +64,8 @@
 <!-- ================= 首屏 ================= -->
 <div class="card">
   <div class="kpis">{{KPI_ITEMS}}</div>
-  <p style="margin:10px 0 0">{{KPI_BADGES}}</p>
-  <p style="margin:10px 0 0;font-size:14.5px">{{THESIS}}</p>
+  <p class="tagbar">{{KPI_BADGES}}</p>
+  <div class="oneline">{{THESIS}}</div>
 </div>
 
 <div class="bestbox">
@@ -72,13 +74,10 @@
   <p class="note" style="margin:8px 0 0">{{BEST_NOTE}}</p>
 </div>
 
-<!-- ================= 顶部标志 K 线硬指标（跑个股必看） ================= -->
-{{TOP_SIGNAL_BLOCK}}
-
 <!-- ================= 叠加概率七层计数（只排序不否决） ================= -->
 {{CONFLUENCE_BLOCK}}
 
-<!-- ================= 开盘作战方案（开盘价落在哪 → 动作） ================= -->
+<!-- ================= 开盘作战方案（开盘价落在哪 → 动作，含向上突破档） ================= -->
 {{OPEN_PLAYBOOK_BLOCK}}
 
 <!-- ================= 1. 模式卡 ================= -->
@@ -93,13 +92,25 @@
     <p class="note">{{MODE_NOTE}}</p>
   </div>
   <div class="card">
-    <h3>止损 / 目标 / 仓位（probe_intraday.py）</h3>
+    <h3>止损 / 目标 / 下单（probe_intraday.py）</h3>
     <table>
       <tr><th>项</th><th>值</th></tr>
       {{PLAN_ROWS}}
     </table>
     <p class="note">{{PLAN_NOTE}}</p>
   </div>
+</div>
+<!-- ⚑ 下单执行表：2026-10-10 改版删「9 · 执行方案」节时，这张表被连带删掉了，
+    导致报告只剩「结构止损/目标」却没了「买多少股、多少钱、风险多少」——
+    买点能看、仓位看不到，等于执行不了。这里补回（不重建整节，只保留这张表）。 -->
+<div class="card">
+  <h3>下单执行（这一档：买多少 / 多少钱 / 风险多少）</h3>
+  <table>
+    <tr><th>项</th><th>值</th><th>备注</th></tr>
+    {{EXEC_ROWS}}
+  </table>
+  {{EXEC_RHYTHM}}
+  {{EXEC_INVALID}}
 </div>
 <div class="card">
   <h3>⚠ 必须知道的口径问题</h3>
@@ -118,28 +129,9 @@
   {{ODDS_APPENDIX}}
 </div>
 
-<!-- ================= 3. 量价分析 ================= -->
-<h2>3 · 量价分析（当日分钟复盘 + 近 20 日）</h2>
-<div class="grid g2">
-  <div class="card">
-    <h3>3.1 当日（{{BASIS_DATE}}）分钟复盘</h3>
-    <table>
-      <tr><th>项</th><th>值</th></tr>
-      {{INTRADAY_ROWS}}
-    </table>
-    <p class="note" style="margin-top:6px">{{INTRADAY_NOTE}}</p>
-  </div>
-  <div class="card">
-    <h3>3.2 近 20 日量价节奏</h3>
-    <table>
-      <tr><th>项</th><th>值</th></tr>
-      {{VP_ROWS}}
-    </table>
-    <p class="note">{{VP_NOTE}}</p>
-  </div>
-</div>
+<!-- ================= 3. 量价结论 ================= -->
+<h2>3 · 量价结论</h2>
 <div class="card">
-  <h3>3.3 量价结论（强制：当日 + 近 20 日分别判定）</h3>
   <table>
     <tr><th>维度</th><th>判定</th><th>依据</th></tr>
     {{VP_VERDICT_ROWS}}
@@ -184,29 +176,8 @@
   <p class="note">{{MINESWEEP_NOTE}}</p>
 </div>
 
-<!-- ================= 6. 大结构与总否决 ================= -->
-<h2>6 · 大结构与标的总否决（三道）</h2>
-<div class="grid g2">
-  <div class="card">
-    <h3>6.1 大结构（多周期视角）</h3>
-    <table>
-      <tr><th>阶段</th><th>价格</th><th>日期</th><th>幅度</th></tr>
-      {{BIGSTRUCT_ROWS}}
-    </table>
-    <p class="note">{{BIGSTRUCT_NOTE}}</p>
-  </div>
-  <div class="card">
-    <h3>6.2 总否决（任一成立即不参与）</h3>
-    <table>
-      <tr><th>#</th><th>否决项</th><th>判据</th><th>结论</th></tr>
-      {{VETO_ROWS}}
-    </table>
-    <p class="note">{{VETO_NOTE}}</p>
-  </div>
-</div>
-
-<!-- ================= 7. 龙头对照 ================= -->
-<h2>7 · 同板块 / 概念龙头对照（轻量）</h2>
+<!-- ================= 6. 龙头对照 ================= -->
+<h2>6 · 同板块 / 概念龙头对照</h2>
 <div class="card">
   <table>
     <tr><th>标的</th><th>收盘</th><th>3 日%</th><th>5 日%</th><th>10 日%</th><th>20 日%</th>
@@ -216,8 +187,8 @@
   <p class="note">{{PEER_NOTE}}</p>
 </div>
 
-<!-- ================= 8. 双轨打分 ================= -->
-<h2>8 · 双轨打分（禁止合成总分）</h2>
+<!-- ================= 7. 双轨打分 ================= -->
+<h2>7 · 双轨打分（禁止合成总分）</h2>
 <div class="grid g2">
   <div class="card">
     <h3>投资价值 <span class="sec-no">{{SCORE_INVEST}} / 10</span></h3>
@@ -227,38 +198,6 @@
     <h3>短线博弈 <span class="sec-no">{{SCORE_TRADE}} / 10</span></h3>
     <ul>{{SCORE_TRADE_LI}}</ul>
   </div>
-</div>
-
-<!-- ================= 9. 执行方案 ================= -->
-<h2>9 · 执行方案（可下单动作）</h2>
-<div class="card">
-  <table>
-    <tr><th>项</th><th>值</th><th>备注</th></tr>
-    {{EXEC_ROWS}}
-  </table>
-  <h3 style="margin-top:14px">9.1 加仓 / 减仓节奏</h3>
-  <ul>{{EXEC_RHYTHM}}</ul>
-  <h3 style="margin-top:14px">9.2 失效条件（任一触发即作废本计划）</h3>
-  <ul>{{EXEC_INVALID}}</ul>
-</div>
-
-<!-- ================= 10. 一页汇总 ================= -->
-<h2>10 · 一页汇总</h2>
-<div class="card">
-  <table>
-    <tr><th>项</th><th>结论</th></tr>
-    {{SUMMARY_ROWS}}
-  </table>
-</div>
-
-<div class="disc">
-  <b>免责声明</b>：本报告由 <code>stock-multidim-battleplan</code> skill 自动生成（数据来自公开行情接口与公开信息），
-  仅用于记录分析过程与纪律约束，<b>不构成任何投资建议</b>。所有价位（买入 / 止损 / 目标）均为基于历史波动的
-  计算值，不代表未来收益，也不保证成交。集合竞价、涨跌停、停牌、除权除息、突发公告都可能使价位失效。
-  交易决策与盈亏后果由账户持有人自行承担。<br>
-  <b>执行约束</b>：{{DISC_CONSTRAINTS}}<br>
-  <b>数据口径</b>：{{DISC_DATA}}<br>
-  生成时间 {{GENERATED_AT}} · 渲染器 report_render.py（模板 templates/battle_report.html）
 </div>
 
 </div>

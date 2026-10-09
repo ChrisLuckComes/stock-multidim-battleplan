@@ -123,14 +123,51 @@ def support_levels(lv, spot):
     return _dedup_sorted(cands, above=False, spot=spot)
 
 
+def swing_levels(bars, left=4, right=4):
+    """裸K摆动高低点（全量，不过滤现价）。
+
+    left/right = 中心柱两侧需更极值的根数（默认 4→9 根窗口）。返回
+    {'highs':[(i,px),...], 'lows':[(i,px),...]}（按出现顺序，未排序）。
+    纯价格结构，不依赖任何均线——平台下沿、趋势线拐点、前低都从这里来。
+    """
+    n = len(bars)
+    if n < 2 * (left + right) + 1:
+        return {"highs": [], "lows": []}
+    highs, lows = [], []
+    for i in range(left, n - right):
+        c = bars[i]
+        wh = [bars[j]["h"] for j in range(i - left, i + right + 1)]
+        wl = [bars[j]["l"] for j in range(i - left, i + right + 1)]
+        nh, nl = wh[:left] + wh[left + 1:], wl[:left] + wl[left + 1:]
+        if c["h"] >= max(wh) and c["h"] not in nh:
+            highs.append((i, c["h"]))
+        if c["l"] <= min(wl) and c["l"] not in nl:
+            lows.append((i, c["l"]))
+    return {"highs": highs, "lows": lows}
+
+
+def structural_levels(bars, left=4):
+    """裸K结构位（摆动高低点原始列表，不过滤现价）。
+
+    返回 (lows, highs)，均为 [(i, px)]。调用方按 anchor 自行切分
+    「上方阻力 / 下方支撑 / 刚跌破的支撑(=止损参考)」，避免把均线当结构。
+    """
+    return swing_levels(bars, left=left)["lows"], swing_levels(bars, left=left)["highs"]
+
+
 def rsi_stance(rsi):
-    """RSI → (区间标签, 含义)。超买=做空加分；超卖=禁追空（随时 V 反）。"""
+    """RSI → (区间标签, 含义)。**纯展示，一律不作否决依据**。
+
+    ⚑ 2026-10-10 老罗定口径：RSI 在强趋势下跌中会**钝化**（一直超卖一直跌），
+      据「超卖」禁空 = 系统性错过整个主跌段。故此处只给标签与提示文案，
+      能否空只取决于 ①结构是否破位 ②RR≥1.5 ③止损距离≥0.25×ATR。
+    """
     if rsi is None:
         return "n/a", ""
     if rsi >= RSI_OB:
         return "超买", "超买加分：压力位反抽不破的空单质量更高"
     if rsi <= RSI_OS:
-        return "超卖", "超卖禁追空：随时 V 反，等反抽"
+        return "超卖", "超卖仅展示（可钝化：强趋势下跌会一直超卖一直跌），不构成禁空理由"
     return "中性", ""
 
 
@@ -160,7 +197,8 @@ def flex_map(spot, lv, ref_close=None):
         near = abs(spot - px) < NOISE_ATR * atr
         tag = "  ⚠ 贴噪声带，需两日收盘确认" if near else ""
         lines.append(("sup", f"{px:9.2f}  {lbl:<6} 距现价 {dist:+.2f}%{tag}"))
-    lines.append(("rule", "口径：一律收盘确认，盘中触碰不算数；超卖禁追空，反多不接下跌中的刀"))
+    # ⚑ 2026-10-10 老罗定：RSI 超卖会钝化，不作禁空依据；此处不再写「超卖禁追空」。
+    lines.append(("rule", "口径：一律收盘确认，盘中触碰不算数；RSI 超卖仅展示、不作禁空依据，反多不接下跌中的刀"))
     return lines
 
 

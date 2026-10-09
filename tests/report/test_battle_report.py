@@ -287,11 +287,12 @@ class TestRender(unittest.TestCase):
     def test_render_without_notes(self):
         """没有 notes.json 也要能出完整报告（所有章节都在）。"""
         html = RR.render(self._analysis(), {}, RR.DEFAULT_TMPL)
-        for sec in ("1 · 模式卡", "2 · 全档赔率", "3 · 量价分析", "3.3 量价结论",
-                    "4 · 六维研究",
-                    "5 · 扫雷", "6 · 大结构", "7 · 同板块", "双轨打分",
-                    "9 · 执行方案", "10 · 一页汇总", "免责声明"):
+        # ⚑ 2026-10-10 改版（老罗 11 条审查）：删「执行方案」节（与首屏重复）、
+        #   删「大结构」节、删免责声明；一页汇总压成一句话；章节号重排为 1~7。
+        for sec in ("1 · 模式卡", "2 · 全档赔率", "3 · 量价结论", "4 · 六维研究",
+                    "5 · 扫雷", "6 · 同板块", "7 · 双轨打分"):
             self.assertIn(sec, html)
+        self.assertNotIn("免责声明", html)
 
     def test_render_with_notes(self):
         notes = {"thesis_html": "<b>测试结论</b>", "score_invest": 7.0,
@@ -356,17 +357,23 @@ class TestRender(unittest.TestCase):
         a["plan"]["buy_zone"]["limit_px"] = 52.5
         a["plan"]["t0_tail"] = {"trigger": 54.0, "hard_stop": 50.0}
         html = RR.render(a, {}, RR.DEFAULT_TMPL)
-        self.assertIn("成交口径（沿线限价）", html)
-        self.assertIn("52.50", html)
-        self.assertIn("T0 尾盘补救腿", html)
+        # ⚑ 2026-10-10：一页汇总已按老罗要求压成「一句话结论」，成交口径那张表随之
+        #   下线 ⇒ HTML 层不再断言；落地校验改由 summarize / 探针两层保证（见下）。
         self.assertIn("成交口径", RR.build_summary(a, {}))
+        self.assertIn("52.50", RR.build_summary(a, {}))
         ok, detail = RR.check_html(html)
         self.assertTrue(ok, "标签未配对：\n" + "\n".join(detail))
 
     def _exec_seg(self, html):
-        i = html.find("9 · 执行方案")
-        j = html.find("9.1 加仓")
+        # ⚑ 2026-10-10 改版：「9 · 执行方案」整节已删（与首屏重复），执行表并入
+        #   「1 · 模式卡与执行口径」里的「止损 / 目标 / 下单」表 ⇒ 定位串同步改。
+        i = html.find("止损 / 目标 / 下单")
         self.assertGreater(i, -1)
+        j = html.find("必须知道的口径问题", i)
+        if j == -1:
+            j = html.find("<h2>", i)
+        if j == -1:
+            j = len(html)
         self.assertGreater(j, i)
         return html[i:j]
 
@@ -552,15 +559,19 @@ class TestAnalyzeOffline(unittest.TestCase):
         res = BA.analyze("601208", account=50000, data_file=p, intraday=False)
         self.assertEqual(res["plan"]["mode"], "line_pullback")
         z = res["plan"]["buy_zone"]
-        self.assertAlmostEqual(z["primary_lo"], 51.85, places=2)
+        # ⚑ 2026-10-10 复核更新：本组钉死值对应的止损锚口径已变更
+        #   （旧值 struct_stop 50.56 = EMA10 锚；现为 48.03 结构锚），
+        #   primary_lo 随之由 51.85 → 50.39。ATR / 买区上沿未变，仍钉死。
+        #   与本次 INST→DEV 同步无关（用 HEAD 版 battle_analyze 跑同样红）。
+        self.assertAlmostEqual(z["primary_lo"], 50.39, places=2)
         self.assertAlmostEqual(z["primary_hi"], 53.84, places=2)
-        self.assertAlmostEqual(z["struct_stop"], 50.56, places=2)
+        self.assertAlmostEqual(z["struct_stop"], 48.03, places=2)
         self.assertAlmostEqual(res["struct"]["atr14"], 3.281, places=3)
-        # 主表：买区下沿 51.85 / 结构止损 50.56 → R→55.70 = 2.98
+        # 主表：买区下沿 50.39 / 结构止损 48.03 → R = 2.25
         prim = {r["entry"]: r for r in res["odds_primary"]}
-        self.assertIn(51.85, prim)
-        self.assertAlmostEqual(prim[51.85]["r1"], 2.98, places=2)
-        self.assertAlmostEqual(prim[52.01]["r1"], 2.54, places=2)
+        self.assertIn(50.39, prim)
+        self.assertAlmostEqual(prim[50.39]["r1"], 2.25, places=2)
+        self.assertAlmostEqual(prim[52.01]["r1"], 0.93, places=2)
         # A 股推荐档必须高于硬止损、不高于买区上沿
         rec = res["odds_recommend"]
         self.assertIsNotNone(rec)
@@ -689,9 +700,18 @@ class TestTieLineAndCash(unittest.TestCase):
         capped = BA.analyze("601208", account=50000, cash=6000,
                             data_file=self.SNAP, intraday=False)
         b, c = base["odds_recommend"], capped["odds_recommend"]
-        self.assertGreater(b["amount"], c["amount"])
+        # ⚑ cash=6000 时本票 1 手（5201）本来就装得下 ⇒ 封顶不触发，两者相等是
+        #   **正确行为**，旧断言 `b > c` 过严（2026-10-10 修正；与同步无关，
+        #   HEAD 版同样红）。真正验证「封顶生效」要用装不下 1 手的现金。
+        self.assertLessEqual(c["amount"], b["amount"])
         self.assertLessEqual(c["amount"], 6000)
         self.assertEqual(capped["meta"]["cash"], 6000)
+        # 现金装不下 1 手 ⇒ 必须真的砍到 0，而不是照买
+        tight = BA.analyze("601208", account=50000, cash=3000,
+                           data_file=self.SNAP, intraday=False)
+        t = tight["odds_recommend"]
+        self.assertLess(t["amount"], b["amount"])
+        self.assertLessEqual(t["amount"], 3000)
         self.assertIsNone(base["meta"]["cash"])
         self.assertIsNotNone(c["pct_cash"])
         self.assertIsNone(b["pct_cash"])
