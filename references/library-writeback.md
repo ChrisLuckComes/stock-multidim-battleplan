@@ -77,16 +77,16 @@ python library/library_pos.py find --market cn --code 601975
 python library/library_pos.py list --market cn --token-stdin
 
 # 定位某票（拿到 record_id，含全部字段）
-python library_pos.py find --market cn --code 688758 --token-stdin
+python library/library_pos.py find --market cn --code 688758 --token-stdin
 
 # 改字段（可多个 --set；值按列类型自动包 oneof）
-python library_pos.py set --market cn --code 301511 --set 止损价=107.5 --set 止损执行=收盘破 --token-stdin
+python library/library_pos.py set --market cn --code 301511 --set 止损价=107.5 --set 止损执行=收盘破 --token-stdin
 
 # 追加「操作记录」
-python library_pos.py note --market cn --code 301511 --text "2026-09-23 回踩 MA5 缩量，持有" --token-stdin
+python library/library_pos.py note --market cn --code 301511 --text "2026-09-23 回踩 MA5 缩量，持有" --token-stdin
 
 # 新增一行
-python library_pos.py add --market cn --code 002001 --name 新和成 \
+python library/library_pos.py add --market cn --code 002001 --name 新和成 \
     --set 状态=持仓 --set 持仓数量=100 --set 成本=20 --set 止损价=19.5 --token-stdin
 
 # 一切写入都可先 --dry-run：只打印将提交的 payload，不落库
