@@ -136,10 +136,38 @@ def test_soft_tape_still_blocks_chasing():
     assert "不追高" in d["reason"] or "回踩" in d["reason"]
 
 
+def test_limit_down_board_is_rejected():
+    """回归：跌停板必须硬拦，不得因 R 算得出来就判「能买」。
+
+    2026-10-09 大金重工 002487 实证：昨收 48.61，当日 43.75 = 跌停板（−10.00%）。
+    旧实现只检涨停价、不检跌停 ⇒ 在跌停板上判「能买 · R 8.96」，属接飞刀。
+    跌停板可成交所以 R 算得出来，但卖盘排队、次日大概率继续低开，实际卖不出。
+    """
+    pre = 48.61
+    dn = round(pre * 0.9, 2)          # 主板 −10% ⇒ 43.75
+    assert abs(dn - 43.75) < 1e-9
+    minutes = [
+        {"t": "09:31", "o": 47.23, "h": 48.00, "l": 47.00, "c": 47.50, "v": 900, "avg": 47.50},
+        {"t": "10:30", "o": 46.00, "h": 46.20, "l": 44.50, "c": 45.00, "v": 800, "avg": 46.40},
+        {"t": "14:00", "o": 44.00, "h": 44.00, "l": 43.75, "c": 43.75, "v": 700, "avg": 45.10},
+    ]
+    day = _day(minutes, [{"t": "14:00", "main": -3e8, "super": -3e8,
+                          "large": 0, "mid": 0, "small": 3e8}],
+               pre=pre, code="002487", name="大金重工")
+    s = _summary(day, main=-3e8, small=3e8)
+    r = decide(day, s, entry=44.14, stop=41.97, target=59.69, cap=None)
+    assert r["action"] == "不买", r["reason"]
+    assert "跌停" in r["reason"], r["reason"]
+    # 盯价提示必须抬到跌停价之上，不能落在跌停板内
+    assert r["arm_price"] is not None and r["arm_price"] > dn, (
+        "盯价 %s 必须高于跌停价 %s" % (r["arm_price"], dn))
+
+
 if __name__ == "__main__":
     test_dip_zone_and_cap()
     test_buy_in_0_2_window()
     test_reject_near_limit_and_supply()
     test_soft_tape_does_not_veto_pullback_entry()
     test_soft_tape_still_blocks_chasing()
-    print("ok 3")
+    test_limit_down_board_is_rejected()
+    print("ok 6")

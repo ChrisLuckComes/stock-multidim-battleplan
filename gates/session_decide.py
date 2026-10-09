@@ -59,6 +59,18 @@ def limit_up_price(pre, code):
     return round_px(pre * (1.0 + board_limit_ratio(code)))
 
 
+def limit_down_price(pre, code):
+    """跌停价。与 limit_up_price 对称。
+
+    2026-10-09 老罗实证：大金重工 002487 昨收 48.61，当日 43.75 = 跌停板
+    （−10.00%），引擎因只检涨停价、未检跌停 ⇒ 在跌停板上判「能买 · R 8.96」，
+    属接飞刀。跌停板不可买：次日大概率继续低开且卖盘排队。
+    """
+    if pre is None:
+        return None
+    return round_px(pre * (1.0 - board_limit_ratio(code)))
+
+
 def plan_from_files(analysis_path, notes_path=None):
     with open(analysis_path, encoding="utf-8") as f:
         a = json.load(f)
@@ -223,9 +235,12 @@ def size_for(code, entry, stop, account=None, risk_scale=1.0):
     }
 
 
-def arm_price(entry, stop, target, buy_cap, limit_px):
+def arm_price(entry, stop, target, buy_cap, limit_px, limit_dn=None):
     """现价还不能买时：涨到哪一档开始能按计划买。优先挂单价。"""
     floor = round_px(stop + 0.01)
+    # ★ 跌停时买点必须抬到跌停价之上（2026-10-09 新增）：跌停板上「能买」是假象。
+    if limit_dn is not None and (floor is None or floor <= limit_dn):
+        floor = round_px(limit_dn + 0.01)
     ceiling = buy_cap
     if target is not None and stop < target:
         rr_cap = round_px(max_entry_for_rr(RR_QUALIFIED, target, stop))
@@ -257,12 +272,13 @@ def decide(day, summary, entry, stop, target, cap=None, account=None, risk_scale
     code = day["code"]
     buy_cap = resolve_cap(entry, stop, target, cap, pre)
     limit_px = limit_up_price(pre, code)
+    limit_dn = limit_down_price(pre, code)
     rr = long_rr(price, target, stop) if target is not None else None
     rr_at_entry = long_rr(entry, target, stop) if target is not None else None
     pct_pre, in_dip = zone_vs_pre(price, pre)
     tape = tape_so_far(day, summary)
     dip_n = count_dip_minutes(day["minutes"], pre)
-    wait_px, wait_note = arm_price(entry, stop, target, buy_cap, limit_px)
+    wait_px, wait_note = arm_price(entry, stop, target, buy_cap, limit_px, limit_dn)
 
     out = {
         "code": code,
@@ -301,6 +317,13 @@ def decide(day, summary, entry, stop, target, cap=None, account=None, risk_scale
 
     if price <= stop:
         return _reject("现价已在止损下方，不接飞刀。")
+    # ★ 跌停板硬拦（2026-10-09 老罗纠正后新增）：跌停价是可成交的，所以 R 算得出来，
+    #   但那不是买点——次日大概率继续低开、卖盘排队，实际卖不出。
+    #   口径与涨停对称，且优先于 R 与 cap：跌停板上的 R 再高也不买。
+    if limit_dn is not None and price <= limit_dn + 1e-9:
+        # 不清 arm_price：盯价要保留，且已被 arm_price() 抬到跌停价之上（=开板后再判）。
+        out["arm_note"] = "跌停板，开板回到 %.2f 以上才可再判" % (limit_dn + 0.01)
+        return _reject("已跌停（%.2f），不接飞刀。" % limit_dn)
     if limit_px is not None and price >= limit_px:
         out["arm_price"] = None
         out["arm_note"] = "已涨停，没有可买价"
