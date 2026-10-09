@@ -198,8 +198,19 @@ def count_dip_minutes(minutes, pre):
     return n
 
 
-def resolve_cap(entry, stop, target, cap, pre):
-    """买入上限：显式 cap、R≥1.5 门槛、昨收+2% 三选严。"""
+def resolve_cap(entry, stop, target, cap, pre, day_open=None):
+    """买入上限：显式 cap、R≥1.5 门槛、昨收+2% 三选严。
+
+    ⚠️ 闸归属必须说清（2026-10-09 金石亚药 300434 教训）：
+      cap 是三闸取严，**不能说「cap=12.55 是昨收+2% 造成的」**——
+      金石那次真正压住的是 **R 闸**：stop 11.70 / target 13.82 / R≥1.5
+      ⇒ cap = 11.70 + 1.5×(13.82−11.70) = 12.55；而昨收+2% 闸给的是 12.66。
+      两者只差 0.11 元，很容易误判归因。**任何 cap 被拒的场合都必须先逐闸打印，
+      再说是哪一闸。**
+
+    day_open 参数保留给「昨收+2% 闸失效」的场景（前一日大跌 + 当日跳空高开时，
+    昨收基准已无意义，改用开盘价）。金石那次不属此类，属 R 闸正常收紧。
+    """
     caps = []
     if cap is not None:
         caps.append(float(cap))
@@ -208,12 +219,50 @@ def resolve_cap(entry, stop, target, cap, pre):
         if rr_cap is not None and entry is not None and rr_cap > entry:
             caps.append(rr_cap)
     if pre is not None and entry is not None:
-        gap_cap = float(pre) * (1.0 + GAP_UP_MAX)
+        base = float(pre)
+        if day_open is not None and float(day_open) > base * (1.0 + GAP_UP_MAX):
+            base = float(day_open)
+        gap_cap = base * (1.0 + GAP_UP_MAX)
         if gap_cap > entry:
             caps.append(gap_cap)
     if not caps:
         return None
     return round_px(min(caps))
+
+
+def cap_gates(entry, stop, target, cap, pre, day_open=None):
+    """逐闸返回各闸给出的上限 + 最终 cap，用于**如实报告是哪一闸在收紧**。
+
+    ★ 纪律第 22 条（2026-10-09 立）：cap 被拒时必须先调本函数打印三闸，
+      不得凭印象归因。金石亚药当天我误把 R 闸的 12.55 归给「昨收+2%」，
+      差 0.11 元，方向就判错了。
+    """
+    out = {"explicit": None, "rr_gate": None, "gap_gate": None,
+           "gap_base": None, "final": None}
+    if cap is not None:
+        out["explicit"] = float(cap)
+    if target is not None and stop is not None and target > stop:
+        rr_cap = max_entry_for_rr(RR_QUALIFIED, float(target), float(stop))
+        if rr_cap is not None and entry is not None and rr_cap > entry:
+            out["rr_gate"] = round_px(rr_cap)
+    if pre is not None and entry is not None:
+        base = float(pre)
+        src = "昨收"
+        if day_open is not None and float(day_open) > base * (1.0 + GAP_UP_MAX):
+            base = float(day_open)
+            src = "开盘价（昨收基准失效）"
+        out["gap_base"] = base
+        out["gap_base_src"] = src
+        gap_cap = base * (1.0 + GAP_UP_MAX)
+        if gap_cap > entry:
+            out["gap_gate"] = round_px(gap_cap)
+    out["final"] = resolve_cap(entry, stop, target, cap, pre, day_open)
+    cands = [(k, v) for k, v in (("显式cap", out["explicit"]),
+                                  ("R闸", out["rr_gate"]),
+                                  ("昨收+2%闸", out["gap_gate"])) if v is not None]
+    if cands:
+        out["tightest"] = min(cands, key=lambda kv: kv[1])[0]
+    return out
 
 
 def size_for(code, entry, stop, account=None, risk_scale=1.0):
@@ -456,7 +505,9 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
     vwap = float(last["avg"])
     pre = day.get("pre")
     code = day["code"]
-    buy_cap = resolve_cap(entry, stop, target, cap, pre)
+    day_open = float(day["minutes"][0]["o"]) if day.get("minutes") else None
+    buy_cap = resolve_cap(entry, stop, target, cap, pre, day_open)
+    gates = cap_gates(entry, stop, target, cap, pre, day_open)
     limit_px = limit_up_price(pre, code)
     limit_dn = limit_down_price(pre, code)
     rr = long_rr(price, target, stop) if target is not None else None
@@ -502,6 +553,7 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
         "structure": struct_ok,
         "shape": shape,
         "burst": burst,
+        "cap_gates": gates,
     }
 
     def _reject(reason):
@@ -656,6 +708,13 @@ def render(d):
         lines.append("  用途：拉升确认「方向对」，**不是买点信号**。买价仍以 entry/cap 为准，"
                      "不因在涨而抬高（2026-10-09 实测：追首个拉升信号比当日最低价少赚 4~5 个点）。")
     lines.append("盘中口径：只看 K线形态 + 结构位 + 分时资金流向，不掺基本面。")
+    g = d.get("cap_gates") or {}
+    if g.get("final") is not None:
+        tight = g.get("tightest") or "—"
+        lines.append("买入上限 %.2f 来自哪一闸：%s（显式 %s / R闸 %s / 昨收+2%%闸 %s%s）"
+                     % (g["final"], tight, g.get("explicit") or "无",
+                        g.get("rr_gate") or "无", g.get("gap_gate") or "无",
+                        "，基准=%s" % g["gap_base_src"] if g.get("gap_base_src") else ""))
     q = d.get("quality")
     if not q:
         lines.append("  基本面（估值/长线位置/雷族）不在盘中判定内 —— 由老罗在完整报告时判断；"
