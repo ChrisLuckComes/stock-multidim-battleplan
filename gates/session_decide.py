@@ -300,6 +300,40 @@ def rally_state(minutes):
             "above": round(above * 100, 0)}
 
 
+def trend_structure(minutes):
+    """★ 分时结构判据：双高双低 + 均价线上（老罗 2026-10-09 14:45 原话）。
+
+    「今天斯菱智驱、高毅达、芒果超媒，包括金徽酒都是涨的，都符合一个共同点：
+      高点一个比一个高，低点一个比一个低，大部分时间在均价线上方。」
+
+    这与 rally_state() 的区别很关键：rally 看「已经涨了多少」（幅度/速度），
+    **本判据看结构**（波峰波谷是否同步抬升）⇒ 能在幅度还很小的时候就识别，
+    是三者中唯一能提前的。实测金徽酒首个信号 10:36（幅度类判据要 10:47 之后）。
+
+    返回 {ok, gap, above, hi[3], lo[3]}；数据不足时 ok=False。
+    """
+    n = len(minutes or [])
+    if n < 41:
+        return {"ok": False, "why": "数据不足"}
+    m = minutes
+    i = n - 1
+    w60 = m[max(0, i - 60):i + 1]
+    segs = [w60[0:20], w60[20:40], w60[40:60]]
+    highs = [max(x["h"] for x in s) for s in segs]
+    lows = [min(x["l"] for x in s) for s in segs]
+    high_up = highs[1] >= highs[0] * 0.999 and highs[2] >= highs[1] * 0.999
+    low_up = lows[1] >= lows[0] * 0.999 and lows[2] >= lows[1] * 0.999
+    c = float(m[i]["c"])
+    avg = float(m[i]["avg"])
+    gap = (c / avg - 1.0) * 100 if avg else 0.0
+    w20 = m[max(0, i - 20):i + 1]
+    above = sum(1 for x in w20 if x["c"] > x["avg"]) / float(len(w20))
+    return {"ok": bool(high_up and low_up and above >= 0.6 and gap > 0),
+            "high_up": high_up, "low_up": low_up,
+            "above": round(above * 100, 0), "gap": round(gap, 2),
+            "hi": [round(x, 2) for x in highs], "lo": [round(x, 2) for x in lows]}
+
+
 def decide(day, summary, entry, stop, target, cap=None, account=None,
             risk_scale=1.0, quality=None):
     """核心判定。返回结构化结果，供 CLI 与测试用。
@@ -330,6 +364,7 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
     pct_pre, in_dip = zone_vs_pre(price, pre)
     tape = tape_so_far(day, summary)
     rally = rally_state(day["minutes"])
+    struct_ok = trend_structure(day["minutes"])
     dip_n = count_dip_minutes(day["minutes"], pre)
     wait_px, wait_note = arm_price(entry, stop, target, buy_cap, limit_px, limit_dn)
 
@@ -360,6 +395,7 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
         "arm_note": wait_note,
         "quality": quality,
         "rally": rally,
+        "structure": struct_ok,
     }
 
     def _reject(reason):
@@ -482,6 +518,14 @@ def render(d):
     if d["action"] == "能买" and d.get("caution"):
         lines.append("⚠ 资金读数偏弱，回踩档可接但建议减半仓（软约束不否决买入）")
     r = d.get("rally") or {}
+    st = d.get("structure") or {}
+    if st.get("ok"):
+        lines.append("★ 分时结构：高点抬高 %s → %s、低点抬高 %s → %s，"
+                     "近20分 %.0f%% 时间在均价上方（缺口 %+.2f%%）"
+                     % (st["hi"][0], st["hi"][2], st["lo"][0], st["lo"][2],
+                        st["above"], st["gap"]))
+        lines.append("  结构成立：方向对，可以按计划执行；买价仍以 entry/cap 为准，"
+                     "不因在涨而抬高（实测追信号比当日最低价少赚 4~5 个点）。")
     if r.get("tier") and r["tier"] != "数据不足":
         mark = "★" if r.get("ok") else "·"
         lines.append("%s 盘中拉升：%s（缺口 %+.2f%% 10分 %+.2f%% 20分 %+.2f%% 近20分收均价上 %.0f%%）"

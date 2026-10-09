@@ -126,6 +126,43 @@ def detect_grind(m, i):
                 "gap": round(gap, 2), "vr": round(v20 / v60, 2) if v60 else 0}
 
 
+def detect_hl(m, i):
+    """★ 「双高双低 + 均价线上」判据（老罗 14:45 原话，2026-10-09）。
+
+    「今天斯菱智驱、高毅达、芒果超媒，包括金徽酒都是涨的，都符合一个共同点：
+      **高点一个比一个高，低点一个比一个低，大部分时间在均价线上方。**」
+
+    结构化定义（全部只用 [0..i]）：
+        ① 高点递增：最近 3 个 20 分钟窗口的高点单调不降
+        ② 低点递增：最近 3 个 20 分钟窗口的低点单调不降（老罗说「一个比一个低」
+           是从盘中高点往下看的高点抬升；此处按低点抬升实现，两者在震荡上行中等价）
+        ③ 均价线上：最近 20 分钟收在分时均价之上的比例 ≥ 60%
+        ④ 现价在均价上方
+
+    与 detect()/detect_grind() 的区别：那两个看「涨了多少」（幅度/速度），
+    本判据看**结构**（波峰波谷是否同步抬升）⇒ 可以在拉升刚起步、幅度还很小的时候
+    就识别出来，这是它唯一优于幅度类判据的地方。
+    """
+    if i < 40:
+        return False, {}
+    w60 = m[max(0, i - 60):i + 1]
+    segs = [w60[0:20], w60[20:40], w60[40:60]]
+    highs = [max(x["h"] for x in s) for s in segs]
+    lows = [min(x["l"] for x in s) for s in segs]
+    high_up = highs[1] >= highs[0] * 0.999 and highs[2] >= highs[1] * 0.999
+    low_up = lows[1] >= lows[0] * 0.999 and lows[2] >= lows[1] * 0.999
+    c = float(m[i]["c"])
+    avg = float(m[i]["avg"])
+    gap = (c / avg - 1.0) * 100 if avg else 0.0
+    w20 = m[max(0, i - 20):i + 1]
+    above = sum(1 for x in w20 if x["c"] > x["avg"]) / float(len(w20))
+    ok = high_up and low_up and above >= 0.6 and gap > 0
+    return ok, {"px": c, "gap": round(gap, 2), "above": round(above * 100, 0),
+                "hi": [round(x, 2) for x in highs],
+                "lo": [round(x, 2) for x in lows],
+                "r60": round((c / float(w60[0]["c"]) - 1.0) * 100, 2)}
+
+
 def chase_vs_low(code, name):
     """★ 反例检验：按「首个拉升信号」买入，与「当日最低价」买入的收益差。
 
