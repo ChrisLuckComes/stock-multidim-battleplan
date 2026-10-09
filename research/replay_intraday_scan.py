@@ -82,7 +82,7 @@ def prev_trade_day(date):
     return (datetime.date(y, m, d) - datetime.timedelta(days=1)).isoformat()
 
 
-def scan(code, step=1, date="2026-10-09"):
+def scan(code, step=1, date="2026-10-09", use_quality=False):
     """对单票逐分钟回放，返回所有 action=='能买' 的时点。"""
     try:
         d0 = load_day_fast(code)
@@ -97,13 +97,16 @@ def scan(code, step=1, date="2026-10-09"):
     if err:
         return None, None, err
 
-    quality = quality_gate.assess(code, spot=float(d0["minutes"][-1]["c"]))
-    if quality["level"] == "block":   # 仅 --quality-strict 才可能 BLOCK
-        return ({"code": code, "name": d0.get("name"),
-                 "entry": plan["entry"], "stop": plan["stop"],
-                 "target": plan["target"], "close": d0["minutes"][-1]["c"],
-                 "quality_scale": quality["scale"]},
-                [], "质量否决：" + "；".join(quality["blocks"]))
+    # 盘中口径：默认不掺基本面（老罗 2026-10-09 14:26）。加 --quality 才接质量闸。
+    quality = None
+    if use_quality:
+        quality = quality_gate.assess(code, spot=float(d0["minutes"][-1]["c"]))
+        if quality["level"] == "block":   # 仅 --quality-strict 才可能 BLOCK
+            return ({"code": code, "name": d0.get("name"),
+                     "entry": plan["entry"], "stop": plan["stop"],
+                     "target": plan["target"], "close": d0["minutes"][-1]["c"],
+                     "quality_scale": quality["scale"]},
+                    [], "质量否决：" + "；".join(quality["blocks"]))
 
     hits = []
     for i in range(0, len(d0["minutes"]), step):
@@ -143,6 +146,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="全池逐分钟回放，列出引擎判能买的时点")
     ap.add_argument("--codes", default="", help="逗号分隔；缺省用今日关注列表")
     ap.add_argument("--step", type=int, default=1, help="采样步长（分钟），默认 1")
+    ap.add_argument("--quality", action="store_true",
+                    help="接入标的质量闸（默认关：盘中只看技术面+资金流向）")
     ap.add_argument("--date", default="2026-10-09")
     ap.add_argument("--json", action="store_true", help="输出 JSON")
     args = ap.parse_args(argv)
@@ -161,7 +166,8 @@ def main(argv=None):
     print("全池盘中回放扫描 · %s · 每 %d 分钟采样" % (args.date, args.step))
     print("=" * 74)
     for code in codes:
-        res, hits, err = scan(code, step=args.step, date=args.date)
+        res, hits, err = scan(code, step=args.step, date=args.date,
+                              use_quality=args.quality)
         if err and res is None:
             print("\n%s %s —— 跳过：%s" % (code, "", err))
             continue

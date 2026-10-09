@@ -264,10 +264,13 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
             risk_scale=1.0, quality=None):
     """核心判定。返回结构化结果，供 CLI 与测试用。
 
-    quality: gates.quality_gate.assess() 的返回值。传入后：
-        level=="block" ⇒ 硬否决（标的质量，不因价格达标而放行）
+    ★ 盘中口径（老罗 2026-10-09 14:26 定调）：
+        **只看 K线形态 + 结构位 + 分时资金流向，不掺基本面。**
+        基本面（估值 / 长线位置 / 雷族）由老罗在完整报告环节自行判断。
+
+    quality: gates.quality_gate.assess() 的返回值，**默认不传（CLI 需显式 --quality）**。
+        level=="block" ⇒ 硬否决（仅 --quality-strict 才可能出现）
         level=="warn"  ⇒ risk_scale 乘以质量系数（降权不否决）
-    2026-10-09 起 CLI 默认接入；不传则只跑价格闸（保持测试与回放兼容）。
     """
     entry = float(entry)
     stop = float(stop)
@@ -436,11 +439,11 @@ def render(d):
             lines.append(s["warn"])
     if d["action"] == "能买" and d.get("caution"):
         lines.append("⚠ 资金读数偏弱，回踩档可接但建议减半仓（软约束不否决买入）")
-    lines.append("价格闸只判断「这笔计划该不该在此价执行」，标的质量由独立质量闸评估：")
+    lines.append("盘中口径：只看 K线形态 + 结构位 + 分时资金流向，不掺基本面。")
     q = d.get("quality")
     if not q:
-        lines.append("  ⚠ 质量闸未接入（--no-quality 或 --plan 缺失）。"
-                     "能否买这只票须另看 扫雷 / 股性体检 / 估值 / 月线 / 板块。")
+        lines.append("  基本面（估值/长线位置/雷族）不在盘中判定内 —— 由老罗在完整报告时判断；"
+                     "需要时加 --quality 出提示（只提示不否决）。")
     else:
         try:
             from gates import quality_gate
@@ -470,11 +473,12 @@ def main(argv=None):
     ap.add_argument("--risk-scale", type=float, default=1.0,
                     help="情绪缩放，极弱可传 0.25")
     ap.add_argument("--json", action="store_true")
-    ap.add_argument("--no-quality", action="store_true",
-                    help="不接标的质量闸（只跑价格闸；调试用）")
+    ap.add_argument("--quality", action="store_true",
+                    help="接入标的质量闸（默认关！老罗 2026-10-09 14:26 定调："
+                         "盘中纯看技术面+K线形态+资金流向，基本面由老罗在完整报告时判断）")
     ap.add_argument("--quality-strict", action="store_true",
-                    help="质量闸严格模式：允许否决（默认只提示+降权，"
-                         "老罗 14:21 定调「盘中决策重点在技术面和资金流向」）")
+                    help="质量闸严格模式：允许否决（需同时给 --quality；"
+                         "默认只提示+降权）")
     args = ap.parse_args(argv)
 
     entry, stop, target, cap = args.entry, args.stop, args.target, args.cap
@@ -507,7 +511,7 @@ def main(argv=None):
 
     t1 = time.perf_counter()
     quality = None
-    if not args.no_quality:
+    if args.quality:
         try:
             from gates import quality_gate
             quality = quality_gate.assess(args.code, analysis_path=args.plan,
