@@ -487,8 +487,8 @@ def render(d):
         lines.append("%s 盘中拉升：%s（缺口 %+.2f%% 10分 %+.2f%% 20分 %+.2f%% 近20分收均价上 %.0f%%）"
                      % (mark, r["tier"], r.get("gap", 0), r.get("rise10", 0),
                         r.get("rise20", 0), r.get("above", 0)))
-        if r.get("ok"):
-            lines.append("  拉升中：可按计划执行，但不因「在涨」而抬高买价（买价仍以 entry/cap 为准）。")
+        lines.append("  用途：拉升确认「方向对」，**不是买点信号**。买价仍以 entry/cap 为准，"
+                     "不因在涨而抬高（2026-10-09 实测：追首个拉升信号比当日最低价少赚 4~5 个点）。")
     lines.append("盘中口径：只看 K线形态 + 结构位 + 分时资金流向，不掺基本面。")
     q = d.get("quality")
     if not q:

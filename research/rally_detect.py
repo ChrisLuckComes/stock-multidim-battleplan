@@ -82,7 +82,35 @@ def scan(code, name, step=1, forward=30):
                      "fwd15": (m[min(len(m) - 1, i + 15)]["c"] / f["price"] - 1) * 100,
                      "fwd": fwd, "fwd_t": m[j]["t"]})
     return {"code": code, "name": name or d.get("name"), "last": last,
-            "bars": len(m), "hits": hits}
+            "bars": len(m), "hits": hits, "day_low": min(x["l"] for x in m)}
+
+
+def chase_vs_low(code, name):
+    """★ 反例检验：按「首个拉升信号」买入，与「当日最低价」买入的收益差。
+
+    2026-10-09 实测（斯菱智驱 / 芒果超媒）⇒ **追拉升信号比抄当日最低点少赚 3.9~4.4 个
+    百分点**。原因：拉升信号必然出现在价格已抬升之后，信号本身是「确认」不是「先知」。
+    ⇒ 拉升判据的用途是**允许在计划区间内果断执行**，不是**替代低吸去找买点**。
+    """
+    d = load_day_fast(code)
+    m = d["minutes"]
+    last = m[-1]["c"]
+    lo = min(x["l"] for x in m)
+    first = None
+    for i in range(len(m)):
+        ok, f, tier = detect(m, i)
+        if ok and first is None:
+            first = (m[i]["t"], f["price"], tier)
+            break
+    out = {"code": code, "name": name or d.get("name"), "last": last,
+           "low": lo, "sig_t": first[0] if first else None,
+           "sig_px": first[1] if first else None,
+           "sig_tier": first[2] if first else None}
+    if first:
+        out["chase_pct"] = (last / first[1] - 1.0) * 100
+        out["low_pct"] = (last / lo - 1.0) * 100
+        out["gap_pct"] = out["chase_pct"] - out["low_pct"]
+    return out
 
 
 def main():
@@ -139,6 +167,12 @@ def main():
                  max(h["fwd"] for h in r["hits"])))
         print("   ★ 最早可识别：%s @ %.2f（后续 %+.2f%%）"
               % (first["t"], first["px"], first["fwd"]))
+        # ★ 反例检验：追拉升信号 vs 抄当日最低
+        if r["day_low"]:
+            chase = (r["last"] / first["px"] - 1) * 100
+            lowp = (r["last"] / r["day_low"] - 1) * 100
+            print("   ★ 反例：首个信号买入 %+.2f%%  vs  当日最低买入 %+.2f%%  ⇒ 差 %+.2f 个百分点"
+                  % (chase, lowp, chase - lowp))
 
 
 if __name__ == "__main__":
