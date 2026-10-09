@@ -6,6 +6,17 @@ out_cn/*.json
 out_us/*.json
 out_cn/*.html
 out_us/*.html
+# gate 子进程 stderr 落盘（2026-10-09 补）：正常为空文件，异常时才是诊断线索，
+# 属本地排障中间产物，不应入库（否则一批 0 字节文件反复污染 git status）。
+out_cn/*.err
+out_us/*.err
+# gate 文本报告落盘（2026-10-09 补）：扫雷/股性等每次重跑都会重新生成，属可再生产物。
+out_cn/*.txt
+out_us/*.txt
+# 排障过程中的临时/复核中间产物（2026-10-09 补）：_tmp_*、_review_* 属一次性诊断文件，
+# 结论落定后即失效；out_cn/*.json 已覆盖其余分析产物。
+out_cn/_tmp_*.json
+out_cn/_review_*.json
 *_data.json
 /data/
 __pycache__/
@@ -13,6 +24,10 @@ __pycache__/
 *.tmp
 output/
 _gen_*.py
+# 一次性传参包装脚本（2026-10-09 补）：为绕开 Git Bash 中文参数 GBK/括号坑临时生成，
+# 用完即弃。通用件 _run_battle.py 例外，它是标准传参路径，予以收录。
+_run_*.py
+!_run_battle.py
 scan_all/codes.json
 scan_all/results.jsonl
 data_n/
