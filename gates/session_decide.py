@@ -260,6 +260,46 @@ def arm_price(entry, stop, target, buy_cap, limit_px, limit_dn=None):
         floor, ("%.2f" % ceiling) if ceiling is not None else "—")
 
 
+def rally_state(minutes):
+    """当前是否处于盘中拉升中（只用已发生的分钟线，无 lookahead）。
+
+    判据三档见 research/rally_detect.py TIERS，2026-10-09 六票全分钟网格扫描标定：
+      观察   gap≥0.5 / 10分≥0.4 / 20分≥0.8 / 近20分收均价上≥70%
+      拉升中 gap≥1.0 / 10分≥0.6 / 20分≥1.2 / 近20分收均价上≥80%  ← 默认判定
+      强拉升 gap≥2.0 / 10分≥1.0 / 20分≥2.0 / 近20分收均价上≥100%
+    同日实测：芒果 12/16 时点命中（平均后续 +7.02%），
+              三夫 0 信号、金徽 1 个且为误报 ⇒ 有区分度，不是「见涨就报」。
+    封板后 10 分涨幅归零会自动熄火 ⇒ 不会把「已封板」误报成拉升机会。
+    """
+    if not minutes or len(minutes) < 6:
+        return {"tier": "数据不足", "ok": False}
+    tiers = ((0.5, 0.4, 0.8, 0.70, "观察"),
+             (1.0, 0.6, 1.2, 0.80, "拉升中"),
+             (2.0, 1.0, 2.0, 1.00, "强拉升"))
+    m = minutes
+    i = len(m) - 1
+    win = m[max(0, i - 20):i + 1]
+    c = float(m[i]["c"])
+    avg = float(m[i]["avg"])
+    gap = (c / avg - 1.0) * 100 if avg else 0.0
+    rise10 = (c / float(m[max(0, i - 10)]["c"]) - 1.0) * 100
+    rise20 = (c / float(win[0]["c"]) - 1.0) * 100
+    above = sum(1 for x in win if x["c"] > x["avg"]) / float(len(win))
+
+    def hit(g, r10, r20, ab):
+        return gap >= g and rise10 >= r10 and rise20 >= r20 and above >= ab
+
+    tier = "观察档以下"
+    for g, r10, r20, ab, name in reversed(tiers):
+        if hit(g, r10, r20, ab):
+            tier = name
+            break
+    ok = tier == "拉升中" or tier == "强拉升"
+    return {"tier": tier, "ok": ok, "gap": round(gap, 2),
+            "rise10": round(rise10, 2), "rise20": round(rise20, 2),
+            "above": round(above * 100, 0)}
+
+
 def decide(day, summary, entry, stop, target, cap=None, account=None,
             risk_scale=1.0, quality=None):
     """核心判定。返回结构化结果，供 CLI 与测试用。
@@ -289,6 +329,7 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
         risk_scale = risk_scale * float(quality.get("scale") or 1.0)
     pct_pre, in_dip = zone_vs_pre(price, pre)
     tape = tape_so_far(day, summary)
+    rally = rally_state(day["minutes"])
     dip_n = count_dip_minutes(day["minutes"], pre)
     wait_px, wait_note = arm_price(entry, stop, target, buy_cap, limit_px, limit_dn)
 
@@ -318,6 +359,7 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
         "arm_price": wait_px,
         "arm_note": wait_note,
         "quality": quality,
+        "rally": rally,
     }
 
     def _reject(reason):
@@ -439,6 +481,14 @@ def render(d):
             lines.append(s["warn"])
     if d["action"] == "能买" and d.get("caution"):
         lines.append("⚠ 资金读数偏弱，回踩档可接但建议减半仓（软约束不否决买入）")
+    r = d.get("rally") or {}
+    if r.get("tier") and r["tier"] != "数据不足":
+        mark = "★" if r.get("ok") else "·"
+        lines.append("%s 盘中拉升：%s（缺口 %+.2f%% 10分 %+.2f%% 20分 %+.2f%% 近20分收均价上 %.0f%%）"
+                     % (mark, r["tier"], r.get("gap", 0), r.get("rise10", 0),
+                        r.get("rise20", 0), r.get("above", 0)))
+        if r.get("ok"):
+            lines.append("  拉升中：可按计划执行，但不因「在涨」而抬高买价（买价仍以 entry/cap 为准）。")
     lines.append("盘中口径：只看 K线形态 + 结构位 + 分时资金流向，不掺基本面。")
     q = d.get("quality")
     if not q:
