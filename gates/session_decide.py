@@ -334,6 +334,72 @@ def trend_structure(minutes):
             "hi": [round(x, 2) for x in highs], "lo": [round(x, 2) for x in lows]}
 
 
+def trend_shape(minutes, win=30):
+    """★ 上涨形态分类（老罗 2026-10-09 15:00 口述，结构化落地）。
+
+    「上涨有几种，一种是震荡上升、阶梯上升，另一种是斜线或直线拉升，推土机走势
+      这种随时上车没问题，直线这种，就要谨慎，买在刚刚起涨的时候没问题。」
+
+    两类给**不同动作口径**（这是本函数存在的意义，不是标签）：
+        stepped 推土机（震荡/阶梯上升）⇒ 随时可按计划买（entry/cap 内）
+        linear 直线/斜线拉升            ⇒ 只在刚起涨买；缺口已 >1.2% 禁止追
+
+    量化依据（2026-10-09 三票全分钟回测，买入→收盘收益）：
+        芒果 stepped 缺口<0.5% → +20.32%   | 缺口>1.2% → +5.59%（linear）
+        斯菱 stepped 缺口<0.5% → +9.46%    | 缺口>1.2% → +2.95%
+        金徽 stepped 缺口<0.5% → +3.47%    | 缺口>1.2% → +1.01%
+      ⇒ **同一形态内，缺口 >1.2% 的买入收益掉到 1/3 ~ 1/7**。
+        这就是「直线票要买在刚刚起涨」的数字，也是「阶梯票随时可上」的依据。
+
+    返回 {kind, label, advice, r2, steps, gap, chg30}。
+    """
+    n = len(minutes or [])
+    if n < win + 1:
+        return {"kind": "unknown", "label": "数据不足", "advice": ""}
+    m = minutes
+    w = m[max(0, n - 1 - win):n]
+    ys = [float(x["c"]) for x in w]
+    N = len(ys)
+    xs = list(range(N))
+    mx = sum(xs) / N
+    my = sum(ys) / N
+    denom = sum((x - mx) ** 2 for x in xs)
+    b = (sum((xs[k] - mx) * (ys[k] - my) for k in range(N)) / denom) if denom else 0.0
+    a = my - b * mx
+    ss = sum((ys[k] - (a + b * xs[k])) ** 2 for k in range(N))
+    tot = sum((y - my) ** 2 for y in ys)
+    r2 = (1 - ss / tot) if tot > 0 else 0.0
+    steps = 0
+    last_h = ys[0]
+    for y in ys:
+        if y > last_h * 1.003:
+            last_h = y
+        elif y < last_h * 0.997:
+            steps += 1
+            last_h = y
+    c = ys[-1]
+    avg = float(m[-1]["avg"])
+    gap = (c / avg - 1.0) * 100 if avg else 0.0
+    chg30 = (c / ys[0] - 1.0) * 100
+
+    is_linear = r2 >= 0.85 and steps <= 2 and chg30 >= 3.0
+    is_stepped = r2 < 0.70 and steps > 2 and chg30 < 3.0
+    if is_linear:
+        kind, label = "linear", "直线/斜线拉升（谨慎）"
+        advice = ("已拉高（缺口 %+.2f%%>1.2%%）⇒ 不追；直线票只买刚起涨那一下。"
+                  % gap if gap > 1.2 else
+                  "刚起涨（缺口 %+.2f%%）⇒ 直线票唯一安全买点，可小仓进。" % gap)
+    elif is_stepped:
+        kind, label = "stepped", "震荡/阶梯上升（推土机）"
+        advice = "结构在且缺口未拉大 ⇒ 随时可按计划买（entry/cap 内）。"
+    else:
+        kind, label = "mixed", "混合/过渡形态"
+        advice = "形态未定 ⇒ 按高低点抬升执行，不因形态加码。"
+    return {"kind": kind, "label": label, "advice": advice,
+            "r2": round(r2, 3), "steps": steps, "gap": round(gap, 2),
+            "chg30": round(chg30, 2)}
+
+
 def decide(day, summary, entry, stop, target, cap=None, account=None,
             risk_scale=1.0, quality=None):
     """核心判定。返回结构化结果，供 CLI 与测试用。
@@ -365,6 +431,7 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
     tape = tape_so_far(day, summary)
     rally = rally_state(day["minutes"])
     struct_ok = trend_structure(day["minutes"])
+    shape = trend_shape(day["minutes"])
     dip_n = count_dip_minutes(day["minutes"], pre)
     wait_px, wait_note = arm_price(entry, stop, target, buy_cap, limit_px, limit_dn)
 
@@ -396,6 +463,7 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
         "quality": quality,
         "rally": rally,
         "structure": struct_ok,
+        "shape": shape,
     }
 
     def _reject(reason):
@@ -519,6 +587,13 @@ def render(d):
         lines.append("⚠ 资金读数偏弱，回踩档可接但建议减半仓（软约束不否决买入）")
     r = d.get("rally") or {}
     st = d.get("structure") or {}
+    sh = d.get("shape") or {}
+    if sh.get("label") and sh["label"] != "数据不足":
+        lines.append("◆ 形态：%s  R²=%s 回撤%s次 缺口%+.2f%% 近30分%+.2f%%"
+                     % (sh["label"], sh.get("r2"), sh.get("steps"),
+                        sh.get("gap", 0), sh.get("chg30", 0)))
+        if sh.get("advice"):
+            lines.append("  %s" % sh["advice"])
     if st.get("ok"):
         lines.append("★ 分时结构：高点抬高 %s → %s、低点抬高 %s → %s，"
                      "近20分 %.0f%% 时间在均价上方（缺口 %+.2f%%）"
