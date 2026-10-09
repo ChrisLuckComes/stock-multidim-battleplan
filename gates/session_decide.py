@@ -340,7 +340,15 @@ def decide(day, summary, entry, stop, target, cap=None, account=None, risk_scale
             return _reject(tape["text"] + " 只接计划内回踩，不追高。")
     if buy_cap is not None and price > buy_cap + 1e-9:
         return _reject("现价 %.2f 高于买入上限 %.2f。" % (price, buy_cap))
-    if target is not None and (rr is None or rr < RR_QUALIFIED):
+    if target is None:
+        # ★ 无目标价 ⇒ 无赔率（R 恒为 None）⇒ 不得判「能买」。
+        #   2026-10-09 老罗要求引擎优化时发现：300434 金石亚药、600188 兖矿能源
+        #   的 analysis 无 odds_recommend.target，旧实现直接跳过 R 闸门，
+        #   上午 09:30~09:48 一路判「能买」——拿一个算不出赔率的计划去下单是不对的。
+        out["arm_price"] = None
+        out["arm_note"] = ""
+        return _reject("计划无目标价，赔率算不出（不是买点）。先补 target 再判。")
+    if rr is None or rr < RR_QUALIFIED:
         return _reject("现价盈亏比 %s，低于 %.1f。" % (
             ("%.2f" % rr) if rr is not None else "—", RR_QUALIFIED))
 
@@ -412,6 +420,8 @@ def render(d):
             lines.append(s["warn"])
     if d["action"] == "能买" and d.get("caution"):
         lines.append("⚠ 资金读数偏弱，回踩档可接但建议减半仓（软约束不否决买入）")
+    lines.append("本闸门只判断「这笔计划该不该在此价执行」，不评估标的质量：")
+    lines.append("  能否买这只票须另看 扫雷 / 股性体检 / 估值 / 月线 / 板块。R 高≠好票（世名 2026-10-09 引擎给 R=10.15，当天 −2.6%）。")
     lines.append("不打板。止损目标沿用计划。T+1：当日买入当日没有止损腿。")
     return "\n".join(lines)
 

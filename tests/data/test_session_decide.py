@@ -163,6 +163,29 @@ def test_limit_down_board_is_rejected():
         "盯价 %s 必须高于跌停价 %s" % (r["arm_price"], dn))
 
 
+def test_missing_target_blocks_entry():
+    """回归：无目标价 ⇒ 赔率算不出 ⇒ 不得判「能买」。
+
+    2026-10-09 老罗要求优化引擎时发现：300434 金石亚药、600188 兖矿能源的
+    analysis 无 odds_recommend.target，旧实现 `if target is not None and ...`
+    直接跳过 R 闸门，于 09:30~09:48 一路判「能买」——拿算不出赔率的计划下单。
+    """
+    minutes = [
+        {"t": "09:30", "o": 5.20, "h": 5.22, "l": 5.18, "c": 5.20, "v": 200, "avg": 5.20},
+        {"t": "10:00", "o": 5.25, "h": 5.30, "l": 5.22, "c": 5.28, "v": 200, "avg": 5.24},
+    ]
+    day = _day(minutes, [{"t": "10:00", "main": 1e7, "super": 1e7,
+                          "large": 0, "mid": 0, "small": -1e7}],
+               pre=5.20, code="300434", name="金石亚药")
+    s = _summary(day, main=1e7, small=-1e7)
+    d = decide(day, s, entry=5.00, stop=4.80, target=None, cap=5.35)
+    assert d["action"] == "不买", d["reason"]
+    assert "目标价" in d["reason"], d["reason"]
+    # 有目标价时同一场景应能给出 R
+    d2 = decide(day, s, entry=5.00, stop=4.80, target=5.90, cap=5.35)
+    assert d2["rr"] is not None and d2["rr"] > 0
+
+
 if __name__ == "__main__":
     test_dip_zone_and_cap()
     test_buy_in_0_2_window()
@@ -170,4 +193,5 @@ if __name__ == "__main__":
     test_soft_tape_does_not_veto_pullback_entry()
     test_soft_tape_still_blocks_chasing()
     test_limit_down_board_is_rejected()
-    print("ok 6")
+    test_missing_target_blocks_entry()
+    print("ok 7")
