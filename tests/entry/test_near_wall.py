@@ -100,18 +100,24 @@ class TestPokeWallIsNotTarget(unittest.TestCase):
         tg = R.targets(bars, "line_pullback", {}, 4.0, 100.0, [(0, 104.8), (0, 120.0)])
         self.assertEqual(tg["target1"], 104.8)
 
-    def test_new_high_opens_upside(self):
-        """前高 100，收盘 120 且上方无墙 ⇒ 目标 = 120+6×ATR，不是 +2×ATR。"""
+    def test_new_high_no_structure_is_sea_sky(self):
+        """前高 100，收盘 120 且上方无墙、无可量度形态 ⇒ 海阔天空（如实，不造假盈亏比）。
+
+        ⚠ 旧口径曾给 entry+6×ATR（144）的虚假高盈亏比；新口径依经典测幅法
+        （E&M 仅对矩形/三角/头肩/旗形成立）判定：无可量度形态 ⇒ 海阔天空，
+        target1/rr 均为 None，且**不**因「无目标」降优先级。
+        """
         bars = []
         for i in range(25):
             bars.append({"d": "p%d" % i, "o": 98, "h": 100, "l": 96, "c": 99, "v": 1})
         bars.append({"d": "d", "o": 110, "h": 122, "l": 109, "c": 120, "v": 1})
         tg = R.targets(bars, "platform_break", {}, 4.0, 120.0, [])
-        self.assertTrue(tg["upside_open"])
-        self.assertEqual(tg["target1"], 144.0)
-        # 止损放在 2×ATR 下，现价 R 仍然过 1.5
-        tg2 = R.targets(bars, "platform_break", {"hard_stop": 112.0}, 4.0, 120.0, [])
-        self.assertEqual(tg2["rr_target1"], 3.0)
+        self.assertTrue(tg["sea_sky"])
+        self.assertIsNone(tg["target1"])
+        self.assertIsNone(tg["rr_target1"])
+        self.assertEqual(tg["measured_kind"], "sea_sky")
+        # 海阔天空 ≠ 封死：封死标记必须为 False（两者语义不同）。
+        self.assertFalse(tg["no_room_above"])
 
     def test_platform_measured_not_pulled_back_into_the_door(self):
         """近端 101 是门。门后的 130 才是目标，不用测量涨幅把目标压在 108。"""
@@ -120,14 +126,18 @@ class TestPokeWallIsNotTarget(unittest.TestCase):
         tg = R.targets(bars, "platform_break", z, 4.0, 100.0, [(0, 101.0), (0, 130.0)])
         self.assertEqual(tg["target1"], 130.0)
 
-    def test_breakout_without_further_wall_opens_space(self):
-        """突破后没有更远的墙，目标用「门后打开空间」= door+6×ATR（2026-09-29 口径：
-        through_gate 103.4 视为要穿过的门，door=gate+0.15×ATR=104，空间从门后算起）。
-        旧期望 124（entry+6×ATR）为门概念引入前的口径，已废。"""
+    def test_breakout_without_further_wall_falls_back_to_extend(self):
+        """突破后没有更远的墙、且非新高（单根无历史 ⇒ 不误判海阔天空）⇒ 保守延伸 2×ATR。
+
+        ⚠ 旧口径曾给 door+6×ATR（128）的「space_open」虚假目标；新口径废除该分支，
+        无真墙且非新高时只给保守的 entry+2×ATR 延伸，海阔天空/封死标记均为 False。
+        """
         bars = [{"d": "d", "o": 99, "h": 101.5, "l": 90, "c": 100, "v": 1}]
         tg = R.targets(bars, "flag_tl_break", {"through_gate": 103.4}, 4.0, 100.0, [(0, 103.4)])
-        self.assertTrue(tg["space_open"])
-        self.assertEqual(tg["target1"], 128.0)
+        self.assertFalse(tg["space_open"])
+        self.assertFalse(tg["sea_sky"])
+        self.assertFalse(tg["no_room_above"])
+        self.assertEqual(tg["target1"], 108.0)
 
 
 if __name__ == "__main__":

@@ -2289,76 +2289,222 @@ OPEN_ATR = 6.0
 # 只算「要穿过的门」、不算目标。与追价上限的赔率闸同一档 1.5。
 RR_GATE = 1.5
 
+# ── 单日大涨后的空间衰减（2026-10-10，老罗「涨停了但报R 很高是虚假」实证）──
+# 问题：`targets` 的 `upside_open` 分支只看「entry ≥ 窗口前高」就判空间打开，
+#   目标直接给 `entry + OPEN_ATR×ATR`（6×ATR）。但涨停/大阳当天，**一根板已把
+#   空间吃掉大半甚至全部** —— 此时再给 6×ATR 等于凭空假设「后面还有一大段」，
+#   报出的rr_target1 是虚高的（实测构造形态：R 报到 9.64，实际空间已被涨停吃掉）。
+#   根因是「创新高」被当成了「空间打开」，这两件事在高��停日被混为一谈。
+# 口径：单日涨幅越大（越接近涨停），可给的空间按比例衰减；真涨停 = 空间归零。
+LU_MAIN = 0.098      # 主板 60/00 涨停幅度（10%）
+LU_GEM = 0.198# 创业板 30 / 科创板 688 涨停幅度（20%）
+# ── 测幅 / 海阔天空辅助（2026-10-10，老罗「涨停/创新高报高盈亏比是虚假」终极口径）──
+# 依据：Edwards & Magee《股市趋势技术分析》"MEASURING FORMULAE" 章 + Bulkowski
+#      《图表形态百科全书》统计 + O'Neil《笑傲股市》。
+#  · 有明确平台宽度 / 明确形态 ⇒ 按对应测幅法算（矩形高度 / 旗杆高度 / 双底深度）；
+#  · 创历史新高（或阶段新高）且上方无历史阻力、无可量度形态 ⇒ 如实写「海阔天空」，
+#    不预设目标价（O'Neil：买新高、让利润奔跑），绝不给凭空延伸的 6×ATR；
+#  · 真涨停封死 ⇒ 标记「封死」，当日不可追（与海阔天空区分）。
 
-def _upside_open(bars, entry, atr_v, beyond):
-    """收盘创了这段行情的新高，且门后没有下一档压力。"""
-    if beyond is not None or not bars or not atr_v or entry is None:
+
+def _last_chg_pct(bars):
+    """末根相对昨收涨跌幅（%），无数据返 None。"""
+    if not bars or len(bars) < 2:
+        return None
+    pc, c = bars[-2].get("c"), bars[-1].get("c")
+    if not pc or pc <= 0 or c is None:
+        return None
+    return round((c - pc) / pc * 100, 2)
+
+
+def _sealed_limit_up(bars, atr_v, ticker=""):
+    """真涨停封死：收盘=最高=涨停价（主板 10% / 双创 20%）。
+
+    封死当天一根板把空间吃完、且当日不可追 ⇒ 如实标记「封死」，与「海阔天空」
+    （创新高但上方无阻力、让利润奔跑）是两回事。仅用于把「封死」从「海阔天空」里
+    区分出来，不参与任何盈亏比计算。
+    """
+    if not bars or len(bars) < 2 or not atr_v or atr_v <= 0:
         return False
-    if len(bars) < 20:
+    last, prev = bars[-1], bars[-2]
+    c, h, o = last.get("c"), last.get("h"), last.get("o")
+    pc = prev.get("c")
+    if None in (c, h, o, pc) or pc <= 0 or c <= 0:
         return False
-    prior_high = max(b["h"] for b in bars[:-1])
-    return entry >= prior_high
+    code = str(ticker or "").split(".")[0]
+    lim = LU_GEM if (code.startswith("30") or code.startswith("688")) else LU_MAIN
+    up_limit = round(pc * (1 + lim), 2)
+    # 主判据：收在涨停价且收=最高（一字/缩量封板，浮筹封死）。
+    if abs(c - up_limit) <= max(0.02, up_limit * 0.005) and abs(h - c) <= 1e-6:
+        return True
+    # 退一步：收盘封在当日最高、实体极厚（无上影）也视为封死。
+    body = abs(c - o)
+    if body > 0 and abs(h - c) <= max(1e-6, body * 0.02):
+        return True
+    return False
 
 
-def targets(bars, mode, z, atr_v, entry, Hs):
-    """目标1=门后的下一档压力。创新高且无墙时用打开空间口径。目标2=窗口内更高阻力。"""
+def measured_target(bars, mode, ev, entry, atr_v):
+    """经典测幅法（E&M "MEASURING FORMULAE" + Bulkowski 统计）：有明确可量度形态时，
+    用形态自身高度从突破点投射目标，把形态转成盈亏比。
+
+    返回 {kind, target1, measure, breakout} 或 None（无可量度结构）：
+      · platform_break → 矩形/平台测幅：target = 平台上沿 + (上沿−下沿)
+      · flag_tl_break  → 旗形测幅：target = 突破点 + 旗杆高度（腿进=腿出）
+      · w_bottom_break → 双底测幅：target = 颈线 + (颈线−底)
+    其它模式（downtrend_tl_break 等反转类）无干净测幅 ⇒ None，交由 targets()
+    走「真墙 / 海阔天空」口径。无 ev 或结构不全 ⇒ None（测试/缺数据时回落旧逻辑）。
+    """
+    if not bars or not atr_v or atr_v <= 0 or entry is None or not ev:
+        return None
+    n = len(bars)
+    if mode == "platform_break":
+        plat = (ev.get("platform") or {})
+        top = plat.get("price")
+        if top is None:
+            return None
+        # 平台下沿 = 突破前窗口内、低于上沿的摆动低点簇的支撑线（取最高低点=地板）。
+        _, Ls = pivots(bars)
+        win = [p for i, p in Ls if n - 60 <= i <= n - 3 and p < top - 0.3 * atr_v]
+        if not win:
+            return None
+        bottom = max(win)                 # 区间下沿支撑线
+        height = top - bottom
+        if height < 0.5 * atr_v:          # 太薄的平台，测幅失真 ⇒ 不强行给
+            return None
+        return {"kind": "platform", "target1": round(top + height, 2),
+                "measure": round(height, 2), "breakout": round(top, 2)}
+    if mode == "flag_tl_break":
+        fl = (ev.get("bull_flag") or {})
+        pole_lo, pole_hi = fl.get("pole_lo"), fl.get("pole_hi")
+        if pole_lo is None or pole_hi is None or pole_hi <= pole_lo:
+            return None
+        pole_h = pole_hi - pole_lo
+        if pole_h < atr_v:
+            return None
+        return {"kind": "flag", "target1": round(entry + pole_h, 2),
+                "measure": round(pole_h, 2), "breakout": round(entry, 2)}
+    if mode == "w_bottom_break":
+        wb = (ev.get("w_bottom") or {})
+        neck = wb.get("neckline")
+        l1 = (wb.get("l1") or {}).get("price")
+        l2 = (wb.get("l2") or {}).get("price")
+        if neck is None or l1 is None or l2 is None:
+            return None
+        bottom = min(l1, l2)
+        height = neck - bottom
+        if height < 0.5 * atr_v:
+            return None
+        return {"kind": "w_bottom", "target1": round(neck + height, 2),
+                "measure": round(height, 2), "breakout": round(neck, 2)}
+    return None
+
+
+def targets(bars, mode, z, atr_v, entry, Hs, ev=None):
+    """目标1 = 经典测幅（有形态时）/ 下一档真阻力（无形态但有墙）；
+    创新高且上方无墙、无可量度形态 ⇒ 海阔天空（如实，不造假盈亏比）。
+
+    ⚠ 2026-10-10 老罗「涨停/创新高报高盈亏比是虚假」终极口径（以经典技术分析为据）：
+      · 有明确平台宽度 / 明确形态 ⇒ 按对应测幅法算（矩形高度 / 旗杆高度 / 双底深度）；
+      · 创历史新高（或阶段新高）且上方无历史阻力、无可量度形态 ⇒ 如实写「海阔天空」，
+        不预设目标价（O'Neil 口径：买新高、让利润奔跑），**绝不**给凭空延伸的 6×ATR；
+      · 真涨停封死 ⇒ 标记「封死」，当日不可追（与海阔天空区分）。
+    旧的 `upside_open`（创新高就给 6×ATR）已被废除——它把「创新高」与「后面还有
+    一大段」混为一谈，正是虚假高盈亏比的病根。
+    """
     if entry is None or not atr_v:
         return None
+    z = z or {}
     door = entry + POKE_ATR * atr_v
-    # 下降趋势线突破注明的前高是要穿过的门，可以比 0.5×ATR 更远。
-    gate = (z or {}).get("through_gate")
-    # 0.15×ATR 以内视为同一道门。再高一丁点的枢轴不是门后的下一档墙。
+    gate = z.get("through_gate")
     if gate is not None:
         door = max(door, gate + 0.15 * atr_v)
     resist = sorted({h for i, h in Hs if h > door})
     beyond = resist[0] if resist else None
-    upside_open = _upside_open(bars, entry, atr_v, beyond)
-    extend = round(entry + 2.0 * atr_v, 2)
-    # 止损与风险提前算：突破买法要靠它挑目标（2026-09-29 修目标口径）
-    hard = (z or {}).get("hard_stop") or (z or {}).get("hard")
+    hard = z.get("hard_stop") or z.get("hard")
     if isinstance(hard, dict):
         hard = hard.get("hard")
     risk = (entry - hard) if hard is not None else None
-    cands = []
-    space_open = False
-    if upside_open:
-        t1 = round(entry + OPEN_ATR * atr_v, 2)
-    else:
-        if beyond is not None:
-            cands.append(beyond)
+
+    # ── 1) 经典测幅：有明确平台/形态 ⇒ 按对应方法算（文献依据）──
+    mt = measured_target(bars, mode, ev, entry, atr_v)
+    if mt is not None:
+        tm = mt["target1"]
+        # 若突破点与测幅目标之间横着更近的真墙，那面墙才是现实第一目标。
+        nearer = min(resist) if resist else None
+        t1 = nearer if (nearer is not None and nearer < tm) else tm
+        above = [h for h in resist if h > t1 + 0.2 * atr_v]
+        t2 = above[0] if above else round(t1 + 2.0 * atr_v, 2)
+        rr = round((t1 - entry) / risk, 2) if risk and risk > 0 else None
+        return {
+            "target1": round(t1, 2), "target2": round(t2, 2), "rr_target1": rr,
+            "measured_kind": mt["kind"], "measure": mt["measure"],
+            "breakout": mt["breakout"],
+            "upside_open": False, "space_open": False,
+            "sea_sky": False, "no_room_above": False,
+            "last_chg_pct": _last_chg_pct(bars),
+        }
+
+    # ── 2) 无测幅结构：用下一档真阻力；无真墙则判封死 / 海阔天空 ──
+    if beyond is not None:
         if mode in BREAKOUT_MODES:
-            # 突破是 T1 主做，因为穿过之后空间打开。
-            # 目标 = 能给到 RR_GATE 的「最近真阻力」，不是「最近的真阻力」。
-            # 旧逻辑是二元判据 t1<=door：差 0.17 元结果差 10 倍（688152：40.88
-            # 刚过 door 40.71 ⇒ R 0.83；再低一档就跳到 +6ATR ⇒ R 9.5），断崖式
-            # 不连续，等于把突破买法系统性废掉（全样本向上档合格率仅 11.3%）。
+            # 突破档只给「能给到 R>=RR_GATE 的墙」，不是「最近的墙」。
             need = entry + RR_GATE * risk if (risk and risk > 0) else None
-            wall = next((h for h in resist if need is None or h >= need), None)
-            if wall is not None:
-                t1 = wall
-            else:
-                t1 = round(door + OPEN_ATR * atr_v, 2)
-                space_open = True
+            t1 = next((h for h in resist if need is None or h >= need), beyond)
         else:
-            t1 = min(cands) if cands else extend
+            t1 = beyond
             if gate is not None and t1 <= gate:
                 t1 = round(gate + 2.0 * atr_v, 2)
-    # 区间高 = 传入 bars 窗口内最高（常见约 130 根），不是严格 250 日/52 周高
-    hi_all = max(b["h"] for b in bars)
-    t2 = hi_all if hi_all > t1 + 0.2 * atr_v else round(t1 + 2.0 * atr_v, 2)
-    if abs(t2 - t1) < 0.15 * atr_v:
-        t2 = round(t1 + 2.0 * atr_v, 2)
-    rr = round((t1 - entry) / risk, 2) if risk and risk > 0 else None
+        hi_all = max(b["h"] for b in bars)
+        t2 = hi_all if hi_all > t1 + 0.2 * atr_v else round(t1 + 2.0 * atr_v, 2)
+        if abs(t2 - t1) < 0.15 * atr_v:
+            t2 = round(t1 + 2.0 * atr_v, 2)
+        rr = round((t1 - entry) / risk, 2) if risk and risk > 0 else None
+        return {
+            "target1": round(t1, 2), "target2": round(t2, 2), "rr_target1": rr,
+            "measured_kind": None, "measure": None, "breakout": None,
+            "upside_open": False, "space_open": False,
+            "sea_sky": False, "no_room_above": False,
+            "last_chg_pct": _last_chg_pct(bars),
+        }
+
+    # ── 3) 无测幅、无真墙：判封死 / 海阔天空 ──
+    ticker = (ev or {}).get("ticker", "")
+    if _sealed_limit_up(bars, atr_v, ticker):
+        # 真涨停封死：当日不可追、空间归零（诚实状态，非虚假高盈亏比）。
+        return {
+            "target1": None, "target2": None, "rr_target1": None,
+            "measured_kind": None, "measure": None, "breakout": None,
+            "upside_open": False, "space_open": False,
+            "sea_sky": False, "no_room_above": True,
+            "last_chg_pct": _last_chg_pct(bars),
+        }
+    prior_high = max((b["h"] for b in bars[:-1]), default=float("inf"))
+    if entry >= prior_high:
+        # 创（阶段/历史）新高、上方无历史阻力、无可量度形态 ⇒ 海阔天空。
+        # 经典测量公式不适用（E&M 仅对矩形/三角/头肩/旗形成立）；O'Neil：买新高、
+        # 让利润奔跑、不预设目标价。如实标注，不造假盈亏比，也不因此降优先级。
+        return {
+            "target1": None, "target2": None, "rr_target1": None,
+            "measured_kind": "sea_sky", "measure": None, "breakout": None,
+            "upside_open": False, "space_open": False,
+            "sea_sky": True, "no_room_above": False,
+            "last_chg_pct": _last_chg_pct(bars),
+        }
+    # 非新高、无墙（极少见）：保守延伸，避免 None 被下游误读成「数据缺失」。
+    extend = round(entry + 2.0 * atr_v, 2)
+    t2 = round(extend + 2.0 * atr_v, 2)
+    rr = round((extend - entry) / risk, 2) if risk and risk > 0 else None
     return {
-        "target1": round(t1, 2),
-        "target2": round(t2, 2),
-        "rr_target1": rr,
-        "upside_open": upside_open,
-        "space_open": space_open,
+        "target1": extend, "target2": t2, "rr_target1": rr,
+        "measured_kind": None, "measure": None, "breakout": None,
+        "upside_open": False, "space_open": False,
+        "sea_sky": False, "no_room_above": False,
+        "last_chg_pct": _last_chg_pct(bars),
     }
 
 
-def attach_stops_targets(plan, bars, atr_v, Hs):
+def attach_stops_targets(plan, bars, atr_v, Hs, ev=None):
     """给 plan / buy_zone 挂上两档止损与目标。"""
     z = plan.get("buy_zone") or {}
     mode = plan.get("mode") or "wait"
@@ -2466,19 +2612,48 @@ def attach_stops_targets(plan, bars, atr_v, Hs):
                         f"买入即止损：{'、'.join(above_px)} ≥ 现价 {round(last_c, 2)}"
                     )
                     plan["stop_warning"] = z["stop_warning"]
-    tg = targets(bars, mode, z, atr_v, last_c, Hs or []) if mode != "wait" else None
+    tg = targets(bars, mode, z, atr_v, last_c, Hs or [], ev) if mode != "wait" else None
     if tg:
         z["target1"] = tg["target1"]
         z["target2"] = tg["target2"]
         z["rr_target1"] = tg["rr_target1"]
-        if tg.get("upside_open") or tg.get("space_open"):
-            z["upside_open"] = True
+        z["measured_kind"] = tg.get("measured_kind")
+        z["sea_sky"] = tg.get("sea_sky")
+        z["last_chg_pct"] = tg.get("last_chg_pct")
+        z["no_room_above"] = tg.get("no_room_above")
+        # ── 真涨停封死：当日不可追、上方空间归零（诚实状态，非虚假高盈亏比）──
+        if tg.get("no_room_above"):
+            _nr = (
+                f"⛔ 涨停封死（当日涨 {tg.get('last_chg_pct')}%）⇒ 当日不可追、"
+                f"上方空间归零；已在涨停板上的仓位按移动止损管理，不在板上加仓"
+            )
+            z["stop_warning"] = ((z.get("stop_warning") + "；") if z.get("stop_warning")
+                                  else "") + _nr
+            plan["stop_warning"] = z["stop_warning"]
+            plan["no_room_above"] = True
+            _prev_nr = plan.get("note") or ""
+            plan["note"] = f"{_prev_nr}；{_nr}" if _prev_nr else _nr
+            plan["verdict"] = ((plan.get("verdict") or "") + "·涨停封死不可追") \
+                if plan.get("verdict") else "涨停封死不可追"
+        # ── 🌊 海阔天空：创新高、上方无历史阻力、无可量度形态 ⇒ 不造假盈亏比，
+        #    也不因此降优先级（O'Neil：买新高、让利润奔跑）。如实标注即可。──
+        elif tg.get("sea_sky"):
+            plan["sea_sky"] = True
+            _ss = ("🌊 海阔天空：创新高、上方无历史阻力、无可量度形态 ⇒ 不预设目标价"
+                   "（经典测幅公式不适用，O'Neil 口径：买新高、让利润奔跑）；"
+                   "用移动止损（MA5 / 大阳中点）替代固定目标，让利润奔跑")
             prev = plan.get("note") or ""
-            if tg.get("upside_open"):
-                open_note = "创新高，上方压力已破，上涨空间打开"
-            else:
-                open_note = "突破之后上方没有更远的墙，上涨空间打开"
-            plan["note"] = f"{prev}；{open_note}" if prev else open_note
+            plan["note"] = f"{prev}；{_ss}" if prev else _ss
+        # ── 经典测幅命中：标注用了哪种测幅法，便于报告/复盘核对 ──
+        elif tg.get("measured_kind"):
+            _mk = {"platform": "平台/矩形测幅", "flag": "旗形测幅（旗杆高度）",
+                   "w_bottom": "双底测幅（颈线+深度）"}.get(
+                tg["measured_kind"], tg["measured_kind"])
+            _mz = (f"📐 经典测幅命中（{_mk}）：量度升幅 {tg.get('measure')}，"
+                   f"突破点 {tg.get('breakout')} ⇒ 目标1 {tg.get('target1')}"
+                   f"（盈亏比 rr_target1={tg.get('rr_target1')}）")
+            prev = plan.get("note") or ""
+            plan["note"] = f"{prev}；{_mz}" if prev else _mz
         if tg.get("rr_target1") is not None and tg["rr_target1"] < 1.0:
             # 突破类单：头顶最近的枢轴高会天然压低静态赔率（SDGR 2026-09-15
             # rr=0.17），这是结构失真，不代表机会变差。旧措辞「赔率差」会让
@@ -4141,7 +4316,7 @@ def _plan_entry_core(bars, ev):
             "days_above_r1": n_above_r1,
             "days_above_platform": n_above,
         }
-        result = attach_stops_targets(result, bars, atr_v, Hs_all)
+        result = attach_stops_targets(result, bars, atr_v, Hs_all, ev)
         # 收盘正顶未破的位 → 附「预备突破单」，与当日 mode 独立并存。
         # 两种挂法：水平平台沿（平台版）/ 下移斜线（下降趋势线版）；同时够格取更近的。
         pb_plat = pre_breakout_order(bars, ev, atr_v, plat, last_c, rvol)

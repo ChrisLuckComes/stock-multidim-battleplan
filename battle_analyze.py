@@ -1151,7 +1151,11 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
             "tie_line_verdict": tie_line_check(z, ma_info),
         },
         "targets": {"t1": _f(t1), "t2_engine": _f(t2_engine),
-                    "wall_far": _f(wall_far), "ath": _f(ath)},
+                    "wall_far": _f(wall_far), "ath": _f(ath),
+                    "sea_sky": bool(z.get("sea_sky")),
+                    "measured_kind": z.get("measured_kind"),
+                    "no_room_above": bool(z.get("no_room_above")),
+                    "rr_target1": (plan.get("targets") or {}).get("rr_target1")},
         "anchors": anchors,
         "entries": entries,
         "odds": odds,
@@ -1312,9 +1316,18 @@ def summarize(r):
     if _tt:
         L.append(" ★ T0 尾盘腿：次日未过昨高 %s、收盘仍站上 MA5/MA10/MA20 且 > 硬止损 %s "
                  "⇒ 尾盘按收盘价成交" % (_tt.get("trigger"), _tt.get("hard_stop")))
-    L.append(" 目标 t1=%s  t2=%s  远端墙=%s  ATH=%s  (rr_target1=%s)" % (
-        r["targets"]["t1"], r["targets"]["t2_engine"], r["targets"]["wall_far"],
-        r["targets"]["ath"], (p.get("targets") or {}).get("rr_target1")))
+    _tg = r["targets"]
+    if _tg.get("sea_sky"):
+        L.append(" 目标 🌊 海阔天空：创新高、上方无历史阻力、无可量度形态 ⇒ 不预设目标价"
+                 "（经典测幅公式不适用，O'Neil 口径：买新高、让利润奔跑）；"
+                 "用移动止损（MA5 / 大阳中点）替代固定目标，让利润奔跑")
+    elif _tg.get("no_room_above"):
+        L.append(" 目标 ⛔ 涨停封死：当日不可追、上方空间归零；已在涨停板上的仓位"
+                 "按移动止损管理，不在板上加仓")
+    else:
+        L.append(" 目标 t1=%s  t2=%s  远端墙=%s  ATH=%s  (rr_target1=%s)" % (
+            _tg["t1"], _tg["t2_engine"], _tg["wall_far"],
+            _tg["ath"], _tg.get("rr_target1")))
     L.append(" ATR %s (%s%%)   分位 60/120/250 = %s / %s / %s" % (
         s["atr14"], s["atr_pct"],
         s["percentile"].get("60", {}).get("pct"),

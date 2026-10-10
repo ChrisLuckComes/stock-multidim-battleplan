@@ -395,7 +395,8 @@ def target_display(a):
         v1 = top.get("t1")
     if v2 is None:
         v2 = top.get("t2_engine")
-    return v1, v2, top.get("wall_far"), top.get("ath")
+    return (v1, v2, top.get("wall_far"), top.get("ath"),
+            bool(top.get("sea_sky")), bool(top.get("no_room_above")))
 
 
 def build_plan_rows(a):
@@ -409,8 +410,17 @@ def build_plan_rows(a):
     #   T0 的框架是「不设固定目标、用移动止损让利润奔跑」（用户 2026-09-06 已纠正过：
     #   拿前高/量度当目标位 = 框架错配），所以这里**不硬塞目标价**，而是如实说明，
     #   并回退到顶层 targets 的远端墙 / ATH 作参考阻力。
-    _t1, _t2, _wall, _ath = target_display(a)
-    if _t1 is not None or _t2 is not None:
+    _t1, _t2, _wall, _ath, _sea, _seal = target_display(a)
+    if _sea:
+        tgt_row = ("目标 🌊 海阔天空", "创新高、上方无历史阻力、无可量度形态 ⇒ 不预设目标价"
+                   "（经典测幅公式不适用；O'Neil 口径：买新高、让利润奔跑）；"
+                   "用移动止损（MA5 / 大阳中点）替代固定目标，让利润奔跑")
+        rr_row = ("rr_target1（引擎）", "—（海阔天空·不造假盈亏比）")
+    elif _seal:
+        tgt_row = ("目标 ⛔ 涨停封死", "当日不可追、上方空间归零；已在涨停板上的仓位"
+                   "按移动止损管理，不在板上加仓")
+        rr_row = ("rr_target1（引擎）", "—（封死·无有效目标位）")
+    elif _t1 is not None or _t2 is not None:
         tgt_row = ("目标1 / 目标2", "<b>%s</b> / %s" % (num(_t1), num(_t2)))
         rr_row = ("rr_target1（引擎）", num(t.get("rr_target1")))
     else:
@@ -680,8 +690,18 @@ def build_exec(a, n):
     # 事实行：与买哪一档无关，notes 覆盖核心行时也照常保留
     # ★ 目标行（2026-09-22 修）：趋势单（T0 等）分支下引擎不给固定目标，旧写法会打印
     #   「目标1 —（到达减 1/3~1/2…）」这种自相矛盾的空行。改为如实说明 + 回退远端墙。
-    _t1, _t2, _wall, _ath = target_display(a)
-    if _t1 is not None or _t2 is not None:
+    _t1, _t2, _wall, _ath, _sea, _seal = target_display(a)
+    if _sea:
+        _tgt1 = ("目标1 🌊 海阔天空", "创新高、上方无历史阻力、无可量度形态 ⇒ 不预设目标价"
+                 "（经典测幅公式不适用；O'Neil 口径：买新高、让利润奔跑）；"
+                 "用移动止损（MA5 / 大阳中点）管理")
+        _tgt2 = ("目标2 / 远端墙", "海阔天空，不设固定目标；远端墙 <b>%s</b> 仅作参考阻力"
+                 % num(_wall) if _wall else "海阔天空，不设固定目标")
+    elif _seal:
+        _tgt1 = ("目标1 ⛔ 涨停封死", "当日不可追、上方空间归零；已在板上的仓位按移动止损管理")
+        _tgt2 = ("目标2 / 远端墙", "封死无有效目标位；远端墙 <b>%s</b> 仅作参考阻力"
+                 % num(_wall) if _wall else "封死无有效目标位")
+    elif _t1 is not None or _t2 is not None:
         _tgt1 = ("目标1", "<b>%s</b>（到达减 1/3~1/2，止损上移到成本或均线）" % num(_t1))
         _tgt2 = ("目标2 / 远端墙", "%s / %s" % (num(_t2), num(_wall)))
     else:
