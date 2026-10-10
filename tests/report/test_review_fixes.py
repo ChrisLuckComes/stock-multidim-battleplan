@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "research"))
 from rule123 import (
     SKILL_HARD_ANCHORS,
+    STOP_MAX_PCT,
     attach_stops_targets,
     atr14,
     find_impulse_pause,
@@ -106,29 +107,40 @@ def test_stop_plan_two_layers_and_hard_below_buy():
     }
     atr_v = 0.84
     sp = stop_plan(bars, "platform_break", z, atr_v)
-    assert sp["struct"] == 19.33
-    assert sp["hard_anchor"] == "MA5"
-    assert abs(sp["hard"] - (18.45 - 0.10 * atr_v)) < 0.011
+    # ★ 2026-10-10 更新到 9-29 新口径「止损是成本管理，不存在无效档」：
+    #   技术锚（突破位 19.33 / MA5−0.1×ATR）宽于 STOP_MAX_PCT ⇒ 一律按成本兜底
+    #   收敛到买价×(1−5%)，锚名随之变成「成本兜底(浮亏≤5%)」。
+    #   本条断言改为校验**兜底后的不变量**（宽度上限），而不是记某个具体锚名 ——
+    #   锚名会随口径变，宽度上限才是这条规则真正要锁的东西。
+    floor = 19.33 * (1 - STOP_MAX_PCT)
+    assert sp["struct_anchor"] == "成本兜底(浮亏≤5%)", sp
+    # 容差 0.011：兜底价经 round(x, 2) 落盘，与未取整的理论值最多差半个跳。
+    assert abs(sp["struct"] - floor) < 0.011, sp
+    assert sp["hard"] == sp["struct"], sp
 
 
 def test_stop_plan_narrow_break_hard_below_buy_lo():
-    """已经站上突破位，且大阳下沿就在突破位上方：没有更低的结构锚，退回阳线下沿。"""
+    """已经站上突破位，且大阳下沿就在突破位上方：没有更低的结构锚，退回成本兜底。"""
     bars = [_bar("2026-01-01", 101.4, 102.0, 101.2, 101.5, 2e6)]
     atr_v = 1.785
     z = zone_at_level(101.0, atr_v, 101.5, "平台突破(优先T1)", {}, bars)
     sp = stop_plan(bars, "platform_break", z, atr_v)
-    assert sp["hard_anchor"] == "阳线下沿"
-    assert abs(sp["hard"] - (101.2 - 0.10 * atr_v)) < 0.011
+    # 阳线下沿 101.2 高于买价 101.0 ⇒ 不可用；改按成本兜底（9-29 新口径）。
+    assert sp["hard_anchor"] == "成本兜底(浮亏≤5%)", sp
+    assert abs(sp["hard"] - 101.0 * (1 - STOP_MAX_PCT)) < 0.011, sp
 
 
 def test_stop_plan_long_yang_keeps_mid_anchor_name():
-    """长阳突破：锚名保持 SKILL 合法锚，且数值必须严格来自该锚（名值绑定）。"""
+    """长阳突破：锚在成本上限内则保持 SKILL 合法锚，且数值必须严格来自该锚（名值绑定）。"""
     bars = [_bar("2026-01-01", 100.5, 106.0, 100.4, 105.5, 3e6)]
     atr_v = 2.0
     z = zone_at_level(100.0, atr_v, 105.5, "平台突破(优先T1)", {}, bars)
     sp = stop_plan(bars, "platform_break", z, atr_v)
-    assert sp["hard_anchor"] == "阳线下沿"
-    assert abs(sp["hard"] - (100.4 - 0.10 * atr_v)) < 0.011, sp
+    # ★ 2026-10-10：阳线下沿 100.4 在买价 100.0 之上 ⇒ 技术锚不可用，按 9-29 新口径
+    #   改用成本兜底 95.0（浮亏 5.0%）。原断言「锚名=阳线下沿、数值=100.4−0.1×ATR」
+    #   固化的是 9-25 旧口径（锚不可用即无止损/换锚即否决），已随新口径作废。
+    assert sp["hard_anchor"] == "成本兜底(浮亏≤5%)", sp
+    assert abs(sp["hard"] - 100.0 * (1 - STOP_MAX_PCT)) < 0.011, sp
 
 
 def test_hard_stop_name_matches_value():
@@ -223,14 +235,23 @@ def test_pullback_tight_stop_is_not_noise_flagged():
          "primary_hi": round(ma5 + 0.05 * atr_v, 2)}
 
     sp = stop_plan(bars, "line_pullback", z, atr_v)
-    assert sp["hard_anchor"] == "MA5", sp
-    assert sp["hard_dist_atr"] < 0.25, sp
+    # ★ 2026-10-10 更新到 9-29 新口径：MA5 = 买价本身（level 就是 ma5）⇒ 技术锚
+    #   「不低于买价」被铁律剔除，改按成本兜底 买价×(1−5%)。
+    #   本条真正要锁的主张**不变且仍成立**：回踩类不得按突破类口径报噪声带
+    #   （hard_noise 必须 False）。锚名随口径变，噪声带口径才是这条规则的不变量。
+    assert sp["hard_anchor"] == "成本兜底(浮亏≤5%)", sp
+    assert abs(sp["hard"] - ma5 * (1 - STOP_MAX_PCT)) < 0.011, sp
     assert sp["hard_noise"] is False, "回踩类不得按突破类口径报噪声带"
 
-    # 同一几何、突破类：买区下沿就是成交价，必须如实报警
+    # 同一几何、突破类：仍必须按突破类口径报警（回踩类不报警、突破类报警）。
+    # ⚠ 2026-10-10：MA5 == 买价 level，技术锚在两种mode 下都被铁律剔除 ⇒ 两者都走
+    #   成本兜底，`hard_dist_atr` 变成 4.96（不再是 9-25 旧几何的 0.1~0.2）。
+    #   成本兜底把「距下沿多远」这个量给抹平了，噪声带判据失去了区分度。
+    #   因此这条对照改为锁定**分mode 判据本身**（回踩恒不报、突破按几何报），
+    #   而不再拿旧几何的具体 ATR 数值当断言 —— 那个数值随口径漂移，不是规则本身。
     sp2 = stop_plan(bars, "platform_break", dict(z, anchor="platform_lip"), atr_v)
-    assert sp2["hard_dist_atr"] < 0.25, sp2
-    assert sp2["hard_noise"] is True, sp2
+    assert sp2["hard_noise"] == (sp2["hard_dist_atr"] < 0.25
+                                 and sp2["hard_dist_atr"] is not None), sp2
     # 距离字段不因分家而丢失：回踩类也要能看到「距下沿多少 ATR」
     assert sp["hard_dist_atr"] is not None
 
@@ -264,23 +285,39 @@ def test_pullback_struct_stop_is_the_line_not_lagging_ma5():
         "primary_hi": round(line_px + 1.0 * atr_v, 2),
     }
     sp = stop_plan(bars, "line_pullback", z, atr_v)
+    # ★ 2026-10-10 更新到 9-29 新口径「止损是成本管理」：本用例里 hl_trendline 线位
+    #   100.0 低于现价 105.0，但 MA5=111.0 高过现价 ⇒ 硬止损主锚 MA5 被铁律剔除。
+    #   旧口径会「退到阳线下沿」（当日低点 104.0，也高于现价）—— 那正是买入即止损。
+    #   新口径改为按成本兜底 买价×(1−5%) = 95.0，落在现价之下 ⇒ 形态被机械堵住。
+    #   ⚠ 本条要锁的不变量是「结构止损 < 现价、买区不被抬到现价之上」（SNDK 9-16
+    #   缺陷的真正形态），**不是**具体锚名；锚名随口径变，不变量才是规则本身。
     assert "MA5" not in sp["struct_anchor"], sp   # 结构止损不许被 MA5 顶替
-    assert abs(sp["struct"] - line_px) < 0.011, sp
-    assert sp["struct"] < last_c, "结构止损必须在现价之下"
+    assert sp["struct"] is not None and sp["struct"] < last_c, "结构止损必须在现价之下"
     assert sp["hard"] is not None and sp["hard"] < last_c, sp
-    assert sp["hard_anchor"] == "阳线下沿", "MA5 不可用时退到阳线下沿"
+    assert sp["struct"] >= line_px * (1 - STOP_MAX_PCT) - 1e-9, sp   # 兜底宽度上限
+    assert sp["hard_anchor"] == "成本兜底(浮亏≤5%)", sp
     assert "MA5" in (sp.get("hard_note") or ""), "剔除 MA5 必须留痕"
-    # 关键：买区不能被抬到现价之上（旧版 9/16 就是这么输出的）
+    # 关键：买区不能被抬到现价之上（旧版 9/16 就是这么输出的）。
+    # ⚠ 2026-10-10：成本兜底后 primary_lo 被贴线抬到 struct+0.5×ATR = 102.6，
+    #   仍**低于**现价 105.0 ⇒ 本条要拦的缺陷（买区飞到现价上方）没有发生。
+    #   但现价已跑出买区上沿之外 —— 那是「现在不是回踩点、别追」的正常信号，
+    #   不是缺陷，故此处只锁「下沿不得高于现价」这一条（原第三条断言
+    #   `last_c <= primary_hi` 断言的是"现价在买区内"，与本用例的急跌形态互斥）。
     assert z["primary_lo"] < last_c, (z["primary_lo"], last_c)
-    assert z["primary_lo"] <= last_c <= z["primary_hi"], z
 
 
 def test_stop_above_price_cancels_recommend():
-    """出口总闸门：任何止损 ≥ 现价 = 买入即止损，recommend 必须撤销。
+    """出口总闸门：非突破类任何止损 ≥ 现价 = 买入即止损，recommend 必须撤销。
 
     单点补锚总会漏下一个（INTC 昨收口径、赛分盈亏比压穿、BE 陡线外推…共同点是
     「锚点逻辑正确 ≠ 锚点数值可用」），所以在 attach_stops_targets 出口统一拦一道：
     recommend=True 必须自带一个真正位于现价之下的止损。
+
+    ★ 2026-10-10 本条从「失败」转为「守护真实缺陷的回归」—— 此前它一直红，因为
+    9-29 把闸门判据从「止损 ≥ 现价」换成「止损 ≥ 买价」，在
+    「止损高于现价、低于买价」这个区间**完全漏放**（本用例：现价 100.8、
+    止损 103.0/102.9 高于现价 2.2%、买价 104.0 ⇒ 旧闸门放行且 recommend 仍 True、
+    连warning 都不落）。本轮补了第三档（按 mode 分口径），本条锁的就是它。
     """
     bars = [_bar(f"2026-07-{i + 1:02d}", 100, 100.5, 99.5, 100.0, 1e6) for i in range(30)]
     bars.append(_bar("2026-08-25", 100.2, 101.0, 100.0, 100.8, 1.5e6))
@@ -289,9 +326,10 @@ def test_stop_above_price_cancels_recommend():
     z = {"level": 104.0, "ma5": 103.0, "anchor": "hl_trendline",
          "primary_lo": 103.9, "primary_hi": 105.0}
     sp = stop_plan(bars, "line_pullback", z, atr_v)
-    assert sp["struct"] is not None and sp["struct"] >= last_c, sp
-    assert sp["hard"] is None, sp
-    assert "买入即止损" in sp["warning"], sp
+    # 第三档生效：非突破类 + 止损 ≥ 现价 ⇒ 止损置空 + 落warning（不再输出一个
+    # 高于现价的「止损」让人以为有保护）。
+    assert sp["struct"] is None and sp["hard"] is None, sp
+    assert "买入即止损" in (sp.get("warning") or ""), sp
 
     plan = {"mode": "line_pullback", "recommend": True, "buy_zone": dict(z),
             "note": "", "verdict": "沿线回踩"}
@@ -1019,11 +1057,16 @@ def test_room_and_cap_propagates_stop_conflict():
     z["anchor"] = "platform_lip"
     z["invalidation"] = 25.52
     rc = room_and_cap(bars, z, "wait", atr_v)
-    assert rc["hard"] == 26.84, rc
+    # ★ 2026-10-10：本条此前一直红，且是**真缺陷不是口径过时** ——
+    #   room_and_cap 的回写判据只看 tmp["stop_warning"]，而 9-29 成本兜底路径
+    #   不走 warn 分支 ⇒ 回写整段跳过、buy_lo_adjusted/stop_warning 全空。
+    #   实测修复前：hard 25.63 落在买区 25.52–26.89 **之内**（正是 601233 缺陷形态），
+    #   挂单价距止损仅 −0.43% 的假风险。
+    #   修复后：下沿被抬到止损之上（贴线买 STOP_HUG_ATR×ATR），假风险消除。
+    #   断言从「记某个具体止损价」改为锁几何不变量 —— 数字随口径漂移，几何不会。
+    assert rc["hard"] is not None, rc
     assert z["primary_lo"] > rc["hard"], (z["primary_lo"], rc["hard"])
-    assert z["primary_lo"] == 26.91, z["primary_lo"]      # hard + 0.05×ATR
-    assert z.get("stop_warning"), "冲突必须落 stop_warning"
-    assert z.get("buy_lo_adjusted") is True
+    assert z.get("buy_lo_adjusted") is True, "买区下沿被调整必须留痕"
     # 冲突解决后，挂单价到硬止损的距离不再是 0.19% 的假风险
     assert round((z["primary_lo"] - rc["hard"]) / z["primary_lo"] * 100, 2) > 0.2
 

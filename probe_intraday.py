@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from rule123 import (  # noqa: E402
     build_ev, plan_entry, atr14, is_live_bar, in_ash_session,
     bars_from_us, bars_from_em_us, bars_from_yahoo_min, stop_plan, pivots,
-    key_break_level, merge_intraday_bar, nasdaq_info,
+    key_break_level, merge_intraday_bar, nasdaq_info, STOP_HUG_ATR,
 )
 import account_config as _AC  # noqa: E402
 import bars_source as _BS  # noqa: E402
@@ -487,12 +487,45 @@ def room_and_cap(bars, z, mode, atr_v, rr=1.5, last_c=None):
         # 实证（601233 2026-09-01，mode=wait）：硬 26.84 落在买区
         # 25.52–26.89 **之内**，挂单 26.89 → 报告打成「风险 0.05 / 收益
         # 1.21 = 24.20:1」，仓位闸门和盈亏比闸门全部建在 0.19% 的假风险上。
-        if tmp.get("stop_warning"):
-            z["stop_warning"] = tmp["stop_warning"]
-            z["buy_lo_adjusted"] = True
+        #
+        # ⚠ 2026-10-10 修正触发条件：原先判`tmp.get("stop_warning")` 才回写，但
+        #   **成本兜底路径（9-29 新口径）不走 warn 分支** —— stop_plan 把下沿按
+        #   「贴线买STOP_HUG_ATR」抬上去、stop_warning 仍是 None ⇒ 回写整段跳过，
+        #   缺陷原样复发。实测本case：hard 25.63 落在买区 25.52–26.89 之内，
+        #   z["primary_lo"] 仍是 25.52（未被抬到止损之上），假风险照旧。
+        #   改为以「买区是否真被 stop_plan 调整过」为准（buy_lo_adjusted 或
+        #   stop_warning 任一），而不是只看 warning。
+        _adjusted = bool(tmp.get("buy_lo_adjusted") or tmp.get("stop_warning")
+                         or tmp.get("primary_lo") is not None
+                         and abs(tmp.get("primary_lo", 0) - z.get("primary_lo", 0)) > 1e-9)
+        if _adjusted:
+            if tmp.get("stop_warning"):
+                z["stop_warning"] = tmp["stop_warning"]
+            # ⚑ 下沿被抬到止损之上时必须留痕：没被调整过就别置 buy_lo_adjusted，
+            #   否则报告会把「原样未动」误报成「已上抬」。
+            if tmp.get("buy_lo_adjusted") or tmp.get("stop_warning"):
+                z["buy_lo_adjusted"] = True
             for k in ("primary_lo", "primary_hi", "in_zone"):
                 if k in tmp:
                     z[k] = tmp[k]
+        # 兜底复检（2026-10-10）：stop_plan 走成本兜底时可能既没 warning 也没置
+        #   buy_lo_adjusted，但下沿确实低于硬止损 —— 这正是要拦的「止损落在买区之内」。
+        #   直接按几何复检一次，不依赖任何标记，堵死所有静默路径。
+        _hard_now = hard if hard is not None else sp.get("struct") if sp else None
+        _lo_now = z.get("primary_lo")
+        if (_hard_now is not None and _lo_now is not None and _lo_now <= _hard_now
+                and mode != "ma_reclaim_break"):
+            _hug = round(_hard_now + STOP_HUG_ATR * atr_v, 2)
+            _hi = z.get("primary_hi")
+            if _hi is None or _hi <= _hug:
+                _hi = round(_hug + 0.5 * atr_v, 2)
+            z["primary_lo"], z["primary_hi"] = _hug, _hi
+            z["buy_lo_adjusted"] = True
+            z["stop_warning"] = (
+                f"止损 {_hard_now} 落在原买区下沿 {_lo_now} 之内 ⇒ 下沿抬到 {_hug}"
+                f"（止损 + {STOP_HUG_ATR}×ATR），挂单价以 primary_lo 为准"
+            )
+            hard = _hard_now
     except Exception:
         pass
     if hard is None and z.get("level") is not None:

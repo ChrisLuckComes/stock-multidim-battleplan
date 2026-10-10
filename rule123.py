@@ -2059,14 +2059,28 @@ def stop_plan(bars, mode, z, atr_v):
                 f"{round(wh, 2)}（距买区下沿 {round((buy_lo - wh) / atr_v, 2)}×ATR）"
             )
         if first is None:
-            return None, None, None, None, None
+            # ⚠ 2026-10-10：原先硬return ...None，把 rej_note 丢掉 ⇒「为什么把 MA5
+            #   剔了」在「全部候选锚都不可用」这条路径上完全静默。实测捕获：
+            #   tests/report/test_review_fixes.py::
+            #   test_pullback_struct_stop_is_the_line_not_lagging_ma5。
+            #   全部候选被剔除时 rej_note 恰恰是唯一的信息，不能丢。
+            return (None, None, None, None,
+                    (rej_note + "；" if rej_note else "")
+                    + "全部候选锚均不可用 ⇒ 回落成本兜底")
         name, px, h = first
         if usable_n == 0:
+            # ⚠ 2026-10-10：此处原先只回 warn、丢掉 rej_note ⇒「为什么剔除 MA5」这条
+            #   留痕在成本兜底路径上会丢（tests/report/test_review_fixes.py::
+            #   test_pullback_struct_stop_is_the_line_not_lagging_ma5 实测捕获）。
+            #   warn 走 sp["warning"]、note 走 sp["hard_note"]，两条路径都得能查到剔除原因，
+            #   否则「锚被剔除」变成静默行为，无法复盘。
             return None, None, None, (
                 f"SKILL 合法锚（{_rej_txt([(n, p) for n, p in cands if p is not None])}）"
                 f"全不低于现价 {round(last_c, 2)} —— 技术锚此刻不可用；按成本口径回落"
                 f"浮亏上限 {STOP_MAX_PCT:.0%} 兜底（**非否决**：止损先按成本定，买价贴着止损买）"
-            ), rej_note
+            ), ((rej_note + "；") if rej_note else "") + (
+                f"全部候选锚均不低于买价 {round(level, 2)} ⇒ 回落成本兜底"
+                f"（{STOP_MAX_PCT:.0%}）")
         return name, px, h, (
             f"SKILL 合法锚（{' / '.join(str(c[0]) for c in cands)}）中最低的 "
             f"{name}@{round(px, 2)} − gap = {round(h, 2)}，仍不低于买区下沿 "
@@ -2107,6 +2121,11 @@ def stop_plan(bars, mode, z, atr_v):
             z["primary_lo"] = _hug
             if z.get("primary_hi") is not None and z["primary_hi"] <= _hug:
                 z["primary_hi"] = round(_hug + 0.5 * atr_v, 2)
+            # ⚑ 2026-10-10 置 buy_lo_adjusted：贴线抬升也是「买区被改过」，
+            #   必须留痕。原先只写进 _notes（进 hard_note），room_and_cap 的回写判据
+            #   看的是 buy_lo_adjusted / stop_warning ⇒ 两者都没有时回写会被跳过，
+            #   601233 那个「止损落在买区之内」的缺陷就会复发。
+            z["buy_lo_adjusted"] = True
             _notes.append(f"买区下沿贴线抬到 {_hug}（止损 {struct} + {STOP_HUG_ATR}×ATR）")
         if _notes:
             note = ((note + "；") if note else "") + "；".join(_notes)
@@ -2123,11 +2142,32 @@ def stop_plan(bars, mode, z, atr_v):
             z["in_zone"] = bool(new_lo <= last_c <= hi)
         lo_now = z.get("primary_lo")
         room = (lo_now - hard) if lo_now is not None else None
+        # ⚠⚠ 2026-10-10 第三档「买入即止损」闸门（真实漏放修复，见 attach_stops_targets
+        #   同名注释的长版）：非突破类模式下，止损 ≥ 现价 = 一买就死 —— 在本层就
+        #   落warning 并把 hard 置 None，不靠调用方的总闸门兜。
+        #   判据只对**非突破类**生效：突破档买价本就在现价之上，止损高于现价是
+        #   正常形态（等的就是突破），用现价判会误杀全部突破档（9-29 已确认的坑）。
+        #   回踩/低吸类的锚就是待回踩的那条线，止损高于现价 ⇒ 还没等到回踩就已破位。
+        _above_px = last_c is not None and mode not in BREAKOUT_MODES and (
+            (struct is not None and struct >= last_c)
+            or (hard is not None and hard >= last_c)
+        )
+        warn_txt = ""
+        if _above_px:
+            _bad = [f"{nm} {round(v, 2)}"
+                    for nm, v in (("结构止损", struct), ("硬止损", hard))
+                    if v is not None and v >= last_c]
+            warn_txt = (
+                f"买入即止损：{'、'.join(_bad)} 未落在现价 {round(last_c, 2)} 之下 —— "
+                f"回踩/低吸类的锚就是待回踩的那条线，止损高于现价即买入即止损（{mode}）"
+            )
+            warn = ((warn + "；") if warn else "") + warn_txt
+            struct = hard = None
         out = {
             "struct_anchor": struct_name,
-            "struct": round(struct, 2),
+            "struct": round(struct, 2) if struct is not None else None,
             "hard_anchor": hard_name,
-            "hard": round(hard, 2),
+            "hard": round(hard, 2) if hard is not None else None,
             "trigger": HARD_STOP_TRIGGER,
             "struct_exec": STRUCT_EXEC,
             "hard_exec": HARD_EXEC,
@@ -2135,10 +2175,17 @@ def stop_plan(bars, mode, z, atr_v):
             "hard_noise": bool(room is not None and room < NOISE_ROOM_ATR * atr_v
                                and mode in BREAKOUT_MODES),
         }
+        if _above_px:
+            out["stop_above_price"] = True
         if note:
             out["hard_note"] = note
         if z.get("stop_warning"):
             out["warning"] = z["stop_warning"]
+        if _above_px:
+            # 第三档的告警必须出现在 sp["warning"] 里（调用方与测试都看这个字段）。
+            out["warning"] = ((out.get("warning") + "；") if out.get("warning")
+                              else "") + warn_txt
+            z["stop_warning"] = out["warning"]
         return out
 
     if mode == "line_pullback":
@@ -2349,11 +2396,39 @@ def attach_stops_targets(plan, bars, atr_v, Hs):
         if sp.get("warning"):
             z["stop_warning"] = sp["warning"]
             plan["stop_warning"] = sp["warning"]
+        # ⚠ 2026-10-10：stop_plan 的第三档已把「止损 ≥ 现价」的锚置空（struct/hard=None），
+        #   但**本函数的第一档判据只看 `v >=买价`，v 为 None 时全部跳过** ⇒ recommend
+        #   不会被撤销。实测：line_pullback + 锚高于现价 ⇒ recommend 仍为 True。
+        #   判据：stop_plan 已给出 stop_above_price 标记（它才是唯一同时看过现价的层），
+        #   这里消费该标记，不重复推导，避免两处口径再漂。
+        if plan.get("recommend") and sp.get("stop_above_price"):
+            plan["recommend"] = False
+            plan["stop_above_price"] = True
+            plan["verdict"] = "买入即止损·锚高于现价·不接"
+            _prev = plan.get("note") or ""
+            plan["note"] = (_prev + "；" if _prev else "") + (
+                f"止损未落在现价 {round(last_c, 2)} 之下（{mode}）—— "
+                f"买入即止损，本单撤销"
+            )
         # 总闸门（2026-09-29 重写）：唯一不可让的是「**止损 < 买价**」。
         # ⚑ 旧判据用 last_c（现价）：向上突破档的买价本就在现价之上，其止损高于现价
         #   是**正常形态**，用现价判「买入即止损」会误杀全部突破档 —— 这正是
         #   「10 次有 9 次向上不能买」的一部分来源。改用买价 level 判；
         #   触发 = 成本兜底失效的内部不一致，如实撤销并留痕。
+        #
+        # ⚠⚠ 2026-10-10 补第三档（真实漏放，非测试过时）：换判据后留下一个真空 ——
+        #   止损落在「高于现价、低于买价」这一区间时两个判据都不管。
+        #   实测（tests/report/test_review_fixes.py::test_stop_above_price_cancels_recommend
+        #   的case）：现价 100.8 / struct 103.0 / hard 102.9（**高于现价 2.2%**）/
+        #   买价 level 104.0 ⇒ 闸门判 `103.0 >= 104.0` 为假放行，而 recommend 仍为
+        #   True、stop_above_price=None、连warning 都不落 ⇒「买入即止损」悄悄通过。
+        #   这正是该测试（SNDK 2026-09-16 实证）要拦的形态。
+        #   修法**不回退**到判现价（会误杀突破档），而是按 mode 分口径补第三档：
+        #     · 回踩/低吸类（买价 ≈ 现价）：止损 ≥ 现价 = 一买就死 ⇒ 撤销 recommend。
+        #       依据：回踩单的定义就是「回踩到这条线买、收盘破这条线走」，锚就是那条线；
+        #       止损高于现价意味着还没等到回踩就已经破位。
+        #     · 突破类（买价 > 现价，stop_plan 走的是突破位下方锚）：止损高于现价是
+        #       正常形态（等的就是突破），放行但必须落 stop_warning 留痕，不可静默。
         _lvl = z.get("level")
         if plan.get("recommend") and _lvl is not None:
             bad = [
@@ -2370,6 +2445,27 @@ def attach_stops_targets(plan, bars, atr_v, Hs):
                     f"{'、'.join(bad)} 未落在买价 {round(_lvl, 2)} 之下 —— "
                     f"成本兜底失效（内部不一致），本单撤销"
                 )
+            elif last_c is not None and mode not in BREAKOUT_MODES:
+                # 第三档：非突破类 + 止损 ≥ 现价 = 买入即止损（锚没跟上涨跌/急跌形态）
+                above_px = [
+                    f"{nm} {round(v, 2)}"
+                    for nm, v in (("结构止损", sp.get("struct")), ("硬止损", sp.get("hard")))
+                    if v is not None and v >= last_c
+                ]
+                if above_px:
+                    plan["recommend"] = False
+                    plan["stop_above_price"] = True
+                    plan["verdict"] = "买入即止损·锚高于现价·不接"
+                    _prev = plan.get("note") or ""
+                    plan["note"] = (_prev + "；" if _prev else "") + (
+                        f"{'、'.join(above_px)} 未落在现价 {round(last_c, 2)} 之下 —— "
+                        f"回踩/低吸类的锚就是待回踩的那条线，止损高于现价即买入即止损"
+                        f"（{mode}），本单撤销"
+                    )
+                    z["stop_warning"] = (
+                        f"买入即止损：{'、'.join(above_px)} ≥ 现价 {round(last_c, 2)}"
+                    )
+                    plan["stop_warning"] = z["stop_warning"]
     tg = targets(bars, mode, z, atr_v, last_c, Hs or []) if mode != "wait" else None
     if tg:
         z["target1"] = tg["target1"]
