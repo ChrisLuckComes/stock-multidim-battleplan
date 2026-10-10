@@ -107,8 +107,8 @@ def fetch_intraday(symbol, ndays=1, retries=3):
 def fetch_daily_stats(symbol, n=60):
     """sina 美股日线算 MA5/10/20 + ATR14 + 昨收。返回 dict。"""
     sym = symbol.upper()
-    u = ("https://stock.finance.sina.com.cn/usstock/api/jsonp.php/var%20_%s"
-         "/US_MinKService.getDailyK?symbol=%s&___qn=3" % (sym, sym))
+    u = ("https://stock.finance.sina.com.cn/usstock/api/jsonp.php/var%20_"
+         + sym + "/US_MinKService.getDailyK?symbol=" + sym + "&___qn=3")
     t = urllib.request.urlopen(urllib.request.Request(u, headers=UA), timeout=20).read().decode("utf-8", "ignore")
     s = t[t.index("(") + 1:t.rindex(")")]
     rows = json.loads(s)
