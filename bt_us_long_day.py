@@ -200,6 +200,36 @@ def realized(seq_minutes, from_i, fill, stop, target):
     }
 
 
+def sweep(day_base, minutes, atr, pre, account, k_stop, r_target, n):
+    """扫描候选计划入场 entry∈[lo,hi]，看模型在哪些 entry 下能抓到上涨。
+    返回 (rows, lo, hi)。每行：entry/stop/target/n_win/best(模型抓到的最低价)/rb(该点R)/first_t。"""
+    ps = [m["c"] for m in minutes]
+    lo, hi = min(ps), max(ps)
+    step = (hi - lo) / (n - 1) if n > 1 else 0.0
+    rows = []
+    for i in range(n):
+        e = lo + step * i
+        stop = e - k_stop * atr
+        target = e + r_target * atr
+        _, wins = walk(day_base, minutes, e, stop, target, atr, pre, account)
+        if wins:
+            best = min(w["best_price"] for w in wins)
+            bi = next(w["best_i"] for w in wins if w["best_price"] == best)
+            rb = (target - best) / (best - stop) if best > stop else None
+            first_t = min(w["start_t"] for w in wins)
+            # clean = 低点明显在止损之上（止损不贴着低点才有真实赔率；
+            # 否则 R 被紧止损数学膨胀，属 TENB 教训的同类陷阱）
+            clean = (best - stop) >= 0.3 * atr
+            rows.append({"entry": e, "stop": stop, "target": target,
+                         "n_win": len(wins), "best": best, "best_i": bi,
+                         "rb": rb, "first_t": first_t, "clean": clean})
+        else:
+            rows.append({"entry": e, "stop": stop, "target": target,
+                         "n_win": 0, "best": None, "best_i": None,
+                         "rb": None, "first_t": None, "clean": False})
+    return rows, lo, hi
+
+
 def _to_min(t):
     h, m = t.split(":")
     return int(h) * 60 + int(m)
@@ -209,16 +239,23 @@ def _to_min(t):
 def main():
     ap = argparse.ArgumentParser(description="美股盘中做多单日回放回测")
     ap.add_argument("symbol")
-    ap.add_argument("--entry", type=float, required=True)
-    ap.add_argument("--stop", type=float, default=None, help="不给则 = entry - 2×ATR(日)")
-    ap.add_argument("--target", type=float, default=None, help="不给则 = entry + 2×ATR(日)")
+    ap.add_argument("--entry", type=float, default=None,
+                   help="计划入场；不给出则自动取开盘价（auto 模式）")
+    ap.add_argument("--stop", type=float, default=None, help="不给则 = entry - k×ATR(日)")
+    ap.add_argument("--target", type=float, default=None, help="不给则 = entry + r×ATR(日)")
     ap.add_argument("--atr", type=float, default=None)
-    ap.add_argument("--pre", type=float, default=None, help="昨收（cap=pre+2ATR 用）")
+    ap.add_argument("--pre", type=float, default=None,
+                   help="昨收（cap=pre+2ATR 用）；不给自动取日线昨收")
     ap.add_argument("--source", choices=["nasdaq", "eastmoney"], default="nasdaq")
     ap.add_argument("--user-fill", type=float, default=None,
                    help="用户真实成交价；不给则取 entry 作为对照")
     ap.add_argument("--compare-stop", type=float, default=None,
                    help="保守止损对照（如 prior-day low），看模型是否还触发")
+    ap.add_argument("--k-stop", type=float, default=1.5, help="自动止损倍数（×ATR）")
+    ap.add_argument("--r-target", type=float, default=2.5, help="自动目标倍数（×ATR，R=2.5）")
+    ap.add_argument("--sweep", action="store_true",
+                   help="入场价扫描：扫描 entry 看模型能否抓到上涨")
+    ap.add_argument("--sweep-n", type=int, default=21, help="扫描档数")
     ap.add_argument("--account", type=float, default=DEFAULT_ACCOUNT)
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--html", action="store_true")
@@ -232,16 +269,25 @@ def main():
     minutes = to_minutes(seq)
     prices = [m["c"] for m in minutes]
     lo, hi = min(prices), max(prices)
-    pre = a.pre if a.pre is not None else prices[0]
-    atr = a.atr
-    if atr is None:
+
+    # 自动取日线 ATR / 昨收（仅缺时取）
+    _daily = None
+    if a.atr is None or a.pre is None:
         try:
             from gates.us_session_decide import fetch_daily_stats
-            atr = fetch_daily_stats(sym)["atr"]
+            _daily = fetch_daily_stats(sym)
         except Exception:
-            atr = (hi - lo) / 2.0
-    stop = a.stop if a.stop is not None else a.entry - 2.0 * atr
-    target = a.target if a.target is not None else a.entry + 2.0 * atr
+            _daily = None
+    atr = a.atr if a.atr is not None else (_daily["atr"] if _daily else (hi - lo) / 2.0)
+    pre = a.pre if a.pre is not None else (_daily["prev_close"] if _daily else prices[0])
+
+    # 未给 entry → auto 模式：取开盘价为计划入场
+    auto_mode = a.entry is None
+    if auto_mode:
+        a.entry = prices[0]
+        print("（auto 模式：计划入场取开盘价 %.2f；--entry 可覆盖）" % a.entry)
+    stop = a.stop if a.stop is not None else a.entry - a.k_stop * atr
+    target = a.target if a.target is not None else a.entry + a.r_target * atr
     user_fill = a.user_fill if a.user_fill is not None else a.entry
 
     day_base = {"code": sym, "name": sym, "date": "", "pre": pre}
@@ -294,6 +340,36 @@ def main():
               % (overall_best, minutes[bi]["t"], mb["reason"], mb["pnl_pct"],
                  mb["mae_pct"], mb["mfe_pct"]))
 
+    # 入场价扫描（auto 或 --sweep）
+    srows = None
+    if a.sweep or auto_mode:
+        srows, slo, shi = sweep(day_base, minutes, atr, pre, a.account,
+                                a.k_stop, a.r_target, a.sweep_n)
+        caught = [r for r in srows if r["n_win"] > 0]
+        print("\n── 入场价扫描（entry %.2f→%.2f，%d 档；stop=entry-%.1fATR，target=entry+%.1fATR）──"
+              % (slo, shi, a.sweep_n, a.k_stop, a.r_target))
+        if caught:
+            best_row = max((r for r in caught
+                           if r["rb"] is not None and r.get("clean")),
+                           key=lambda r: r["rb"], default=None)
+            print("  ✅ 模型能抓到上涨：在合理计划入场（含开盘/回踩）下均触发")
+            print("  ★ 扫描印证：entry 越接近高位，止损越贴低点 → R 越被数学膨胀"
+                  "（见“虚高”行）；真正可执行的是「计划入场≤开盘」那档（见上表模型抓到的 early dip）。")
+            for r in srows:
+                if r["n_win"] > 0:
+                    if r.get("clean"):
+                        rb_s = "%.2f" % r["rb"]
+                    else:
+                        rb_s = "虚高(止损贴低点)"
+                    print("    entry=%.2f → 抓 %.2f @%s  R=%s  (窗口%d)"
+                          % (r["entry"], r["best"], r["first_t"], rb_s, r["n_win"]))
+                else:
+                    print("    entry=%.2f → 全程不买" % r["entry"])
+            print("  （R 标“虚高”= 计划入场过高使止损贴着低点，R 被数学膨胀，"
+                  "非真实赔率，属紧止损陷阱）")
+        else:
+            print("  ❌ 该结构下模型全程不买（dip 总在止损外 / R 不达标）")
+
     # 保守止损对照
     if a.compare_stop is not None:
         cs = a.compare_stop
@@ -333,7 +409,8 @@ def main():
         p = render_html(sym, a, minutes, lo, hi, atr, pre, stop, target,
                         windows, overall_best if windows else None,
                         user_fill, ub,
-                        realized(minutes, bt, overall_best, stop, target) if windows else None)
+                        realized(minutes, bt, overall_best, stop, target) if windows else None,
+                        srows=srows)
         print("\n📄 已渲染", p)
 
 
@@ -347,7 +424,7 @@ def _nearest_idx(minutes, price):
 
 
 def render_html(sym, a, minutes, lo, hi, atr, pre, stop, target, windows,
-                overall_best, user_fill, ub, mb):
+                overall_best, user_fill, ub, mb, srows=None):
     os.makedirs(OUT_DIR, exist_ok=True)
     p = os.path.join(OUT_DIR, "bt_long_%s_%s.html" %
                      (sym, datetime.now().strftime("%Y%m%d")))
@@ -425,6 +502,30 @@ def render_html(sym, a, minutes, lo, hi, atr, pre, stop, target, windows,
                      f"{mb['pnl_pct']:+.2f}%</td><td class='num'>{mb['mae_pct']:.2f}%</td>"
                      f"<td class='num'>{mb['mfe_pct']:.2f}%</td></tr>")
     parts.append("</table></div>")
+
+    # 入场价扫描表
+    if srows is not None:
+        parts.append("<div class='card'>")
+        parts.append("<div class='meta'>入场价扫描（entry %.2f→%.2f，%d 档；stop=entry-%.1fATR，target=entry+%.1fATR）</div>"
+                     % (srows[0]["entry"], srows[-1]["entry"], len(srows),
+                        a.k_stop, a.r_target))
+        parts.append("<table><tr><th>计划入场</th><th>模型抓</th><th>时间</th>"
+                     "<th>该点 R</th><th>触发</th></tr>")
+        for r in srows:
+            if r["n_win"] > 0:
+                if r.get("clean"):
+                    rb_s = "%.2f" % r["rb"]
+                else:
+                    rb_s = "虚高(止损贴低点)"
+                parts.append("<tr><td class='num'>%.2f</td><td class='num best'>%.2f</td>"
+                             "<td class='num'>%s</td><td class='num'>%s</td>"
+                             "<td>✅</td></tr>"
+                             % (r["entry"], r["best"], r["first_t"], rb_s))
+            else:
+                parts.append("<tr><td class='num'>%.2f</td><td class='num na' colspan=2>—</td>"
+                             "<td class='num na'>—</td><td>❌</td></tr>" % r["entry"])
+        parts.append("</table></div>")
+
     parts.append("""<div class="warn">⚠ 分钟序列为单值（Nasdaq 每分钟一个价，非 OHLC），
 触价判定用分钟价近似；同根先判止损（悲观）；stop/target 开盘前固定，无未来函数。</div>
 </div></body></html>""")
