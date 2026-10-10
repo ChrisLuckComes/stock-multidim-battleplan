@@ -64,6 +64,39 @@ python gates/session_decide.py <code> --plan out_cn/analysis_<code>.json [--note
 
 ---
 
+## 1c. 美股盘中口令 → us_session_decide（强制识别，与 1b 对称）
+
+**主口令（固化，所有模型必须识别）**：
+
+> 「这个票 **[TICKER]** 现在能上吗 / 能买吗？」  
+> （TICKER = 美股代码，如 CIEN / TENB / ZS / SNOW；与 A股 6 位数字代码的口令同义）
+
+命中后 **立刻**跑 `gates/us_session_decide.py`，不要先开完整 HTML 报告，也不要只口头估。同义口令一并触发（与 1b 完全一致，意思对即可，不必字面一致）：
+
+- 「能不能买 / 可以买吗 / 现在能不能买 / 这个价能买吗 / 盘中能不能进」
+- 「能不能上 / 上不上得去 / 现在上车吗 / 能搞吗 / 现在能买吗」
+
+**美股与 A股的关键差异（识别时必须分清）**：
+
+1. **怎么区分 A股还是美股**：输入是 6 位数字代码 → 走 1b `session_decide`；输入是**字母 TICKER** → 走本条 `us_session_decide`。两者口令相同，按代码形态分流。
+2. **美股没有「昨晚作战计划」约定文件**，故本脚本**支持只给 ticker 自动答**（无需预填 entry/stop/target）：
+
+```bash
+python gates/us_session_decide.py <TICKER>                # 只给 ticker → 自动计划，直接答「能买吗」
+python gates/us_session_decide.py <TICKER> --plan watch/plan_<TICKER>.json
+python gates/us_session_decide.py <TICKER> --entry <价> --stop <止损> --target <目标> [--cap <上限>] [--risk-scale 0.25]
+# 数据源：默认 nasdaq（含盘前 04:00 ET 起）；--source eastmoney 切东财
+```
+
+3. **自动计划口径**（仅 ticker 时）：`entry=现价`，`stop=近25分最低点（≤3×ATR）`，`target=近40分最高点（≤4×ATR）`。语义＝「若现在买，合理止损/目标在哪」。**买在高位→R<1.5→如实答「不买」；买在回踩→R≥1.5→答「能买」**，与 A股同逻辑。
+4. **⏰ 24h 交易（致富证券，老罗 2026-10-10 确认）**：盘前 / 盘后 / 夜盘买点**一律按可执行**——命中的买点若落在盘前 04:00–09:30 ET 或盘后，直接给可执行限价，不要当非交易时段排除。
+5. **输出纪律与 A股一致**：给「能买 / 不买 + 原因 + 推荐限价 + 仓位 + 拉升类型」；不追高（R≥1.5 且 ≤ 买入上限 pre+2×ATR），不打板，止损目标沿用计划。美股无 T+1、可随时离场。
+6. 缺 entry/stop 且无 --plan 时脚本**自动推导并明示「自动计划」来源**；取不到数写「未知」并停手，不编造。
+
+完整美股报告仍走 `battle_analyze.py`（美股 ticker 分流）→ notes → `report_render.py`（禁止手写 HTML）。
+
+---
+
 ## 2. 账户配置边界 / Forbidden
 
 - **人与钱**（账户、主力/备用、单笔硬顶、风险预算%）→ `env` / `.env`（`account_config.py`）。

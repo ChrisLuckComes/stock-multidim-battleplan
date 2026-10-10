@@ -32,12 +32,20 @@
 
 用法
 ----
+    python gates/us_session_decide.py CIEN                  # 只给 ticker → 自动计划（盘后/盘中/盘前都能答「能买吗」）
     python gates/us_session_decide.py CIEN --entry 430 --stop 425 --target 460
     python gates/us_session_decide.py CIEN --entry 430 --stop 425 --target 460 --atr 24
     python gates/us_session_decide.py CIEN --plan watch/plan_cien.json
     python gates/us_session_decide.py CIEN --entry 430 --stop 425 --target 460 --asof 22:30
 
 回答三件事：现在能不能买（回踩到价 / 拉升中）、推荐限价、仓位；并判定拉升类型。
+
+⚑ 与 A股 session_decide 对称（AGENTS.md §1c 强制识别）：用户问「能不能买 / 能不能上 / 能搞吗 /
+现在能买吗」等口令，命中即跑本脚本。美股没有「昨晚作战计划」约定文件，故两种取计划方式：
+  ① 只给 ticker → 自动从当日分钟序列推导计划（entry=现价, stop=近25分低点, target=近40分高点），
+     这样「CIEN 现在能买吗」无需预填参数即可答。
+  ② --plan <json> → 读 entry/stop/target/cap（顶层字段或嵌套 open_playbook，与 A股 notes 同构）。
+  ③ --entry/--stop/--target 显式覆盖。
 """
 
 from __future__ import print_function
@@ -147,16 +155,128 @@ def fetch_daily_stats(symbol, n=60):
             "atr": a, "prev_close": cl[-1], "last": rows[-1]}
 
 
-def load_us_day(symbol):
-    """组装 decide_us 需要的 day 结构（兼容 A股 decide 的 minutes 字段名）。"""
-    mins, pre, name = fetch_intraday(symbol)
-    date = mins[0]["t"][:10] if mins else ""
+def load_us_day(symbol, source="nasdaq"):
+    """组装 decide_us 需要的 day 结构（兼容 A股 decide 的 minutes 字段名）。
+
+    source="nasdaq"（默认）：Nasdaq /chart 主源（沙箱里东财 trends2 偶发断连，故默认走 Nasdaq），
+        失败自动回退东财。序列含盘前 04:00 ET 起，盘前/盘后/夜盘买点均可执行。
+    source="eastmoney"：强制东财 trends2（--source eastmoney 可切）。
+    """
+    if source == "eastmoney":
+        mins, pre, name = fetch_intraday(symbol)
+    else:
+        try:
+            mins, pre, name = fetch_intraday_nasdaq(symbol)
+        except Exception as e:
+            # Nasdaq 兜底不到（限频/网络）再试东财
+            mins, pre, name = fetch_intraday(symbol)
+    date = mins[0]["t"][:10] if (mins and len(mins[0]["t"]) >= 10) else ""
     return {"code": symbol.upper(), "name": name, "date": date,
             "pre": float(pre) if pre else None, "minutes": mins}, pre
 
 
 def summarize(day):
     return {"last": day["minutes"][-1]}
+
+
+# ───────────────────────── 自动计划 / 计划文件 ─────────────────────────
+def _parse_et(txt):
+    """'4:01 AM ET' / '9:59 AM ET' → 当日分钟数（Nasdaq /chart 时间标签）。"""
+    try:
+        body = txt.replace(" ET", "").strip()
+        hhmm, ap = body.split(" ")
+        h, m = hhmm.split(":")
+        h, m = int(h), int(m)
+        if ap.upper() == "PM" and h != 12:
+            h += 12
+        if ap.upper() == "AM" and h == 12:
+            h = 0
+        return h * 60 + m
+    except Exception:
+        return None
+
+
+def fetch_intraday_nasdaq(symbol):
+    """Nasdaq /chart 主源 → (minutes, preClose, name)。含盘前 04:00 起。
+
+    复用 rule123 的 _assetclass_order / fetch_json_nasdaq / _US_AC_CACHE（与 bt_us_long_day 同链路）。
+    序列为单值（每分钟一个价），o=h=l=c=avg=价；decide_us 只用 c/avg/h/l，无影响。
+    preClose 不在 /chart 端点里，返回 None，由调用方用日线 prev_close 补。
+    """
+    import rule123 as R
+    s = symbol.upper()
+    for ac in R._assetclass_order(s):
+        try:
+            j = R.fetch_json_nasdaq(
+                "https://api.nasdaq.com/api/quote/%s/chart?assetclass=%s" % (s, ac))
+        except Exception:
+            continue
+        rows = ((j or {}).get("data") or {}).get("chart") or []
+        if not rows:
+            continue
+        R._US_AC_CACHE[s] = ac
+        mins = []
+        for r in rows:
+            z = (r.get("z") or {}).get("dateTime", "")
+            y = r.get("y")
+            if not z or y is None:
+                continue
+            m = _parse_et(z)
+            t = ("%02d:%02d" % (m // 60, m % 60)) if m is not None else z[-8:-3]
+            p = float(y)
+            mins.append({"t": t, "o": p, "c": p, "h": p, "l": p,
+                         "v": 0.0, "amt": 0.0, "avg": p})
+        if mins:
+            return mins, None, s
+    raise RuntimeError("Nasdaq /chart 无数据：%s" % symbol)
+
+
+AUTO_LOW_N = 25      # 自动计划：止损取近 N 分最低点
+AUTO_HIGH_N = 40     # 自动计划：目标取近 N 分最高点
+
+
+def auto_plan_us(minutes, atr, pre):
+    """无 --plan / 无 --entry 时的自动计划：entry=现价，stop=近 LOW_N 分低点（不超过 3×ATR），
+    target=近 HIGH_N 分高点（不超过 4×ATR）。语义 = 「若现在买，合理的止损/目标在哪」。
+
+    这样「<TICKER> 现在能买吗」无需预填参数即可给出「能买/不买 + 理由 + 限价 + 仓位」。
+    """
+    if not minutes:
+        raise RuntimeError("无分钟序列，无法自动计划")
+    cur = float(minutes[-1]["c"])
+    n = len(minutes)
+    low_n = max(5, min(AUTO_LOW_N, n))
+    high_n = max(10, min(AUTO_HIGH_N, n))
+    low = min(float(m["l"]) for m in minutes[-low_n:])
+    high = max(float(m["h"]) for m in minutes[-high_n:])
+    a = float(atr) if atr else max(0.01, (high - low) / 2.0)
+    stop = low if low < cur else cur - 1.5 * a
+    if cur - stop > 3.0 * a:          # 风险距过宽 → 收紧到 3×ATR（买在高位时自然触发）
+        stop = cur - 3.0 * a
+    target = high if high > cur else cur + 2.5 * a
+    if target - cur > 4.0 * a:        # 上方空间过远 → 收到 2.5×ATR
+        target = cur + 2.5 * a
+    if target <= cur:
+        target = cur + 2.5 * a
+    return {"entry": round_px(cur), "stop": round_px(stop),
+            "target": round_px(target), "cap": None}
+
+
+def plan_from_us(plan_path):
+    """读美股计划 JSON（与 A股 notes.open_playbook 同构）：顶层 entry/stop/target/cap，
+    或嵌套 open_playbook.{entry,stop,target}。返回 dict。"""
+    with open(plan_path, encoding="utf-8") as f:
+        p = json.load(f)
+    if isinstance(p, dict) and "open_playbook" in p and isinstance(p["open_playbook"], dict):
+        ob = p["open_playbook"]
+        entry, stop = ob.get("entry"), ob.get("stop")
+        target, cap = ob.get("target"), ob.get("cap")
+    else:
+        entry, stop = p.get("entry"), p.get("stop")
+        target, cap = p.get("target"), p.get("cap")
+    name = p.get("name") or p.get("code") or p.get("symbol")
+    return {"entry": entry, "stop": stop, "target": target,
+            "cap": cap, "name": name}
 
 
 # ───────────────────────── 规则层（美股适配） ─────────────────────────
@@ -276,6 +396,9 @@ def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
 def render_us(d):
     lines = []
     lines.append("%s %s  %s" % (d["name"], d["code"], d["date"]))
+    src = d.get("plan_src") or "显式参数"
+    lines.append("计划来源  %s%s"
+                 % (src, "  · 源=%s" % d["intraday_source"] if d.get("intraday_source") else ""))
     lines.append("现价 %.2f  均价 %.2f  昨收 %s"
                  % (d["price"], d["vwap"], ("%.2f" % d["pre"]) if d["pre"] else "—"))
     lines.append("计划  挂单 %.2f  止损 %.2f  目标 %s  买入上限 %s"
@@ -324,53 +447,96 @@ def render_us(d):
                         s["risk_pct_budget"] * 100))
         if s.get("warn"):
             lines.append(s["warn"])
-    lines.append("不打板。止损目标沿用计划。美股可全天成交，无 T+1 限制。")
+    lines.append("不打板。止损目标沿用计划。美股可全天成交（含盘前/盘后/夜盘），无 T+1 限制。")
     return "\n".join(lines)
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="美股盘中临时决策（复用 A股判据）")
     ap.add_argument("symbol")
-    ap.add_argument("--entry", type=float)
-    ap.add_argument("--stop", type=float)
-    ap.add_argument("--target", type=float)
+    ap.add_argument("--entry", type=float, default=None)
+    ap.add_argument("--stop", type=float, default=None)
+    ap.add_argument("--target", type=float, default=None)
     ap.add_argument("--cap", type=float, default=None)
+    ap.add_argument("--plan", default=None,
+                   help="美股计划 JSON（顶层 entry/stop/target/cap 或嵌套 open_playbook）")
     ap.add_argument("--atr", type=float, default=None, help="日 ATR14；不给则用 sina 日线算")
     ap.add_argument("--account", type=float, default=DEFAULT_ACCOUNT)
     ap.add_argument("--risk-scale", type=float, default=1.0)
     ap.add_argument("--asof", default=None, help="回放时刻 HH:MM（截断分钟线）")
+    ap.add_argument("--source", choices=["nasdaq", "eastmoney"], default="nasdaq",
+                   help="分钟线数据源（默认 nasdaq，含盘前；eastmoney 走东财 trends2）")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
-    if args.entry is None or args.stop is None:
-        print("必须给 --entry/--stop")
-        return 3
-    if float(args.entry) <= float(args.stop):
-        print("挂单价必须高于止损")
-        return 3
+    symbol = args.symbol.upper()
 
+    # 1) 计划文件
+    plan = None
+    if args.plan:
+        try:
+            plan = plan_from_us(args.plan)
+        except Exception as e:
+            print("读计划文件失败: %s" % e)
+            return 3
+
+    # 2) 取数（自动计划也需要 atr / 分钟序列）
     try:
         t0 = time.perf_counter()
-        day, pre = load_us_day(args.symbol)
+        day, pre = load_us_day(symbol, source=args.source)
         if args.asof:
             day["minutes"] = [m for m in day["minutes"] if m["t"][-5:] <= args.asof]
         if not day["minutes"]:
             print("没有分时")
             return 3
         summary = summarize(day)
-        stats = fetch_daily_stats(args.symbol)
-        atr = args.atr if args.atr is not None else stats["atr"]
-        if day["pre"] is None:
+        stats = None
+        try:
+            stats = fetch_daily_stats(symbol)
+        except Exception:
+            stats = None
+        atr = args.atr if args.atr is not None else (stats["atr"] if stats else None)
+        if atr is None:
+            ps = [m["c"] for m in day["minutes"]]
+            atr = (max(ps) - min(ps)) / 2.0 or 1.0
+        if day["pre"] is None and stats:
             day["pre"] = stats["prev_close"]
         fetch_ms = (time.perf_counter() - t0) * 1000.0
     except Exception as e:
         print("取数失败: %s" % e)
         return 3
 
+    # 3) 解析 entry/stop/target（--plan < --entry/--stop 显式 < 自动计划）
+    if plan:
+        entry = args.entry if args.entry is not None else plan["entry"]
+        stop = args.stop if args.stop is not None else plan["stop"]
+        target = args.target if args.target is not None else plan["target"]
+        cap = args.cap if args.cap is not None else plan["cap"]
+        plan_src = "计划文件 %s" % args.plan
+    elif args.entry is not None and args.stop is not None:
+        entry, stop, target, cap = args.entry, args.stop, args.target, args.cap
+        plan_src = "显式参数"
+    else:
+        ap_plan = auto_plan_us(day["minutes"], atr, day.get("pre"))
+        entry, stop, target, cap = (ap_plan["entry"], ap_plan["stop"],
+                                    ap_plan["target"], ap_plan["cap"])
+        plan_src = ("自动计划(无--plan)：entry=现价 %.2f，stop=近%d分低点 %.2f，"
+                    "target=近%d分高点 %.2f" % (entry, AUTO_LOW_N, stop,
+                                                AUTO_HIGH_N, target))
+
+    if entry is None or stop is None:
+        print("无法解析 entry/stop（计划文件缺字段且未给 --entry/--stop）")
+        return 3
+    if float(entry) <= float(stop):
+        print("挂单价必须高于止损")
+        return 3
+
     t1 = time.perf_counter()
-    d = decide_us(day, summary, args.entry, args.stop, args.target,
-                  cap=args.cap, atr=atr, account=args.account,
+    d = decide_us(day, summary, entry, stop, target,
+                  cap=cap, atr=atr, account=args.account,
                   risk_scale=args.risk_scale)
+    d["plan_src"] = plan_src
+    d["intraday_source"] = args.source
     decide_ms = (time.perf_counter() - t1) * 1000.0
     d["elapsed_ms"] = round(fetch_ms + decide_ms, 1)
     d["fetch_ms"] = round(fetch_ms, 1)

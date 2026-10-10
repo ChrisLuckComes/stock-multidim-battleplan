@@ -12,7 +12,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from gates.us_session_decide import (decide_us, size_for_us, resolve_cap_us,
-                                     summarize, trend_shape, DEFAULT_ACCOUNT)
+                                     summarize, trend_shape, DEFAULT_ACCOUNT,
+                                     auto_plan_us, plan_from_us,
+                                     fetch_intraday_nasdaq, _parse_et)
+from open_playbook import long_rr
 
 FAILS = []
 
@@ -23,6 +26,20 @@ def chk(name, cond, extra=""):
     else:
         print("  ✗", name, extra)
         FAILS.append(name)
+
+
+def mkx(closes, vols=None, avg_off=0.0):
+    """精确分钟线：o=h=l=c=close（不注入 ±0.3% 影线），供 auto_plan_us 断言用。
+
+    ⚠ mk() 会把 h=max(o,c)*1.003 / l=min(o,c)*0.997 撑开，算「近 N 分高低点」时
+    会引入 0.3% 误差 ⇒ 断言精确价位必须用本helper。
+    """
+    mins = []
+    for i, c in enumerate(closes):
+        v = 1000.0 if vols is None else vols[i]
+        mins.append({"t": "%05d" % (i + 1), "o": c, "h": c, "l": c,
+                     "c": c, "v": v, "avg": c - avg_off})
+    return mins
 
 
 def mk(closes, vols=None, avg_off=0.0):
@@ -155,6 +172,115 @@ def test_reuse_pure_functions():
         chk("复用 %s 不报错" % fn.__name__, ok)
 
 
+def test_auto_plan_us_at_low():
+    """自动计划·买在低位：现价≈近25分低点 → stop 由 1.5×ATR 兜底、target=近40分高点 → R够→能买。
+
+    构造 40 根精确K：前 15 根 110（近40分高点），后 25 根 90（现价=近25分低点）。
+    auto_plan: cur=90, low=90(不低于 cur) ⇒ stop=cur−1.5×8=78；high=110 ⇒ target=110。
+    R=(110−90)/(90−78)=20/12=1.667 ≥1.5 ⇒ 能买。
+    """
+    mins = mkx([110.0] * 15 + [90.0] * 25)
+    atr = 8.0
+    ap = auto_plan_us(mins, atr, pre=90.0)
+    assert ap["entry"] == 90.0, ap
+    assert ap["stop"] == 78.0, ap            # cur − 1.5×ATR（低位时近低不给出缓冲）
+    assert ap["target"] == 110.0, ap         # 近40分高点，且未超 4×ATR=32
+    assert ap["stop"] < ap["entry"] < ap["target"], ap
+    # R 闸：max_entry_for_rr(1.5,110,78)=(110+1.5×78)/2.5=90.8；ATR 闸=90+16=106 ⇒ cap=90.8
+    # 现价 90 ≤ cap 90.8 ⇒ 不被「不追高」拦下
+    cap = resolve_cap_us(ap["entry"], ap["stop"], ap["target"], None, pre=90.0, atr=atr)
+    assert abs(cap - 90.8) < 1e-6, cap
+    d = decide_us({"code": "X", "name": "X", "date": "", "pre": 90.0, "minutes": mins},
+                  {"last": mins[-1]}, ap["entry"], ap["stop"], ap["target"],
+                  atr=atr, account=DEFAULT_ACCOUNT)
+    assert d["action"] == "能买", d
+    assert abs(d["rr"] - 20.0 / 12.0) < 1e-6, d["rr"]
+    assert d["limit_buy"] == 90.0, d
+    assert d["size"]["qty"] == 5, d["size"]   # 预算70.42 / 每股风险12 ⇒ 5股
+
+
+def test_auto_plan_us_pullback_rejects_chase():
+    """自动计划·买在相对高位：现价已回到近40分高附近 ⇒ R 闸把买价压到现价下方 ⇒ 不买。
+
+    构造 40 根：105(10根) → 100(10根) → 跌到 90 → 反弹回 100收尾。
+    auto_plan: cur=100, low=90 ⇒ stop=90；high=105 ⇒ target=105；R=5/10=0.5。
+    R 闸 max_entry_for_rr(1.5,105,90)=96.0 < 现价 100 ⇒ 「高于买入上限」拒绝。
+    ⚑ 断言「上限」而不是「盈亏比」——cap 闸先于 R 闸触发。
+    """
+    closes = ([105.0] * 10 + [100.0] * 10 + [98.0, 96.0, 94.0, 92.0, 90.0]
+              + [92.0, 94.0, 96.0, 98.0] + [100.0] * 11)
+    assert len(closes) == 40, len(closes)
+    mins = mkx(closes)
+    atr = 5.0
+    ap = auto_plan_us(mins, atr, pre=100.0)
+    assert ap["entry"] == 100.0, ap          # entry = 现价
+    assert ap["stop"] == 90.0, ap            # 近25分低点
+    assert ap["target"] == 105.0, ap         # 近40分高点
+    assert abs(long_rr(100.0, 105.0, 90.0) - 0.5) < 1e-9, "R 应为 0.5"
+    d = decide_us({"code": "X", "name": "X", "date": "", "pre": 100.0, "minutes": mins},
+                  {"last": mins[-1]}, ap["entry"], ap["stop"], ap["target"],
+                  atr=atr, account=DEFAULT_ACCOUNT)
+    assert d["action"] == "不买", d
+    assert "上限" in d["reason"], d["reason"]
+    assert abs(d["cap"] - 96.0) < 1e-6, d["cap"]
+
+
+def test_plan_from_us_top_level():
+    """计划文件（顶层字段）解析正确。"""
+    import json as _json, tempfile
+    p = os.path.join(tempfile.gettempdir(), "plan_us_toplevel.json")
+    with open(p, "w", encoding="utf-8") as f:
+        _json.dump({"name": "TENB", "entry": 40.07, "stop": 38.50,
+                    "target": 42.50, "cap": None}, f)
+    pl = plan_from_us(p)
+    chk("顶层entry解析", pl["entry"] == 40.07, pl)
+    chk("顶层stop解析", pl["stop"] == 38.50, pl)
+    chk("顶层target解析", pl["target"] == 42.50, pl)
+    chk("顶层name解析", pl["name"] == "TENB", pl)
+    os.remove(p)
+
+
+def test_plan_from_us_open_playbook():
+    """计划文件（嵌套 open_playbook）解析正确。"""
+    import json as _json, tempfile
+    p = os.path.join(tempfile.gettempdir(), "plan_us_ob.json")
+    with open(p, "w", encoding="utf-8") as f:
+        _json.dump({"code": "CIEN", "open_playbook": {"entry": 430, "stop": 425,
+                   "target": 460}}, f)
+    pl = plan_from_us(p)
+    chk("嵌套entry解析", pl["entry"] == 430, pl)
+    chk("嵌套stop解析", pl["stop"] == 425, pl)
+    chk("嵌套target解析", pl["target"] == 460, pl)
+
+
+def test_parse_et():
+    """Nasdaq 时间标签解析。"""
+    chk("4:01 AM ET→241", _parse_et("4:01 AM ET") == 241, _parse_et("4:01 AM ET"))
+    chk("9:59 AM ET→599", _parse_et("9:59 AM ET") == 599, _parse_et("9:59 AM ET"))
+    chk("4:30 PM ET→990", _parse_et("4:30 PM ET") == 990, _parse_et("4:30 PM ET"))
+
+
+def test_fetch_intraday_nasdaq_monkeypatch():
+    """Nasdaq /chart 解析逻辑（不触网，monkeypatch rule123.fetch_json_nasdaq）。"""
+    import rule123 as R
+    fake = {"data": {"chart": [
+        {"z": {"dateTime": "4:01 AM ET"}, "y": 39.01},
+        {"z": {"dateTime": "9:30 AM ET"}, "y": 40.50},
+        {"z": {"dateTime": "4:00 PM ET"}, "y": 42.00},
+    ]}}
+    orig = R.fetch_json_nasdaq
+    R.fetch_json_nasdaq = lambda url, timeout=20, retries=2: fake
+    try:
+        mins, pre, name = fetch_intraday_nasdaq("TENB")
+        chk("Nasdaq解析返回3根", len(mins) == 3, mins)
+        chk("Nasdaq首根价39.01", abs(mins[0]["c"] - 39.01) < 1e-6, mins[0])
+        chk("Nasdaq时间标签04:01", mins[0]["t"] == "04:01", mins[0])
+        chk("Nasdaq序列升序", mins[0]["t"] < mins[-1]["t"], mins)
+        chk("Nasdaq preClose=None", pre is None, pre)
+    finally:
+        R.fetch_json_nasdaq = orig
+
+
 if __name__ == "__main__":
     test_pullback_buy()
     test_chase_reject()
@@ -166,5 +292,11 @@ if __name__ == "__main__":
     test_rally_linear()
     test_rally_stepped_no_crash()
     test_reuse_pure_functions()
+    test_auto_plan_us_at_low()
+    test_auto_plan_us_pullback_rejects_chase()
+    test_plan_from_us_top_level()
+    test_plan_from_us_open_playbook()
+    test_parse_et()
+    test_fetch_intraday_nasdaq_monkeypatch()
     print("\n%d failed" % len(FAILS))
     sys.exit(1 if FAILS else 0)
