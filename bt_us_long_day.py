@@ -12,8 +12,14 @@
   2. 复用 `gates.us_session_decide.decide_us` —— 与盘中实时决策同逻辑，
      只把分钟序列一段段喂进去，等价于「模型在每一分钟替你盯着」。
   3. 数据层：默认 Nasdaq /chart（东财 trends2 在沙箱里偶发 RemoteDisconnected，
-     故用 Nasdaq 兜底；--source eastmoney 可切换）。
+     故用 Nasdaq 兜底；--source eastmoney 可切换）。序列含盘前 04:00 ET 起。
   4. 同根先判止损（悲观）；两档出场并列（到 target 全平 / 收盘平）。
+
+  ⏰ 美股交易时段（致富证券 · 2026-10-10 老罗确认 · 已固化）：
+     支持 24h 交易，含 夜盘 / 盘前 (04:00 ET 起) / 盘后。
+     ⇒ 回放里抓到的盘前/盘后/夜盘低点【都是可执行买点】，不是理论值——
+       不要像初版那样标注「致富大概率不支持盘前单」（那是错的）。
+     ⇒ 唯一限制：无原生条件单/止损单（突破上方不能自动触发），深夜难全程盯屏。
 
 用法：
     python bt_us_long_day.py TENB --entry 40.07
@@ -527,7 +533,9 @@ def render_html(sym, a, minutes, lo, hi, atr, pre, stop, target, windows,
         parts.append("</table></div>")
 
     parts.append("""<div class="warn">⚠ 分钟序列为单值（Nasdaq 每分钟一个价，非 OHLC），
-触价判定用分钟价近似；同根先判止损（悲观）；stop/target 开盘前固定，无未来函数。</div>
+触价判定用分钟价近似；同根先判止损（悲观）；stop/target 开盘前固定，无未来函数。<br>
+⏰ 盘前/盘后/夜盘买点均按**可执行**计（致富 24h 交易，含 04:00 ET 盘前起）；
+抓到的 early-dip 低点真实可成交，非理论值。</div>
 </div></body></html>""")
     with open(p, "w", encoding="utf-8") as f:
         f.write("".join(parts))

@@ -286,8 +286,8 @@ def analyze_one(item, cfg):
     elif r["zone_lo"] and spot < r["zone_lo"]:
         parts.append(f"现价已低于买区下沿 {r['zone_lo']:.2f}（回踩过深，等企稳再说）")
     if trg and trg > spot:
-        parts.append(f"上方突破买 站上 {trg:.2f}（**无 buy-stop → 只能盯盘，"
-                     f"不能预挂** ✗，美股盘中在你的深夜 → 实际不可执行）")
+        parts.append(f"上方突破买 站上 {trg:.2f}（**无 buy-stop → 只能手动点**，"
+                     f"但 24h 可交易含盘前/盘后/夜盘，限价单挂上即可在对应时段成交）")
     r["buy_side"] = "；".join(parts) if parts else "—"
 
     # 信号冲突：主判"不追"但突破单几乎贴现价 → 两个结论互斥，必须人工二选一
