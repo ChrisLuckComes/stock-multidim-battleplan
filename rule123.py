@@ -2323,15 +2323,22 @@ def _sealed_limit_up(bars, atr_v, ticker=""):
     封死当天一根板把空间吃完、且当日不可追 ⇒ 如实标记「封死」，与「海阔天空」
     （创新高但上方无阻力、让利润奔跑）是两回事。仅用于把「封死」从「海阔天空」里
     区分出来，不参与任何盈亏比计算。
+
+    ⚠ 仅对 A 股生效：美股无涨跌停制度，"封死"概念不存在。美股强势日收在最高是常态
+    （MDB/RVMD 等高 beta 票常见），若不作市场闸门会被误判成「⛔ 涨停封死不可追」——
+    那是错误的。美股无涨停 ⇒ 一律返回 False，让其自然落到「海阔天空（创新高无阻力）」
+    或「真墙」分支（见 targets()）。ticker 缺失时同样返回 False（宁可不判，不可误判）。
     """
     if not bars or len(bars) < 2 or not atr_v or atr_v <= 0:
+        return False
+    code = str(ticker or "").split(".")[0].strip()
+    if not is_ash(code):          # 非 6 位 A 股代码（美股字母代码等）→ 无涨跌停，不判封死
         return False
     last, prev = bars[-1], bars[-2]
     c, h, o = last.get("c"), last.get("h"), last.get("o")
     pc = prev.get("c")
     if None in (c, h, o, pc) or pc <= 0 or c <= 0:
         return False
-    code = str(ticker or "").split(".")[0]
     lim = LU_GEM if (code.startswith("30") or code.startswith("688")) else LU_MAIN
     up_limit = round(pc * (1 + lim), 2)
     # 主判据：收在涨停价且收=最高（一字/缩量封板，浮筹封死）。

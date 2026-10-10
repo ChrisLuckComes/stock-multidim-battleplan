@@ -177,6 +177,74 @@ class TestSealedLimitUp:
         assert tg["target1"] <= 34.0, tg                  # 报那面墙，不是凭空延伸
 
 
+class TestUSMarket:
+    """美股覆盖（老罗 2026-10-10「A股美股都要覆盖到」）：美股无涨跌停，
+    「封死」判据必须失效；强势日收在最高是常态（MDB/RVMD 等高 beta），
+    应自然落到「海阔天空（创新高无阻力）」或「真墙」分支。"""
+
+    def test_us_strong_up_day_not_sealed(self):
+        """美股强势日（如 +23%）收在最高、实体极厚 ⇒ 旧逻辑会误判封死；
+        加市场闸门后必须 no_room_above=False，并正确判为海阔天空。"""
+        bars = []
+        for i in range(25):
+            bars.append(_bar("p%d" % i, 98, 100, 96, 99, 1))
+        bars.append(_bar("d", 110, 122, 109, 122, 1))    # 收=高、实体厚、+23%
+        atr = _atr(bars)
+        ev = {"ticker": "SNPS"}                           # 美股字母代码
+        Hs, _ = pivots(bars, 3)
+        tg = targets(bars, "downtrend_tl_break", {}, atr, 122.0, Hs, ev)
+        assert tg["no_room_above"] is False, tg           # 关键：美股不判封死
+        assert tg["sea_sky"] is True, tg                  # 创新高无结构 → 海阔天空
+        assert tg["target1"] is None, tg
+        assert tg["rr_target1"] is None, tg
+
+    def test_us_sealed_func_inert_for_us_ticker(self):
+        """_sealed_limit_up 对美股 ticker 直接返回 False；A 股真涨停才封死。"""
+        from rule123 import _sealed_limit_up
+        # 美股强势日收在最高（无涨跌停制度）⇒ 不判封死
+        us_bars = [_bar("a", 100, 101, 99, 100, 1),
+                   _bar("b", 110, 122, 109, 122, 1)]       # +22% 收=高、实体厚
+        assert _sealed_limit_up(us_bars, 3.0, "SNPS") is False
+        # 对照：A 股主板真涨停 +10%（prev 100 → 涨停 110、收=高）⇒ 真封死
+        ash_bars = [_bar("a", 99, 100, 98, 100, 1),
+                    _bar("b", 100, 110, 99, 110, 1)]
+        assert _sealed_limit_up(ash_bars, 3.0, "600882") is True
+
+    def test_us_with_real_wall_uses_wall(self):
+        """美股强势日但上方有真墙 ⇒ 报那面墙，不判封死、不判海阔天空。"""
+        bars = []
+        for i in range(10):
+            bars.append(_bar("p%d" % i, 157, 159, 156, 158, 1))   # 窄幅整理
+        bars.append(_bar("2026-09-10", 158, 160, 157, 159, 2e6))   # 触碰 160 成阻力（真墙）
+        for i in range(11, 23):
+            bars.append(_bar("q%d" % i, 157, 159, 156, 158, 1))   # 右侧 12 根确认间距
+        bars.append(_bar("2026-10-09", 157, 158, 156, 158, 2e6))   # 现价/入场 158，贴近墙
+        atr = _atr(bars)
+        ev = {"ticker": "MDB"}                             # 美股
+        Hs, _ = pivots(bars, 3)
+        tg = targets(bars, "platform_break", {"hard_stop": 150.0}, atr, 158.0, Hs, ev)
+        assert tg["no_room_above"] is False, tg
+        assert tg["sea_sky"] is False, tg
+        assert tg["target1"] is not None, tg
+        assert tg["target1"] <= 160.0, tg                  # 报那面墙（最近真阻力），非凭空延伸
+
+    def test_us_sea_sky_not_lowered_priority(self):
+        """美股海阔天空同样不降优先级（与 A 股同红线）。"""
+        bars = []
+        for i in range(25):
+            bars.append(_bar("p%d" % i, 98, 100, 96, 99, 1))
+        bars.append(_bar("d", 110, 122, 109, 122, 1))
+        atr = _atr(bars)
+        plan = {"mode": "downtrend_tl_break", "recommend": True,
+                "buy_zone": {"level": 122.0, "anchor": "hl_trendline"},
+                "note": "", "verdict": "下降趋势线突破"}
+        plan = attach_stops_targets(plan, bars, atr, [], ev={"ticker": "SNPS"})
+        assert plan.get("sea_sky") is True, plan
+        assert plan["recommend"] is True, plan
+        assert "海阔天空" in (plan.get("note") or ""), plan
+        assert "封死" not in (plan.get("verdict") or ""), plan
+
+
 if __name__ == "__main__":
     import unittest
     unittest.main(verbosity=2)
