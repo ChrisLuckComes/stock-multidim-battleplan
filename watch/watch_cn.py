@@ -206,8 +206,28 @@ def analyze_one(item):
     r["stop_too_close"] = bool(r["d_struct_atr"] is not None and r["d_struct_atr"] < 0.25)
 
     # 持仓：浮盈亏 + 生死线
+    # ★ 容错（2026-10-10）：持仓行缺 stop 时**降级告警**而不是抛 KeyError。
+    #   回归实测：`002780` pos 只有 {qty,cost,date}，旧代码 `pos["stop"]` 直接崩，
+    #   整池 A股扫描（ThreadPoolExecutor.map）全挂 —— **一行数据缺失 = 全池瘫痪**。
+    #   口径：cost/qty 缺 ⇒ 该行不算持仓（无意义的行）；stop 缺 ⇒ 仍算持仓、照常出
+    #   浮盈亏，但生死线相关字段留 None + `pos_missing` 告警，由人补 stop 后复跑。
     pos = item.get("pos")
     if pos:
+        q, cost = pos.get("qty"), pos.get("cost")
+        stop = pos.get("stop")
+        missing = [k for k in ("qty", "cost", "stop") if pos.get(k) in (None, "", 0)]
+        r["pos_missing"] = missing or None
+        if missing and q and cost:
+            # 成本/数量在、只缺 stop（或 stop 为 0）→ 降级保留持仓行
+            r["pnl"] = round((spot - cost) * q, 2)
+            r["pnl_pct"] = round((spot / cost - 1) * 100, 2)
+            r["pnl_amt_pct"] = round((spot - cost) * q / account_denom() * 100, 2)
+            r["amp_today"] = round(bars2[-1]["h"] - bars2[-1]["l"], 2)
+        elif not (q and cost):
+            # qty/cost 缺 ⇒ 这行不是有效持仓（否则 pnl 无从算起）
+            r["pos"] = None
+            r["pos_missing"] = missing
+    if pos and pos.get("qty") and pos.get("cost") and pos.get("stop"):
         q, cost, stop = pos["qty"], pos["cost"], pos["stop"]
         r["pnl"] = round((spot - cost) * q, 2)
         r["pnl_pct"] = round((spot / cost - 1) * 100, 2)
@@ -312,17 +332,27 @@ def render(cfg, rows, senti, idx, src_stat=None, snap_info=None):
         L.append("  无持仓")
     for r in holds:
         p = r["pos"]
-        mark = "✖ 收盘破止损·按纪律卖出" if r.get("stop_broken") else "○ 未破"
-        noise = "  ⚠止损距现价 < 当日振幅（噪声带）" if r.get("stop_inside_noise") else ""
+        miss = r.get("pos_missing")
+        if not p:
+            L.append(f"  {r['name']:<8} ⚠持仓数据不完整（缺 {','.join(miss or [])}）"
+                     f"，本行不计入持仓，请补 watch/watch_cn.json")
+            if r.get("flag"):
+                L.append(f"      ⚑ {r['flag']}")
+            continue
         L.append(f"  {r['name']:<8} {p['qty']}股@{p['cost']:.2f}  收 {fmt(r['spot'])}  "
                  f"{r['chg_pct']:+.2f}%")
         L.append(f"      浮盈亏 {r['pnl']:+,.2f}（{r['pnl_pct']:+.2f}% 账户 {r['pnl_amt_pct']:+.2f}%）"
-                 f"   │ 止损 {p['stop']:.2f}（{p.get('stop_exec', '收盘破')}）"
-                 f" 距 {r['stop_dist']:+.2f} = {r['stop_dist_pct']:+.2f}%  {mark}{noise}")
+                 + (f"   │ 止损 {p['stop']:.2f}（{p.get('stop_exec', '收盘破')}）"
+                    f" 距 {r['stop_dist']:+.2f} = {r['stop_dist_pct']:+.2f}%"
+                    + ("  ✖ 收盘破止损·按纪律卖出" if r.get("stop_broken") else "  ○ 未破")
+                    + ("  ⚠止损距现价 < 当日振幅（噪声带）" if r.get("stop_inside_noise") else "")
+                    if p.get("stop") and r.get("stop_dist") is not None
+                    else f"   │ ⚠ 缺 stop（缺 {','.join(miss or [])}）—— 生死线未定义，"
+                         f"**禁止在无止损状态下继续持有**，请补后复跑"))
         if r.get("flag"):
             L.append(f"      ⚑ {r['flag']}")
         eng = r.get("struct_stop")
-        if eng:
+        if eng and p.get("stop"):
             delta = p["stop"] - eng
             note = ("你的更宽 → 更抗噪声但单笔亏更多" if delta < 0
                     else "你的更紧 → 更抗跌但更容易被噪声扫")
