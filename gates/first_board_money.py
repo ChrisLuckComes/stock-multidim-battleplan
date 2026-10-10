@@ -9,11 +9,18 @@
 
 不写 --date 就取最后一个交易日的分时。
 
-★ 触发门槛（不满足直接跳过，不给结论）—— 本脚本只判「涨停板是谁打的」，
-  非涨停票跑它等于拿当日最高价当涨停价，会算出假结论。触发后再分档：
-    A 高危  首板 + 流通市值 ≤100亿 + 股价 ≤20元   （三板组高发区，必看）
-    B 普通  首板，但盘子/价格不符                （也跑，三板组概率低）
-    C 接力  已 ≥2 连板                           （更该看：正进入出货窗口）
+★ 触发门槛：**当日收盘涨停**（唯一门槛，不满足直接跳过、不给结论）。
+  理由：本脚本判的是「涨停板是谁打的」，非涨停票跑它等于拿当日最高价当
+  涨停价，会算出假结论。⇒ **只有「是否涨停」能当门槛**（这是脚本有效性的
+  前提，不是对资金性质的预判）。
+
+⚠ 曾经用「流通市值 ≤100亿 + 股价 ≤20元」再分 A/B 档，**已作废**（老罗
+  2026-10-08：「这判断也太武断了」）。实证 `research_first_board_size_2026-10-08.py`
+  （n=611 首板 / 15 交易日）：市值·股价与**次日连板率**确实正相关且显著
+  （Q1 20.3% vs Q5 7.4%，z=2.93 p=0.003）—— 但这证明的是「小盘低价**更容易
+  被接力**」，**不是「更危险」**；把它标成「三板组高危区」是用法错误。
+  ⇒ 规模只作**连续读数**（当日涨停股中的分位），**不设阈值、不分档、不进打分**。
+
   --force 可绕过门槛（复盘历史某日、或人工确认要跑时用）。
 
 判的是「钱的性质」，不是「票好不好」。四层证据，逐层都能缺，缺了要写明：
@@ -43,10 +50,19 @@ if _HERE not in sys.path:
 _H = {"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"}
 _HQ = {"User-Agent": "Mozilla/5.0", "Referer": "https://gu.qq.com/"}
 
-# 常见打板/接力游资营业部关键词（席位层识别用，命中仅作加分，不作唯一判据）
-_YZ_SEATS = ("拉萨", "团结路", "东环路", "华鑫", "桑田路", "溧阳路", "佛山",
-             "成都", "杭州帮", "宁波", "厦门", "紫阳", "建国路", "解放南",
+# ★ 龙虎榜「死亡名单」—— 老罗 2026-10-08 给的三板组常见席位（命中权重最高）
+_DEATH_SEATS = ("联储证券宁波分公司", "华源证券深圳分公司",
+                "天风证券江阴人民东路", "华鑫证券")
+# 其余打板/接力游资营业部关键词（次级，命中加分但不单独定性）
+_YZ_SEATS = ("拉萨", "团结路", "东环路", "桑田路", "溧阳路", "佛山",
+             "成都", "杭州帮", "厦门", "紫阳", "建国路", "解放南",
              "台州", "温岭", "绍兴", "瑞安", "上海分公司", "深圳帮")
+
+# 三板组选股偏好：流通市值 5~30 亿（微盘）。⚑ 单独不构成避雷理由，
+# 必须配「无业绩 + 无逻辑 + 无板块」才成立（老罗：决不碰 <40亿 的
+# 无业绩无厘头冷门股）。⇒ 只给 ±1，且必须在依据里写明这一条限定。
+MICRO_FLOAT_CAP = 3e9       # 30 亿
+BIG_FLOAT_CAP = 1e10        # 100 亿
 
 
 def _get(url, hdr=_H, tries=3, timeout=20):
@@ -59,11 +75,6 @@ def _get(url, hdr=_H, tries=3, timeout=20):
             last = e
             time.sleep(1.2)
     raise RuntimeError("取数失败 %s: %s" % (url[:80], last))
-
-
-# 触发档阈值（小盘低价 = 三板组高发区）
-SMALL_FLOAT_CAP = 1e10      # 流通市值 ≤ 100 亿
-LOW_PRICE_CAP = 20.0        # 股价 ≤ 20 元
 
 
 def is_sh(code):
@@ -110,24 +121,20 @@ def zt_state(bars, code, name=""):
             "is_zt": _is_zt(prev["c"], last["c"]), "streak": streak}
 
 
-def trigger_tier(zs, float_cap=None, price=None):
-    """触发档：A 高危 / B 普通 / C 接力 / None 不触发。"""
+def trigger_tier(zs):
+    """触发档 —— 门槛只有「当日收盘涨停」这一个。
+
+    ⚑ 曾经用「流通 ≤100亿 + 股价 ≤20元」再分 A/B 高危档，**已作废**：
+    实证（n=611 首板）市值/股价与「次日连板率」确实显著相关（22.0% vs 7.4%，
+    p=0.001），但那证明的是「小盘低价**更容易被接力**」，不是「更危险」；
+    且按收益分组完全不单调 ⇒ 二元阈值站不住。规模只作连续读数输出。
+    """
     if not zs or not zs["is_zt"]:
         return None, "当日未涨停（%+.2f%%），不适用本脚本" % (
             (zs["pct"] * 100) if zs else 0)
     if zs["streak"] >= 2:
         return "C", "已 %d 连板 —— 正进入接力/出货窗口" % zs["streak"]
-    small = (float_cap is not None and float_cap <= SMALL_FLOAT_CAP)
-    low = (price is not None and price <= LOW_PRICE_CAP)
-    if small and low:
-        return "A", "首板 + 小盘低价（流通 %.0f 亿 / %.2f 元）—— 三板组高发区" % (
-            float_cap / 1e8, price)
-    if small or low:
-        return "B", "首板 + %s（流通 %s / 价 %s）" % (
-            "小盘" if small else "低价",
-            ("%.0f亿" % (float_cap / 1e8)) if float_cap is not None else "缺失",
-            ("%.2f元" % price) if price is not None else "缺失")
-    return "B", "首板，但盘子/价格不符合小盘低价特征（三板组概率低）"
+    return "1", "首板"
 
 
 def fmt_t(t):
@@ -190,7 +197,35 @@ def board_structure(rows, lim_px=None):
             steep = (ch, rows[i - 3]["px"], rows[i]["px"], rows[i]["t"])
     return {"hi": hi, "lo": lo, "first": first, "segs": segs, "opens": opens,
             "lim_vol_share": lim_v / tot_v, "lim_min": lim_min, "density": density,
-            "steep": steep, "n": len(rows)}
+            "t_share": t_share, "steep": steep, "n": len(rows)}
+
+
+def runup_profile(rows, first_t):
+    """拉升段形态：开盘 → 首次封板这一段的最大回撤。
+
+    一线天（老罗判据：早盘直线拉升、中间几乎无回调）⇒ mdd 极小。
+    返回 {mdd, mins, start, end}；取不到返回 None。
+    """
+    if not first_t or not rows:
+        return None
+    idx = None
+    for i, r in enumerate(rows):
+        if r["t"] == first_t:
+            idx = i
+            break
+    if idx is None or idx < 1:
+        return None
+    seg = rows[:idx + 1]
+    peak = seg[0]["px"]
+    mdd = 0.0
+    for r in seg:
+        if r["px"] > peak:
+            peak = r["px"]
+        dd = (peak - r["px"]) / peak if peak else 0.0
+        if dd > mdd:
+            mdd = dd
+    return {"mdd": mdd, "mins": idx + 1,
+            "start": seg[0]["px"], "end": seg[-1]["px"]}
 
 
 # ---------------------------------------------------------------- 涨停池（东财）
@@ -225,8 +260,13 @@ def lhb(code, date):
 
 
 # ---------------------------------------------------------------- 判定
-def judge(st, volx, hs, peers_zt, seal_ratio, seats):
-    """打分：正分 = 越像游资接力/三板组。返回 (score, 明细)。"""
+def judge(st, volx, hs, peers_zt, seal_ratio, seal_float, mdd, float_cap,
+          seats, death_seats, streak=1):
+    """打分：正分 = 越像三板组/接力盘。返回 (score, 明细)。
+
+    判据来自老罗 2026-10-08 给的三板组操作手册（席位 / 封单÷流通市值 /
+    一线天 / 量能节奏 / 无板块效应），不是市值与价格的二元猜测。
+    """
     s = 0
     why = []
     t = st["first"] or ""
@@ -242,6 +282,49 @@ def judge(st, volx, hs, peers_zt, seal_ratio, seats):
     else:
         why.append("上午 %s 封板（早板，0）" % fmt_t(t))
 
+    # -- ★ 连板阶段（老罗：二板缩量一字=锁仓诱多；三板=撤单砸跌停的出货日）
+    streak = streak or 1
+    if streak >= 3:
+        s += 3
+        why.append("已 %d 连板 ⇒ 三板组通常在第三板撤封单、反手砸跌停（出货日，+3）" % streak)
+    elif streak == 2:
+        ts = st.get("t_share") or 0.0
+        if ts >= 0.80 and (st.get("density") or 0) < 1.5:
+            s += 2
+            why.append("二板缩量一字（板上时间占比 %.0f%%）⇒ 锁仓诱多、根本排不进（+2）"
+                       % (ts * 100))
+        else:
+            why.append("二板（接力中段，0）")
+
+    # -- ★ 封单 ÷ 流通市值（老罗核心判据：封单远超流通盘 = 假单诱多）
+    if seal_float is None:
+        why.append("封单/流通市值 算不出（缺封单或流通市值，0）")
+    elif seal_float >= 0.20:
+        s += 3
+        why.append("封单/流通市值 %.0f%% —— 封单大到不合理，典型假封单/诱多（+3）"
+                   % (seal_float * 100))
+    elif seal_float >= 0.10:
+        s += 2
+        why.append("封单/流通市值 %.0f%%（封单偏大，+2）" % (seal_float * 100))
+    elif seal_float >= 0.05:
+        s += 1
+        why.append("封单/流通市值 %.0f%%（+1）" % (seal_float * 100))
+    else:
+        why.append("封单/流通市值 %.1f%%（正常，0）" % (seal_float * 100))
+
+    # -- ★ 一线天：拉升段几乎无回调（早盘直线拉板）
+    if mdd is None:
+        why.append("拉升段回撤算不出（0）")
+    elif mdd <= 0.02:
+        s += 2
+        why.append("拉升段最大回撤 %.1f%% —— 一线天·几乎无回调直线拉板（+2）" % (mdd * 100))
+    elif mdd <= 0.04:
+        s += 1
+        why.append("拉升段最大回撤 %.1f%%（回撤很小，+1）" % (mdd * 100))
+    else:
+        why.append("拉升段最大回撤 %.1f%%（有回调，非一线天，0）" % (mdd * 100))
+
+    # -- 封板后量密度（⚑ 已按老罗判据修正：缩量不再一律算「惜售=最强」）
     d = st["density"]
     if d is None:
         why.append("封板后量密度算不出（0）")
@@ -251,31 +334,37 @@ def judge(st, volx, hs, peers_zt, seal_ratio, seats):
     elif d > 1.5:
         s += 1
         why.append("封板后量密度 %.2fx（换手偏大，+1）" % d)
+    elif d < 0.6 and (seal_float or 0) >= 0.10:
+        s += 2
+        why.append("封板后量密度 %.2fx 且封单/流通 %.0f%% ⇒ 巨量假封单 + 板上几乎无成交"
+                   "（封单是摆设、根本排不进，+2）" % (d, seal_float * 100))
     elif d < 0.6:
-        s -= 2
-        why.append("封板后量密度 %.2fx（缩量锁仓，惜售，-2）" % d)
+        why.append("封板后量密度 %.2fx（缩量，无法区分真锁仓与假封单，0）" % d)
     else:
         why.append("封板后量密度 %.2fx（正常，0）" % d)
 
     if seal_ratio is None:
         why.append("封单数据缺失（0）")
     elif seal_ratio < 0.10:
-        s += 2
-        why.append("封单/成交额 %.0f%%（封单薄，+2）" % (seal_ratio * 100))
+        s += 1
+        why.append("封单/成交额 %.0f%%（封单薄，+1）" % (seal_ratio * 100))
     elif seal_ratio > 0.25:
         s -= 1
         why.append("封单/成交额 %.0f%%（封单厚，-1）" % (seal_ratio * 100))
     else:
         why.append("封单/成交额 %.0f%%（中，0）" % (seal_ratio * 100))
 
+    # -- 量能节奏（老罗：首板放量=建仓，二三板缩量=锁仓诱多，出货板巨量=砸盘）
     if volx is None:
         why.append("量能倍数缺失（0）")
     elif volx > 5:
         s += 1
-        why.append("首板量 %.1fx 前5日均量（爆量，+1）" % volx)
+        why.append("首板量 %.1fx 前5日均量（爆量建仓，+1）" % volx)
     elif volx < 2:
         s -= 1
-        why.append("首板量 %.1fx 前5日均量（温和，-1）" % volx)
+        why.append("首板量 %.1fx 前5日均量（温和不放量，-1）" % volx)
+    else:
+        why.append("首板量 %.1fx 前5日均量（正常，0）" % volx)
 
     if hs is None:
         why.append("换手率缺失（0）")
@@ -283,9 +372,12 @@ def judge(st, volx, hs, peers_zt, seal_ratio, seats):
         s += 1
         why.append("换手 %.1f%%（高换手，+1）" % hs)
     elif hs < 2:
-        s -= 2
-        why.append("换手 %.1f%%（极低，抛压小，-2）" % hs)
+        s -= 1
+        why.append("换手 %.1f%%（极低，-1；⚑ 缩量一字也可能是锁仓诱多，别当安全证明）" % hs)
+    else:
+        why.append("换手 %.1f%%（正常，0）" % hs)
 
+    # -- 板块效应（老罗：三板组专挑「板块冷、无跟风」的冷门股）
     if peers_zt is None:
         why.append("板块涨停数缺失（0）")
     elif peers_zt >= 3:
@@ -293,26 +385,62 @@ def judge(st, volx, hs, peers_zt, seal_ratio, seats):
         why.append("同行业当日涨停 %d 只（有板块效应，接力可持续，-1）" % peers_zt)
     elif peers_zt <= 1:
         s += 1
-        why.append("同行业当日涨停仅 %d 只（孤板，三板组不接力，+1）" % peers_zt)
+        why.append("同行业当日涨停仅 %d 只（孤板·无板块效应，三板组偏爱，+1）" % peers_zt)
+    else:
+        why.append("同行业当日涨停 %d 只（0）" % peers_zt)
 
     if st["opens"] >= 2:
         s += 1
         why.append("炸板 %d 次（封板不牢，+1）" % st["opens"])
 
-    if seats:
+    # -- 流通市值（⚑ 小权重，且必须配「无业绩 + 无逻辑 + 无板块」才成立）
+    if float_cap is None:
+        why.append("流通市值缺失（0）")
+    elif float_cap <= MICRO_FLOAT_CAP:
+        s += 1
+        why.append("流通 %.0f 亿（微盘·三板组偏好区间，+1；⚑ 单独不构成避雷理由，"
+                   "须配无业绩+无逻辑+无板块）" % (float_cap / 1e8))
+    elif float_cap >= BIG_FLOAT_CAP:
+        s -= 1
+        why.append("流通 %.0f 亿（大盘，三板组拉不动，-1）" % (float_cap / 1e8))
+    else:
+        why.append("流通 %.0f 亿（0）" % (float_cap / 1e8))
+
+    if death_seats:
         s += 3
-        why.append("龙虎榜摘要含游资席位关键词（%s，+3）" % "、".join(seats))
+        why.append("⚑⚑ 龙虎榜命中三板组死亡席位（%s，+3）" % "、".join(death_seats))
+    if seats:
+        s += 2
+        why.append("龙虎榜含游资营业部关键词（%s，+2）" % "、".join(seats))
     return s, why
 
 
-def verdict(score):
+def verdict(score, streak=1):
     if score <= -3:
-        return ("机构/锁仓型", "低", "锁仓良好、抛压小。可持有；回踩位可等。")
-    if score <= 1:
-        return ("混合型", "中", "有游资参与但未失控。可持有，但二板不追高开 >5% 的竞价。")
-    if score <= 4:
-        return ("游资接力型", "高", "典型接力盘指纹。不做二板接力；已有仓位第三板无条件走。")
-    return ("出货/三板组型", "极高", "板上换手巨大、封单薄。直接避雷；持有者次日高开即减。")
+        kind, risk, act = ("机构/锁仓型", "低", "锁仓良好、抛压小。可持有；回踩位可等。")
+    elif score <= 1:
+        kind, risk, act = ("混合型", "中",
+                           "有游资参与但未失控。可持有，但二板不追高开 >5% 的竞价。")
+    elif score <= 4:
+        kind, risk, act = ("游资接力型", "高",
+                           "典型接力盘指纹。不做二板接力（缩量一字更不接）；"
+                           "已持有 ⇒ 第二/第三板开盘坚决止盈；炸板放量必死，破板就走。")
+    else:
+        kind, risk, act = ("三板组高危", "极高",
+                           "封单异常/一线天/无板块效应，符合三板组做盘指纹。直接不参与；"
+                           "已持有 ⇒ 次日开盘坚决走，不等第三板。")
+    streak = streak or 1
+    if streak == 2 and risk in ("低", "中"):
+        act += (" ⚑ 二板缩量一字 ⇒ 根本排不进，**不接一字飞刀**；"
+                "炸板放量必死 ⇒ 炸板就走，不博回封。")
+    # ★ 第三板是三板组的出货日 —— 这条与打分无关，不被其他项抵消
+    if streak >= 3:
+        if risk != "极高":
+            kind, risk = "游资接力型（三板出货窗口）", "高"
+        act = ("⚑ 已 %d 连板 —— 三板组通常在第三板撤封单、反手万手砸跌停（出货日）。"
+               "不接力；已持有 ⇒ 开盘坚决止盈，不等第四板。" % streak) + (
+              " " + act if risk == "极高" else "")
+    return kind, risk, act
 
 
 def main():
@@ -356,11 +484,11 @@ def main():
     px = (bars[-1]["c"] if bars else None)
     tier, tier_why = (None, ""), ""
     if zs:
-        tier, tier_why = trigger_tier(zs, float_cap, px)
+        tier, tier_why = trigger_tier(zs)
     if tier is None and not a.force:
         msg = ("【不适用 · 跳过】%s %s 当日 %+.2f%%（涨停价 %.2f）未封板 —— "
                "本脚本只判涨停板的资金成分，非涨停票跑它会拿当日最高价当涨停价、算出假结论。\n"
-               "  触发门槛：当日收盘涨停（首板=A/B 档，≥2 连板=C 档）。确需复盘请加 --force。"
+               "  触发门槛只有一个：当日收盘涨停。确需复盘请加 --force。"
                % (code, date, zs["pct"] * 100 if zs else 0,
                   zs["limit_price"] if zs else 0))
         print(msg if not a.json else json.dumps(
@@ -382,19 +510,30 @@ def main():
     elif pool_err:
         print("⚠ " + pool_err)
 
+    # 封单 ÷ 成交额（老口径）与 封单 ÷ 流通市值（老罗判据：假封单）
     seal_ratio = None
-    if it and it.get("fund") and mm["amt"]:
-        seal_ratio = float(it["fund"]) / mm["amt"]
+    seal_float = None
+    if it and it.get("fund"):
+        if mm["amt"]:
+            seal_ratio = float(it["fund"]) / mm["amt"]
+        if float_cap:
+            seal_float = float(it["fund"]) / float_cap
+    prof = runup_profile(rows, st["first"])
+    mdd = prof["mdd"] if prof else None
+
     lhbinfo, lhb_err = lhb(code, date)
     if lhb_err:
         print("⚠ " + lhb_err)
     seats = []
+    death = []
     if lhbinfo:
         txt = "%s %s" % (lhbinfo.get("reason") or "", lhbinfo.get("note") or "")
-        seats = [k for k in _YZ_SEATS if k in txt]
+        death = [k for k in _DEATH_SEATS if k in txt]
+        seats = [k for k in _YZ_SEATS if k in txt and k not in "".join(death)]
 
-    score, why = judge(st, volx, hs, peers, seal_ratio, seats)
-    kind, risk, act = verdict(score)
+    score, why = judge(st, volx, hs, peers, seal_ratio, seal_float, mdd,
+                       float_cap, seats, death, (zs["streak"] if zs else 1))
+    kind, risk, act = verdict(score, (zs["streak"] if zs else 1))
 
     out = {
         "code": code, "date": date, "applicable": True, "tier": tier,
@@ -402,7 +541,9 @@ def main():
         "float_cap": float_cap, "score": score, "kind": kind, "risk": risk,
         "action": act, "first_seal": fmt_t(st["first"]), "opens": st["opens"],
         "density": st["density"], "volx": volx, "turnover": hs,
-        "seal_ratio": seal_ratio, "peers_zt": peers, "lhb": lhbinfo,
+        "seal_ratio": seal_ratio, "seal_float": seal_float, "mdd": mdd,
+        "run_mins": prof["mins"] if prof else None,
+        "peers_zt": peers, "lhb": lhbinfo, "death_seats": death,
         "amt": mm["amt"], "hi": st["hi"], "lo": st["lo"], "why": why,
     }
     if a.json:
@@ -410,10 +551,11 @@ def main():
         return 0
 
     print("=" * 64)
-    print("【触发档 %s】%s ｜ %s 连板 ｜ %s" % (
-        tier, tier_why, ("首板" if (zs and zs["streak"] <= 1) else
-                         ("%d 板" % zs["streak"] if zs else "未知")),
-        ("流通 %.0f 亿" % (float_cap / 1e8)) if float_cap else "流通市值缺失"))
+    print("【%s】%s ｜ 流通 %s ｜ 股价 %s  ⚑ 规模只作读数、不作档位" % (
+        ("首板" if tier == "1" else ("%d 连板" % zs["streak"] if zs else tier)),
+        tier_why,
+        ("%.0f 亿" % (float_cap / 1e8)) if float_cap else "缺失",
+        ("%.2f 元" % px) if px else "缺失"))
     print("【结论】%s %s ｜ 资金性质：%s ｜ 三板组风险：%s" % (code, date, kind, risk))
     print("        %s" % act)
     print("        打分 %+d（正分越高越像游资接力盘）" % score)
@@ -426,6 +568,11 @@ def main():
     print("  封板后量密度 %s ｜ 板上量占比 %.0f%%（%d分钟）" % (
         ("%.2fx" % st["density"]) if st["density"] else "缺失",
         st["lim_vol_share"] * 100, st["lim_min"]))
+    print("  封单/流通市值 %s ｜ 拉升段 %s 分钟、最大回撤 %s%s" % (
+        ("%.1f%%" % (seal_float * 100)) if seal_float is not None else "缺失",
+        prof["mins"] if prof else ("一字板" if st["hi"] == st["lo"] else "—"),
+        ("%.1f%%" % (mdd * 100)) if mdd is not None else "缺失",
+        "（一线天）" if (mdd is not None and mdd <= 0.02) else ""))
     print("  首板量/5日均量 %s ｜ 换手 %s ｜ 封单/成交额 %s ｜ 同行业涨停 %s" % (
         ("%.2fx" % volx) if volx else "缺失",
         ("%.2f%%" % hs) if hs is not None else "缺失",
@@ -438,6 +585,8 @@ def main():
             print("  ⚑ 买方疑似游资席位关键词：%s" % "、".join(seats))
     else:
         print("  龙虎榜：当日未上榜（只取偏离值前三，未上榜≠无游资，看分时证据）")
+    if death:
+        print("  ⚑⚑ 命中三板组死亡席位：%s" % "、".join(death))
     print("-" * 64)
     for w in why:
         print("  · " + w)
