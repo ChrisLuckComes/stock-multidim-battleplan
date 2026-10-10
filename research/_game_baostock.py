@@ -8,11 +8,18 @@ import sys
 import json
 import os
 
-sys.path.insert(0, r"D:\code\stock-multidim-battleplan")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+# 产物落 data/cache/（AGENTS.md 2b：运行产物不得落根目录）
+CACHE = os.path.join(ROOT, "data", "cache")
+PRESCAN = os.path.join(CACHE, "game_screen_prescan.json")
+DEEP = os.path.join(CACHE, "game_deep.json")
+MEMBERS = os.path.join(ROOT, "game_board_members.json")
+os.makedirs(CACHE, exist_ok=True)
 import baostock as bs
 from src_baostock import fetch_daily, fill_cache
 
-members = json.load(open("game_board_members.json", encoding="utf-8"))
+members = json.load(open(MEMBERS, encoding="utf-8"))
 
 
 def ma(bars, n):
@@ -134,7 +141,7 @@ for r in rows:
     )
     r["score"] = round(score, 2)
 rows.sort(key=lambda r: r["score"], reverse=True)
-json.dump(rows, open("game_screen_prescan.json", "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+json.dump(rows, open(PRESCAN, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 print("Baostock 初筛完成", len(rows), "只 -> game_screen_prescan.json")
 for r in rows[:22]:
     print(

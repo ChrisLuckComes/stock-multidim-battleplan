@@ -60,3 +60,9 @@ open_memo_*.md
 
 # 一次性草稿、探查输出、临时脚本。用完删除；需要留在磁盘时只放这里，不入库。
 scratch/
+
+# 游戏板块初筛/深筛产物（2026-10-10 补）：脚本已归 research/_game_*.py，
+# 产物由脚本写去 data/cache/（已在上面被/data/ 覆盖）。这两条只作兜底，
+# 防止有人从别的 cwd 跑脚本时把json 甩回根目录。
+game_screen_prescan.json
+game_deep.json
