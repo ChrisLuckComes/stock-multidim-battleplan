@@ -964,6 +964,35 @@ def build_tier_ranking(a, n):
     )
 
 
+def build_sector_risk(a, n):
+    """板块状态风险区块（2026-10-11 老罗：板块龙头退潮 = 后排禁买/降级）。
+
+    数据来源：notes.sector_risk（人工强化，优先级高，如已知龙头严重异动→avoid）
+    或 analysis.sector_risk（引擎自动，仅用 peers d20 评级）。
+    取两者最严者渲染。不写就不渲染（不影响其他章节）。
+    """
+    sr = (n.get("sector_risk") or a.get("sector_risk"))
+    if not sr or not isinstance(sr, dict):
+        return ""
+    risk = sr.get("risk", "unknown")
+    badge = {"avoid": "<span class='badge red'>禁买/观察</span>",
+             "watch": "<span class='badge yellow'>谨慎/降级</span>",
+             "safe": "<span class='badge green'>可参与</span>"}.get(
+                 risk, "<span class='badge'>%s</span>" % risk)
+    lead = ""
+    if sr.get("leader_name") or sr.get("leader_code"):
+        lead = "<b>板块龙头</b>：%s%s" % (
+            esc(str(sr.get("leader_name") or sr.get("leader_code"))),
+            ("（20日 +%.0f%%）" % sr["leader_d20"]) if sr.get("leader_d20") is not None else "")
+    need = " ⚠ 当日涨幅/连板需交易日复核" if sr.get("need_recheck") else ""
+    return (
+        "<div class='card'><h3>板块状态风险（后排闸门）</h3>"
+        "<p>风险等级：%s%s</p>%s"
+        "<p class='note'>%s</p></div>"
+        % (badge, need, lead, esc(str(sr.get("reason", ""))))
+    )
+
+
 def build_confluence(a, n):
     """叠加概率七层计数区块（2026-09-25 新增）。
 
@@ -1173,6 +1202,7 @@ def render(a, n, tmpl_path=DEFAULT_TMPL, vp_from=None, vp_to=None):
         "CONFLUENCE_BLOCK": build_confluence(a, n),
         "OPEN_PLAYBOOK_BLOCK": build_open_playbook(a, n),
         "TIER_RANKING_BLOCK": build_tier_ranking(a, n),
+        "SECTOR_RISK_BLOCK": build_sector_risk(a, n),
         "T1": num(a["targets"].get("t1")),
         "T2": num(a["targets"].get("wall_far")),
         "ODDS_ROWS": build_odds_rows(a),

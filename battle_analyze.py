@@ -1264,6 +1264,12 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
         "peers": peer_rows,
         "probe_text": probe_txt,
     }
+    # ★ 2026-10-11 板块龙头退潮闸门（轻量）：自动识别后排风险，仅用已取 peers，不联网
+    try:
+        from gates.sector_check import sector_risk_of as _sector_risk_of
+        out["sector_risk"] = _sector_risk_of(code, out)
+    except Exception as e:                      # noqa: BLE001
+        out["sector_risk"] = {"risk": "unknown", "reason": "板块检查失败：%s" % e}
     # ★ 叠加概率七层计数（2026-09-25 新增）：把上面已经算好的结论**汇总成一个数**，
     #   回答「这单是单因素还是多因素」。市场层自动去 data/sentiment_<基准日>.json 找
     #   当日情绪分（日期必须严格一致，隔日不算）；板块与催化剂单票报告拿不到，
