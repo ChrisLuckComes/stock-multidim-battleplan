@@ -217,6 +217,12 @@ def cache_check(market, code, n, now=None, trim=True):
     meta = _read_meta(_cache_path(market, code))
     if not meta:
         return None, "无缓存"
+    if not isinstance(meta, dict):
+        # data/cache 是被多个工具共用的目录：老版本的行情缓存存的是**裸 list**，
+        # 还可能混进 ann_/seat_/sweep_/now_* 等其它工具的 JSON。它们一律判为未命中
+        # （而不是崩在 `.get("bars")` 上）—— 走网络重新取数后 cache_save 会写成
+        # 标准字典格式，等于自动自愈。
+        return None, "缓存格式非字典（老格式/其它工具产出）"
     bars = meta.get("bars") or []
     if not bars:
         return None, "缓存无 bars"
@@ -535,9 +541,13 @@ def _stat():
     if not os.path.isdir(CACHE_DIR):
         print("缓存目录不存在（还没写过缓存）")
         return 0
-    files = [f for f in os.listdir(CACHE_DIR) if f.endswith(".json")]
+    # 只统计 bars_source 自己写的行情缓存（cn_/us_ 前缀，与 `_cache_path` 一致）。
+    # 该目录还被 ann_/sweep_/seat_*/now_* 等其它工具共用，它们的 JSON 不是行情缓存：
+    # 无差别遍历会让 `.get("bars")` 崩在裸 list（如 now_5y.json）上。
+    files = [f for f in os.listdir(CACHE_DIR)
+             if f.endswith(".json") and f.startswith(("cn_", "us_"))]
     if not files:
-        print("缓存为空")
+        print("缓存为空（无行情缓存文件）")
         return 0
     rows = []
     total = 0
@@ -545,13 +555,20 @@ def _stat():
         p = os.path.join(CACHE_DIR, fn)
         sz = os.path.getsize(p)
         total += sz
-        meta = _read_meta(p) or {}
+        meta = _read_meta(p)
+        if not isinstance(meta, dict):
+            # 老格式（裸 list）或其它工具产出：不按行情缓存解析，直接标失效。
+            rows.append((fn, 0, "-", "-", "失效", "缓存格式非字典（老格式）"))
+            continue
         bars = meta.get("bars") or []
-        mk = meta.get("market", "?")
+        # 市场/代码优先用文件里存的，缺了就从文件名反推（"cn_300821.json" → 300821）,
+        # 避免 meta 里 market 是 "?" 时误判成美股。
+        mk = "ASH" if fn.startswith("cn_") else "US"
+        code = meta.get("code") or re.sub(r"\.json$", "", fn)[3:]
         # 按它自己存的根数口径判定 —— 指数/温度计只有 6 根（quote_of 的 n=6），
         # 拿 140 的口径去看它必然误报「根数不足」。
         nchk = min(60, meta.get("n") or 60)
-        hit, why = (None, "无 bars") if not bars else cache_check(mk, meta.get("code", ""), nchk)
+        hit, why = (None, "无 bars") if not bars else cache_check(mk, code, nchk)
         rows.append((fn, len(bars), bars[-1]["d"] if bars else "-",
                      meta.get("saved_at", "-"), "命中" if hit else "失效", why))
     rows.sort(key=lambda r: r[0])
