@@ -247,11 +247,34 @@ def stop_anchor_candidates(bars, plan, atr_v):
 
 # ────────────────────────── 入场候选 ──────────────────────────
 
+def rolling_sma_last(bars, n):
+    """下一日平收近似滚动 MA：把最后一根 close 当作「下一日」close 再滚一次。
+
+    ★ 2026-10-11 对齐用户铁律①（实时均线口径）：静态快照 MA 会因新大阳进入窗口而
+    低估，导致低吸档算出「破位价」。例：301449 快照 MA5=41.39 < struct_stop 41.71
+    （破位），但实盘滚动后 MA5≈42.83 反而是结构未破的可买位。用滚动值生成低吸档，
+    避免把「结构已坏」的价误当成可低吸位（接飞刀）。
+    注意：这只是「下一日若平收」的近似，真正实盘均线以当日收盘后为准；
+    它解决的是「周末跑引擎时快照过低」的口径偏差，而非预测次日走势。
+    """
+    if not bars or len(bars) < n:
+        return None
+    closes = [b["c"] for b in bars[-(n - 1):]] + [bars[-1]["c"]]
+    return sum(closes) / len(closes)
+
+
 def entry_candidates(bars, plan, probe_out, atr_v, odds_from_probe=None):
-    """入场候选：上方（突破跟单类）/ 现价 / 下方（低吸类）。"""
+    """入场候选：上方（突破跟单类）/ 现价 / 下方（低吸类）。
+
+    ★ 2026-10-11 结构完整性闸门（用户定）：低吸（below）档的买点必须 > 结构破位线
+    struct_stop，否则结构/趋势/突破已破坏 = 接飞刀，不生成该档。这直接砍掉「近 10/20
+    根低点」「贴着/跌破结构止损的买区下沿」这类纸面高赔率、实盘不可达的接飞刀档。
+    下方均线档改用 rolling_sma_last（实时均线近似），让低吸档位落在结构未破区。
+    """
     z = plan.get("buy_zone") or {}
     c0 = bars[-1]["c"]
     last = bars[-1]
+    struct_floor = z.get("struct_stop")  # 结构破位线：低吸不得跌破
     cands = []
 
     def add(name, price, kind, note=""):
@@ -267,6 +290,9 @@ def entry_candidates(bars, plan, probe_out, atr_v, odds_from_probe=None):
                 kind = "below"
             else:
                 kind = "now"
+        # ★ 结构完整性闸门：低吸档跌破结构破位线 = 接飞刀，剔除
+        if kind == "below" and struct_floor is not None and p <= struct_floor:
+            return
         cands.append({"name": name, "price": p, "kind": kind,
                       "dist_pct": _pct(price, c0),
                       "dist_need": _pct(price, c0), "note": note})
@@ -280,19 +306,22 @@ def entry_candidates(bars, plan, probe_out, atr_v, odds_from_probe=None):
         add("引擎挂单价", po["limit"], "above", "probe 预案单挂价")
     # 现价
     add("基准日收盘（现价）", c0, "now", "市价追")
-    # 下方
+    # 下方（低吸类）—— 必须 > struct_floor（结构未破）；均线用滚动值
     vw = z.get("vwap5")
     if vw:
         add("5 日 VWAP", vw, "below", "低吸带")
-    add("MA5", R.sma([b["c"] for b in bars], 5), "below", "低吸首选")
-    add("买区下沿", z.get("primary_lo"), "below", "引擎最低可买价")
-    lo10 = min(b["l"] for b in bars[-10:])
-    add("近 10 根低点", lo10, "below", "")
-    add("结构止损 上方 0.5×ATR", (z.get("struct_stop") or 0) + 0.5 * atr_v if z.get("struct_stop") else None,
+    ma5r = rolling_sma_last(bars, 5)
+    if ma5r is not None:
+        add("MA5(滚动)", ma5r, "below", "低吸首选·实时均线(下一日平收近似)")
+    ma10r = rolling_sma_last(bars, 10)
+    if ma10r is not None:
+        add("MA10(滚动)", ma10r, "below", "低吸·实时均线")
+    ma20r = rolling_sma_last(bars, 20)
+    if ma20r is not None:
+        add("MA20(滚动)", ma20r, "below", "趋势线·实时均线")
+    # 回踩深一档（结构止损上方 0.5×ATR，结构仍完整）
+    add("结构止损上方 0.5×ATR", (struct_floor or 0) + 0.5 * atr_v if struct_floor else None,
         "below", "回踩深一档")
-    add("结构止损（回踩锚）", z.get("struct_stop"), "below", "贴线买")
-    lo20 = min(b["l"] for b in bars[-20:])
-    add("近 20 根低点", lo20, "below", "深回踩")
     # 去重
     seen, uniq = set(), []
     for x in cands:
@@ -508,16 +537,62 @@ def limit_touch_rate(bars, limit_px, horizon=5):
     return {"px": round(limit_px, 2), "pct": round(hits / n * 100, 1), "n": n, "horizon": horizon}
 
 
-def pick_recommend(rows, z, us=False):
+def pick_recommend(rows, z, us=False, bars=None):
     """推荐档。A 股、美股分开。
 
-    A 股当日买入不能卖，仍在可预挂的回踩档里取 R 最大的一条。
+    A 股当日买入不能卖，仍在可预挂的回踩档里取「达成率×赔率」联合最高的一条。
     美股可以随时离场：现价或现价上方的档自己 R≥1.5，就推荐这档追涨，
     不因为下面还有 R 更大的回踩而改去等。
     """
     if us:
-        return _pick_recommend_us(rows, z)
-    return _pick_recommend_cn(rows, z)
+        return _pick_recommend_us(rows, z, bars=bars)
+    return _pick_recommend_cn(rows, z, bars=bars)
+
+
+def _attain_rate(r, bars):
+    """达成率估计（0~1）：低吸档「需跌多少才能到」越浅越易达。
+
+    ★ 2026-10-11 用户定：最佳推荐档不能只看赔率，必须叠加达成率。
+    优先用历史触达率 limit_touch_rate（真实回测），拿不到则按 need_pct 启发式
+    （需跌幅度：每多跌 ~8% 达成率趋近 0）。
+    """
+    e = r.get("entry")
+    if bars and e is not None:
+        try:
+            t = limit_touch_rate(bars, e)
+        except Exception:
+            t = None
+        if t and isinstance(t.get("pct"), (int, float)):
+            return max(0.0, min(1.0, t["pct"] / 100.0)), "历史触达率%d%%" % t["pct"]
+    npct = r.get("need_pct")
+    if isinstance(npct, (int, float)):
+        a = 1.0 + npct / 8.0  # need_pct=0→1.0；=-8%→0
+        a = max(0.03, min(1.0, a))
+        return a, "启发式(需跌%.1f%%)" % npct
+    return 0.5, "未知"
+
+
+def exec_stop_of(z, bars):
+    """执行止损腿（往下加缓冲带）：取 struct_stop / hard_stop / MA20 中**低于买点**的
+    最低可用价。
+
+    ★ 2026-10-11 对齐用户：最佳推荐档的止损要「往下加缓冲带」（取更低执行止损，
+      而非贴着结构破位线）。本例 hard_stop=struct_stop=41.71 并未真正缓冲到 MA20=40.77，
+      导致推荐档赔率列贴着结构线虚高。此处把 MA20 纳入缓冲候选，让推荐档的实际
+      执行止损落到更低、更稳的位。与 sizing_stop_of 取「更低腿」的口径一致。
+    """
+    cands = []
+    for k in ("hard_stop", "struct_stop"):
+        v = z.get(k)
+        if isinstance(v, (int, float)):
+            cands.append(v)
+    if bars:
+        try:
+            cands.append(R.sma([b["c"] for b in bars], 20))
+        except Exception:
+            pass
+    cands = [c for c in cands if isinstance(c, (int, float))]
+    return min(cands) if cands else None
 
 
 def _primary_pool(rows, struct_stop):
@@ -538,15 +613,20 @@ def _primary_pool(rows, struct_stop):
             and abs(r["stop"] - struct_stop) < 0.005]
 
 
-def _pick_recommend_cn(rows, z):
-    """A 股：可预挂、不追高、不贴着止损、风险够，里面 R 最大的一条。
+def _pick_recommend_cn(rows, z, bars=None):
+    """A 股：可预挂、不追高、不破位、风险够，里面「达成率×赔率」联合最高的一条。
 
-    ★ 2026-09-27 修：优先在「止损 = 引擎结构止损」的口径里挑（与 odds_primary
-      和执行方案同一套数），挑不到才回落全矩阵。原实现直接在全矩阵里挑，
-      688581 因此选中 stop 50.2（4.06×ATR，200 股 1514 元超预算 2 倍）。
+    ★ 2026-10-11 改（用户定）：最佳推荐档 = 达成率 × 赔率 联合排序，不只看赔率最高。
+      纯 R 最大常选中「需深跌才能到」的接飞刀档（达成率≈0），与「等不到的价=0」铁律冲突。
+      结构完整性已由 entry_candidates 闸门保证（below 档均 > struct_stop），此处再叠加达成率。
+      止损端用「往下加缓冲带」的执行止损（exec_stop，含 MA20），而非贴着结构破位线，
+      买点端一档不动 —— 贴均线买不是问题，问题只在止损没加够缓冲。
+    ★ 2026-09-27 修：优先在「止损 = 执行止损腿」的口径里挑（与 sizing 同一套数），
+      挑不到才回落全矩阵。
     """
     struct_stop = z.get("struct_stop")
     zone_hi = z.get("primary_hi")
+    exec_stop = exec_stop_of(z, bars)  # ★ 往下加缓冲的执行止损
 
     def _feas(pool):
         out = []
@@ -559,22 +639,40 @@ def _pick_recommend_cn(rows, z):
                 continue
             if r["risk_atr"] is None or r["risk_atr"] < MIN_RISK_ATR:
                 continue
-            if r["need_pct"] is not None and r["need_pct"] < -4.0:
+            # ★ 2026-10-11 放宽：原 -4.0% 硬剔除会误删「最近均线回踩」档
+            #   （如 301449 滚动MA5=42.83 需跌 -4.6%）；改为软因子交由达成率×赔率联合排序
+            if r.get("need_pct") is not None and r["need_pct"] < -9.0:
                 continue
             out.append(r)
-        out.sort(key=lambda r: -(r["r1"] if r["r1"] is not None else -999))
-        return out
+        scored = []
+        for r in out:
+            ar, src = _attain_rate(r, bars)
+            r1 = r["r1"] if r["r1"] is not None else 0
+            scored.append((round(r1 * ar, 3), ar, src, r))
+        scored.sort(key=lambda x: -x[0])
+        return scored
 
-    primary = _primary_pool(rows, struct_stop)
-    if primary:
-        feas = _feas(primary)
-        if feas:
-            return feas[0]
-    feas = _feas(rows)
-    return feas[0] if feas else None
+    primary = _primary_pool(rows, exec_stop)
+    best = None
+    for pool in (primary, rows):
+        if not pool:
+            continue
+        sc = _feas(pool)
+        if sc:
+            best = sc[0]
+            break
+    if best is None:
+        return None
+    score, ar, src, r = best
+    # 把达成率/联合分写回最优项，供报告展示（不污染其他 row）
+    r["attain_rate"] = round(ar, 3)
+    r["attain_src"] = src
+    r["score"] = score
+    r["exec_stop"] = round(exec_stop, 2) if exec_stop is not None else None
+    return r
 
 
-def _pick_recommend_us(rows, z):
+def _pick_recommend_us(rows, z, bars=None):
     """美股：追涨档 R≥1.5 就做。没有合格的追涨档，才退回 R≥1.5 的回踩。
 
     ★ 2026-09-27 修：同 CN，优先在「止损 = 引擎结构止损」的口径里挑。
@@ -591,7 +689,7 @@ def _pick_recommend_us(rows, z):
             if r.get("risk_atr") is None or r["risk_atr"] < MIN_RISK_ATR:
                 continue
             need = r.get("need_pct")
-            if need is not None and need < -4.0:
+            if need is not None and need < -9.0:
                 continue
             if need is None or need >= 0:
                 chase.append(r)
@@ -955,7 +1053,7 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
     entries = entry_candidates(bars, plan, probe_out, atr_v)
     odds = odds_matrix(entries, anchors, atr_v, t1, wall_far if wall_far else t2_engine, last_c)
     odds = annotate_odds(odds, z, atr_v, last_c)
-    rec = pick_recommend(odds, z, us=is_us)
+    rec = pick_recommend(odds, z, bars=bars, us=is_us)
     touch_px = None
     if rec and rec.get("entry") is not None and rec["entry"] < last_c:
         touch_px = rec["entry"]

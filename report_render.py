@@ -917,6 +917,53 @@ def build_open_playbook(a, n):
     return OP.format_html(pb)
 
 
+def build_tier_ranking(a, n):
+    """买点分层排序区块（2026-10-11 老罗纠正）。
+
+    老罗原话：「最佳推荐档不可以只是盈亏比最高，还要结合达成率。」
+    ⇒ 各候选买点按 达成率 × 赔率 联合排序，不只看 R 倍数最高（等不到的价=0）。
+    notes 里由模型写入：
+        "tier_ranking": [{"tier":..., "entry":..., "stop":..., "upside":...,
+                          "risk":..., "R":..., "touch_rate":..., "reach_prob":...,
+                          "score":..., "verdict":...}, ...],
+        "tier_ranking_note": "..."
+    不写就不渲染本区块（不影响其他章节）。
+    """
+    trs = n.get("tier_ranking")
+    if not trs:
+        return ""
+    rows_l = []
+    for x in trs:
+        is_best = ("★" in str(x.get("verdict", ""))) or ("主推" in str(x.get("tier", "")))
+        style = ' style="background:#fff3cd;font-weight:600"' if is_best else ""
+        rows_l.append(
+            "<tr%s><td><b>%s</b></td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
+            "<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>"
+            % (style,
+               esc(str(x.get("tier", ""))),
+               esc(str(x.get("entry", ""))),
+               esc(str(x.get("stop", ""))),
+               esc(str(x.get("upside", ""))),
+               esc(str(x.get("risk", ""))),
+               esc(str(x.get("R", ""))),
+               esc(str(x.get("touch_rate", ""))),
+               esc(str(x.get("reach_prob", ""))),
+               esc(str(x.get("score", ""))),
+               esc(str(x.get("verdict", ""))))
+        )
+    note_html = note(n.get("tier_ranking_note"), "")
+    return (
+        "<div class='card'><h3>买点分层排序（达成率 × 赔率 联合）</h3>"
+        "<table>"
+        "<tr><th>档位</th><th>买点</th><th>止损</th><th>上行</th><th>下行风险</th>"
+        "<th>R倍数</th><th>股性触及率</th><th>利好达成率(估)</th><th>联合评分</th><th>结论</th></tr>"
+        + "".join(rows_l) +
+        "</table>"
+        + note_html +
+        "</div>"
+    )
+
+
 def build_confluence(a, n):
     """叠加概率七层计数区块（2026-09-25 新增）。
 
@@ -1125,6 +1172,7 @@ def render(a, n, tmpl_path=DEFAULT_TMPL, vp_from=None, vp_to=None):
         "TOP_SIGNAL_BLOCK": build_top_signal(a, n),
         "CONFLUENCE_BLOCK": build_confluence(a, n),
         "OPEN_PLAYBOOK_BLOCK": build_open_playbook(a, n),
+        "TIER_RANKING_BLOCK": build_tier_ranking(a, n),
         "T1": num(a["targets"].get("t1")),
         "T2": num(a["targets"].get("wall_far")),
         "ODDS_ROWS": build_odds_rows(a),
