@@ -165,7 +165,7 @@ def layer_sector(sector):
     extra = ("：" + "、".join(peers)) if peers else ""
     if sector.get("basis") == "peer_20d":
         tot = sector.get("total") or "?"
-        det = ("[%s] 同行近 20 日 <b>%d/%s</b> 只与本票同向%s —— "
+        det = ("[%s] 同行近 20 日 %d/%s 只与本票同向%s —— "
                "口径＝同行同向近似（单票无池层共振），阈值 ≥%d"
                % (bk, n, tot, extra, SECTOR_ON))
     else:

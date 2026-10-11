@@ -588,17 +588,23 @@ def _fund_fallback(a):
 
 
 def _valuation_fallback(a):
-    """六维研究 4.3 兜底：直接用 analysis 的 valuation（fetch_ash_valuation 已算好）。"""
+    """六维研究 4.3 兜底：直接用 analysis 的 valuation（fetch_ash_valuation 已算好）。
+
+    ⚑ 2026-10-11 修：本函数**必须返回行数据 list[list]**，不能返回 rows() 渲染好的
+    HTML —— 调用处 `rows(n.get("valuation_rows") or _valuation_fallback(a))` 会再
+    包一次 rows()，若这里返回字符串，rows() 就会按**字符**迭代，把 "<tr><td>PE(动…"
+    拆成一格一个字母（"<","t","r",">"…），表格全废。与 _fund_fallback 不同：
+    那个槽位 {{FUND_BODY}} 直出 HTML，本槽位 {{VALUATION_ROWS}} 走 rows()。
+    """
     val = a.get("valuation") or {}
-    rows_l = [["PE(动/静/TTM)", "%s / %s / %s"
-               % (num(val.get("pe_dynamic")), num(val.get("pe_static")),
-                  num(val.get("pe_ttm")))],
-              ["PB", num(val.get("pb"))],
-              ["总市值 / 流通", "%.1f 亿 / %.1f 亿"
-               % ((val.get("market_cap") or 0) / 1e8, (val.get("float_cap") or 0) / 1e8)]]
     if not val:
-        rows_l = [["估值", "接口未返回，需人工补"]]
-    return rows(rows_l)
+        return [["估值", "接口未返回，需人工补"]]
+    return [["PE(动/静/TTM)", "%s / %s / %s"
+             % (num(val.get("pe_dynamic")), num(val.get("pe_static")),
+                num(val.get("pe_ttm")))],
+            ["PB", num(val.get("pb"))],
+            ["总市值 / 流通", "%.1f 亿 / %.1f 亿"
+             % ((val.get("market_cap") or 0) / 1e8, (val.get("float_cap") or 0) / 1e8)]]
 
 
 def build_peers(a, n):
@@ -934,6 +940,14 @@ def build_tier_ranking(a, n):
         return ""
     rows_l = []
     for x in trs:
+        # ⚑ 2026-10-11 修：notes 里同义键名并存（upside/up、touch_rate/touch、
+        #   reach_prob/reach），只认一个键会让整列静默变空。取第一个非空即可。
+        def _pick(*keys):
+            for k in keys:
+                v = x.get(k)
+                if v not in (None, ""):
+                    return v
+            return ""
         is_best = ("★" in str(x.get("verdict", ""))) or ("主推" in str(x.get("tier", "")))
         style = ' style="background:#fff3cd;font-weight:600"' if is_best else ""
         rows_l.append(
@@ -943,11 +957,11 @@ def build_tier_ranking(a, n):
                esc(str(x.get("tier", ""))),
                esc(str(x.get("entry", ""))),
                esc(str(x.get("stop", ""))),
-               esc(str(x.get("upside", ""))),
-               esc(str(x.get("risk", ""))),
+               esc(str(_pick("upside", "up"))),
+               esc(str(_pick("risk", "down"))),
                esc(str(x.get("R", ""))),
-               esc(str(x.get("touch_rate", ""))),
-               esc(str(x.get("reach_prob", ""))),
+               esc(str(_pick("touch_rate", "touch"))),
+               esc(str(_pick("reach_prob", "reach"))),
                esc(str(x.get("score", ""))),
                esc(str(x.get("verdict", ""))))
         )
@@ -1045,10 +1059,14 @@ def build_confluence(a, n):
     rows_l = []
     for x in conf["layers"]:
         color, mark = _st[x["state"]]
+        # ⚑ 2026-10-11：detail 是引擎拼的纯文本，个别层里带了 <b> 装饰标签，
+        #   esc() 会把它转义成字面量 &lt;b&gt; 显示在表格里（老罗截图反馈的同类问题）。
+        #   渲染前统一剥标签，再转义。
+        _det = re.sub(r"<[^>]+>", "", str(x["detail"]))
         rows_l.append([
             "<b>%s</b> <span class='note'>%s</span>" % (esc(x["cn"]), esc(x["en"])),
             "<span style='color:%s;font-weight:600'>%s</span>" % (color, mark),
-            esc(x["detail"]),
+            esc(_det),
         ])
 
     veto_html = ""
