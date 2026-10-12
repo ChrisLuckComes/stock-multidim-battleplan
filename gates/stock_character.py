@@ -649,6 +649,9 @@ def analyze(bars, big=BIG_DEFAULT, hold=HOLD_DEFAULT,
     # —— 第三层：突破后路径形状（V 型 / N 字）——
     a["path"] = path_habit(bars, big=big)
 
+    # —— 合并裁决：第一层（结果）× 第三层（路径），消除两独立结论矛盾 ——
+    a["breakout_verdict"] = reconcile_breakout(a)
+
     # —— 第四层：当下连拉状态（决定出场用固定目标还是移动止损）——
     a["run"] = run_state(bars, big=big)
 
@@ -680,6 +683,57 @@ def classify(a):
                 "大阳后横盘/回落概率高 —— 突破当日禁止追入，买点只放回踩（MA10 / MA20）")
     return ("mixed", "混合型",
             "延续性一般 —— 优先回踩买；若做突破买，止损必须收紧、仓位减半")
+
+
+def reconcile_breakout(a):
+    """合并裁决：第一层（结果：追了能不能赚）× 第三层（路径：追了会不会被 N 字扫），
+    给出唯一「突破买」结论，消除两层独立下相反结论的矛盾。
+
+    ★ 矛盾根因：第一层 breakout 仅说明「平均能赚」，不保证「中途不被挖坑扫止损」；
+      第三层 N 字说明「必先挖坑」。两件事正交，但旧实现各自对「突破追」直接下命令
+      （一个说「可追」、一个说「禁止追」），读者看到两条相向结论 → 看似矛盾。
+      正确结论 = 组合裁决，路径层只作支撑/约束，不再独立发号施令。
+
+    组合矩阵：
+        breakout + V        ⇒ 真可做突破追（浅调就上，止损按常规/略宽）
+        breakout + N        ⇒ 可做突破买，但 N 字必挖坑 → 止损须 ≥ 坑深P75 才活得下来；
+                               窄止损 = 等价于「会被扫」⇒ 优先等回踩接
+        breakout + mixed    ⇒ 可做突破买，减半仓 + 宽止损；优先回踩
+        grind + *           ⇒ 禁止突破追（第一层已否决），只回踩
+        mixed(第一层) + V   ⇒ 突破买打折（减半+收紧），路径支持
+        mixed(第一层) + N   ⇒ 优先回踩
+        unknown / 路径不足  ⇒ 退化为仅信第一层（路径层不否决）
+    """
+    cls1 = a.get("class") or "unknown"
+    pth = a.get("path") or {}
+    enough = pth.get("n", 0) >= PATH_MIN_SIG
+    pcls = pth.get("class") if enough else None
+    d75 = pth.get("depth_p75") or 0
+
+    if cls1 == "breakout":
+        if pcls == "v":
+            return ("可追（最优）",
+                    "第一层突破加速型 + 第三层浅调续攻（V 型）⇒ 真可做突破追；"
+                    "止损用大阳中点/前一日低点，正常宽度即可")
+        if pcls == "n":
+            return ("可做，但优先回踩",
+                    "第一层突破加速型（能赚），但第三层为 N 字（必挖坑）→ 窄止损会被扫；"
+                    "要追必须让止损容得下 %.1f%%（坑深P75），否则等价于「会被扫」⇒ "
+                    "优先等回踩接（同样吃后续涨幅，不赌自己不被扫）" % d75)
+        if pcls == "mixed":
+            return ("可追，打折",
+                    "第一层突破加速型 + 第三层路径混合 ⇒ 可做突破买，但减半仓 + "
+                    "止损≥%.1f%%（坑深P75）" % d75)
+        return ("可追", "第一层突破加速型 ⇒ 可做突破买（路径层样本不足，按第一层执行）")
+    if cls1 == "grind":
+        return ("禁止追", "第一层拉高消化型 ⇒ 突破当日禁止追入，买点只放回踩（MA10/MA20）")
+    if cls1 == "mixed":
+        if pcls == "n":
+            return ("优先回踩", "第一层混合型 + 第三层 N 字 ⇒ 突破买打折且优先回踩接")
+        if pcls == "v":
+            return ("可追，打折", "第一层混合型 + 第三层 V 型 ⇒ 可做突破买，减半仓+收紧止损")
+        return ("优先回踩", "第一层混合型 ⇒ 优先回踩买；若做突破买，减半仓+收紧止损")
+    return ("样本不足", "大阳样本不足，不下「突破追」结论")
 
 
 # ─────────────────────── 第二层：利好兑现习惯 ───────────────────────
@@ -969,14 +1023,19 @@ def render_conclusion(a):
         return "n/a" if v is None else ("%." + str(nd) + "f%s") % (v, suf)
 
     k = a.get("class") or "unknown"
-    L = ["【结论 · 突破买】%s" % BREAK_CONCL.get(k, BREAK_CONCL["unknown"])]
+    bv = a.get("breakout_verdict")
+    if bv:
+        L = ["【结论 · 突破买】%s —— %s" % (bv[0], bv[1])]
+    else:
+        L = ["【结论 · 突破买】%s" % BREAK_CONCL.get(k, BREAK_CONCL["unknown"])]
     nb = a.get("news") or {}
     if NEWS_CONCL.get(nb.get("news_class")):
         L.append("【结论 · 出消息】%s"
                  % NEWS_CONCL[nb["news_class"]])
     pth = a.get("path")
     if pth and pth.get("n", 0) >= PATH_MIN_SIG:
-        L.append("【结论 · 路径】%s —— %s" % (pth["class_label"], pth["advice"]))
+        # 路径层是「突破买」裁决的支撑/约束维度，不当独立命令重复下结论
+        L.append("【路径 · 支撑】%s —— %s" % (pth["class_label"], pth["advice"]))
     rn = a.get("run")
     if rn:
         L.append("【结论 · 连拉】%s —— %s" % (rn["class_label"], rn["advice"]))
@@ -1061,19 +1120,27 @@ def render(a):
     L.extend(render_news(a.get("news") or {"available": False}))
     L.append("-" * 66)
     L.append("四、股性判定")
-    L.append("    ① 突破后行为：%s" % a["class_label"])
-    L.append("       %s" % a["advice"])
+    bv = a.get("breakout_verdict")
+    if bv:
+        L.append("    ① 突破买裁决（第一层×第三层合并）：%s" % bv[0])
+        L.append("       %s" % bv[1])
+        L.append("       （第一层：%s；第三层：%s）"
+                 % (a["class_label"],
+                    (a.get("path") or {}).get("class_label", "样本不足")))
+    else:
+        L.append("    ① 突破后行为：%s" % a["class_label"])
+        L.append("       %s" % a["advice"])
     nb = (a.get("news") or {})
     if nb.get("label") and nb.get("n"):
         L.append("    ② 利好兑现  ：%s" % nb["label"])
         L.append("       %s" % nb["advice"])
     pth = a.get("path")
     if pth and pth.get("n", 0) >= PATH_MIN_SIG:
-        L.append("    ③ 突破后路径：%s" % pth["class_label"])
+        L.append("    ③ 突破后路径（①的支撑/约束维度）：%s" % pth["class_label"])
         L.append("       %s" % pth["advice"])
     rn = a.get("run")
     if rn:
-        L.append("    ④ 当下连拉状态：%s" % rn["class_label"])
+        L.append("    ④ 当下连拉状态（决定出场/加仓，非开仓）：%s" % rn["class_label"])
         L.append("       %s" % rn["advice"])
     L.append("-" * 66)
     if a.get("market") == "us":
