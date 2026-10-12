@@ -42,6 +42,12 @@ DIP_ZONE_LO = 0.0
 DIP_ZONE_HI = 0.02
 # 离涨停太近就不追（与 probe 同口径量级）
 LIMIT_NEAR = 0.015
+# ★ 买入上限容差带（浮动买区）：cap 上方允许的小幅浮动范围。
+#   2026-10-12 老罗反馈：固定点 cap 导致天溯计量 301449 在 -4%(43.09) 被 42.42 硬拒，
+#   而实际 R=2.35 是合法买点——差 0.45~0.67 元就放跑绝佳机会。
+#   改为 cap 上方容差带内仍可买（按实际价重算 R，必须仍 ≥RR_QUALIFIED）。
+#   含义：买区是「小的浮动范围」而非「固定点位」。可用 --cap-tol-pct 调整，也可由计划买区携带。
+CAP_TOL_PCT = 0.02
 
 
 def board_limit_ratio(code):
@@ -533,7 +539,7 @@ def chase_risk(minutes, lookback=20, ratio=6.0, gap_min=1.0, from_low_max=6.0):
 
 
 def decide(day, summary, entry, stop, target, cap=None, account=None,
-            risk_scale=1.0, quality=None):
+            risk_scale=1.0, quality=None, cap_tol_pct=None):
     """核心判定。返回结构化结果，供 CLI 与测试用。
 
     ★ 盘中口径（老罗 2026-10-09 14:26 定调）：
@@ -555,6 +561,15 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
     day_open = float(day["minutes"][0]["o"]) if day.get("minutes") else None
     buy_cap = resolve_cap(entry, stop, target, cap, pre, day_open)
     gates = cap_gates(entry, stop, target, cap, pre, day_open)
+    # ★ 浮动买区：cap 上方容差带内视为「计划内」（2026-10-12 老罗反馈）。
+    #   固定点 cap 会差 0.45~0.67 元就放跑合法买点（天溯 -4% 实证）。
+    #   near_zone=True 时仍按实际价重算 R（下方 R 闸照常卡 ≥1.5），仅放宽「价格上限」这一道。
+    tol = CAP_TOL_PCT if cap_tol_pct is None else float(cap_tol_pct)
+    soft_cap = round_px(buy_cap * (1.0 + tol)) if buy_cap is not None else None
+    near_zone = bool(
+        buy_cap is not None and price > buy_cap + 1e-9
+        and soft_cap is not None and price <= soft_cap + 1e-9
+    )
     limit_px = limit_up_price(pre, code)
     limit_dn = limit_down_price(pre, code)
     rr = long_rr(price, target, stop) if target is not None else None
@@ -569,7 +584,7 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
     burst = volume_burst(day["minutes"])
     chase = chase_risk(day["minutes"])
     dip_n = count_dip_minutes(day["minutes"], pre)
-    wait_px, wait_note = arm_price(entry, stop, target, buy_cap, limit_px, limit_dn)
+    wait_px, wait_note = arm_price(entry, stop, target, soft_cap, limit_px, limit_dn)
 
     out = {
         "code": code,
@@ -585,6 +600,9 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
         "stop": stop,
         "target": target,
         "cap": buy_cap,
+        "cap_band": soft_cap,
+        "near_zone": near_zone,
+        "cap_tol_pct": tol,
         "limit_up": limit_px,
         "rr": rr,
         "rr_at_entry": rr_at_entry,
@@ -609,8 +627,8 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
         out["reason"] = reason
         if wait_px is not None and price < wait_px:
             out["reason"] = reason + " 盯 %.2f：%s" % (wait_px, wait_note)
-        elif wait_px is not None and price > wait_px and buy_cap is not None and price > buy_cap:
-            out["reason"] = reason + " 买点窗口已过（上限 %.2f）。" % buy_cap
+        elif wait_px is not None and price > wait_px and soft_cap is not None and price > soft_cap:
+            out["reason"] = reason + " 买点窗口已过（容差带上沿 %.2f）。" % soft_cap
         return out
 
     if price <= stop:
@@ -640,10 +658,11 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
     # 当日 92.33→103.78），把软读数当硬闸门会误杀整段行情。
     if not tape["ok"]:
         out["caution"] = tape["text"]
-        if price > entry:
+        if price > entry and not near_zone:
             return _reject(tape["text"] + " 只接计划内回踩，不追高。")
-    if buy_cap is not None and price > buy_cap + 1e-9:
-        return _reject("现价 %.2f 高于买入上限 %.2f。" % (price, buy_cap))
+    if buy_cap is not None and price > buy_cap + 1e-9 and not near_zone:
+        return _reject("现价 %.2f 高于买入上限 %.2f（容差带 %.2f 仍超）。"
+                       % (price, buy_cap, soft_cap))
     if target is None:
         # ★ 无目标价 ⇒ 无赔率（R 恒为 None）⇒ 不得判「能买」。
         #   2026-10-09 老罗要求引擎优化时发现：300434 金石亚药、600188 兖矿能源
@@ -662,6 +681,9 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
     elif in_dip:
         limit_buy = round_px(price)
         tag = "昨收 0%~2% 窗口"
+    elif near_zone:
+        limit_buy = round_px(price)
+        tag = "计划区上方容差内（较计划高 %.2f%%）" % ((price / buy_cap - 1.0) * 100)
     else:
         limit_buy = round_px(price)
         tag = "计划上限内"
@@ -698,11 +720,16 @@ def render(d):
         "现价 %.2f（较昨收 %s，%s）  均价 %.2f  昨收 %s"
         % (d["price"], pct_s, zone, d["vwap"], d["pre"] if d["pre"] is not None else "—")
     )
+    cap_s = ("%.2f" % d["cap"]) if d["cap"] is not None else "—"
+    if d.get("cap_band") is not None:
+        cap_disp = "%s（容差带 %.2f）" % (cap_s, d["cap_band"])
+    else:
+        cap_disp = cap_s
     lines.append(
         "计划  挂单 %.2f  止损 %.2f  目标 %s  买入上限 %s  涨停 %s"
         % (d["entry"], d["stop"],
            ("%.2f" % d["target"]) if d["target"] is not None else "—",
-           ("%.2f" % d["cap"]) if d["cap"] is not None else "—",
+           cap_disp,
            ("%.2f" % d["limit_up"]) if d["limit_up"] is not None else "—")
     )
     rr_s = ("%.2f" % d["rr"]) if d["rr"] is not None else "—"
@@ -711,6 +738,10 @@ def render(d):
     lines.append("分时  %s  %s" % (d["tape"]["label"], d["tape"]["text"]))
     lines.append("窗口  全天已出现 %d 根落在昨收 0%%～2%%" % d["dip_minutes"])
     lines.append("结论  %s。%s" % (d["action"], d["reason"]))
+    if d.get("near_zone"):
+        lines.append("◆ 浮动买区：现价 %.2f 落在 cap %.2f 上方容差带（≤%.2f，+%.1f%%）内，"
+                     "按实际价重算 R 仍合格 ⇒ 视为计划内。"
+                     % (d["price"], d["cap"], d["cap_band"], (d["cap_tol_pct"] or 0) * 100))
     if d["action"] != "能买" and d.get("arm_price") is not None:
         lines.append("盯价  %.2f  %s" % (d["arm_price"], d.get("arm_note") or ""))
     if d["action"] == "能买" and d["size"]:
@@ -800,6 +831,11 @@ def main(argv=None):
     ap.add_argument("--target", type=float, default=None)
     ap.add_argument("--cap", type=float, default=None,
                     help="买入上限；默认取 R>=1.5 与昨收+2%% 的更严者")
+    ap.add_argument("--cap-tol", type=float, default=None,
+                    help="买入上限容差（绝对价）；cap 上方该幅度内仍视为计划内买点")
+    ap.add_argument("--cap-tol-pct", type=float, default=None,
+                    help="买入上限容差（百分比，如 2 表示 2%%；默认 2%%）；"
+                         "cap 上方该幅度内仍视为计划内")
     ap.add_argument("--plan", default=None, help="analysis.json，从中读挂单/止损/目标")
     ap.add_argument("--notes", default=None, help="notes.json，可覆盖 open_playbook")
     ap.add_argument("--asof", default=None, help="回放时刻 HH:MM")
@@ -829,6 +865,12 @@ def main(argv=None):
         print("挂单价必须高于止损")
         return 3
 
+    # --cap-tol-pct 以「百分比」为单位（如 2 表示 2%），内部转比例；
+    # --cap-tol 以「绝对价」为单位，转比例 = tol/abs(cap)。
+    cap_tol_pct = (args.cap_tol_pct / 100.0) if args.cap_tol_pct is not None else None
+    if args.cap_tol is not None and cap is not None:
+        cap_tol_pct = args.cap_tol / float(cap)
+
     try:
         t0 = time.perf_counter()
         day = load_day_fast(args.code)
@@ -857,7 +899,7 @@ def main(argv=None):
     d = decide(
         day, summary, entry, stop, target,
         cap=cap, account=args.account, risk_scale=args.risk_scale,
-        quality=quality,
+        quality=quality, cap_tol_pct=cap_tol_pct,
     )
     decide_ms = (time.perf_counter() - t1) * 1000.0
     d["elapsed_ms"] = round(fetch_ms + decide_ms, 1)
