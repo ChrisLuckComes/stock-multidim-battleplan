@@ -854,7 +854,11 @@ def render(r):
     print(f" SCR 筹码集中度 · {r['code']} {r['name']} · 截至 {r['as_of']}")
     print(line)
     _st = r.get("state") or "—"
-    print(f"【筹码状态】{_st}　⇒　【交易侧】{r['verdict']}"
+    # ⚑ 2026-10-14 修：原用r['verdict']（旧四态）当「交易侧」，导致**所有票都打「观察」**
+    #   （verdict 在价格离开峰区时一律判观察），字段等于没信息量，且与下方
+    #   state_allow_new 的 ✅/⛔ 自相矛盾。改用六态映射 state_trade（权威口径）。
+    _trade = r.get("state_trade") or r["verdict"]
+    print(f"【筹码状态】{_st}　⇒　【交易侧】{_trade}"
           f"　{'✅允许新开仓' if r.get('state_allow_new') else '⛔不允许新开仓'}")
     print(f"   理由：{r.get('state_why') or r['why']}")
     print(f"   动作：{r.get('state_action') or r['action']}")
@@ -892,7 +896,10 @@ def render(r):
               f"   {row['M']:>7.2f}  {row['profit']:>5.1f}%    {row['low_share'] * 100:>5.1f}%"
               f"    {row['turnover']:>5.2f}%")
     print("─" * 66)
-    print(f" 动作：{r['action']}")
+    # ⚑ 2026-10-14 修：末行原打印旧口径 r['action']（verdict 层），会与上方六态状态打架。
+    #   实例603099 长白山：状态＝拉升脱离（允许开仓），末行却打「动作：观望。买点三件套」。
+    #   verdict/action 是旧四态遗留，state_action 才是权威口径 —— 与报告渲染同源。
+    print(f" 动作（权威口径）：{r.get('state_action') or r['action']}")
     if r.get("turnover_missing"):
         print(f" ⚑ 有 {r['turnover_missing']} 根日线缺换手率，已用窗口中位数兜底（不是真实值）")
     print(line)
