@@ -174,7 +174,7 @@ python gates/us_session_decide.py <TICKER> --entry <价> --stop <止损> --targe
 - `recommend=False` 时不得打印可执行下单指令（挂单价/股数当成交单）。
 - 低开 ≠ 低吸：低开本身不是买入理由，须落入买区且模式成立。
 - 美股 `session=Open` 时必须把**今日未收盘 bar 合成并入结构**（`merge_intraday_bar`，5 分钟线聚合）再判模式/买区：日线源盘中不返回当日半根，只按昨收算会让突破当天的买区滞后一整天，输出「永远等回踩」（INTC 2026-09-17）。盘前/盘后与 `Closed` **不合成**（稀疏成交不能当「收盘站上」）；合成 bar 的 `v` 按已走时段折算成量比口径，`v_raw` 才是累计量。
-- 赔率优先于形态信仰：突破后高波动导致止损被迫放宽（≥8% 才抗洗）时，优先前移买点，仍映射六种 mode；**前移主渠道 = `pre_breakout` 预案单（与 mode 并存、买在突破位不追高）与 `line_pullback`**；盘中通道 A/B/C 单笔 R 更小但回测净账户为负，只可小仓试错；禁止用事后突破倒推「昨天就该预判买」。
+- 赔率优先于形态信仰：突破后高波动导致止损被迫放宽（≥8% 才抗洗）时，优先前移买点，仍映射七种 mode；**前移主渠道 = `pre_breakout` 预案单（与 mode 并存、买在突破位不追高）与 `line_pullback`**；盘中通道 A/B/C 单笔 R 更小但回测净账户为负，只可小仓试错；禁止用事后突破倒推「昨天就该预判买」。
 - 提交前检查 diff：业务代码不得含临时 mock / 调试残留；测试里的正式 fixture 可保留。
 - 报告类字段必须与引擎同步：`scan_all/scanner.py` 负责把新字段（`pre_breakout` / `struct_exec` / `hard_exec` / `hard_dist_atr` / `hard_noise`）导出到 `results.jsonl`，`scan_all/report.py` 负责渲染；**只改引擎不改这两处 = 全市场扫描用不到该功能**（CLI/probe 能打印不等于报表能看）。
 - 美股必须有 HTML 报告通道（2026-09-22 补）：`battle_analyze.py` 原来只收 6 位 A 股代码，美股 ticker 直接 SystemExit ⇒ 美股永远只能拿 `rule123.py --out` 的 JSON 手搓，出不了报告。现由 `is_us_code()` 分流，美股走 `bars_source.us_quote` / `probe_intraday.probe_us` / `probe_intraday.us_lots`（1 股起、无整手、`$`、无 T+1）。`report_render.py` 按 `meta.market` 切换币种、交易制度文案与「超 40% 仓位习惯线」提示（该提示是 A 股 30%×跌停 10% 倒推的，美股两条前提都不成立）。**给美股出报告一律走两步流程，禁止手写 HTML。**

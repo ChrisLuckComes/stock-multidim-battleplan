@@ -320,7 +320,7 @@ tr.warn td{{background:#fdecea}}
 svg{{width:100%;height:auto;display:block;border:1px solid #eee;border-radius:6px;margin-top:6px}}
 </style></head><body><div class="wrap">
 <h1>全市场 A 股 · 方向感知 123 技术扫描</h1>
-<p class="sub">生成 {today} · 数据源：A股日线取自新浪行情。短线六种模式：平台突破 / W底颈线 / 旗形下降趋势线 / 沿线回踩（优先T1）；大阳后缩量回踩 / 下降趋势线突破（次优先T2）。另附<b>预备突破单</b>（buy-stop 埋伏，活平台沿 / 下降趋势线两种挂法），与当日买区并存、先到先做。买区禁止默认 VWAP。</p>
+<p class="sub">生成 {today} · 数据源：A股日线取自新浪行情。短线七种模式：平台突破 / W底颈线 / 旗形下降趋势线 / 沿线回踩（优先T1）；大阳后缩量回踩 / 下降趋势线突破（次优先T2）；短线多头战法（MA5&gt;MA7&gt;MA10 排列+长均托底，弱势行情·链尾补位，2026-10-13 增）。另附<b>预备突破单</b>（buy-stop 埋伏，活平台沿 / 下降趋势线两种挂法），与当日买区并存、先到先做。买区禁止默认 VWAP。</p>
 
 <div class="badges">
 <div class="b"><b>{total}</b><span>扫描总数</span></div>

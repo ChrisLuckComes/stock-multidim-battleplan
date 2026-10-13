@@ -3,7 +3,7 @@
 """
 方向感知结构判定（延续 vs 反转）
 ================================
-六种买法（当日只给一种，由 plan_entry 输出 mode）：
+七种买法（当日只给一种，由 plan_entry 输出 mode；第 7 种 2026-10-13 老罗增）：
   T1 内部顺序（2026-09-26 老罗改：**平台 ⟷ 牛旗 并列**，W底 退到第三）：
   1. platform_break 平台突破（优先T1）：近 3 根内收盘站上活平台沿，买突破位
      （活沿见 living_platform；123 的 R1 仍是 P0–P1 反应高，二者不是同一个东西）
@@ -28,6 +28,11 @@
      （水平→platform_break / 下倾→flag_tl_break，均 T1，判定上排在前面）。
      买区带 confirm_edge / confirm_kind / confirm_tier 指明该盯哪条确认线。
   6. downtrend_tl_break 下降趋势线突破（次优先T2）：下跌段反转，近 3 根内站上下降高点连线；与旗形区分，无旗杆则才用本模式
+  7. ma_bull_align 短线多头战法（优先T1·弱势行情专属·链尾补位，2026-10-13 老罗定稿）：
+     收盘 > MA5 > MA7 > MA10（严格多头排列）且 > MA20 且 > MA60（长均托底；MA60 压价
+     上方不成立，如上海机场 10-13 临界观察）⇒ 盘中排列成立即买、不要求过突破高点；
+     主卖点（动态）= 三短均线多头排列一打乱（MA5<MA7 或 MA7<MA10）即卖出；兜底硬止损
+     = MA20/MA60 中更近者。优先级（老罗裁决）：其他战法优先，本战法排链尾最后判断。
   wait = 没有可执行模式，或距买位 >2×ATR
 
 HH 两两比较不作门控。cond2 = 自 P1 未再创新低。不用 MA60。
@@ -2261,6 +2266,34 @@ def stop_plan(bars, mode, z, atr_v):
             "t0": True,
         }
 
+    if mode == "ma_bull_align":
+        # T1 短均线多头排列（2026-10-13 老罗定）：买区由 ma_bull_align 构造，
+        # level=现价（盘中排列成立即买，不要求过突破高点），止损锚=长均托底（MA20/MA60），
+        # 已在 buy_zone 算好，此处原样透传，不顺带做任何买区上抬。
+        # ★ 主卖点（动态）= 三短均线多头排列一打乱（MA5<MA7 或 MA7<MA10）即卖出，
+        #   该规则在买区 exit_rule 字段与各层提示中表达，硬止损仅作兜底（ catastrophic floor）。
+        _hs = z.get("hard_stop")
+        if _hs is None:
+            _hs = z.get("struct_stop")
+        if _hs is None:
+            _hs = z.get("hard")
+        if _hs is None:
+            return None
+        _an = z.get("hard_anchor") or z.get("struct_anchor") or "长均托底"
+        return {
+            "struct_anchor": z.get("struct_anchor") or f"{_an}@{round(_hs, 2)}（收盘破）",
+            "struct": round(_hs, 2),
+            "hard_anchor": _an,
+            "hard": round(_hs, 2),
+            "trigger": HARD_STOP_TRIGGER,
+            "struct_exec": STRUCT_EXEC,
+            "hard_exec": HARD_EXEC,
+            "hard_dist_atr": z.get("hard_dist_atr"),
+            "hard_noise": bool((z.get("hard_dist_atr") or 9) < NOISE_ROOM_ATR),
+            "stop_basis": z.get("stop_basis"),
+            "t0": False,
+        }
+
     # 平台 / W底 / 旗形 / 下降趋势线突破。
     # 结构止损仍是突破位（收盘跌破才算突破失败）。
     # 硬止损不拿突破位本身：回踩突破位是常态，挂在位上会被扫掉。
@@ -2665,13 +2698,23 @@ def attach_stops_targets(plan, bars, atr_v, Hs, ev=None):
             # 突破类单：头顶最近的枢轴高会天然压低静态赔率（SDGR 2026-09-15
             # rr=0.17），这是结构失真，不代表机会变差。旧措辞「赔率差」会让
             # 人在趋势启动第一天就放弃，故单列口径。
+            # ★ 2026-10-13：ma_bull_align 同理且更甚 —— 它的主卖点是**动态的**
+            #   「三短均线排列打乱即卖」，静态 rr 只量到第一面墙，天然偏低；
+            #   按「赔率差」否掉它等于用固定目标口径否决一个移动止损战法。
             if mode in ("platform_break", "w_bottom_break", "flag_tl_break",
-                        "downtrend_tl_break"):
-                rr_note = (
-                    f"静态赔率 rr_target1={tg['rr_target1']}<1.0 属突破初期失真"
-                    f"（头顶最近枢轴高天然压住赔率），机会未变差；"
-                    f"趋势单用移动止损（MA5/大阳中点）替代固定目标"
-                )
+                        "downtrend_tl_break", "ma_bull_align"):
+                if mode == "ma_bull_align":
+                    rr_note = (
+                        f"静态赔率 rr_target1={tg['rr_target1']}<1.0 属趋势单失真"
+                        f"（只量到第一面墙；本战法主卖点是动态的「三短均线排列"
+                        f"打乱即卖」，用移动规则替代固定目标）—— 机会未变差"
+                    )
+                else:
+                    rr_note = (
+                        f"静态赔率 rr_target1={tg['rr_target1']}<1.0 属突破初期失真"
+                        f"（头顶最近枢轴高天然压住赔率），机会未变差；"
+                        f"趋势单用移动止损（MA5/大阳中点）替代固定目标"
+                    )
             else:
                 rr_note = f"盈亏比 rr_target1={tg['rr_target1']}<1.0，结构有效但赔率差"
             prev = plan.get("note") or ""
@@ -2679,7 +2722,7 @@ def attach_stops_targets(plan, bars, atr_v, Hs, ev=None):
             v = plan.get("verdict") or ""
             if v and "赔率" not in v and mode not in (
                 "platform_break", "w_bottom_break", "flag_tl_break",
-                "downtrend_tl_break",
+                "downtrend_tl_break", "ma_bull_align",
             ):
                 plan["verdict"] = f"{v}·赔率偏弱"
     plan["buy_zone"] = z
@@ -4098,6 +4141,163 @@ def ma_reclaim_break(bars, ev, atr_v, last_c, res_win=25):
     }
 
 
+def ma_bull_align(bars, ev, atr_v, last_c):
+    """★ T1 买法：短均线多头排列 + 长均托底（2026-10-13 老罗定稿，弱势行情专属）。
+
+    老罗原话：「20，60天均线在下面支撑，5，7，10三短均线组多头排列就买进，
+    不要去等突破形态高点。三短均线多头排列一打乱就卖出。」
+
+    与 T0 出水芙蓉（ma_reclaim_break）的本质区别（这是单列独立 T1、非 T0 子分支的理由）：
+      · 买点触发：T0 等「过昨高」才算（位置更高）；本战法排列成立即买、不要求过任何
+        突破高点（位置更低、不追突破）。
+      · 均线组：T0 用 MA5/10/20（不含 MA7）且只判「站上/未站上」、与排列无关；
+        本战法用 MA5>MA7>MA10（含 MA7 的短均线组多头排列），MA20/MA60 降为下方支撑闸门。
+      · 趋势位置：T0 = 底部转势（fresh_reclaim，均线刚收复）；本战法 = 多头排列已立、
+        长均托底的趋势中继（不抢突破、不抄底）。
+      · 卖点：T0 = 固定止损锚（六选一离触发价最近者）；本战法 = **动态跟踪**——
+        三短均线多头排列一打乱（MA5<MA7 或 MA7<MA10）即卖出，硬止损（MA20/MA60 托底位）
+        仅作兜底。
+      · 适用行情：T0 通用；本战法针对「弱势行情」—— 假突破多，故不要求过突破高点，
+        只认已成立的多头排列 + 长均托底，等回踩/突破反而容易踏空或接飞刀。
+
+    判据（老罗定）：
+      ① 短均线组严格多头排列：last_c > MA5 > MA7 > MA10
+         （价格在最上、短均按 5→7→10 升序 —— 教科书式「多头排列」；
+          上海机场 2026-10-13 失效即因 MA7<MA10 未理顺）
+      ② 长均托底（支撑在下方）：last_c > MA20 且 last_c > MA60
+         ★ MA60 在价格上方压制（如上海机场 MA60=23.20 > 收23.18）⇒ 不成立，判 wait/暂不买。
+      ③ 触发 = 盘中排列成立即买（老罗拍板「盘中即触发」），不要求过任何突破高点。
+      ④ 主卖点（动态） = 三短均线多头排列一打乱：MA5<MA7 或 MA7<MA10 ⇒ 立即卖出。
+      ⑤ 兜底硬止损 = 长均托底位（MA20，趋势线；MA60 为更深支撑参考）。
+
+    边界：
+      · 本战法**不要求**平台度/阻力墙（与 T0 根本区别）。
+      · ★ 优先级位置（2026-10-13 老罗裁决：「如果优先符合其他战法，那就是其他，
+        最后再来判断是否符合短线多头战法」）：排在整个 mode 链**末端**——
+        突破类（平台/W底/旗形/下降趋势线）、沿线回踩、大阳后缩量回踩等**有效买点**
+        全部优先；仅当其他战法都没有给出可执行买点（走到链尾的空等/等待段）时，
+        才评估本战法。这样它既不抢标客观突破，又能在弱势行情「等回踩等到踏空」
+        的场景下补位（中车/神华/海控 10-13 当日另有 W 底突破 ⇒ 按裁决走突破类，
+        本战法状态仍挂 result["ma_bull_align"] 供参考/卖出跟踪）。
+      · 老罗拍板「直接实施」，列为独立 T1（非 T0 子分支）；中文名**短线多头战法**
+        （老罗 2026-10-13 取名），内部 mode 字符串沿用 ma_bull_align。
+    """
+    if not bars or len(bars) < 60 or not atr_v or atr_v <= 0 or last_c is None:
+        return None
+    closes = [b["c"] for b in bars]
+    if len(closes) < 60:
+        return None
+    ma5, ma7, ma10 = sma(closes, 5), sma(closes, 7), sma(closes, 10)
+    ma20, ma60 = sma(closes, 20), sma(closes, 60)
+    if None in (ma5, ma7, ma10, ma20, ma60):
+        return None
+    # ① 短均线组严格多头排列（价格在最上）
+    aligned = (last_c > ma5 > ma7 > ma10)
+    # ② 长均托底：价格必须在 MA20、MA60 之上（支撑在下方）
+    supported = (last_c > ma20 and last_c > ma60)
+    _ma_state = {
+        "ma5": round(ma5, 2), "ma7": round(ma7, 2), "ma10": round(ma10, 2),
+        "ma20": round(ma20, 2), "ma60": round(ma60, 2),
+    }
+    if not aligned or not supported:
+        # 记录原因，供回调解读（上海机场 = 临界观察、暂不买）
+        _why = []
+        if not (last_c > ma5 > ma7 > ma10):
+            _why.append(
+                f"短均线未严格多头排列（收{last_c:.2f} > MA5 {ma5:.2f} > MA7 {ma7:.2f} "
+                f"> MA10 {ma10:.2f} 不成立）")
+        if not (last_c > ma20):
+            _why.append(f"价格{last_c:.2f}未站上MA20({ma20:.2f})")
+        if not (last_c > ma60):
+            _why.append(f"MA60({ma60:.2f})在价格上方压制（长均未托底）")
+        return {
+            "setup_kind": "ma_bull_align",
+            "mode": None,            # 尚未成立
+            "tier": "T1",
+            "priority": 1,
+            "role": "primary_entry",
+            "aligned": aligned,
+            "supported": supported,
+            "ma_state": _ma_state,
+            "recommend": False,
+            "why": "；".join(_why) if _why else "暂不满足",
+        }
+    # 成立：计算买区与止损
+    # 触发价 = 现价（盘中排列成立即买，不要求过突破高点）
+    trigger = round(last_c, 2)
+    # 兜底硬止损锚 = 长均托底位中离现价更近者（趋势线 MA20；MA60 为更深支撑）。
+    # 两者均在价格下方（supported 已保证），取较大值（更贴近价格 = 更紧的托底）。
+    _hard = ma20 if ma20 >= ma60 else ma60
+    _hard_name = "MA20" if ma20 >= ma60 else "MA60"
+    hard = round(_hard, 2)
+    risk_pct_v = (last_c - hard) / last_c * 100
+    risk_atr = round((last_c - hard) / atr_v, 2) if atr_v else None
+    risk_over = risk_pct_v > 8.0
+    # 主卖点（动态跟踪，非固定止损锚）：三短均线多头排列一打乱即卖出
+    exit_break = {
+        "condition": "MA5<MA7 或 MA7<MA10（三短均线多头排列一打乱即卖出）",
+        "ma5_lt_ma7": bool(ma5 < ma7),
+        "ma7_lt_ma10": bool(ma7 < ma10),
+        "triggered": bool(ma5 < ma7 or ma7 < ma10),
+    }
+    _note = (
+        f"【T1·短均线多头排列】价格在最上、短均升序：收{last_c:.2f} > MA5 {ma5:.2f} "
+        f"> MA7 {ma7:.2f} > MA10 {ma10:.2f}（严格多头排列）；长均托底：MA20 {ma20:.2f} "
+        f"< 价、MA60 {ma60:.2f} < 价。弱势行情不追突破高点，排列成立即买（盘中触发）。"
+        f"★ 主卖点（动态）：三短均线多头排列一打乱（MA5<MA7 或 MA7<MA10）即卖出；"
+        f"兜底硬止损 {hard}（{_hard_name}·长均托底），风险 {risk_pct_v:.2f}%"
+        + (f"（>8% 偏宽 → 实际离场以排列打乱为准，勿死等 MA{_hard_name}）" if risk_over else "")
+    )
+    return {
+        "setup_kind": "ma_bull_align",
+        "mode": "ma_bull_align",
+        "tier": "T1",
+        "priority": 1,
+        "role": "primary_entry",
+        "path": "A",
+        "aligned": aligned,
+        "supported": supported,
+        "level": trigger,
+        "trigger": trigger,
+        "hard_stop": hard,
+        "stop_anchor": _hard_name,
+        "struct_stop": hard,
+        "struct_anchor": f"{_hard_name}(收盘破)",
+        "risk_per_share": round(last_c - hard, 2),
+        "risk_pct": round(risk_pct_v, 2),
+        "risk_atr": risk_atr,
+        "risk_over_limit": risk_over,
+        "exit_rule": exit_break,
+        "ma_state": _ma_state,
+        "recommend": True,
+        "note": _note,
+        "buy_zone": {
+            "level": trigger,
+            "primary_lo": round(last_c - 0.20 * atr_v, 2),
+            "primary_hi": round(last_c + 0.30 * atr_v, 2),
+            "in_zone": True,
+            "type": "短均线多头排列·长均托底（MA5>MA7>MA10 且 价>MA20>MA60）",
+            "anchor": "ma_bull_align",
+            "counter": None,
+            "struct_stop": hard,
+            "struct_anchor": f"{_hard_name}(收盘破)",
+            "hard_stop": hard,
+            "hard_anchor": _hard_name,
+            "invalidation": hard,
+            "hard": hard,
+            "stop_basis": (
+                "三短均线多头排列一打乱（MA5<MA7 或 MA7<MA10）即卖出；"
+                f"{_hard_name}({hard}) 为兜底硬止损（长均托底位）"
+            ),
+            "struct_exec": STRUCT_EXEC,
+            "hard_exec": HARD_EXEC,
+            "hard_dist_atr": risk_atr,
+            "hard_noise": bool(risk_atr is not None and risk_atr < NOISE_ROOM_ATR),
+            "exit_rule": exit_break,
+        },
+    }
+
+
 def _is_dual_crea(bars):
     """判断是否创业板/科创板（20% 涨跌幅）—— 用代码前缀兜底。
 
@@ -4423,6 +4623,9 @@ def _plan_entry_core(bars, ev):
                     _takeover = False
             if _takeover:
                 result = _t0_takeover(result, t0)
+        # ★ 2026-10-13：T1 短均线多头排列状态（含「临界观察·暂不买」）始终挂载，供报告消费。
+        if mab:
+            result["ma_bull_align"] = mab
         # ★ 2026-09-24（老罗三轮）：「沿线」是趋势背景，当日形态是事件 —— 定优先级。
         #   他原话：「振华 603067 翻成 line_ride 后，但平台突破是客观存在的，这个优先级，
         #   你要想想到底怎么判定。否则所有股大部分时间都是沿均线走的。」
@@ -4494,6 +4697,10 @@ def _plan_entry_core(bars, ev):
     #   （常高于现价）喂给 stop_plan，触发「止损锚在现价之上·买入即止损」误判
     #   （2026-09-20 康龙 8-04 实测：结构止损被算成趋势线 40.44 > 现价 39.92）。
     t0 = ma_reclaim_break(bars, ev, atr_v, last_c)
+    # ★ 2026-10-13 老罗定：T1 短均线多头排列（独立战法，与 T0 并行计算、纯增量、不改 mode）。
+    #   无论当日 mode 是谁，都把它的状态挂到结果（含上海机场式「临界观察·暂不买」），
+    #   供报告/盯盘方案消费 —— 与 T0 的 `ma_reclaim` 同处理。
+    mab = ma_bull_align(bars, ev, atr_v, last_c)
     # ★ 2026-09-24：`ma_ride` **与 T0 是否成立无关** —— 状态本身就要能给报告看。
     #   东材 601208 09-24 收 56.44 已创 25 日新高（头上无墙）⇒ T0 不成立，但它就是
     #   `line_ride`；只在 T0 成立时才算 ride，等于老罗问的那只票恰恰看不到答案。
@@ -4856,6 +5063,30 @@ def _plan_entry_core(bars, ev):
             return pack(
                 "impulse_pause", 2, "pullback", "大阳后缩量回踩(次优先T2)", True, note, z,
             )
+
+    # ★★ 2026-10-13 老罗定稿：短线多头战法（T1·短均线多头排列，独立战法，弱势行情专属）。
+    #   原话：「20，60天均线在下面支撑，5，7，10三短均线组多头排列就买进，
+    #   不要去等突破形态高点。三短均线多头排列一打乱就卖出。」
+    #   优先级裁决（老罗 10-13 补齐）：「如果优先符合其他战法，那就是其他，
+    #   最后再来判断是否符合短线多头战法」⇒ 本段排在 mode 链**末端**：
+    #     · 上方所有**有效买点**（平台/W底/旗形/下降趋势线突破、沿线回踩、
+    #       大阳后缩量回踩）全部优先 —— 不抢标客观突破；
+    #     · 上方所有**反追高纪律**（大阳当日不追/突破已延伸等回踩/调整未缩量）
+    #       同样优先 —— 本战法不用于追刚爆量的大阳；
+    #     · 仅当其他战法都没有给出可执行买点、链尾只剩「等回踩/等待」类空转时，
+    #       才由本战法补位 —— 这正是弱势行情「等回踩等到踏空」的对症解。
+    #   path="A"（趋势延续入场族，与 line_pullback/impulse_pause 同族）—— 必须显式传，
+    #     否则 pack() 会把未知 mode 的 path 降级成 "wait"。
+    if mab and mab.get("recommend"):
+        _mz = dict(mab["buy_zone"])
+        _mz["days_above_r1"] = n_above_r1
+        _mz["days_above_platform"] = n_above
+        _mz["mode"] = "ma_bull_align"
+        _mz["priority"] = 1
+        return pack(
+            "ma_bull_align", 1, "align", "短均线多头排列(优先T1·弱势行情)", True,
+            mab["note"], _mz, "A",
+        )
 
     if line_wait_note:
         return pack(

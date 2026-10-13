@@ -514,7 +514,7 @@ def room_and_cap(bars, z, mode, atr_v, rr=1.5, last_c=None):
         _hard_now = hard if hard is not None else sp.get("struct") if sp else None
         _lo_now = z.get("primary_lo")
         if (_hard_now is not None and _lo_now is not None and _lo_now <= _hard_now
-                and mode != "ma_reclaim_break"):
+                and mode not in ("ma_reclaim_break", "ma_bull_align")):
             _hug = round(_hard_now + STOP_HUG_ATR * atr_v, 2)
             _hi = z.get("primary_hi")
             if _hi is None or _hi <= _hug:

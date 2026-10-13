@@ -174,6 +174,20 @@ def build_kpis(a, n):
         badges.append('<span class="badge b-t1">T0 并行入口：过昨高 %s / 止损 %s（%s）</span>'
                       % (num(_t0.get("trigger")), num(_t0.get("hard_stop")),
                          esc(_t0.get("stop_anchor") or "锚")))
+    # ★ 2026-10-13 老罗定：T1 短均线多头排列。mode==ma_bull_align 时显式挂首屏徽标，
+    #   说明「排列成立即买、不追突破高点、三短均线一打乱即卖」的核心纪律。
+    _mab = p.get("ma_bull_align") or {}
+    if p.get("mode") == "ma_bull_align":
+        badges.append(
+            '<span class="badge b-t1">T1·短均线多头排列：MA5&gt;MA7&gt;MA10 且 价&gt;MA20&gt;MA60；'
+            '排列成立即买（不追突破高点）｜ 三短均线一打乱（MA5&lt;MA7 或 MA7&lt;MA10）即卖出</span>'
+        )
+    elif _mab.get("ma_state") and not _mab.get("recommend"):
+        # 临界观察（如上海机场）：排列未成形 / 长均未托底，提示原因，不买。
+        badges.append(
+            '<span class="badge b-warn">短均线多头排列·临界观察（暂不买）：%s</span>'
+            % esc(_mab.get("why") or "未成形")
+        )
     # ★ 2026-09-24：T0 不成立时也要把模式判别挂出来（东材 601208 09-24 已创 25 日新高
     #   ⇒ T0 判据不成立，但它就是 line_ride —— 只在 T0 成立时才显示等于答案缺失）。
     #   ★ 三轮补 `new_high`：有线上行但一条都不在可回踩距离内 ⇒ 无锚=新高，别硬找锚。
@@ -439,6 +453,13 @@ def build_plan_rows(a):
     out = [
         ("结构止损", "<b>%s</b>（%s · 收盘破）" % (num(z.get("struct_stop")), esc(z.get("struct_anchor")))),
         ("硬止损", "<b>%s</b>（%s · 盘中触价）" % (num(z.get("hard_stop")), esc(z.get("hard_anchor")))),
+        # ★ 2026-10-13 老罗定：T1 短均线多头排列的主卖点是「动态」的 —— 三短均线多头排列
+        #   一打乱（MA5<MA7 或 MA7<MA10）即卖出，硬止损（MA20/MA60 托底位）仅作兜底层。
+        #   这一条是它与 T0/突破类（固定止损锚）的根本区别，必须显式进报告。
+        *((("主卖点（动态）",
+              "三短均线多头排列一打乱即卖出：MA5&lt;MA7 或 MA7&lt;MA10（硬止损 %s 仅兜底）"
+              % esc(z.get("hard_anchor") or "MA20"))
+             ,) if z.get("exit_rule") else ()),
         tgt_row,
         ("预案单", "限价 <b>%s</b>　%s 股　撤单线：跳空 &gt; %s"
          % (num(po.get("limit")),
