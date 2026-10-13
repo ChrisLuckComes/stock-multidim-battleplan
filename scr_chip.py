@@ -37,6 +37,9 @@ EM_KLINE = ("https://push2his.eastmoney.com/api/qt/stock/kline/get"
 EM_QUOTE = ("https://push2.eastmoney.com/api/qt/stock/get?secid={secid}"
             "&ut=fa5fd1943c7b386f172d6893dbfba10b&invt=2&fltt=2"
             "&fields=f43,f57,f58,f116,f117,f168")
+EM_FFLOW = ("https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
+            "?lmt=0&klt=101&secid={secid}&fields1=f1,f2,f3,f7"
+            "&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63")
 
 # ── 判据常数（源自 Excel「公式与说明」+「筹码峰回测逻辑」两表 + 老罗聊天记录口径）──
 SCR_TIGHT = 10.0          # SCR90 < 10%  高度集中
@@ -53,6 +56,9 @@ LOCK_TOL = 0.10           # 锁仓：底部峰带质量 N 日波动 < 10%
 LOOSE_MASS = 0.20         # 底部峰带质量 5 日缩水 > 20% = 锁仓破坏
 LOW_LO, LOW_HI = 5, 35     # 低位筹码带分位区间（庄的成本段＝图上「下方红色、几天不动」那段）
 MIN_BARS = 60             # 日线不足则不出结论（不编造）
+# 换手衰减系数：实际每过一个交易日，旧筹码被交易的强度未必等于当日全部换手
+# （高频换手票里很多是中散户当日回转，庄的底仓没动）。k=1.0 = 严格按换手衰减；k 越小记得越久。
+DECAY_K = 1.0
 
 
 # ─────────────────────────────── 取数 ───────────────────────────────
@@ -104,11 +110,34 @@ def fetch_bars(code, n=120):
     return bars, name
 
 
-# ─────────────────────────── 筹码分布模型 ───────────────────────────
-def chip_model(bars, keep_last=8):
-    """三角分布 + 换手衰减。返回 (prices, dist, snaps, bin_w)。
+def fetch_fflow(code):
+    """东财逐日资金流 → {日期: 主力净流入占成交比 ρ(0~1)}，只取净买入（出流出记 0）。
 
-    snaps = 最后 keep_last 天的分布快照（用于锁仓 / 松动判定）。
+    字段序：日期,主力净额,小单净额,中单净额,大单净额,超大单净额,**主力占比**,…,收盘价,涨跌幅。
+    ⚠ 接口只给**净额**、不给主力「买入额」⇒ ρ 是净买入口径的近似。取不到就返回 {}（上层会退到备用口径）。
+    """
+    try:
+        d = _get_json(EM_FFLOW.format(secid=secid_of(code))).get("data") or {}
+        out = {}
+        for line in d.get("klines") or []:
+            p = line.split(",")
+            if len(p) >= 7:
+                try:
+                    out[p[0]] = max(0.0, float(p[6])) / 100.0
+                except ValueError:
+                    continue
+        return out
+    except Exception:
+        return {}
+
+
+# ─────────────────────────── 筹码分布模型 ───────────────────────────
+def chip_model(bars, keep_last=8, main_rho=None, decay_k=DECAY_K):
+    """三角分布 + 换手衰减。返回 (prices, dist, snaps, bin_w, miss, main_dist)。
+
+    `main_rho` = {日期: 主力净买入占成交比} ⇒ 同步累出**主力筹码分布** `main_dist`：
+    每个交易日只有「主力净买入那一份」进入主力分布（tri × ρ），同样按换手衰减。
+    ⇒ 主力分布的重心＝**主力成本**，代表「庄真正出手的价格带」，而不是散户追出来的高位。
     """
     lo = min(b["l"] for b in bars)
     hi = max(b["h"] for b in bars)
@@ -127,6 +156,7 @@ def chip_model(bars, keep_last=8):
     miss = sum(1 for b in bars if b["turnover"] <= 0)
 
     dist = [0.0] * n_bins
+    m_dist = [0.0] * n_bins
     snaps = []
     for b in bars:
         r = min(max(b["turnover"] / 100.0, 0.0), 1.0) if b["turnover"] > 0 else med_r
@@ -149,14 +179,17 @@ def chip_model(bars, keep_last=8):
             if tot > 0:
                 for i in range(i0, i1 + 1):
                     tri[i] = tri[i] * vol / tot
-        decay = 1.0 - r
+        decay = max(0.0, 1.0 - r * decay_k)
+        rho = float((main_rho or {}).get(b["d"], 0.0) or 0.0)
         for i in range(n_bins):
-            d = dist[i] * decay + tri[i]
-            dist[i] = d
+            dist[i] = dist[i] * decay + tri[i]
+        if rho > 0:
+            for i in range(n_bins):
+                m_dist[i] = m_dist[i] * decay + tri[i] * rho
         snaps.append(dist[:])
         if len(snaps) > keep_last:
             snaps.pop(0)
-    return prices, dist, snaps, w, miss
+    return prices, dist, snaps, w, miss, m_dist
 
 
 # ─────────────────────────── 指标提取 ───────────────────────────
@@ -241,6 +274,14 @@ def band_share(dist, lo_i, hi_i):
     return band_mass(dist, lo_i, hi_i) / tot if tot > 0 else 0.0
 
 
+def band_avg_cost(prices, dist, lo_i, hi_i):
+    """该价格带内筹码的加权平均成本（主力成本取不到时的替代口径）。"""
+    seg = dist[max(0, lo_i):min(len(dist), hi_i + 1)]
+    tot = sum(seg)
+    return (sum(p * m for p, m in zip(prices[max(0, lo_i):min(len(dist), hi_i + 1)], seg)) / tot
+            if tot > 0 else None)
+
+
 # ─────────────────────────── 综合结论 ───────────────────────────
 def judge(scr90, scr70, scr_hist, close, M, p5, p15, p85, p95, profit,
           vol_ratio, turnover, n_peak, locked, mass_chg, peak_price, dist_pos):
@@ -321,14 +362,16 @@ def action_of(verdict, close, M, p15, p85, scr90):
 
 
 # ─────────────────────────── 主流程 ───────────────────────────
-def analyze(code, n=120):
+def analyze(code, n=120, decay_k=DECAY_K):
     bars, name = fetch_bars(code, n=n)
     if len(bars) < MIN_BARS:
         raise RuntimeError(f"{code} 只有 {len(bars)} 根日线（< {MIN_BARS}），不足以判读筹码，不出结论")
 
     # 模型只正向跑一遍，末端保留 KEEP 份快照：既得今日分布，也得近 12 日 SCR 趋势 + 近 5 日锁仓
     KEEP = 15
-    prices, dist, snaps, w, miss = chip_model(bars, keep_last=KEEP)
+    main_rho = fetch_fflow(code)                  # 逐日主力净买入占比（算主力成本用）
+    prices, dist, snaps, w, miss, m_dist = chip_model(bars, keep_last=KEEP,
+                                                      main_rho=main_rho, decay_k=decay_k)
 
     def summary(d, close):
         p5 = cost_at(prices, d, 5)
@@ -364,6 +407,15 @@ def analyze(code, n=120):
     seg = dist[lo_i:hi_i + 1]
     peak_price = prices[lo_i + (seg.index(max(seg)) if seg else 0)]
     below_now = prices[hi_i] < close          # 低位带是否真的在现价下方
+    # ── 主力成本：优先「资金流口径」（主力净买入那批筹码的重心），取不到退到「低位带均价」 ──
+    mtot = sum(m_dist) if m_dist else 0.0
+    if mtot > 0:
+        main_cost = sum(p * m for p, m in zip(prices, m_dist)) / mtot
+        main_src = "资金流"
+    else:
+        main_cost = band_avg_cost(prices, dist, lo_i, hi_i)
+        main_src = "低位带替代"
+    low_cost = band_avg_cost(prices, dist, lo_i, hi_i)
     # ⚑ 跨日只能比**份额**（低位带占全部筹码之比＝图上那截柱的相对高度）。
     #   比绝对量会被「总筹码每天在增减」污染，导致任何票都判不出锁仓。
     mass_now = band_share(dist, lo_i, hi_i)
@@ -396,6 +448,7 @@ def analyze(code, n=120):
         "peak_price": peak_price, "main_price": main_price,
         "low_lo": low_lo, "low_hi": low_hi, "below_now": below_now, "n_peak": n_peak,
         "lock": locked, "lock_spread": spread, "mass_chg": mass_chg,
+        "low_cost": low_cost, "main_cost": main_cost, "main_src": main_src,
         "dist_pos": dist_pos, "scr_hist": scr_hist[-12:],
         "verdict": verdict, "why": why, "action": act,
         "turnover_missing": miss,
@@ -416,6 +469,11 @@ def render(r):
     bp = f"{r['peak_price']:.2f}（低位带 {r['low_lo']:.2f}~{r['low_hi']:.2f}）"
     if not r["below_now"]:
         bp = f"无 — 低位带已抬到现价 {r['close']:.2f} 之上"
+    mc = r["main_cost"]
+    if mc:
+        gap = (r["close"] / mc - 1) * 100
+        tag = "" if r["main_src"] == "资金流" else f"（资金流取不到，退低位带口径）"
+        print(f" 主力成本 {mc:.2f}{tag}｜现价相对主力成本 {gap:+.1f}%")
     print(f" 平均成本 {r['M']:.2f}｜获利盘 {r['profit']:.1f}%｜主峰 {r['main_price']:.2f}"
           f"｜底部峰 {bp}｜{'单峰' if r['n_peak'] <= 1 else str(r['n_peak']) + ' 峰（分歧）'}")
     if r["dist_pos"] is not None:
@@ -458,6 +516,8 @@ def main():
     ap.add_argument("code", nargs="?", help="6 位 A 股代码")
     ap.add_argument("--n", type=int, default=120, help="回看日线根数（默认 120）")
     ap.add_argument("--json", default=None, help="结构化输出路径（建议 out_cn/scr_<code>.json）")
+    ap.add_argument("--decay-k", type=float, default=DECAY_K, dest="decay_k",
+                    help="换手衰减系数（默认 1.0＝严格按换手衰减；调小＝筹码记得更久）")
     ap.add_argument("--selftest", action="store_true", help="用截图实测值回归 SCR 公式")
     a = ap.parse_args()
     if a.selftest:
@@ -465,7 +525,7 @@ def main():
     if not a.code:
         ap.error("请给代码，或用 --selftest")
     try:
-        r = analyze(a.code, n=a.n)
+        r = analyze(a.code, n=a.n, decay_k=a.decay_k)
     except Exception as e:
         print(f"✗ {a.code}：{e}")
         return 1
