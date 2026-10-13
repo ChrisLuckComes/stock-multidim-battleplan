@@ -14,6 +14,8 @@
 
 相对昨收 0%%～2%% 是常见可买窗口（吉鑫 601218 2026-09-28 一天里多次出现）。
 现价落在挂单价～买入上限之间、且 R≥1.5、分时不是偏派发 ⇒ 能买。
+★ 追高定义（2026-10-13 纠偏）：禁追高 = 不买在「价格远离分时均线(VWAP)」，不是「不买在涨」。
+  涨 2%%~3%% 或涨停初期贴着均线都不算高；只禁「被拉到高于均线过多（情绪高点接盘）」。
 """
 
 from __future__ import print_function
@@ -80,10 +82,11 @@ def auto_plan_cn(minutes, code, pre):
     stop = low if low < cur else cur - 1.5 * a
     if cur - stop > 3.0 * a:          # 风险距过宽 → 收紧到 3×ATR（买在高位时自然触发）
         stop = cur - 3.0 * a
-    target = high if high > cur else cur + 2.5 * a
-    if target - cur > 4.0 * a:        # 上方空间过远 → 收到 2.5×ATR
-        target = cur + 2.5 * a
-    if target <= cur:
+    # ★ 真实阻力 = 涨停价（A股硬顶）。不用「近 HIGH_N 分高点」——上涨途中近高≈现价
+    #   ⇒ R 坍缩 ⇒ 误杀（杭氧 002430 10-13 13:30 实例：价26.57、近高≈26.6 ⇒ R0.25 被否）。
+    #   涨停价是天然上限，价格贴着均线往上走时 R 保持稳定，框架才不会被「涨」误杀。
+    target = limit_up_price(pre, code)
+    if target is None or target <= cur:
         target = cur + 2.5 * a
     return {"entry": round_px(cur), "stop": round_px(stop),
             "target": round_px(target), "cap": None}
@@ -94,6 +97,10 @@ DIP_ZONE_LO = 0.0
 DIP_ZONE_HI = 0.02
 # 离涨停太近就不追（与 probe 同口径量级）
 LIMIT_NEAR = 0.015
+# ★ 追高定义（老罗 2026-10-13 纠偏）：禁追高 = 不买在「价格远离分时均线(VWAP)」，
+#   不是「不买在涨的时候」。涨 2%~3% 或涨停初期贴着均线都不算高；
+#   只有价格高于分时均线达此阈值（情绪高点接盘）才禁买。美股不启用此闸。
+CHASE_DEV_PCT = 6.0
 # ★ 买入上限容差带（浮动买区）：cap 上方允许的小幅浮动范围。
 #   2026-10-12 老罗反馈：固定点 cap 导致天溯计量 301449 在 -4%(43.09) 被 42.42 硬拒，
 #   而实际 R=2.35 是合法买点——差 0.45~0.67 元就放跑绝佳机会。
@@ -543,13 +550,15 @@ def volume_burst(minutes, lookback=20, ratio=6.0, gap_min=1.0):
             "gap_need": gap_min}
 
 
-def chase_risk(minutes, lookback=20, ratio=6.0, gap_min=1.0, from_low_max=6.0):
-    """★ 追高风险判据：区分「芒果型（买就吃到涨停）」与「斯菱型（追高被套）」。
+def chase_risk(minutes, lookback=20, ratio=6.0, gap_min=1.0, dev_max=6.0):
+    """★ 追高风险判据（老罗 2026-10-13 纠偏：追高 = 价格远离分时均线，不是距当日最低涨多少）。
 
     老罗 2026-10-09 15:07 提问：「如何区分芒果和斯菱智驱的买入？芒果不会被套能
     吃到涨停，斯菱要追高被套，有没有识别的方法。」
 
-    ★ 实测找到了唯一有区分度的量：**起涨点出现时，价格距「当日至今最低」已涨多少**。
+    ★ 实测找到了唯一有区分度的量：**起涨点出现时，价格距「分时均线(VWAP)」已偏离多少**。
+    （旧版用「距当日最低」，会被「全天低位横盘后拉起」误判为斯菱型——低位横盘时
+     距最低本就小，但拉起后若已远离均线才是真追高。）
 
       麒麟信安 688152：起涨 13:02 @39.40，距当时最低 37.45 已涨 **+5.21%** ⇒ 到收盘 **+16.37%**
       斯菱智驱 301550：起涨 13:01 @100.54，距当时最低 92.33 已涨 **+8.89%** ⇒ 到收盘 **仅 +2.75%**
@@ -557,9 +566,9 @@ def chase_risk(minutes, lookback=20, ratio=6.0, gap_min=1.0, from_low_max=6.0):
 
     判据（全部实时可算，只用 [0..i]）：
         ① 先要求 volume_burst 命中（量能突增 = 起涨）
-        ② 再看 **现价 / 当时最低 − 1 ≤ from_low_max**（默认 6%）
-           ≤6%  ⇒ 低位起涨 ⇒ 可上手（芒果/麒麟型）
-           >6%  ⇒ 高位追涨 ⇒ **不买**（斯菱型）
+        ② 再看 **现价 / 分时均线(VWAP) − 1 ≤ dev_max**（默认 6%）
+           ≤6%  ⇒ 贴着均线起涨 ⇒ 可上手（芒果/麒麟型）
+           >6%  ⇒ 远离均线追涨 ⇒ **不买**（斯菱型）
         ③ 叠加硬闸：现价必须 ≤ cap（entry/cap 区间内）
 
     ⚠️ 单日样本（今天 6 只票里只有麒麟/斯菱触发起涨），
@@ -572,21 +581,28 @@ def chase_risk(minutes, lookback=20, ratio=6.0, gap_min=1.0, from_low_max=6.0):
     m = minutes
     i = n - 1
     burst = volume_burst(m, lookback, ratio, gap_min)
-    lo_so_far = min(float(x["l"]) for x in m)
+    # 累计 VWAP（到当前分钟）
+    cv = 0.0
+    cvv = 0.0
+    for x in m:
+        v = float(x.get("v", 0))
+        cv += float(x["c"]) * v
+        cvv += v
+    vwap = cv / cvv if cvv else float(m[i]["c"])
     c = float(m[i]["c"])
-    from_low = (c / lo_so_far - 1.0) * 100 if lo_so_far else 0.0
+    dev = (c / vwap - 1.0) * 100 if vwap else 0.0
     is_burst = bool(burst.get("hit"))
-    ok = is_burst and from_low <= from_low_max
+    ok = is_burst and dev <= dev_max
     if not is_burst:
         why = "未起涨（量比 %.1f / 缺口 %+.2f%%）" % (burst.get("vr", 0), burst.get("gap", 0))
-    elif from_low > from_low_max:
-        why = ("已起涨但位置偏高（距当日最低 %+.2f%% > %.1f%%）⇒ 斯菱型，不追"
-               % (from_low, from_low_max))
+    elif dev > dev_max:
+        why = ("已起涨但远离分时均线（高于 VWAP %+.2f%% > %.1f%%）⇒ 斯菱型，不追"
+               % (dev, dev_max))
     else:
-        why = ("起涨且位置低（距当日最低 %+.2f%% ≤ %.1f%%）⇒ 芒果/麒麟型，可上手"
-               % (from_low, from_low_max))
-    return {"ok": ok, "burst": is_burst, "from_low": round(from_low, 2),
-            "lo_so_far": lo_so_far, "need": from_low_max, "why": why,
+        why = ("起涨且贴着均线（高于 VWAP %+.2f%% ≤ %.1f%%）⇒ 芒果/麒麟型，可上手"
+               % (dev, dev_max))
+    return {"ok": ok, "burst": is_burst, "dev": round(dev, 2),
+            "vwap": round(vwap, 2), "need": dev_max, "why": why,
             "vr": burst.get("vr"), "gap": burst.get("gap")}
 
 
@@ -608,6 +624,7 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
     last = summary["last"]
     price = float(last["c"])
     vwap = float(last["avg"])
+    dev = (price / vwap - 1.0) * 100 if vwap else 0.0   # 现价高于分时均线幅度（%）
     pre = day.get("pre")
     code = day["code"]
     day_open = float(day["minutes"][0]["o"]) if day.get("minutes") else None
@@ -644,6 +661,7 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
         "date": day.get("date"),
         "price": price,
         "vwap": round_px(vwap),
+        "dev_vwap_pct": round(dev, 2),
         "pre": pre,
         "pct_pre": pct_pre,
         "in_dip_zone": in_dip,
@@ -704,14 +722,23 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
         out["arm_price"] = None
         out["arm_note"] = "标的质量否决，价格到位也不买"
         return _reject("标的质量否决：" + "；".join(quality.get("blocks") or []))
+    # ★ 追高定义（老罗 2026-10-13 纠偏）：禁追高 = 不买在「价格远离分时均线」，
+    #   不是「不买在涨」。价高于 VWAP 达 CHASE_DEV_PCT% 才禁买（情绪高点接盘）；
+    #   涨 2%~3% 或涨停初期贴着均线都不算高，照常判。
+    if dev > CHASE_DEV_PCT:
+        out["arm_price"] = None
+        out["arm_note"] = "价格远离分时均线 %.1f%%，等回踩均线再判" % dev
+        return _reject("现价 %.2f 高于分时均线 %.2f 达 %+.1f%%（追高：远离均线，不买）。"
+                       % (price, vwap, dev))
     # 分时资金是软约束（老罗 2026-10-09 定）：它只否决「追高」，不否决「回踩到价」。
     # 能否决的硬约束只有：跌破止损 / 涨停买不到 / 超买入上限 / R 不足 —— 各自在别处判。
     # 依据：主力净流出在盘中会反转（斯菱 301550 于 13:37 由 −1922 万转 +4435 万，
     # 当日 92.33→103.78），把软读数当硬闸门会误杀整段行情。
     if not tape["ok"]:
         out["caution"] = tape["text"]
-        if price > entry and not near_zone:
-            return _reject(tape["text"] + " 只接计划内回踩，不追高。")
+        # ★ 软约束只否决「追高」（价格远离均线），不否决回踩/均线附近（老罗 2026-10-13 纠偏）
+        if dev > CHASE_DEV_PCT and not near_zone:
+            return _reject(tape["text"] + " 价格已远离分时均线（%+.1f%%），不追高。" % dev)
     if buy_cap is not None and price > buy_cap + 1e-9 and not near_zone:
         return _reject("现价 %.2f 高于买入上限 %.2f（容差带 %.2f 仍超）。"
                        % (price, buy_cap, soft_cap))
@@ -815,12 +842,12 @@ def render(d):
         cs = d.get("chase") or {}
         if cs.get("ok"):
             lines.append("◆ 低位起涨（可上手）：量比 %.1f 倍、缺口 %+.2f%%、"
-                         "距当日最低 %+.2f%% ≤ %.1f%% ⇒ 芒果/麒麟型，"
+                         "高于 VWAP %+.2f%% ≤ %.1f%% ⇒ 芒果/麒麟型，"
                          "这是今天唯一敢动手的位置。" % (vb["vr"], vb["gap"],
-                                                      cs["from_low"], cs["need"]))
+                                                      cs["dev"], cs["need"]))
         elif cs.get("burst"):
-            lines.append("✗ 追高风险：已起涨但距当日最低 %+.2f%% > %.1f%% ⇒ 斯菱型，**不追**"
-                         % (cs["from_low"], cs["need"]))
+            lines.append("✗ 追高风险：已起涨但高于 VWAP %+.2f%% > %.1f%% ⇒ 斯菱型，**不追**"
+                         % (cs["dev"], cs["need"]))
     if vb.get("vr") is not None:
         if vb.get("hit"):
             lines.append("◆ 起涨异动：本分钟量为前20分均量的 **%.1f 倍**，缺口 %+.2f%% "

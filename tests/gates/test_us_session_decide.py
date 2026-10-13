@@ -113,17 +113,16 @@ def test_low_rr_reject():
 
 
 def test_resolve_cap_us():
-    """买入上限 = R闸 与 ATR闸 取严。"""
+    """买入上限 = R闸 与 显式 cap 取严（美股已无「不追高线/pre+2ATR」这道闸）。"""
     # R闸 = stop + (target-stop)/(1+RR) = 93 + 7/2.5 = 95.8
-    # ATR闸 = pre + 2*atr = 98 + 4 = 102  → 取严得 95.8
     cap = resolve_cap_us(95.0, 93.0, 100.0, None, pre=98.0, atr=2.0)
-    chk("R闸∩ATR闸取严=95.8", abs(cap - 95.8) < 0.01, cap)
-    # ATR闸更紧时取它：pre=90, atr=1 → ATR闸=92 < R闸95.8
-    cap3 = resolve_cap_us(95.0, 93.0, 100.0, None, pre=90.0, atr=1.0)
-    chk("ATR闸更紧时取92", abs(cap3 - 92.0) < 0.01, cap3)
+    chk("R闸=95.8", abs(cap - 95.8) < 0.01, cap)
     # 显式 cap 优先
     cap2 = resolve_cap_us(95.0, 93.0, 100.0, 90.0, pre=98.0, atr=2.0)
     chk("显式cap优先", abs(cap2 - 90.0) < 0.01, cap2)
+    # 无 target 且无显式 cap ⇒ 无上限（返回 None）
+    cap3 = resolve_cap_us(95.0, 93.0, None, None, pre=98.0, atr=2.0)
+    chk("无target无cap→None", cap3 is None, cap3)
 
 
 def test_size_for_us():
@@ -203,8 +202,8 @@ def test_auto_plan_us_pullback_rejects_chase():
     """自动计划·买在相对高位：现价已回到近40分高附近 ⇒ R 闸把买价压到现价下方 ⇒ 不买。
 
     构造 40 根：105(10根) → 100(10根) → 跌到 90 → 反弹回 100收尾。
-    auto_plan: cur=100, low=90 ⇒ stop=90；high=105 ⇒ target=105；R=5/10=0.5。
-    R 闸 max_entry_for_rr(1.5,105,90)=96.0 < 现价 100 ⇒ 「高于买入上限」拒绝。
+    auto_plan: cur=100, low=90 ⇒ stop=90；target=max(近40分高105, cur+2.5×ATR=112.5)=112.5。
+    R=(112.5−100)/(100−90)=1.25 <1.5 ⇒ 「盈亏比不足」拒绝（同时 cap 闸=99<现价100）。
     ⚑ 断言「上限」而不是「盈亏比」——cap 闸先于 R 闸触发。
     """
     closes = ([105.0] * 10 + [100.0] * 10 + [98.0, 96.0, 94.0, 92.0, 90.0]
@@ -215,14 +214,14 @@ def test_auto_plan_us_pullback_rejects_chase():
     ap = auto_plan_us(mins, atr, pre=100.0)
     assert ap["entry"] == 100.0, ap          # entry = 现价
     assert ap["stop"] == 90.0, ap            # 近25分低点
-    assert ap["target"] == 105.0, ap         # 近40分高点
-    assert abs(long_rr(100.0, 105.0, 90.0) - 0.5) < 1e-9, "R 应为 0.5"
+    assert ap["target"] == 112.5, ap         # max(近40分高105, cur+2.5×ATR=112.5)
+    assert abs(long_rr(100.0, 112.5, 90.0) - 1.25) < 1e-9, "R 应为 1.25"
     d = decide_us({"code": "X", "name": "X", "date": "", "pre": 100.0, "minutes": mins},
                   {"last": mins[-1]}, ap["entry"], ap["stop"], ap["target"],
                   atr=atr, account=DEFAULT_ACCOUNT)
     assert d["action"] == "不买", d
     assert "上限" in d["reason"], d["reason"]
-    assert abs(d["cap"] - 96.0) < 1e-6, d["cap"]
+    assert abs(d["cap"] - 99.0) < 1e-6, d["cap"]
 
 
 def test_plan_from_us_top_level():

@@ -72,7 +72,8 @@ def test_buy_in_0_2_window():
     assert d["rr"] >= 1.5
 
 
-def test_reject_near_limit_and_supply():
+def test_limit_near_rejected_pullback_buyable():
+    # case1：离涨停不足1.5% ⇒ 硬拦（买不到）
     minutes = [
         {"t": "09:31", "o": 5.5, "h": 5.6, "l": 5.4, "c": 5.5, "v": 100, "avg": 5.5},
         {"t": "14:20", "o": 6.0, "h": 6.05, "l": 5.9, "c": 6.0, "v": 100, "avg": 5.7},
@@ -83,16 +84,18 @@ def test_reject_near_limit_and_supply():
     assert d["action"] == "不买"
     assert "涨停" in d["reason"] or "上限" in d["reason"]
 
+    # case2：主力净卖 + 价格回踩到均线下方（非追高）→ 2026-10-13 纠偏后判「能买」+ caution
+    # （旧口径：价>entry 直接「不追高」拒；新口径：回踩到均线下方不追高，软约束只给提示）
     minutes2 = [
         {"t": "09:31", "o": 5.6, "h": 5.8, "l": 5.5, "c": 5.7, "v": 50, "avg": 5.6},
         {"t": "11:00", "o": 5.5, "h": 5.55, "l": 5.4, "c": 5.45, "v": 100, "avg": 5.65},
     ]
     day2 = _day(minutes2, [{"t": "11:00", "main": -5e6, "super": -5e6, "large": 0, "mid": 0, "small": 5e6}])
     s2 = _summary(day2, main=-5e6, small=5e6)
-    # 高点在第一根，高点后量 100/150≈0.67
     assert tape_so_far(day2, s2)["ok"] is False
-    d2 = decide(day2, s2, entry=5.30, stop=5.21, target=5.99, cap=5.52)
-    assert d2["action"] == "不买"
+    d2 = decide(day2, s2, entry=5.30, stop=5.00, target=6.50, cap=5.60)
+    assert d2["action"] == "能买", d2["reason"]
+    assert d2["caution"], "软约束必须留下 caution 供模型提示减半仓"
 
 
 def test_soft_tape_does_not_veto_pullback_entry():
@@ -122,19 +125,21 @@ def test_soft_tape_does_not_veto_pullback_entry():
 
 
 def test_soft_tape_still_blocks_chasing():
-    """同一软读数下，现价高于挂单价 = 追高，仍应被拦（口径不得放松到无脑买）。"""
+    """2026-10-13 纠偏：禁追高 = 价格远离分时均线（VWAP），不是「价>挂单价」。
+    软读数下，价高于 VWAP 达阈值（追高）仍应被拦；均线附近不拦。"""
+    # 价 6.40，均价 6.00 ⇒ 高于均线 +6.7%（追高），且主力净卖
     minutes = [
-        {"t": "09:30", "o": 5.50, "h": 5.60, "l": 5.45, "c": 5.55, "v": 300, "avg": 5.50},
-        {"t": "10:00", "o": 5.56, "h": 5.62, "l": 5.50, "c": 5.58, "v": 200, "avg": 5.53},
-        {"t": "10:30", "o": 5.57, "h": 5.59, "l": 5.52, "c": 5.54, "v": 150, "avg": 5.55},
+        {"t": "09:30", "o": 6.00, "h": 6.10, "l": 5.95, "c": 6.02, "v": 300, "avg": 6.00},
+        {"t": "10:00", "o": 6.03, "h": 6.20, "l": 6.00, "c": 6.10, "v": 200, "avg": 6.02},
+        {"t": "10:30", "o": 6.30, "h": 6.45, "l": 6.25, "c": 6.40, "v": 150, "avg": 6.00},
     ]
     day = _day(minutes, [{"t": "10:30", "main": -2e7, "super": -2e7,
                           "large": 0, "mid": 0, "small": 2e7}],
-               pre=5.50, code="301550", name="斯菱智驱")
+               pre=6.00, code="301550", name="斯菱智驱")
     s = _summary(day, main=-2e7, small=2e7)
-    d = decide(day, s, entry=5.30, stop=5.00, target=6.50, cap=5.60)
+    d = decide(day, s, entry=6.00, stop=5.60, target=7.00, cap=6.50)
     assert d["action"] == "不买", d["reason"]
-    assert "不追高" in d["reason"] or "回踩" in d["reason"]
+    assert "追高" in d["reason"] or "远离均线" in d["reason"], d["reason"]
 
 
 def test_limit_down_board_is_rejected():
@@ -193,7 +198,7 @@ def test_auto_plan_cn_no_network():
     saved = SD._cn_atr14
     SD._cn_atr14 = lambda code: None          # 离线：强制走分时区间兜底
     try:
-        # 现价 10.00；近 40 分高 10.20、近 25 分低 9.70 ⇒ 区间=0.50 → a≈0.25
+        # 现价 10.00；近 25 分低 9.70 ⇒ stop=9.70；涨停价=9.75×1.10=10.73 ⇒ target=10.73
         minutes = [
             {"t": "09:31", "o": 9.80, "h": 9.85, "l": 9.70, "c": 9.78, "v": 100, "avg": 9.80},
             {"t": "10:00", "o": 9.79, "h": 9.95, "l": 9.72, "c": 9.88, "v": 100, "avg": 9.82},
@@ -201,13 +206,15 @@ def test_auto_plan_cn_no_network():
         ]
         ap = SD.auto_plan_cn(minutes, "600000", 9.75)
         assert ap["entry"] == 10.00, ap
-        # low=9.70 < cur=10.00 ⇒ stop=9.70（不触发 3×ATR 收紧）；high=10.20 > cur ⇒ target=10.20
+        # low=9.70 < cur=10.00 ⇒ stop=9.70（不触发 3×ATR 收紧）
         assert abs(ap["stop"] - 9.70) < 1e-6, ap
-        assert abs(ap["target"] - 10.20) < 1e-6, ap
+        # 真实阻力=涨停价（主板+10%）：9.75×1.10=10.725 → round_px=10.73
+        assert abs(ap["target"] - 10.73) < 1e-6, ap
         assert ap["cap"] is None, ap
-        # 买在次高：R=(10.20-10.00)/(10.00-9.70)=0.67 <1.5 ⇒ decide 会如实答不买
+        # 买在现价 10.00、止损 9.70、目标涨停 10.73 ⇒ R=(10.73-10.00)/(10.00-9.70)=2.43≥1.5
+        # ⇒ decide 会如实答「能买」（旧版用近高10.20作锚会坍缩到 R0.67 误杀，已修正）
         rr = (ap["target"] - ap["entry"]) / (ap["entry"] - ap["stop"])
-        assert rr < 1.5, rr
+        assert rr >= 1.5, rr
     finally:
         SD._cn_atr14 = saved
 
@@ -215,7 +222,7 @@ def test_auto_plan_cn_no_network():
 if __name__ == "__main__":
     test_dip_zone_and_cap()
     test_buy_in_0_2_window()
-    test_reject_near_limit_and_supply()
+    test_limit_near_rejected_pullback_buyable()
     test_soft_tape_does_not_veto_pullback_entry()
     test_soft_tape_still_blocks_chasing()
     test_limit_down_board_is_rejected()

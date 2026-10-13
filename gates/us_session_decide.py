@@ -18,8 +18,9 @@
   🔁 重写「规则层」（美股市场机制不同）：
       ① 无涨跌停价 ⇒ 删除 limit_up/down 硬拦（美股可全天成交）。
       ② 无主力资金流 ⇒ 删除 tape_so_far 软约束，改中性提示「美股无主力资金流，仅看量价」。
-      ③ 买入上限闸：昨收+2% 在美股会系统性误杀（ATR 3~5%）⇒
-         改用「pre + 2.0×ATR」作不追高线，并与 R≥1.5 闸取严。
+      ③ 买入上限闸：仅 R≥1.5 闸 与 显式 cap 取严；**不设「不追高线」**——
+         老罗 2026-10-13 纠偏：美股拉升是直线，pre+2ATR 会把刚起涨也挡掉，等于禁了追高
+         让人买不进；风险交给硬止损(T+0)兜底，不在买入侧预设「涨多了不让买」。
       ④ 仓位：1 股起（无整手），单笔预算 = 账户 ×1.5%。
 
   ⏰ 美股交易时段（致富证券 · 2026-10-10 老罗确认 · 已固化）：
@@ -74,7 +75,6 @@ from open_playbook import long_rr, RR_QUALIFIED, max_entry_for_rr
 
 UA = {"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"}
 DEFAULT_ACCOUNT = 4694.80          # 美股账户总额（memory：单笔预算 1.5%=$70.42）
-ATR_GATE_MULT = 2.0                # 不追高线 = 昨收 + 2.0×ATR（美股波动大）
 
 
 # ───────────────────────── 数据层 ─────────────────────────
@@ -253,9 +253,10 @@ def auto_plan_us(minutes, atr, pre):
     stop = low if low < cur else cur - 1.5 * a
     if cur - stop > 3.0 * a:          # 风险距过宽 → 收紧到 3×ATR（买在高位时自然触发）
         stop = cur - 3.0 * a
-    target = high if high > cur else cur + 2.5 * a
-    if target - cur > 4.0 * a:        # 上方空间过远 → 收到 2.5×ATR
-        target = cur + 2.5 * a
+    # ★ 真实阻力 = max(近 HIGH_N 高, cur+2.5×ATR)。不用「近高」单锚——美股直线拉升时
+    #   近高≈现价 ⇒ R 坍缩 ⇒ 误杀（老罗 2026-10-13：直线拉升根本追不上，禁了就买不进）。
+    #   cur+2.5×ATR 给一个前瞻阻力，保证 R 不退化；风险由硬止损(T+0)兜底。
+    target = max(high, cur + 2.5 * a)
     if target <= cur:
         target = cur + 2.5 * a
     return {"entry": round_px(cur), "stop": round_px(stop),
@@ -301,14 +302,17 @@ def size_for_us(entry, stop, account=None, risk_scale=1.0):
 
 
 def resolve_cap_us(entry, stop, target, cap, pre, atr):
-    """美股买入上限：R≥1.5 闸 与 不追高线(pre+2ATR) 取严；显式 cap 优先。"""
+    """美股买入上限：R≥1.5 闸 与 显式 cap 取严；显式 cap 优先。
+
+    ★ 老罗 2026-10-13 纠偏：美股**不再有「不追高线(pre+2ATR)」**这道闸——
+    美股拉升是直线，pre+2ATR 会把「刚起涨」也挡掉，等于「禁了追高」让人买不进；
+    风险交给硬止损(T+0)兜底，不在买入侧预设「涨多了不让买」。
+    """
     cands = []
     if cap is not None:
         cands.append(float(cap))
     if target is not None:
         cands.append(max_entry_for_rr(RR_QUALIFIED, float(target), float(stop)))
-    if pre is not None and atr:
-        cands.append(float(pre) + ATR_GATE_MULT * float(atr))
     return min(cands) if cands else None
 
 
@@ -356,7 +360,7 @@ def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
         out["arm_note"] = "回到 %.2f 以下再判（结构止损下方不接飞刀）" % entry
         return _reject("现价 %.2f 已在止损 %.2f 下方，不接飞刀。" % (price, stop))
     if buy_cap is not None and price > buy_cap + 1e-9:
-        return _reject("现价 %.2f 高于买入上限 %.2f（不追高）。" % (price, buy_cap))
+        return _reject("现价 %.2f 高于买入上限 %.2f（R 不足或超计划上限）。" % (price, buy_cap))
     if target is None:
         out["arm_price"] = None
         out["arm_note"] = ""
@@ -421,11 +425,11 @@ def render_us(d):
         lines.append("  %s" % sh["advice"])
     if vb.get("vr") is not None:
         if cs.get("ok"):
-            lines.append("◆ 低位起涨（可上手）：量比 %.1f×、缺口 %+.2f%%、距当日最低 %+.2f%% ≤ %.1f%% ⇒ 芒果/麒麟型"
-                         % (vb["vr"], vb["gap"], cs["from_low"], cs["need"]))
+            lines.append("◆ 低位起涨（可上手）：量比 %.1f×、缺口 %+.2f%%、高于 VWAP %+.2f%% ≤ %.1f%% ⇒ 芒果/麒麟型"
+                         % (vb["vr"], vb["gap"], cs["dev"], cs["need"]))
         elif cs.get("burst"):
-            lines.append("✗ 追高风险：已起涨但距当日最低 %+.2f%% > %.1f%% ⇒ 斯菱型，不追"
-                         % (cs["from_low"], cs["need"]))
+            lines.append("✗ 追高风险：已起涨但高于 VWAP %+.2f%% > %.1f%% ⇒ 斯菱型，不追"
+                         % (cs["dev"], cs["need"]))
         else:
             lines.append("· 起涨异动：量能 %.1f× 前20分均量、缺口 %+.2f%%（阈值 6.0× / +1.00%%）"
                          % (vb["vr"], vb["gap"]))
