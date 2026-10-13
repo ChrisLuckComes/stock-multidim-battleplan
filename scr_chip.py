@@ -56,9 +56,42 @@ LOCK_TOL = 0.10           # 锁仓：底部峰带质量 N 日波动 < 10%
 LOOSE_MASS = 0.20         # 底部峰带质量 5 日缩水 > 20% = 锁仓破坏
 LOW_LO, LOW_HI = 5, 35     # 低位筹码带分位区间（庄的成本段＝图上「下方红色、几天不动」那段）
 MIN_BARS = 60             # 日线不足则不出结论（不编造）
-# 换手衰减系数：实际每过一个交易日，旧筹码被交易的强度未必等于当日全部换手
-# （高频换手票里很多是中散户当日回转，庄的底仓没动）。k=1.0 = 严格按换手衰减；k 越小记得越久。
-DECAY_K = 1.0
+# ⚑⚑ 换手衰减系数：不要用**跨股票固定的常数**（老罗 2026-10-13 打回：那样等于让他去抄软件读数）。
+#    正确做法：给模型一个**统一口径的记忆**＝「筹码半衰期 H 个交易日」（经过 H 日，当日筹码权重剩一半），
+#    再按该股自己的换手水平**反解衰减系数 k**（上限 1.0＝不能超过真实换手）。
+#    ⇒ 高换手票自动得到更小的 k（记忆不被高频回转吃掉），低换手票 k 自然取满 ⇒ 不同票的 SCR 才可比。
+CHIP_HALF_LIFE = 60       # 默认：约一个季度 —— 当日筹码走过 60 个交易日权重减半
+
+
+def solve_decay_k(bars, half_life=CHIP_HALF_LIFE):
+    """按「筹码半衰期 H 个交易日」**自求**衰减系数 k ∈ (0, 1] —— 不用软件读数对拍。
+
+    定义：把最近 H 个交易日的换手 r_t 依次作用后，当日筹码权重衰到一半：
+          Π_t (1 − r_t × k) = 0.5
+    r_t 是该股自己的日换手 ⇒ **k 每只票自求**（不是拿来拍的常数）；k 上限 1.0，
+    因为衰减强度不可能超过真实换手本身（∏(1−r) 已经慢于目标时就直接取 1.0）。
+    """
+    tail = bars[-half_life:] if len(bars) >= half_life else bars
+    rs = [min(max(b.get("turnover", 0.0) / 100.0, 0.0), 1.0) for b in tail]
+    if not rs or sum(rs) <= 0:
+        return 1.0
+
+    def surv(k):
+        s = 1.0
+        for r in rs:
+            s *= max(0.0, 1.0 - r * k)
+        return s
+
+    if surv(1.0) >= 0.5:          # 该股换手本就低，按真实换手衰减已经记得够久
+        return 1.0
+    lo, hi = 0.0, 1.0             # surv 单调递减 ⇒ 二分
+    for _ in range(60):
+        mid = (lo + hi) / 2.0
+        if surv(mid) > 0.5:
+            lo = mid
+        else:
+            hi = mid
+    return max(1e-4, (lo + hi) / 2.0)
 
 
 # ─────────────────────────────── 取数 ───────────────────────────────
@@ -132,7 +165,7 @@ def fetch_fflow(code):
 
 
 # ─────────────────────────── 筹码分布模型 ───────────────────────────
-def chip_model(bars, keep_last=8, main_rho=None, decay_k=DECAY_K):
+def chip_model(bars, keep_last=8, main_rho=None, decay_k=1.0):
     """三角分布 + 换手衰减。返回 (prices, dist, snaps, bin_w, miss, main_dist)。
 
     `main_rho` = {日期: 主力净买入占成交比} ⇒ 同步累出**主力筹码分布** `main_dist`：
@@ -362,13 +395,17 @@ def action_of(verdict, close, M, p15, p85, scr90):
 
 
 # ─────────────────────────── 主流程 ───────────────────────────
-def analyze(code, n=120, decay_k=DECAY_K):
+def analyze(code, n=120, decay_k=None, half_life=CHIP_HALF_LIFE):
     bars, name = fetch_bars(code, n=n)
     if len(bars) < MIN_BARS:
         raise RuntimeError(f"{code} 只有 {len(bars)} 根日线（< {MIN_BARS}），不足以判读筹码，不出结论")
 
     # 模型只正向跑一遍，末端保留 KEEP 份快照：既得今日分布，也得近 12 日 SCR 趋势 + 近 5 日锁仓
     KEEP = 15
+    # 衰减系数自求：统一口径＝「筹码半衰期 H 日」⇒ 每只票按自己的换手反解 k（不再跨股票用同一常数）
+    k_auto = decay_k is None
+    if decay_k is None:
+        decay_k = solve_decay_k(bars, half_life=half_life)
     main_rho = fetch_fflow(code)                  # 逐日主力净买入占比（算主力成本用）
     prices, dist, snaps, w, miss, m_dist = chip_model(bars, keep_last=KEEP,
                                                       main_rho=main_rho, decay_k=decay_k)
@@ -383,11 +420,20 @@ def analyze(code, n=120, decay_k=DECAY_K):
                 "M": avg_cost(prices, d), "profit": profit_ratio(prices, d, close)}
 
     tail = bars[-len(snaps):]                    # 与 snaps 一一对应的日线
-    scr_hist, scr70_hist = [], []
+    # ⚑ 锁仓＝「一段**固定价格**上的筹码没走」⇒ 价格带必须钉死（取窗口首日的 P5~P35），
+    #   不能每天重取分位（P5~P35 的份额恒等于 30%，那样永远看不出变化 —— 已踩）。
+    REF_LO = idx_of(cost_at(prices, snaps[0], LOW_LO), prices[0], w, len(dist))
+    REF_HI = idx_of(cost_at(prices, snaps[0], LOW_HI), prices[0], w, len(dist))
+    if REF_HI - REF_LO < 2:
+        REF_HI = min(REF_HI + 2, len(dist) - 1)
+    scr_hist, scr70_hist, series = [], [], []
     for d, b in zip(snaps, tail):
-        s = summary(d, b["c"])
-        scr_hist.append(s["scr90"])
-        scr70_hist.append(s["scr70"])
+        sm = summary(d, b["c"])
+        scr_hist.append(sm["scr90"])
+        scr70_hist.append(sm["scr70"])
+        series.append({"d": b["d"], "c": b["c"], "scr90": sm["scr90"], "scr70": sm["scr70"],
+                       "M": sm["M"], "profit": sm["profit"], "low_share": band_share(d, REF_LO, REF_HI),
+                       "turnover": b["turnover"]})
     today = summary(dist, bars[-1]["c"])
 
     last = bars[-1]
@@ -401,7 +447,10 @@ def analyze(code, n=120, decay_k=DECAY_K):
     # 「底部锁仓」对齐聊天记录：取**低位筹码带** = 今日 P5~P35 这一段（庄的成本段，
     # 图上就是「下方红色、几天不动」的那部分）。用分位数而不是局部极大值，宽分布也找得到。
     low_lo, low_hi = cost_at(prices, dist, LOW_LO), cost_at(prices, dist, LOW_HI)
-    lo_i, hi_i = idx_of(low_lo, prices[0], w, len(dist)), idx_of(low_hi, prices[0], w, len(dist))
+    # 锁仓看的是「LOCK_DAYS 日前那段低价筹码今天还在不在」⇒ 价格带取当时的分位，不取今日的
+    ref_d = snaps[-(LOCK_DAYS + 1)] if len(snaps) >= LOCK_DAYS + 1 else snaps[0]
+    lo_i = idx_of(cost_at(prices, ref_d, LOW_LO), prices[0], w, len(dist))
+    hi_i = idx_of(cost_at(prices, ref_d, LOW_HI), prices[0], w, len(dist))
     if hi_i - lo_i < 2:                       # 段太窄（极端密集）：放宽到至少 3 格
         hi_i = min(hi_i + 2, len(dist) - 1)
     seg = dist[lo_i:hi_i + 1]
@@ -449,8 +498,9 @@ def analyze(code, n=120, decay_k=DECAY_K):
         "low_lo": low_lo, "low_hi": low_hi, "below_now": below_now, "n_peak": n_peak,
         "lock": locked, "lock_spread": spread, "mass_chg": mass_chg,
         "low_cost": low_cost, "main_cost": main_cost, "main_src": main_src,
-        "dist_pos": dist_pos, "scr_hist": scr_hist[-12:],
+        "dist_pos": dist_pos, "scr_hist": scr_hist[-12:], "series": series[-10:],
         "verdict": verdict, "why": why, "action": act,
+        "decay_k": decay_k, "k_auto": k_auto, "half_life": half_life,
         "turnover_missing": miss,
     }
 
@@ -462,7 +512,8 @@ def render(r):
     print(line)
     print(f"【结论】{r['verdict']} —— {r['why']}")
     print("─" * 66)
-    print(f" 现价 {r['close']:.2f}｜换手 {r['turnover']:.2f}%｜量比 {r['vol_ratio']:.2f}×")
+    print(f" 现价 {r['close']:.2f}｜换手 {r['turnover']:.2f}%｜量比 {r['vol_ratio']:.2f}×"
+          f"｜衰减 k={r['decay_k']:.3f}（{'按半衰期 ' + str(r['half_life']) + ' 日自求' if r['k_auto'] else '手动'}）")
     print(f" SCR90 {r['scr90']:.2f}%｜SCR70 {r['scr70']:.2f}%"
           f"｜近 5 日 SCR90 {'→'.join(f'{v:.1f}' for v in r['scr_hist'][-5:])}")
     print(f" 90% 筹码 {r['p5']:.2f}~{r['p95']:.2f}｜70% 筹码（峰区）{r['p15']:.2f}~{r['p85']:.2f}")
@@ -486,6 +537,13 @@ def render(r):
               f"、{'变化 %+.1f%%' % (r['mass_chg'] * 100) if r['mass_chg'] is not None else '未知'}）")
     print(f" 底部锁仓：{lock_txt}（{detail}"
           if r["below_now"] else f" 底部锁仓：不适用（{detail[:-1]}，低位带已抬到现价之上）")
+    print("─" * 66)
+    print(f" 近 {len(r.get('series') or [])} 日筹码演进（「低位带份额」＝首日钉死的那段低价筹码，份额不掉＝锁仓）：")
+    print(f"   日期        收盘    SCR90   SCR70   平均成本  获利盘  低位带份额  换手")
+    for row in (r.get("series") or []):
+        print(f"   {row['d']}  {row['c']:>6.2f}  {row['scr90']:>5.1f}%  {row['scr70']:>5.1f}%"
+              f"   {row['M']:>7.2f}  {row['profit']:>5.1f}%    {row['low_share'] * 100:>5.1f}%"
+              f"    {row['turnover']:>5.2f}%")
     print("─" * 66)
     print(f" 动作：{r['action']}")
     if r.get("turnover_missing"):
@@ -516,8 +574,10 @@ def main():
     ap.add_argument("code", nargs="?", help="6 位 A 股代码")
     ap.add_argument("--n", type=int, default=120, help="回看日线根数（默认 120）")
     ap.add_argument("--json", default=None, help="结构化输出路径（建议 out_cn/scr_<code>.json）")
-    ap.add_argument("--decay-k", type=float, default=DECAY_K, dest="decay_k",
-                    help="换手衰减系数（默认 1.0＝严格按换手衰减；调小＝筹码记得更久）")
+    ap.add_argument("--decay-k", type=float, default=None, dest="decay_k",
+                    help="手动指定换手衰减系数（默认 None＝按 --half-life 自求）")
+    ap.add_argument("--half-life", type=int, default=CHIP_HALF_LIFE, dest="half_life",
+                    help="筹码半衰期：多少交易日后当日筹码权重减半（默认 60 ≈ 一个季度）")
     ap.add_argument("--selftest", action="store_true", help="用截图实测值回归 SCR 公式")
     a = ap.parse_args()
     if a.selftest:
@@ -525,7 +585,7 @@ def main():
     if not a.code:
         ap.error("请给代码，或用 --selftest")
     try:
-        r = analyze(a.code, n=a.n, decay_k=a.decay_k)
+        r = analyze(a.code, n=a.n, decay_k=a.decay_k, half_life=a.half_life)
     except Exception as e:
         print(f"✗ {a.code}：{e}")
         return 1
