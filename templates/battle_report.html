@@ -34,6 +34,9 @@
   .flat{color:var(--dim)}
   .bestbox{background:var(--hi);border:2px solid var(--hi-b);border-radius:10px;padding:14px 16px;margin:12px 0}
   .bestbox .ttl{font-weight:700;color:#8a5a00;font-size:15px;margin-bottom:8px}
+  .scrgate{margin-top:10px;padding-top:9px;border-top:1px dashed var(--hi-b);font-size:13px;line-height:1.7}
+  .scrgate .g-ok{color:#1b5e20;font-weight:700}
+  .scrgate .g-no{color:#b3261e;font-weight:700}
   .kpis{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}
   .kpi{background:var(--accent2);border:1px solid #d3e2f0;border-radius:8px;padding:7px 11px;font-size:12.5px}
   .kpi b{color:var(--accent);font-size:14px}
@@ -68,14 +71,15 @@
   <div class="oneline">{{THESIS}}</div>
 </div>
 
-<!-- ================= 0 · 筹码面（老罗 2026-10-14：完整报告必须带，且放最前） ================= -->
-{{SCR_BLOCK}}
-
 <div class="bestbox">
   <div class="ttl">★ 最高盈亏比路径（强制高亮）—— {{BEST_TITLE}}</div>
   <div class="kpis">{{BEST_KPIS}}</div>
   <p class="note" style="margin:8px 0 0">{{BEST_NOTE}}</p>
+  <div class="scrgate">{{SCR_GATE}}</div>
 </div>
+
+<!-- ================= 筹码面（老罗 2026-10-14：结论必须带上，但**放在最高盈亏比之后**） ================= -->
+{{SCR_BLOCK}}
 
 <!-- ================= 叠加概率七层计数（只排序不否决） ================= -->
 {{CONFLUENCE_BLOCK}}

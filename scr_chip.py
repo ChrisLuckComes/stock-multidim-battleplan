@@ -65,6 +65,26 @@ MIN_BARS = 60             # 日线不足则不出结论（不编造）
 #    ⇒ 高换手票自动得到更小的 k（记忆不被高频回转吃掉），低换手票 k 自然取满 ⇒ 不同票的 SCR 才可比。
 CHIP_HALF_LIFE = 60       # 默认：约一个季度 —— 当日筹码走过 60 个交易日权重减半
 
+# ── 五态筹码状态（老罗 2026-10-14 定：结论必须一眼看懂，只给这五个词）────────────
+#   ① 筹码发散      ② 集中锁仓中    ③ 拉升脱离成本区中   ④ 派发出货中   ⑤ 吸筹中
+#   判定优先级：派发出货中 > 筹码发散 > 拉升脱离成本区中 > 吸筹中 > 集中锁仓中
+ST_SHIP = "派发出货中"
+ST_LOOSE = "筹码发散"
+ST_PULL = "拉升脱离成本区中"
+ST_ACCUM = "吸筹中"
+ST_LOCK = "集中锁仓中"
+CHIP_STATES = [ST_ACCUM, ST_LOCK, ST_PULL, ST_LOOSE, ST_SHIP]   # 由好到坏
+# 状态 → 交易侧结论（报告用它跟「最高盈亏比路径」做一致性闸门）
+STATE_TRADE = {ST_ACCUM: "买", ST_LOCK: "持", ST_PULL: "持",
+               ST_LOOSE: "观察", ST_SHIP: "卖"}
+# 状态 → 是否**允许新开仓**（老罗：筹码面与路径不一致 ⇒ 不构成推荐最高盈亏比路径）
+STATE_ALLOW_NEW = {ST_ACCUM: True, ST_LOCK: True,
+                   ST_PULL: False, ST_LOOSE: False, ST_SHIP: False}
+PULL_UP = 1.0             # 现价 ≥ 70% 峰区上沿（P85）⇒ 已脱离成本区
+PULL_M = 1.10             # 或 现价 ≥ 平均成本 ×1.10
+PROFIT_RICH = 85.0        # 获利盘 ≥85% ＝ 全员获利区，拉升段随时转派发
+ACCUM_RISE = 0.02         # 低位带份额 5 日 +2% 以上 ＝ 有人在低位收
+
 
 def solve_decay_k(bars, half_life=CHIP_HALF_LIFE):
     """按「筹码半衰期 H 个交易日」**自求**衰减系数 k ∈ (0, 1] —— 不用软件读数对拍。
@@ -478,6 +498,104 @@ def action_of(verdict, close, M, p15, p85, scr90):
             f"{M:.2f} ±3% + 量比 ≥ {VOL_CONFIRM}×。")
 
 
+def chip_state_of(scr90, scr70, scr_hist, close, M, p15, p85, profit,
+                  vol_ratio, turnover, dist_pos, mass_chg, locked, n_peak=1):
+    """★ 五态筹码状态（老罗 2026-10-14 定）：一句话看懂筹码现在在干什么。
+
+    返回 (state, why)。优先级：**派发出货中 > 筹码发散 > 拉升脱离成本区中 > 吸筹中 > 集中锁仓中**。
+    ⚑ 派发的判定必须有「**搬运证据**」（低位筹码在减少 / 集中度爆量跳升）——
+      光是「获利盘高 + 价格高」只能算**拉升脱离成本区**，不能算派发（会误杀强势股）。
+    """
+    prev5 = scr_hist[-6:-1] or scr_hist[-1:]
+    base = sum(prev5) / len(prev5) if prev5 else 0.0
+    jump = scr90 / base if base > 0 else 1.0
+    big_vol = (vol_ratio or 0) >= VOL_BIG or (turnover or 0) >= TURN_BIG
+    loose = scr90 >= SCR_LOOSE
+    drain = mass_chg is not None and mass_chg <= -LOOSE_MASS      # 底仓在撤
+    rising = mass_chg is not None and mass_chg >= ACCUM_RISE      # 底仓在增
+    pos = dist_pos
+    out_zone = pos is not None and pos >= PULL_UP                 # 已在 P85（70% 峰区上沿）之上
+    above_m = bool(M and close >= M * PULL_M)
+    tail = ""
+    if n_peak >= 2:
+        tail = f"；⚠ 双峰（{n_peak} 个）＝多空分歧"
+
+    # ① 派发出货中 —— 必须有搬运证据
+    if loose and jump >= SCR_JUMP and big_vol:
+        return ST_SHIP, (f"爆量发散：SCR90 {scr90:.1f}% 较 5 日均值跳升 {(jump - 1) * 100:+.0f}%"
+                         f"（换手 {turnover:.1f}%、量比 {vol_ratio:.1f}×）"
+                         f"——低位筹码正被搬向高位，出货为主{tail}")
+    if drain and pos is not None and pos > 0.6:
+        return ST_SHIP, (f"底仓在撤：低位筹码带 {LOCK_DAYS} 日 {mass_chg * 100:+.0f}%"
+                         f"（价格仍在峰区上方 {pos * 100:.0f}%）——庄在高位撤底仓{tail}")
+    if p15 is not None and close < p15 and (profit or 0) >= 50:
+        return ST_SHIP, (f"派发后破位：跌破峰区下沿 {p15:.2f} 且获利盘仍 {(profit or 0):.0f}%"
+                         f"——高位筹码开始割肉{tail}")
+    # ② 筹码发散（无搬运证据，方向未定）
+    if loose:
+        return ST_LOOSE, (f"SCR90 {scr90:.1f}% ≥ {SCR_LOOSE:g}%、SCR70 {scr70:.1f}%"
+                          f"（5 日均值 {base:.1f}%、{jump:.2f}×）——筹码摊在两个价位上，"
+                          f"多空没共识，等收敛到 {SCR_BUY:g}% 以内再谈{tail}")
+    # ③ 拉升脱离成本区中
+    if (out_zone or above_m) and not drain:
+        extra = ""
+        if (profit or 0) >= PROFIT_RICH:
+            extra = f"，获利盘 {(profit or 0):.0f}% 已进全员获利区——拉升段随时转派发"
+        return ST_PULL, (f"现价已站到成本区上方（峰区位置 {(pos or 0) * 100:.0f}%、"
+                         f"较平均成本 {M:.2f} {(close / M - 1) * 100:+.1f}%）"
+                         f"，筹码尚未发散（SCR90 {scr90:.1f}%）、底仓未撤{extra}"
+                         f"——脱离成本区＝没有成本优势，持有可、追高不可{tail}")
+    # ④ 吸筹中
+    fall_days = 0
+    for v in reversed(scr_hist[:-1]):
+        if v > scr90:
+            fall_days += 1
+        else:
+            break
+    if (fall_days >= 2 or scr90 <= SCR_BUY) and M and close <= M * 1.03 and (rising or locked):
+        return ST_ACCUM, (f"集中度在改善（SCR90 {scr90:.1f}%、连降 {fall_days} 日）"
+                          f"且现价贴近平均成本 {M:.2f}（{(close / M - 1) * 100:+.1f}%）、"
+                          f"低位筹码带 {LOCK_DAYS} 日 {(mass_chg or 0) * 100:+.1f}%"
+                          f"——低位在收筹码{tail}")
+    # ⑤ 集中锁仓中
+    if locked:
+        return ST_LOCK, (f"低位筹码带 {LOCK_DAYS} 日份额不动（波动 "
+                         f"{(abs(mass_chg or 0)) * 100:.1f}% 以内）、SCR90 {scr90:.1f}% 未发散"
+                         f"——底部筹码没走，庄还在，结构没坏{tail}")
+    if scr90 <= SCR_BUY and pos is not None and 0.0 <= pos <= 1.0:
+        return ST_LOCK, (f"SCR90 {scr90:.1f}% 已压缩到 {SCR_BUY:g}% 以内"
+                         f"、价格在筹码峰区内（位置 {pos * 100:.0f}%）——筹码集中，等放量启动{tail}")
+    # 兜底
+    if pos is not None and pos < 0:
+        return (ST_SHIP if drain else ST_ACCUM), (
+            f"价格已在峰区下沿 {p15:.2f} 之下（获利盘 {(profit or 0):.0f}%）——"
+            + ("底仓同步在撤，弱势未止" if drain else "无人可派发，属低位区，但缺启动证据")
+            + tail)
+    return ST_LOCK, (f"SCR90 {scr90:.1f}%、峰区位置 {(pos or 0) * 100:.0f}%"
+                     f"（低位带 {LOCK_DAYS} 日 {(mass_chg or 0) * 100:+.1f}%）——"
+                     f"筹码未发散（<{SCR_LOOSE:g}%）且底仓未撤，按集中锁仓处理{tail}")
+
+
+def state_action_of(state, close, M, p15, p85, scr90, profit=None):
+    """五态 → 一句话动作（报告/终端都用它，保证两处口径一致）。"""
+    if state == ST_SHIP:
+        return (f"减仓/清仓优先。回补条件：SCR90 回到 {SCR_LOOSE:g}% 以下且缩量站稳"
+                + (f"，或重新站回峰区上沿 {p85:.2f}" if p85 else "") + "。")
+    if state == ST_LOOSE:
+        return (f"不开新仓（含回踩单）。等三件套：SCR90 ≤ {SCR_BUY:g}% + 收盘贴近成本区 "
+                f"{M:.2f} ±3% + 量比 ≥ {VOL_CONFIRM}×。")
+    if state == ST_PULL:
+        return (f"持有可以，**新开仓禁止**（脱离成本区＝无成本优势、追高即违规）。"
+                f"要加仓等回踩成本区 {M:.2f} 一带；止盈触发：获利盘 ≥ {PROFIT_RICH:g}% "
+                f"或低位带 {LOCK_DAYS} 日 −{LOOSE_MASS * 100:.0f}%。")
+    if state == ST_ACCUM:
+        stop = min((p15 or close * 0.95), close * 0.95)
+        return (f"可分批低吸；止损＝峰区下沿与 −5% 兜底取严：{stop:.2f}"
+                f"（再与本仓库硬止损规则取更严者）。确认信号＝贴成本区 {M:.2f} + 量比 ≥ {VOL_CONFIRM}×。")
+    return (f"持有 / 回踩可买。离场触发：① 收盘跌破峰区下沿 {p15:.2f}；"
+            f"② SCR90 连续 2 日 > {SCR_SHIP:g}% 且放量（出货确认）。")
+
+
 # ─────────────────────────── 批量（一次进程扫多只） ───────────────────────────
 # ⚡ 提速的关键：解释器启动在本机约 0.5~0.9s，单只跑就是白付一次；
 #   批量模式把启动摊到 N 只上，且多只**并发取数**（网络是唯一的大头）。
@@ -503,20 +621,23 @@ def run_batch(codes, n=120, half_life=CHIP_HALF_LIFE, decay_k=None, workers=6):
 def render_batch(rows):
     ok = [r for r in rows if r[1]]
     bad = [r for r in rows if not r[1]]
-    ok.sort(key=lambda r: (_VERDICT_ORDER.get(r[1]["verdict"], 9), -r[1]["scr90"]))
-    print("═" * 104)
-    print(f" SCR 筹码集中度 · 批量 {len(rows)} 只（{'卖出优先' }排序）")
-    print("═" * 104)
+    ok.sort(key=lambda r: (CHIP_STATES.index(r[1]["state"])
+                           if r[1].get("state") in CHIP_STATES else 9, -r[1]["scr90"]))
+    print("═" * 112)
+    print(f" SCR 筹码集中度 · 批量 {len(rows)} 只（按五态由好到坏排序）")
+    print("═" * 112)
     print(f"{'代码':<7}{'名称':<9}{'现价':>7}{'SCR90':>7}{'SCR70':>7}{'主力成本':>9}"
-          f"{'偏离主力':>9}{'获利盘':>8}{'位置':>8}  结论")
-    print("─" * 104)
+          f"{'偏离主力':>9}{'获利盘':>8}{'位置':>8}  {'筹码状态':<20}{'开仓':<6}交易侧")
+    print("─" * 112)
     for code, r, _ in ok:
         mc = r.get("main_cost")
         gap = f"{(r['close'] / mc - 1) * 100:+.1f}%" if mc else "—"
         pos = "—" if r["dist_pos"] is None else f"{r['dist_pos'] * 100:.0f}%"
+        st = r.get("state") or "—"
         print(f"{code:<7}{r['name'][:8]:<9}{r['close']:>7.2f}{r['scr90']:>6.1f}%"
               f"{r['scr70']:>6.1f}%{(mc if mc else 0):>9.2f}{gap:>9}"
-              f"{r['profit']:>7.1f}%{pos:>8}  {r['verdict']}"
+              f"{r['profit']:>7.1f}%{pos:>8}  {st:<14}"
+              f"{'✅可' if r.get('state_allow_new') else '⛔否':<6}{r['verdict']}"
               + ("" if r["main_src"] == "资金流" else "·主力成本=低位带"))
     for code, _, err in bad:
         print(f"{code:<7}{'取数失败':<9}{'':>7}{'':>7}{'':>7}{'':>9}{'':>9}{'':>8}{'':>8}  {err}")
@@ -618,6 +739,11 @@ def analyze(code, n=120, decay_k=None, half_life=CHIP_HALF_LIFE):
                          profit, vol_ratio or 0.0, turnover or 0.0,
                          n_peak, locked, mass_chg, peak_price, dist_pos)
     act = action_of(verdict, close, M, p15, p85, scr90)
+    # ★ 五态（老罗 2026-10-14）：买/持/卖 是**交易侧**结论，五态是**筹码侧**结论，两个都要给
+    state, state_why = chip_state_of(scr90, scr70, scr_hist, close, M, p15, p85,
+                                     profit, vol_ratio or 0.0, turnover or 0.0,
+                                     dist_pos, mass_chg, locked, n_peak)
+    state_act = state_action_of(state, close, M, p15, p85, scr90, profit)
 
     return {
         "code": str(code).zfill(6), "name": name, "as_of": last["d"],
@@ -630,6 +756,9 @@ def analyze(code, n=120, decay_k=None, half_life=CHIP_HALF_LIFE):
         "low_cost": low_cost, "main_cost": main_cost, "main_src": main_src,
         "dist_pos": dist_pos, "scr_hist": scr_hist[-12:], "series": series[-10:],
         "verdict": verdict, "why": why, "action": act,
+        "state": state, "state_why": state_why, "state_action": state_act,
+        "state_trade": STATE_TRADE.get(state, "观察"),
+        "state_allow_new": STATE_ALLOW_NEW.get(state, False),
         "decay_k": decay_k, "k_auto": k_auto, "half_life": half_life,
         "turnover_missing": miss,
     }
@@ -640,7 +769,11 @@ def render(r):
     print(line)
     print(f" SCR 筹码集中度 · {r['code']} {r['name']} · 截至 {r['as_of']}")
     print(line)
-    print(f"【结论】{r['verdict']} —— {r['why']}")
+    _st = r.get("state") or "—"
+    print(f"【筹码状态】{_st}　⇒　【交易侧】{r['verdict']}"
+          f"　{'✅允许新开仓' if r.get('state_allow_new') else '⛔不允许新开仓'}")
+    print(f"   理由：{r.get('state_why') or r['why']}")
+    print(f"   动作：{r.get('state_action') or r['action']}")
     print("─" * 66)
     print(f" 现价 {r['close']:.2f}｜换手 {r['turnover']:.2f}%｜量比 {r['vol_ratio']:.2f}×"
           f"｜衰减 k={r['decay_k']:.3f}（{'按半衰期 ' + str(r['half_life']) + ' 日自求' if r['k_auto'] else '手动'}）")

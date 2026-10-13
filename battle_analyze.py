@@ -1281,7 +1281,11 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
         except Exception as e:                  # noqa: BLE001
             out["scr"] = {"error": "%s: %s" % (type(e).__name__, e)}
     else:
+        # ⚑ 显式标记「本次主动跳过」：否则报告层的 A 股现算兜底会把 --no-scr 的提速意图
+        #   悄悄抵消（老罗要的是**明示**，不是静默补算 —— 静默＝读者以为跑过了）。
         out["scr"] = None
+        if not is_us:
+            out["scr_skipped"] = True
     # ★ 名字兜底：日线快照里常不带 name，报告 H1 会退化成 6 位代码（688543 已踩）。
     #   scr_chip 走东财 kline、一定带名字 ⇒ 拿到了就补上，不额外发请求。
     if not is_us and out.get("scr") and not out["scr"].get("error"):
