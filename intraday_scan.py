@@ -35,7 +35,22 @@ from gates.session_decide import (  # noqa: E402
     auto_plan_cn, decide, load_day_fast, summarize,
 )
 
-WATCH = os.path.join(HERE, "watch", "watch_cn.json")
+
+def _watch_path():
+    """watch_cn.json 路径：兼容 DEV 与 INST 两种副本布局。
+
+    DEV（git 真源）：`watch/watch_cn.json`（子目录布局）；
+    INST（skill 安装副本）：扁平布局，`watch_cn.json` 在根，且无 watch/ 目录。
+    两级回退；两处都不在时返回 DEV 默认路径（报错信息仍指向真源布局）。
+    """
+    for cand in (os.path.join(HERE, "watch", "watch_cn.json"),
+                 os.path.join(HERE, "watch_cn.json")):
+        if os.path.exists(cand):
+            return cand
+    return os.path.join(HERE, "watch", "watch_cn.json")
+
+
+WATCH = _watch_path()
 
 
 def load_positions(path):
