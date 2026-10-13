@@ -44,12 +44,15 @@
 - 「现在能上吗 / 能不能上 / 上不上得去 / 现在上车吗」
 - 「能不能买 / 可以买吗 / 现在能不能买 / 这个价能买吗 / 盘中能不能进」
 
-命令（计划锚必须来自昨晚作战计划或用户当场给出的 entry/stop/target）：
+命令（计划锚优先级：--plan < --entry/--stop 显式 < 纯代码自动计划）：
 
 ```bash
 python gates/session_decide.py <code> --entry <挂单价> --stop <止损> --target <目标> [--cap <上限>] [--risk-scale 0.25]
 # 或
 python gates/session_decide.py <code> --plan out_cn/analysis_<code>.json [--notes out_cn/notes_<code>.json]
+# 或（纯代码自动计划，对齐美股 us_session_decide：无 --plan/--entry 时自动推导
+#     entry=现价 / stop=近25分低点 / target=近40分高点，cap 由 decide 按 R≥1.5 与 昨收+2% 算）
+python gates/session_decide.py <code>
 ```
 
 **能买 / 不买与「派发」的关系（回答用户时必须清楚）**：

@@ -9,6 +9,7 @@ sys.path.insert(0, ROOT)
 
 from gates.session_decide import (  # noqa: E402
     count_dip_minutes, decide, resolve_cap, tape_so_far, zone_vs_pre,
+    auto_plan_cn,
 )
 
 
@@ -186,6 +187,31 @@ def test_missing_target_blocks_entry():
     assert d2["rr"] is not None and d2["rr"] > 0
 
 
+def test_auto_plan_cn_no_network():
+    """自动计划：纯代码推导 entry/stop/target，不依赖 --plan/--entry；离线用分时区间兜底 ATR。"""
+    import gates.session_decide as SD
+    saved = SD._cn_atr14
+    SD._cn_atr14 = lambda code: None          # 离线：强制走分时区间兜底
+    try:
+        # 现价 10.00；近 40 分高 10.20、近 25 分低 9.70 ⇒ 区间=0.50 → a≈0.25
+        minutes = [
+            {"t": "09:31", "o": 9.80, "h": 9.85, "l": 9.70, "c": 9.78, "v": 100, "avg": 9.80},
+            {"t": "10:00", "o": 9.79, "h": 9.95, "l": 9.72, "c": 9.88, "v": 100, "avg": 9.82},
+            {"t": "13:30", "o": 9.89, "h": 10.20, "l": 9.86, "c": 10.00, "v": 100, "avg": 9.95},
+        ]
+        ap = SD.auto_plan_cn(minutes, "600000", 9.75)
+        assert ap["entry"] == 10.00, ap
+        # low=9.70 < cur=10.00 ⇒ stop=9.70（不触发 3×ATR 收紧）；high=10.20 > cur ⇒ target=10.20
+        assert abs(ap["stop"] - 9.70) < 1e-6, ap
+        assert abs(ap["target"] - 10.20) < 1e-6, ap
+        assert ap["cap"] is None, ap
+        # 买在次高：R=(10.20-10.00)/(10.00-9.70)=0.67 <1.5 ⇒ decide 会如实答不买
+        rr = (ap["target"] - ap["entry"]) / (ap["entry"] - ap["stop"])
+        assert rr < 1.5, rr
+    finally:
+        SD._cn_atr14 = saved
+
+
 if __name__ == "__main__":
     test_dip_zone_and_cap()
     test_buy_in_0_2_window()
@@ -194,4 +220,5 @@ if __name__ == "__main__":
     test_soft_tape_still_blocks_chasing()
     test_limit_down_board_is_rejected()
     test_missing_target_blocks_entry()
-    print("ok 7")
+    test_auto_plan_cn_no_network()
+    print("ok 8")

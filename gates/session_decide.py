@@ -7,6 +7,7 @@
     python gates/session_decide.py 601218 --entry 5.30 --stop 5.00 --target 5.99 --cap 5.52
     python gates/session_decide.py 601218 --plan out_cn/analysis_601218.json [--notes notes.json]
     python gates/session_decide.py 601218 --entry 5.30 --stop 5.00 --target 5.99 --asof 13:30
+    python gates/session_decide.py 601218                # 纯代码自动计划（对齐美股，无需 --plan/--entry）
 
 不打板。回答四件事：至今有没有派发迹象、能不能买、推荐限价、仓位。
 止损和目标沿用计划，不改。未收盘不下全天派发结论；至今偏派发就先不买。
@@ -36,6 +37,57 @@ import time
 
 def round_px(p):
     return round(float(p) + 1e-9, 2)
+
+
+# ─────────────────────── 自动计划（纯代码，对齐美股 us_session_decide） ───────────────────────
+AUTO_LOW_N = 25      # 自动计划：止损取近 N 分最低点
+AUTO_HIGH_N = 40     # 自动计划：目标取近 N 分最高点
+
+
+def _cn_atr14(code):
+    """尽力取 A 股日 ATR14（bars_source.ash_bars → rule123.atr14）；
+    取不到返回 None，由 auto_plan_cn 用分时区间兜底。延迟导入，避免常路径开销。"""
+    try:
+        import rule123 as R                       # noqa: F401
+        import bars_source as BS                 # noqa: F401
+        prefix = "sh" if str(code)[0] in "69" else "sz"
+        bars, _src, _notes = BS.ash_bars(prefix, code, n=60)
+        if bars and len(bars) >= 15:
+            return float(R.atr14(bars))
+    except Exception:
+        pass
+    return None
+
+
+def auto_plan_cn(minutes, code, pre):
+    """无 --plan / 无 --entry 时的自动计划：entry=现价，stop=近 LOW_N 分低点（≤3×ATR），
+    target=近 HIGH_N 分高点（≤4×ATR）。语义 = 「若现在买，合理的止损/目标在哪」。
+    买在高位→R<1.5→decide 如实答不买；买在回踩→R≥1.5→答能买。cap 留空交 decide 算。
+
+    对齐美股 us_session_decide.auto_plan_us；差异仅在 A 股买上限仍由 decide 按
+    R≥1.5 与 昨收+2% 自动算（A 股不用 pre+2ATR），故 cap 返回 None。
+    """
+    if not minutes:
+        raise RuntimeError("无分钟序列，无法自动计划")
+    cur = float(minutes[-1]["c"])
+    n = len(minutes)
+    low_n = max(5, min(AUTO_LOW_N, n))
+    high_n = max(10, min(AUTO_HIGH_N, n))
+    low = min(float(m["l"]) for m in minutes[-low_n:])
+    high = max(float(m["h"]) for m in minutes[-high_n:])
+    atr = _cn_atr14(code)
+    a = atr if atr else max(0.01, (high - low) / 2.0)
+    stop = low if low < cur else cur - 1.5 * a
+    if cur - stop > 3.0 * a:          # 风险距过宽 → 收紧到 3×ATR（买在高位时自然触发）
+        stop = cur - 3.0 * a
+    target = high if high > cur else cur + 2.5 * a
+    if target - cur > 4.0 * a:        # 上方空间过远 → 收到 2.5×ATR
+        target = cur + 2.5 * a
+    if target <= cur:
+        target = cur + 2.5 * a
+    return {"entry": round_px(cur), "stop": round_px(stop),
+            "target": round_px(target), "cap": None}
+
 
 # 相对昨收的常见回踩窗口（不是新买法，只作位置标注）
 DIP_ZONE_LO = 0.0
@@ -851,26 +903,7 @@ def main(argv=None):
                          "默认只提示+降权）")
     args = ap.parse_args(argv)
 
-    entry, stop, target, cap = args.entry, args.stop, args.target, args.cap
-    if args.plan:
-        p = plan_from_files(args.plan, args.notes)
-        entry = entry if entry is not None else p["entry"]
-        stop = stop if stop is not None else p["stop"]
-        target = target if target is not None else p["target"]
-        cap = cap if cap is not None else p["cap"]
-    if entry is None or stop is None:
-        print("必须给 --entry/--stop，或 --plan")
-        return 3
-    if float(entry) <= float(stop):
-        print("挂单价必须高于止损")
-        return 3
-
-    # --cap-tol-pct 以「百分比」为单位（如 2 表示 2%），内部转比例；
-    # --cap-tol 以「绝对价」为单位，转比例 = tol/abs(cap)。
-    cap_tol_pct = (args.cap_tol_pct / 100.0) if args.cap_tol_pct is not None else None
-    if args.cap_tol is not None and cap is not None:
-        cap_tol_pct = args.cap_tol / float(cap)
-
+    # 1) 取数（自动计划也需要分钟序列 / 昨收，故先取）
     try:
         t0 = time.perf_counter()
         day = load_day_fast(args.code)
@@ -884,6 +917,41 @@ def main(argv=None):
     if summary is None:
         print("没有分时")
         return 3
+
+    # 2) 解析 entry/stop/target（--plan < --entry/--stop 显式 < 自动计划）
+    plan_src = ""
+    if args.plan:
+        p = plan_from_files(args.plan, args.notes)
+        entry = args.entry if args.entry is not None else p["entry"]
+        stop = args.stop if args.stop is not None else p["stop"]
+        target = args.target if args.target is not None else p["target"]
+        cap = args.cap if args.cap is not None else p["cap"]
+        plan_src = "计划文件 %s" % args.plan
+    elif args.entry is not None and args.stop is not None:
+        entry, stop, target, cap = args.entry, args.stop, args.target, args.cap
+        plan_src = "显式参数"
+    else:
+        # 纯代码自动计划（对齐美股 us_session_decide）：无 --plan / 无 --entry 时
+        # entry=现价，stop=近 N 分低点，target=近 N 分高点，cap 留空交 decide 算。
+        ap_plan = auto_plan_cn(day["minutes"], args.code, day.get("pre"))
+        entry, stop, target, cap = (ap_plan["entry"], ap_plan["stop"],
+                                    ap_plan["target"], ap_plan["cap"])
+        plan_src = ("自动计划(无--plan)：entry=现价 %.2f，stop=近%d分低点 %.2f，"
+                    "target=近%d分高点 %.2f" % (entry, AUTO_LOW_N, stop,
+                                                AUTO_HIGH_N, target))
+
+    if entry is None or stop is None:
+        print("无法解析 entry/stop（计划文件缺字段且未给 --entry/--stop）")
+        return 3
+    if float(entry) <= float(stop):
+        print("挂单价必须高于止损")
+        return 3
+
+    # --cap-tol-pct 以「百分比」为单位（如 2 表示 2%），内部转比例；
+    # --cap-tol 以「绝对价」为单位，转比例 = tol/abs(cap)。
+    cap_tol_pct = (args.cap_tol_pct / 100.0) if args.cap_tol_pct is not None else None
+    if args.cap_tol is not None and cap is not None:
+        cap_tol_pct = args.cap_tol / float(cap)
 
     t1 = time.perf_counter()
     quality = None
@@ -901,6 +969,7 @@ def main(argv=None):
         cap=cap, account=args.account, risk_scale=args.risk_scale,
         quality=quality, cap_tol_pct=cap_tol_pct,
     )
+    d["plan_src"] = plan_src
     decide_ms = (time.perf_counter() - t1) * 1000.0
     d["elapsed_ms"] = round(fetch_ms + decide_ms, 1)
     d["fetch_ms"] = round(fetch_ms, 1)
@@ -908,6 +977,8 @@ def main(argv=None):
     if args.json:
         print(json.dumps(d, ensure_ascii=False, default=str))
     else:
+        if plan_src:
+            print(plan_src)
         print(render(d))
         print("耗时  取数 %.0fms  判定 %.0fms  合计 %.0fms" % (
             fetch_ms, decide_ms, fetch_ms + decide_ms))
