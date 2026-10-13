@@ -103,6 +103,21 @@ STATE_NOTE = {
 PULL_UP = 1.0             # 现价 ≥ 70% 峰区上沿（P85）⇒ 已脱离成本区
 PULL_M = 1.10             # 或 现价 ≥ 平均成本 ×1.10
 PROFIT_RICH = 85.0        # 获利盘 ≥85% ＝ 全员获利区，拉升段随时转派发
+
+# ── ★★ 「底部成峰」修正（老罗 2026-10-14 指出，值得买 300785 实例）──────────────
+# ⚑ 缺陷：SCR90=(P95−P5)/(P95+P5) **只看两端、完全不看中间怎么分布**。
+#   只要有5% 的老筹码留在 54 元（上方套牢盘），P95 就被撑到 54，
+#   于是「底部 24.5% 已聚成大峰 + 中段真空」这种**明显吸筹**的票也会算出SCR90 23.8% 被判「发散」。
+#   实测：值得买 SCR90=23.8% 判发散，但 40 元以下聚了 69.6%、峰±10% 占 68.6%、
+#   低位带5 日 **+6.6%（在增）**、峰位就在现价下方 ⇒ 真状态是「底部吸筹」，判「发散」是错的。
+# ⇒ 补一个正交维度，**在 loose 分支之前**先判：
+#   ① PEAK_CONC_MIN 主峰±10% 内筹码占比 ≥ 该值 ⇒ 底部确实聚成了一个峰（不是真发散）
+#   ② 低位带份额在增（mass_chg ≥ ACCUM_RISE）⇒ 有人在收，不是有人在撤
+#   两条同时成立 ⇒ 改判「吸筹中」，理由写明「SCR90 被上方套牢盘撑高」。
+# ⚑ 阈值用 47 只实盘扫描校准（见 2026-10-14.md），不是拍脑袋。
+# ⚑ 试过再加第三条「主峰之上真空带 < 12%」，**实测区分度差已删**（真发散票同样有 9%~46% 的真空段，
+#   例如德福 51.5% / 二六三 44.7% / 值得买 46.0%，完全重叠 ⇒ 伪指标，不许再加回来）。
+PEAK_CONC_MIN = 55.0      # 主峰±10% 筹码占比下限：值得买 68.6%、天溯 54.5%、康龙 48.3%（真发散）
 ACCUM_RISE = 0.02         # 低位带份额 5 日 +2% 以上 ＝ 有人在低位收
 FALL_PROFIT = 50.0        # 跌破峰区下沿时：获利盘 ≥ 该值算派发后破位，低于则算破位下行（无人可派）
 
@@ -520,7 +535,8 @@ def action_of(verdict, close, M, p15, p85, scr90):
 
 
 def chip_state_of(scr90, scr70, scr_hist, close, M, p15, p85, profit,
-                  vol_ratio, turnover, dist_pos, mass_chg, locked, n_peak=1):
+                  vol_ratio, turnover, dist_pos, mass_chg, locked, n_peak=1,
+                  peak_conc=None, peak_price=None):
     """★ 筹码状态（老罗 2026-10-14 定）：一句话看懂筹码现在在干什么。
 
     返回 (state, why)。优先级：
@@ -561,11 +577,26 @@ def chip_state_of(scr90, scr70, scr_hist, close, M, p15, p85, profit,
         return ST_FALL, (f"跌破筹码峰区下沿 {p15:.2f}、获利盘仅 {(profit or 0):.0f}%"
                          f"——上方全是套牢盘，反弹到 {p15:.2f} 是<b>压力不是支撑</b>；"
                          f"既无人可派也无人在吸，属破位下行结构{tail}")
-    # ③ 筹码发散（无搬运证据，方向未定）
+    # ③ ★ 「底部成峰」修正（老罗 2026-10-14）——必须排在 loose 分支**之前**
+    #    SCR90 只看 P5/P95 两端，会被「上方老套牢盘」绑架 ⇒ 把明显在吸筹的票误判成发散。
+    #    两个正交证据同时成立才改判，避免把真发散翻成吸筹（阈值见 PEAK_CONC_MIN 注释）。
+    if loose and rising and peak_conc is not None and peak_conc >= PEAK_CONC_MIN:
+        return ST_ACCUM, (
+            f"底部已聚峰：SCR90 {scr90:.1f}% 虽 ≥ {SCR_LOOSE:g}%，但那是"
+            f"<b>P95 被上方老套牢盘撑高</b>（公式只看两端、不看中间分布）——"
+            f"主峰 {peak_price:.2f} 附近 ±10% 内筹码占 <b>{peak_conc:.0f}%</b>"
+            f"（筹码确实聚成了一个峰），低位筹码带 {LOCK_DAYS} 日 "
+            f"{mass_chg * 100:+.1f}%（<b>在收不是在撤</b>）"
+            f"⇒ 实为底部吸筹，不是多空无共识{tail}")
+    # ④ 筹码发散（无搬运证据、无底部聚峰，方向未定）
     if loose:
+        extra = ""
+        if peak_conc is not None and peak_conc < PEAK_CONC_MIN:
+            extra = (f"；主峰 ±10% 内仅 {peak_conc:.0f}%（< {PEAK_CONC_MIN:g}%）"
+                     f"——筹码确实摊开，多空无共识")
         return ST_LOOSE, (f"SCR90 {scr90:.1f}% ≥ {SCR_LOOSE:g}%、SCR70 {scr70:.1f}%"
                           f"（5 日均值 {base:.1f}%、{jump:.2f}×）——筹码摊在两个价位上，"
-                          f"多空没共识，等收敛到 {SCR_BUY:g}% 以内再谈{tail}")
+                          f"多空没共识，等收敛到 {SCR_BUY:g}% 以内再谈{extra}{tail}")
     # ③ 拉升脱离成本区中
     if (out_zone or above_m) and not drain:
         extra = ""
@@ -740,6 +771,12 @@ def analyze(code, n=120, decay_k=None, half_life=CHIP_HALF_LIFE):
     pk_idx, main_i = peaks_of(prices, dist, w)
     n_peak = len(pk_idx)
     main_price = prices[main_i]
+    # ★★ 「底部成峰」两个正交指标（老罗 2026-10-14 修正 SCR90 只看两端的缺陷）：
+    #   peak_conc = 主峰 ±10% 价格带内的筹码占全部筹码之比（图上「峰的柱子有多粗」）
+    #   vac_share = 峰区上沿 P85 到现价之间的筹码占比（这段越空＝中段真空、无人挂单）
+    _tot = sum(dist) or 1.0
+    _plo, _phi = main_price * 0.90, main_price * 1.10
+    peak_conc = sum(dist[i] for i in range(len(prices)) if _plo <= prices[i] <= _phi) / _tot * 100
     # 「底部锁仓」对齐聊天记录：取**低位筹码带** = 今日 P5~P35 这一段（庄的成本段，
     # 图上就是「下方红色、几天不动」的那部分）。用分位数而不是局部极大值，宽分布也找得到。
     low_lo, low_hi = cost_at(prices, dist, LOW_LO), cost_at(prices, dist, LOW_HI)
@@ -787,7 +824,8 @@ def analyze(code, n=120, decay_k=None, half_life=CHIP_HALF_LIFE):
     # ★ 五态（老罗 2026-10-14）：买/持/卖 是**交易侧**结论，五态是**筹码侧**结论，两个都要给
     state, state_why = chip_state_of(scr90, scr70, scr_hist, close, M, p15, p85,
                                      profit, vol_ratio or 0.0, turnover or 0.0,
-                                     dist_pos, mass_chg, locked, n_peak)
+                                     dist_pos, mass_chg, locked, n_peak,
+                                     peak_conc=peak_conc, peak_price=main_price)
     state_act = state_action_of(state, close, M, p15, p85, scr90, profit)
 
     return {
@@ -797,6 +835,7 @@ def analyze(code, n=120, decay_k=None, half_life=CHIP_HALF_LIFE):
         "p5": p5, "p15": p15, "p85": p85, "p95": p95,
         "peak_price": peak_price, "main_price": main_price,
         "low_lo": low_lo, "low_hi": low_hi, "below_now": below_now, "n_peak": n_peak,
+        "peak_conc": peak_conc,
         "lock": locked, "lock_spread": spread, "mass_chg": mass_chg,
         "low_cost": low_cost, "main_cost": main_cost, "main_src": main_src,
         "dist_pos": dist_pos, "scr_hist": scr_hist[-12:], "series": series[-10:],
