@@ -1067,6 +1067,41 @@ def _scr_state_note(state):
         return ""
 
 
+def build_breakout_hold_gate(a, n):
+    """★ 突破有效性闸门（老罗 2026-10-14 定，301087 可孚医疗实例）。
+
+    ⚑⚑⚑ 三条铁律（写死在这里，不许在报告层另写一份，会漂移）：
+      1. 突破复核的参照物**只能是突破位**，**不许换成均线**。
+         可孚医疗：10-13 收 56.00 站上 MA5/MA10/MA20 ⇒「结构没坏」，
+         但平台沿 55.78 盘中刺破 −2.58% ⇒ 两者结论完全相反。
+      2. **盘中刺破 ≠ 突破失败；收盘站上= 突破仍有效**（同牛旗 bull_flag_anchor 原则）。
+      3. **主力资金单因子不得独立定性洗盘 vs 派发**，必须配突破位状态。
+    """
+    try:
+        import breakout_hold as _BH
+    except Exception:                               # noqa: BLE001
+        return ""
+    m = a.get("meta") or {}
+    if (m.get("market") or "cn").lower() != "cn":
+        return ""
+    ed = (n.get("breakout_hold") if isinstance(n, dict) else None) \
+        or (a.get("breakout_hold") if isinstance(a, dict) else None)
+    if not ed or ed.get("error"):
+        return ("<span class='g-no'>突破有效性闸门：未生效</span>——"
+                "本次未复核突破位（<code>python gates/breakout_hold.py &lt;code&gt;</code> "
+                "可单跑）。<br>⚑ <b>突破买法复核的参照物只能是突破位，不许用均线代替</b>。")
+    v = str(ed.get("verdict") or "—")
+    cls = {"有效": "g-ok", "勉强有效": "g-warn", "收盘破位": "g-no"}.get(v, "")
+    tip = ("<br><b>洗盘 vs 派发</b>：%s" % esc(str(ed.get("flow_note") or
+                                          ed.get("wash_or_ship_hint") or "—")))
+    tail = ""
+    if ed.get("fail_at"):
+        tail = ("　｜<b>收盘跌破 %.2f</b> 即确认失败"
+                % ed["fail_at"])
+    return ("<span class='%s'>突破有效性闸门：%s</span> —— %s%s%s"
+            % (cls or "g-no", esc(v), esc(str(ed.get("note") or "")), tail, tip))
+
+
 def build_scr_gate(a, n):
     """★ 筹码面 × 最高盈亏比路径 一致性闸门（老罗 2026-10-14 定）。
 
@@ -1386,7 +1421,7 @@ def render(a, n, tmpl_path=DEFAULT_TMPL, vp_from=None, vp_to=None):
         "BEST_KPIS": best_kpis,
         "BEST_NOTE": best_note,
         # ★ 筹码面 × 最高盈亏比路径 一致性闸门（老罗 2026-10-14）：不一致 ⇒ 不构成推荐
-        "SCR_GATE": build_scr_gate(a, n),
+        "SCR_GATE": build_scr_gate(a, n) + build_breakout_hold_gate(a, n),
         "BASIS_DATE": esc(m["basis_date"]),
         "MODE_ROWS": build_mode_rows(a),
         "MODE_NOTE": note(n.get("mode_note"), ""),

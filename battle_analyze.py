@@ -1292,6 +1292,22 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
         _nm = out["scr"].get("name")
         if _nm and (not out["meta"].get("name") or out["meta"]["name"] == code):
             out["meta"]["name"] = _nm
+    # ★ 2026-10-14 突破有效性闸门（gates/breakout_hold.py）：老罗三条铁律。
+    #   ⚑⚑ **突破买法复核的参照物只能是突破位，不许换成均线**（301087 可孚医疗教训）。
+    #   ⚑ 失败不得影响主流程（增强项，不是闸门）。
+    if not is_us:
+        try:
+            import breakout_hold as _BH
+            _lvl = _BH.auto_level(bars)
+            _e = _BH.check_breakout_edge(bars, _lvl)
+            try:
+                _e["flow_note"] = _BH.check_flow_vs_edge(
+                    (out.get("scr") or {}).get("main_cost_flow"), _e)
+            except Exception:
+                pass
+            out["breakout_hold"] = _e
+        except Exception as e:                  # noqa: BLE001
+            out["breakout_hold"] = {"error": "%s: %s" % (type(e).__name__, e)}
     # ★ 叠加概率七层计数（2026-09-25 新增）：把上面已经算好的结论**汇总成一个数**，
     #   回答「这单是单因素还是多因素」。市场层自动去 data/sentiment_<基准日>.json 找
     #   当日情绪分（日期必须严格一致，隔日不算）；板块与催化剂单票报告拿不到，
