@@ -65,25 +65,40 @@ MIN_BARS = 60             # 日线不足则不出结论（不编造）
 #    ⇒ 高换手票自动得到更小的 k（记忆不被高频回转吃掉），低换手票 k 自然取满 ⇒ 不同票的 SCR 才可比。
 CHIP_HALF_LIFE = 60       # 默认：约一个季度 —— 当日筹码走过 60 个交易日权重减半
 
-# ── 五态筹码状态（老罗 2026-10-14 定：结论必须一眼看懂，只给这五个词）────────────
-#   ① 筹码发散      ② 集中锁仓中    ③ 拉升脱离成本区中   ④ 派发出货中   ⑤ 吸筹中
-#   判定优先级：派发出货中 > 筹码发散 > 拉升脱离成本区中 > 吸筹中 > 集中锁仓中
+# ── 筹码状态（老罗 2026-10-14 定：结论必须一眼看懂，只给这几个词）────────────────
+#   ① 吸筹中   ② 集中锁仓中   ③ 拉升脱离成本区中   ④ 筹码发散   ⑤ 派发出货中   ⑥ 破位下行中
+#   判定优先级：派发出货中 > 破位下行中 > 筹码发散 > 拉升脱离成本区中 > 吸筹中 > 集中锁仓中
 ST_SHIP = "派发出货中"
+ST_FALL = "破位下行中"          # 2026-10-14 补：价格跌破主峰区下沿、上方全是套牢盘（原被兜底吞掉）
 ST_LOOSE = "筹码发散"
 ST_PULL = "拉升脱离成本区中"
 ST_ACCUM = "吸筹中"
 ST_LOCK = "集中锁仓中"
-CHIP_STATES = [ST_ACCUM, ST_LOCK, ST_PULL, ST_LOOSE, ST_SHIP]   # 由好到坏
+CHIP_STATES = [ST_ACCUM, ST_LOCK, ST_PULL, ST_LOOSE, ST_SHIP, ST_FALL]   # 由好到坏
 # 状态 → 交易侧结论（报告用它跟「最高盈亏比路径」做一致性闸门）
 STATE_TRADE = {ST_ACCUM: "买", ST_LOCK: "持", ST_PULL: "持",
-               ST_LOOSE: "观察", ST_SHIP: "卖"}
+               ST_LOOSE: "观察", ST_SHIP: "卖", ST_FALL: "卖"}
 # 状态 → 是否**允许新开仓**（老罗：筹码面与路径不一致 ⇒ 不构成推荐最高盈亏比路径）
-STATE_ALLOW_NEW = {ST_ACCUM: True, ST_LOCK: True,
-                   ST_PULL: False, ST_LOOSE: False, ST_SHIP: False}
+# ⚑ 拉升脱离成本区中 **允许买**（老罗 2026-10-14 纠正：「拉升中当然可以买，买的就是拉升」，
+#   趋势派买的就是趋势段）——禁的是**追价档**，不是禁买本身。
+STATE_ALLOW_NEW = {ST_ACCUM: True, ST_LOCK: True, ST_PULL: True,
+                   ST_LOOSE: False, ST_SHIP: False, ST_FALL: False}
+# 状态 → 买法限定（允许买 ≠ 随便买；这段直接进报告闸门，别在两处各写一份）
+STATE_BUY_NOTE = {
+    ST_ACCUM: "低吸为主；止损＝峰区下沿与 −5% 兜底取严。",
+    ST_LOCK: "回踩成本区 / 整理上沿买；不追价。",
+    ST_PULL: "<b>可以买</b>（趋势派买的就是拉升段），但<b>只限回踩档与整理上沿（平台顶）</b>；"
+             "<b>追价档（超出买区上沿）仍禁止</b>——脱离成本区意味着没有成本优势，"
+             "必须靠移动止损跟着走，且获利盘 ≥85% 后随时可能转派发。",
+    ST_LOOSE: "<b>禁止新开仓（含回踩单）</b>：多空无共识，等三件套。",
+    ST_SHIP: "<b>禁止任何买档</b>：低位筹码正被搬向高位，减仓/清仓优先。",
+    ST_FALL: "<b>禁止买入</b>：上方全是套牢盘，反弹到峰区下沿是减仓区不是支撑。",
+}
 PULL_UP = 1.0             # 现价 ≥ 70% 峰区上沿（P85）⇒ 已脱离成本区
 PULL_M = 1.10             # 或 现价 ≥ 平均成本 ×1.10
 PROFIT_RICH = 85.0        # 获利盘 ≥85% ＝ 全员获利区，拉升段随时转派发
 ACCUM_RISE = 0.02         # 低位带份额 5 日 +2% 以上 ＝ 有人在低位收
+FALL_PROFIT = 50.0        # 跌破峰区下沿时：获利盘 ≥ 该值算派发后破位，低于则算破位下行（无人可派）
 
 
 def solve_decay_k(bars, half_life=CHIP_HALF_LIFE):
@@ -500,11 +515,13 @@ def action_of(verdict, close, M, p15, p85, scr90):
 
 def chip_state_of(scr90, scr70, scr_hist, close, M, p15, p85, profit,
                   vol_ratio, turnover, dist_pos, mass_chg, locked, n_peak=1):
-    """★ 五态筹码状态（老罗 2026-10-14 定）：一句话看懂筹码现在在干什么。
+    """★ 筹码状态（老罗 2026-10-14 定）：一句话看懂筹码现在在干什么。
 
-    返回 (state, why)。优先级：**派发出货中 > 筹码发散 > 拉升脱离成本区中 > 吸筹中 > 集中锁仓中**。
+    返回 (state, why)。优先级：
+    **派发出货中 > 破位下行中 > 筹码发散 > 拉升脱离成本区中 > 吸筹中 > 集中锁仓中**。
     ⚑ 派发的判定必须有「**搬运证据**」（低位筹码在减少 / 集中度爆量跳升）——
       光是「获利盘高 + 价格高」只能算**拉升脱离成本区**，不能算派发（会误杀强势股）。
+    ⚑ 拉升脱离成本区**允许买**（老罗纠正：趋势派买的就是拉升），禁的只是追价档。
     """
     prev5 = scr_hist[-6:-1] or scr_hist[-1:]
     base = sum(prev5) / len(prev5) if prev5 else 0.0
@@ -528,10 +545,16 @@ def chip_state_of(scr90, scr70, scr_hist, close, M, p15, p85, profit,
     if drain and pos is not None and pos > 0.6:
         return ST_SHIP, (f"底仓在撤：低位筹码带 {LOCK_DAYS} 日 {mass_chg * 100:+.0f}%"
                          f"（价格仍在峰区上方 {pos * 100:.0f}%）——庄在高位撤底仓{tail}")
-    if p15 is not None and close < p15 and (profit or 0) >= 50:
+    if p15 is not None and close < p15 and (profit or 0) >= FALL_PROFIT:
         return ST_SHIP, (f"派发后破位：跌破峰区下沿 {p15:.2f} 且获利盘仍 {(profit or 0):.0f}%"
                          f"——高位筹码开始割肉{tail}")
-    # ② 筹码发散（无搬运证据，方向未定）
+    # ② 破位下行中（2026-10-14 补：原被兜底吞掉，会误导成「吸筹中」）
+    #    与①的区别：获利盘已很低 ⇒ 上面全是套牢盘、无人可派，是单边下跌结构不是派发
+    if p15 is not None and close < p15:
+        return ST_FALL, (f"跌破筹码峰区下沿 {p15:.2f}、获利盘仅 {(profit or 0):.0f}%"
+                         f"——上方全是套牢盘，反弹到 {p15:.2f} 是<b>压力不是支撑</b>；"
+                         f"既无人可派也无人在吸，属破位下行结构{tail}")
+    # ③ 筹码发散（无搬运证据，方向未定）
     if loose:
         return ST_LOOSE, (f"SCR90 {scr90:.1f}% ≥ {SCR_LOOSE:g}%、SCR70 {scr70:.1f}%"
                           f"（5 日均值 {base:.1f}%、{jump:.2f}×）——筹码摊在两个价位上，"
@@ -552,10 +575,14 @@ def chip_state_of(scr90, scr70, scr_hist, close, M, p15, p85, profit,
             fall_days += 1
         else:
             break
-    if (fall_days >= 2 or scr90 <= SCR_BUY) and M and close <= M * 1.03 and (rising or locked):
-        return ST_ACCUM, (f"集中度在改善（SCR90 {scr90:.1f}%、连降 {fall_days} 日）"
-                          f"且现价贴近平均成本 {M:.2f}（{(close / M - 1) * 100:+.1f}%）、"
-                          f"低位筹码带 {LOCK_DAYS} 日 {(mass_chg or 0) * 100:+.1f}%"
+    # ⚑ 「吸筹中」必须有**在收的证据**，否则底部不动只能叫锁仓（不编造）：
+    #   ① 低位带份额在增（rising）② 集中度连降 ≥3 日（快速收敛）。且价格须在峰区中下部。
+    accum_ev = rising or fall_days >= 3
+    if accum_ev and not drain and M and close <= M * 1.03 and pos is not None and pos <= 0.6:
+        ev = (f"低位筹码带 {LOCK_DAYS} 日 {(mass_chg or 0) * 100:+.1f}%（在增）" if rising
+              else f"SCR90 连降 {fall_days} 日（集中度快速收敛）")
+        return ST_ACCUM, (f"{ev}、现价贴近平均成本 {M:.2f}"
+                          f"（{(close / M - 1) * 100:+.1f}%、峰区位置 {pos * 100:.0f}%）"
                           f"——低位在收筹码{tail}")
     # ⑤ 集中锁仓中
     if locked:
@@ -565,29 +592,36 @@ def chip_state_of(scr90, scr70, scr_hist, close, M, p15, p85, profit,
     if scr90 <= SCR_BUY and pos is not None and 0.0 <= pos <= 1.0:
         return ST_LOCK, (f"SCR90 {scr90:.1f}% 已压缩到 {SCR_BUY:g}% 以内"
                          f"、价格在筹码峰区内（位置 {pos * 100:.0f}%）——筹码集中，等放量启动{tail}")
-    # 兜底
-    if pos is not None and pos < 0:
-        return (ST_SHIP if drain else ST_ACCUM), (
-            f"价格已在峰区下沿 {p15:.2f} 之下（获利盘 {(profit or 0):.0f}%）——"
-            + ("底仓同步在撤，弱势未止" if drain else "无人可派发，属低位区，但缺启动证据")
-            + tail)
-    return ST_LOCK, (f"SCR90 {scr90:.1f}%、峰区位置 {(pos or 0) * 100:.0f}%"
-                     f"（低位带 {LOCK_DAYS} 日 {(mass_chg or 0) * 100:+.1f}%）——"
-                     f"筹码未发散（<{SCR_LOOSE:g}%）且底仓未撤，按集中锁仓处理{tail}")
+    # 兜底（⚑ 文案不许写死「底仓未撤」——drain 为真时会被派发/破位拦掉，
+    #        能走到这里的 drain 必为 False，但文案仍按实际值说，避免自相矛盾）
+    _base = (f"SCR90 {scr90:.1f}%、峰区位置 {(pos if pos is not None else 0) * 100:.0f}%"
+             f"（低位带 {LOCK_DAYS} 日 {(mass_chg or 0) * 100:+.1f}%）")
+    if drain:
+        return ST_LOOSE, (_base + f"——低位筹码带 {LOCK_DAYS} 日 {mass_chg * 100:+.0f}%（在撤），"
+                          f"但尚未发散也未见高位搬运，按发散前兆处理{tail}")
+    return ST_LOCK, (_base + f"——筹码未发散（<{SCR_LOOSE:g}%）且底仓未撤"
+                     f"（{LOCK_DAYS} 日 {(mass_chg or 0) * 100:+.1f}%），按集中锁仓处理{tail}")
 
 
 def state_action_of(state, close, M, p15, p85, scr90, profit=None):
-    """五态 → 一句话动作（报告/终端都用它，保证两处口径一致）。"""
+    """筹码状态 → 一句话动作（报告/终端都用它，保证两处口径一致）。"""
     if state == ST_SHIP:
         return (f"减仓/清仓优先。回补条件：SCR90 回到 {SCR_LOOSE:g}% 以下且缩量站稳"
                 + (f"，或重新站回峰区上沿 {p85:.2f}" if p85 else "") + "。")
+    if state == ST_FALL:
+        return (f"清仓 / 禁买。反弹到峰区下沿 {p15:.2f} 是<b>减仓区不是支撑</b>；"
+                f"重回条件＝收盘站回 {p15:.2f} 且缩量企稳 + SCR90 收敛到 {SCR_BUY:g}% 以内。")
     if state == ST_LOOSE:
         return (f"不开新仓（含回踩单）。等三件套：SCR90 ≤ {SCR_BUY:g}% + 收盘贴近成本区 "
                 f"{M:.2f} ±3% + 量比 ≥ {VOL_CONFIRM}×。")
     if state == ST_PULL:
-        return (f"持有可以，**新开仓禁止**（脱离成本区＝无成本优势、追高即违规）。"
-                f"要加仓等回踩成本区 {M:.2f} 一带；止盈触发：获利盘 ≥ {PROFIT_RICH:g}% "
-                f"或低位带 {LOCK_DAYS} 日 −{LOOSE_MASS * 100:.0f}%。")
+        # ⚑ 老罗 2026-10-14 纠正：**拉升中当然可以买，买的就是拉升**。
+        #   禁的是「追价档」（超出买区上沿＝没有成本优势），不是禁买本身。
+        return (f"持有 / <b>可买</b>——只限<b>回踩档与整理上沿（平台顶）</b>，"
+                f"回踩成本区 {M:.2f} 一带优先；<b>追价档（超出买区上沿）禁止</b>。"
+                f"脱离成本区＝没有成本优势，必须靠移动止损跟着走；"
+                f"止盈触发：获利盘 ≥ {PROFIT_RICH:g}% 或低位带 {LOCK_DAYS} 日 "
+                f"−{LOOSE_MASS * 100:.0f}%。")
     if state == ST_ACCUM:
         stop = min((p15 or close * 0.95), close * 0.95)
         return (f"可分批低吸；止损＝峰区下沿与 −5% 兜底取严：{stop:.2f}"
@@ -624,7 +658,7 @@ def render_batch(rows):
     ok.sort(key=lambda r: (CHIP_STATES.index(r[1]["state"])
                            if r[1].get("state") in CHIP_STATES else 9, -r[1]["scr90"]))
     print("═" * 112)
-    print(f" SCR 筹码集中度 · 批量 {len(rows)} 只（按五态由好到坏排序）")
+    print(f" SCR 筹码集中度 · 批量 {len(rows)} 只（按筹码状态由好到坏排序）")
     print("═" * 112)
     print(f"{'代码':<7}{'名称':<9}{'现价':>7}{'SCR90':>7}{'SCR70':>7}{'主力成本':>9}"
           f"{'偏离主力':>9}{'获利盘':>8}{'位置':>8}  {'筹码状态':<20}{'开仓':<6}交易侧")

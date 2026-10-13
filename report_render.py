@@ -1049,18 +1049,18 @@ def _scr_result(a, n):
     return r, ("cn" if r else "none")
 
 
-# 五态徽章配色（好 → 坏）：吸筹/锁仓=绿蓝，拉升=橙，发散=橙，派发=红
+# 状态徽章配色（好 → 坏）：吸筹/锁仓=绿蓝，拉升=橙，发散=橙，派发/破位=红
 _SCR_CLS = {"吸筹中": "b-t1", "集中锁仓中": "b-ok", "拉升脱离成本区中": "b-warn",
-            "筹码发散": "b-warn", "派发出货中": "b-no"}
-# 不一致时给最高盈亏比路径的降级说明（老罗：筹码面 ✗ 路径 ⇒ 不构成推荐）
-_SCR_DENY = {
-    "拉升脱离成本区中": "已脱离成本区＝没有成本优势，<b>持有可以、新开仓禁止</b>"
-                    "（追高即违规）；要上车等回踩平均成本区。",
-    "筹码发散": "筹码摊在两个价位上、多空无共识，<b>不开新仓（含回踩单）</b>；"
-             "等 SCR90 ≤ 15% + 收盘贴成本区 + 量比 ≥1.5× 三件套。",
-    "派发出货中": "低位筹码正在被搬向高位，<b>减仓/清仓优先，任何买档都不成立</b>；"
-              "回补等 SCR90 回到 20% 以下且缩量站稳。",
-}
+            "筹码发散": "b-warn", "派发出货中": "b-no", "破位下行中": "b-no"}
+
+
+def _scr_buy_note(state):
+    """买法限定一律取自 scr_chip.STATE_BUY_NOTE（⚑ 不许在报告层另写一份，会漂移）。"""
+    try:
+        import scr_chip as _SC
+        return (_SC.STATE_BUY_NOTE.get(state) or "").replace("<b>", "<b>")
+    except Exception:                               # noqa: BLE001
+        return ""
 
 
 def build_scr_gate(a, n):
@@ -1077,12 +1077,14 @@ def build_scr_gate(a, n):
                 "本路径<b>未经筹码面确认</b>（重跑 <code>battle_analyze.py</code> 即自动带上）")
     st = str(r.get("state") or "—")
     allow = bool(r.get("state_allow_new"))
+    note = _scr_buy_note(st) or esc(str(r.get("state_why") or ""))
     if allow:
+        # ⚑ 拉升脱离成本区中 **允许买**（老罗 2026-10-14 纠正），但仍带买法限定
         return ("<span class='g-ok'>✔ 筹码面一致：%s</span> —— 允许新开仓，"
-                "本路径<b>构成推荐最高盈亏比路径</b>。"
-                % esc(st))
+                "本路径<b>构成推荐最高盈亏比路径</b>。<br><b>买法限定</b>：%s"
+                % (esc(st), note))
     return ("<span class='g-no'>✘ 筹码面不一致：%s</span> —— <b>本路径不构成推荐最高盈亏比路径</b>。"
-            "<br>%s" % (esc(st), _SCR_DENY.get(st, esc(str(r.get("state_why") or "")))))
+            "<br>%s" % (esc(st), note))
 
 
 def build_scr(a, n):
