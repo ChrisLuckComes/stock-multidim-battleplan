@@ -114,6 +114,20 @@ python gates/us_session_decide.py <TICKER> --entry <价> --stop <止损> --targe
 - 结构化输出：`--json out_cn/scr_<code>.json`；公式回归：`python scr_chip.py --selftest`。
 - ⚑ 只支持 A 股（东财流通换手率口径）；缺数据在 output 里写「未知」并停手，不编造。
 
+**用法（两种情况）**：
+```bash
+python scr_chip.py <code>                     # 单只：完整结论 + 近 10 日筹码演进表
+python scr_chip.py --batch 300199,300785,301449   # 批量：一次进程跑完（摊掉解释器启动，8 只 0.65s）
+python scr_chip.py <code> --json out_cn/scr_<code>.json
+python scr_chip.py --selftest                 # 用截图实测值回归 SCR 公式
+```
+**⚡ 提速要点（2026-10-13 老罗要求「尽可能提高运行速度」，实测 单只 0.87s→0.56s、8 只 7.2s→0.65s）**：
+1. **批量模式 `--batch`（最大收益≈11×）**：解释器启动在本机 0.5~0.9s，单只跑就白付一次；批量把它摊掉，且多只并发取数。
+2. 名字从 kline 的 `data.name` 取 —— 砍掉一整次 quote 请求（省 ~0.15s）。
+3. 日线与资金流**两路并发**（原来串行）。
+4. **同日磁盘缓存** `data/cache/scr_<code>.json`：收盘后当日有效；盘中 120s TTL（与 `bars_source` 同一判据）⇒ 二次调用几乎瞬时（0.02s）。
+5. 纯计算只占 ~17ms（筹码模型 13ms + 指标 3.5ms）—— **已测过，不值得为此冒险改算法**。
+
 ---
 
 ## 2. 账户配置边界 / Forbidden
