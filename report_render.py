@@ -1054,11 +1054,15 @@ _SCR_CLS = {"吸筹中": "b-t1", "集中锁仓中": "b-ok", "拉升脱离成本�
             "筹码发散": "b-warn", "派发出货中": "b-no", "破位下行中": "b-no"}
 
 
-def _scr_buy_note(state):
-    """买法限定一律取自 scr_chip.STATE_BUY_NOTE（⚑ 不许在报告层另写一份，会漂移）。"""
+def _scr_state_note(state):
+    """状态提示一律取自 scr_chip.STATE_NOTE（⚑ 不许在报告层另写一份，会漂移）。
+
+    ⚑⚑ 这里**不是买法**：追价 vs 回踩归最高盈亏比路径管（老罗 2026-10-14：
+    「股票本来就是可以向上向下，只买回踩就会踏空」）。筹码面只给「能不能开仓 + 风险」。
+    """
     try:
         import scr_chip as _SC
-        return (_SC.STATE_BUY_NOTE.get(state) or "").replace("<b>", "<b>")
+        return _SC.STATE_NOTE.get(state) or ""
     except Exception:                               # noqa: BLE001
         return ""
 
@@ -1077,11 +1081,12 @@ def build_scr_gate(a, n):
                 "本路径<b>未经筹码面确认</b>（重跑 <code>battle_analyze.py</code> 即自动带上）")
     st = str(r.get("state") or "—")
     allow = bool(r.get("state_allow_new"))
-    note = _scr_buy_note(st) or esc(str(r.get("state_why") or ""))
+    note = _scr_state_note(st) or esc(str(r.get("state_why") or ""))
     if allow:
-        # ⚑ 拉升脱离成本区中 **允许买**（老罗 2026-10-14 纠正），但仍带买法限定
+        # ⚑ 拉升脱离成本区中 **允许买**（老罗 2026-10-14 纠正）。
+        #   这里只给筹码面的「能不能开仓 + 风险」，**不写追价/回踩**（买法归路径层）。
         return ("<span class='g-ok'>✔ 筹码面一致：%s</span> —— 允许新开仓，"
-                "本路径<b>构成推荐最高盈亏比路径</b>。<br><b>买法限定</b>：%s"
+                "本路径<b>构成推荐最高盈亏比路径</b>。<br><b>筹码面提示</b>：%s"
                 % (esc(st), note))
     return ("<span class='g-no'>✘ 筹码面不一致：%s</span> —— <b>本路径不构成推荐最高盈亏比路径</b>。"
             "<br>%s" % (esc(st), note))
@@ -1133,11 +1138,13 @@ def build_scr(a, n):
     # 现价 / 你的成本 vs 主力成本：三者是**不同的两件事**，分开说（老罗 2026-10-14 追问后定的口径）
     guard = ""
     if devi is not None:
+        # ⚑⚑ 只描述**状态**，不指导动作（老罗 2026-10-14：筹码面不输出买法）。
+        #     旧文案写过「回踩主力成本区是低吸位」「反弹到成本区是减仓区」——都是买法，已删。
         guard = ("<p class='note'>主力成本 %s：现价 <b>%s</b>（%+.1f%%）——%s</p>"
                  % (num(main_cost), num(close), devi,
-                    "主力有浮盈，回踩主力成本区是低吸位。"
+                    "主力有浮盈，该成本线是筹码密集区。"
                     if devi >= 0 else
-                    "主力自己浮亏（护城河失效），反弹到成本区是<b>减仓区</b>不是加仓位。"))
+                    "主力自己浮亏（护城河失效：主力被套 ≠ 主力会护盘）。"))
     mc = n.get("my_cost")
     if mc and main_cost:
         gap_mine = (mc - main_cost) / main_cost * 100
@@ -1145,9 +1152,9 @@ def build_scr(a, n):
                   "（⚠ 主力成本是<b>估算参考位</b>不是地板价，主力被套不等于主力会护盘；"
                   "真正的安全垫是你的硬止损。）</p>"
                   % (num(mc), num(main_cost), gap_mine,
-                     "你比主力便宜，成本优势成立：主力要解套必须把价拉回其成本之上，你在此之前可先走。"
+                     "你比主力便宜 ⇒ <b>成本优势成立</b>（主力要解套必须把价拉回其成本之上）。"
                      if gap_mine < 0 else
-                     "你比主力贵，成本优势不成立：主力回本时你才刚回本。"))
+                     "你比主力贵 ⇒ 成本优势不成立（主力回本时你才刚回本）。"))
     return (
         "<div class='card'>%s"
         "<p><span class='badge %s'>筹码状态：%s</span> %s</p>"
