@@ -1028,6 +1028,125 @@ def build_sector_risk(a, n):
     )
 
 
+def build_scr(a, n):
+    """筹码面区块（2026-10-14 老罗：完整报告必须带筹码面结论，且**尽量放最前**）。
+
+    数据来自 `analysis['scr']`（battle_analyze 已跑 `scr_chip.py` 写入）。
+    ⚑ 老 analysis.json（10-14 之前生成的）不含该键 ⇒ A 股路径**现算一次**兜底
+      （scr_chip 自带同日缓存，命中约 0.5s）——**不许写「未提供」把这一节交白卷**。
+    ⚑ 美股 / `--no-scr` ⇒ 明确写「不适用/未跑」，不许静默消失（静默＝读者以为看过了）。
+    """
+    m = a.get("meta") or {}
+    is_us = (m.get("market") or "CN").upper() == "US"
+    head = "<h3>筹码面 · SCR 集中度 / 锁仓 / 主力成本（<code>scr_chip.py</code>）</h3>"
+    # 锁仓观察窗以 scr_chip 的常量为准（报告里写死 5 会与引擎漂移）
+    try:
+        import scr_chip as _SC
+        _lock_days = int(getattr(_SC, "LOCK_DAYS", 5) or 5)
+    except Exception:                               # noqa: BLE001
+        _SC, _lock_days = None, 5
+    if is_us:
+        return ("<div class='card'>" + head +
+                "<p class='note'>美股不适用：筹码模型依赖东财流通换手率口径，"
+                "本项只覆盖 A 股。</p></div>")
+    r = (n.get("scr") or a.get("scr"))
+    if not r and m.get("code") and _SC is not None:
+        try:
+            r = _SC.analyze(m["code"])
+        except Exception as e:                      # noqa: BLE001
+            r = {"error": "%s: %s" % (type(e).__name__, e)}
+    if not r:
+        return ("<div class='card'>" + head +
+                "<p class='note'>本次未跑筹码面（引擎以 <code>--no-scr</code> 跳过）。"
+                "单票完整报告不应跳过：重跑 <code>battle_analyze.py &lt;code&gt;</code> "
+                "即自动带上。</p></div>")
+    if r.get("error"):
+        return ("<div class='card'>" + head +
+                "<p class='note'>⚠ 筹码面计算失败：%s"
+                "（不影响其余章节；单独跑 <code>python scr_chip.py %s</code> 复现）</p></div>"
+                % (esc(r["error"]), esc(str(m.get("code") or ""))))
+
+    v = str(r.get("verdict") or "观察")
+    cls = {"买": "b-t1", "持": "b-ok", "卖": "b-no"}.get(v, "b-warn")
+    close = r.get("close")
+    main_cost = r.get("main_cost")
+    devi = ((close - main_cost) / main_cost * 100
+            if (close and main_cost) else None)
+    # ⚑ 主力成本是**护城河线**：跌破＝主力自己被套，性质最坏 ⇒ 单独给一行红字警示。
+    guard = ""
+    if devi is not None:
+        guard = ("<p class='note'><b class='%s'>现价%s主力成本 %s（%+.1f%%）</b>"
+                 " —— %s</p>"
+                 % ("dn" if devi >= 0 else "up",
+                    "高于" if devi >= 0 else "低于",
+                    num(main_cost), devi,
+                    "主力有浮盈护城河，回踩主力成本区是低吸位。"
+                    if devi >= 0 else
+                    "主力自己被套，护城河失效；反弹到成本区是减仓区，不是加仓位。"))
+    lock_txt = ("锁仓未破（底部峰 %d 日份额波动 %.0f%%）"
+                % (_lock_days, (r.get("lock_spread") or 0) * 100)
+                if r.get("lock") else
+                ("未锁仓（底部峰份额 %d 日 %+.0f%%）"
+                 % (_lock_days, (r.get("mass_chg") or 0) * 100)
+                 if r.get("mass_chg") is not None else "—"))
+    rows_l = [
+        ("SCR90（90% 筹码区间集中度）",
+         "<b>%s%%</b> · %s" % (num(r.get("scr90"), 1),
+                             "高度集中" if (r.get("scr90") or 99) < 10 else
+                             ("相对集中" if (r.get("scr90") or 99) < 20 else "发散"))),
+        ("SCR70（庄家口径）",
+         "<b>%s%%</b>" % num(r.get("scr70"), 1)),
+        ("筹码平均成本 M", num(r.get("M"))),
+        ("主力成本（%s口径）" % esc(str(r.get("main_src") or "—")),
+         "<b>%s</b>" % num(main_cost)),
+        ("底部筹码带（P5~P35）", "%s ~ %s　带内均价 %s"
+         % (num(r.get("low_lo")), num(r.get("low_hi")), num(r.get("low_cost")))),
+        ("获利盘 / 现价在峰区位置",
+         "%s%%　/　%s" % (num(r.get("profit"), 1),
+                      ("%d%%" % round((r.get("dist_pos") or 0) * 100))
+                      if r.get("dist_pos") is not None else "—")),
+        ("底部锁仓", lock_txt),
+        ("当日 量比 / 换手", "%s×　/　%s%%"
+         % (num(r.get("vol_ratio"), 2), num(r.get("turnover"), 2))),
+    ]
+    # 近 10 日演进：答案就在自己算的日序列里，不用截图对拍（老罗 2026-10-13 打回后定的口径）
+    ser = r.get("series") or []
+    if ser:
+        ser_rows = "".join(
+            "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
+            "<td>%s</td><td>%s</td></tr>"
+            % (esc(str(x.get("d"))), num(x.get("c")), num(x.get("scr90"), 1),
+               num(x.get("scr70"), 1), num(x.get("M")),
+               num(x.get("profit"), 1), num((x.get("low_share") or 0) * 100, 1),
+               num(x.get("turnover"), 2))
+            for x in ser[-10:])
+        ser_html = ("<table><tr><th>日期</th><th>收盘</th><th>SCR90%</th><th>SCR70%</th>"
+                    "<th>平均成本</th><th>获利盘%</th><th>低位带份额%</th><th>换手%</th></tr>"
+                    + ser_rows + "</table>"
+                    "<p class='note'>低位带＝窗口首日钉死的 P5~P35 价格段，跨日比的是"
+                    "<b>份额</b>（每天重取分位会恒等于 30%，永远看不出锁仓变化）。</p>")
+    else:
+        ser_html = ""
+    k_txt = ("%.3f（按半衰期 %s 日自求）" % (r.get("decay_k") or 0, r.get("half_life"))
+             if r.get("k_auto") else "%.3f（人工指定）" % (r.get("decay_k") or 0))
+    return (
+        "<div class='card'>%s"
+        "<p><span class='badge %s'>筹码面结论：%s</span> <b>%s</b></p>"
+        "<table>%s</table>%s"
+        "<p class='note'><b>动作</b>：%s</p>"
+        "%s"
+        "%s"
+        "<p class='note'>口径：三角分布（峰＝当日成交均价）+ 换手衰减，衰减系数 k=%s；"
+        "<code>SCR90=(P95−P5)/(P95+P5)×100%%</code>（SCR70 取 P85/P15），是对同花顺私有"
+        " COST() 的<b>工程近似</b>，绝对值有偏差，方向性判读（压缩/发散/锁仓/派发）可用。"
+        "只支持 A 股；解禁/股本变动未回溯修正。</p>"
+        "</div>"
+        % (head, cls, esc(v), esc(str(r.get("why") or "")),
+           rows(rows_l), guard, esc(str(r.get("action") or "—")), ser_html,
+           note(n.get("scr_note"), ""), k_txt)
+    )
+
+
 def build_confluence(a, n):
     """叠加概率七层计数区块（2026-09-25 新增）。
 
@@ -1237,6 +1356,7 @@ def render(a, n, tmpl_path=DEFAULT_TMPL, vp_from=None, vp_to=None):
         "PLAN_ROWS": build_plan_rows(a),
         "PLAN_NOTE": note(n.get("plan_note"), ""),
         "CALIBER_NOTES": "".join("<p>%s</p>" % _caliber_html(x) for x in caliber),
+        "SCR_BLOCK": build_scr(a, n),
         "TOP_SIGNAL_BLOCK": build_top_signal(a, n),
         "CONFLUENCE_BLOCK": build_confluence(a, n),
         "OPEN_PLAYBOOK_BLOCK": build_open_playbook(a, n),

@@ -904,7 +904,7 @@ def is_us_code(code):
 def analyze(code, account=None, peers=None, data_file=None, n=330,
             intraday=True, min_scale=5, name=None, theme=None,
             peer_names=None, no_cache=False, cash=None,
-            auto_peers=True, auto_peer_n=5):
+            auto_peers=True, auto_peer_n=5, scr=True):
     # ★ 账户 / 现金口径一律从 account_config 现取（env > .env > DEFAULTS），
     #   不在签名里写 50000 —— 那是「代码写死」，改配置还得改代码。
     code = str(code).strip()
@@ -1270,6 +1270,24 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
         out["sector_risk"] = _sector_risk_of(code, out)
     except Exception as e:                      # noqa: BLE001
         out["sector_risk"] = {"risk": "unknown", "reason": "板块检查失败：%s" % e}
+    # ★ 2026-10-14 筹码面（scr_chip.py）：SCR 集中度 / 底部锁仓 / 主力成本。
+    #   老罗要求「完整报告必须带筹码面结论、且放最前」⇒ 在引擎层就落地，报告只负责渲染。
+    #   ⚠ 只支持 A 股（东财换手率口径）；美股与 --no-scr 一律记 None，报告层据此出占位说明。
+    #   ⚠ 失败不得影响主流程（筹码面是增强项，不是闸门）。
+    if scr and not is_us:
+        try:
+            import scr_chip as _SC
+            out["scr"] = _SC.analyze(code)
+        except Exception as e:                  # noqa: BLE001
+            out["scr"] = {"error": "%s: %s" % (type(e).__name__, e)}
+    else:
+        out["scr"] = None
+    # ★ 名字兜底：日线快照里常不带 name，报告 H1 会退化成 6 位代码（688543 已踩）。
+    #   scr_chip 走东财 kline、一定带名字 ⇒ 拿到了就补上，不额外发请求。
+    if not is_us and out.get("scr") and not out["scr"].get("error"):
+        _nm = out["scr"].get("name")
+        if _nm and (not out["meta"].get("name") or out["meta"]["name"] == code):
+            out["meta"]["name"] = _nm
     # ★ 叠加概率七层计数（2026-09-25 新增）：把上面已经算好的结论**汇总成一个数**，
     #   回答「这单是单因素还是多因素」。市场层自动去 data/sentiment_<基准日>.json 找
     #   当日情绪分（日期必须严格一致，隔日不算）；板块与催化剂单票报告拿不到，
@@ -1307,6 +1325,8 @@ def main():
     ap.add_argument("--min-scale", type=int, default=5)
     ap.add_argument("--out", default=None, help="输出 JSON 路径")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--no-scr", action="store_true",
+                    help="跳过筹码面 scr_chip（批量扫描提速用；单票报告默认必跑）")
     a = ap.parse_args()
 
     # ★ 永久黑名单前置闸门（2026-09-27）：命中后直接退出，连日线都不拉。
@@ -1335,7 +1355,7 @@ def main():
                       name=a.name, theme=a.theme, peer_names=pnames,
                       no_cache=a.no_cache, cash=cash,
                       auto_peers=not a.no_auto_peers,
-                      auto_peer_n=a.auto_peer_n)
+                      auto_peer_n=a.auto_peer_n, scr=not a.no_scr)
         out_path = a.out or os.path.join(HERE, "out_us" if _is_us else "out_cn",
                                         "analysis_%s.json" % _c.upper())
         md = os.path.dirname(out_path)
