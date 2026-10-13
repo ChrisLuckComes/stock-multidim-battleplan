@@ -19,6 +19,9 @@ for p in (_ROOT, os.path.join(_ROOT, "gates")):
 from breakout_hold import (  # noqa: E402
     UNDERCUT_ATR_ALERT, UNDERCUT_ATR_BAD, RECLAIM_BUFFER_ATR,
     check_breakout_edge, check_flow_vs_edge, atr,
+    # 铁律四
+    BODY_MIN_PCT, BODY_GONE, BODY_GONE_HARD, BODY_RECOVER,
+    check_body_retest, find_breakout_body, is_true_limit_up,
 )
 # ⚑ 这三个常量名历史上被我打错过（UNDECUT_*），断言守住真名，防止再犯。
 assert hasattr(sys.modules["breakout_hold"], "UNDERCUT_ATR_BAD")
@@ -136,3 +139,113 @@ class Test阈值与ATR口径:
         for name in ("UNDERCUT_ATR_ALERT", "UNDERCUT_ATR_BAD", "RECLAIM_BUFFER_ATR"):
             assert f"{name} = " in src, name
             assert f"{name} " in src  # 有行尾注释
+
+# ══════════════════════════════════════════════════════════════════
+# 铁律四（2026-10-14 老罗 600882 妙可蓝多加定）：
+#   **「突破位没破」不等于「突破有效」—— 还要查突破阳/涨停实体有没有被吃完。**
+#   实例：10-09 涨停封死（10-08 收 19.21×1.1=21.13 = 10-09 收=高），实体 19.99→21.13；
+#   两天走弱后 10-13 收 19.91 ⇒ 自涨停收盘回吐 111%、收盘已破实体下沿。
+#   同期「突破位 19.41（9-30 高）收盘仍站上 +2.58%」⇒ **两者结论完全相反**。
+# ══════════════════════════════════════════════════════════════════
+
+# 600882 妙可蓝多真实日线片段（2026-09-30 ~ 2026-10-13）
+BARS_600882 = [
+    {"d": "2026-09-30", "o": 18.71, "h": 19.41, "l": 18.56, "c": 19.31},
+    {"d": "2026-10-08", "o": 19.26, "h": 19.54, "l": 19.11, "c": 19.21},
+    {"d": "2026-10-09", "o": 19.99, "h": 21.13, "l": 19.44, "c": 21.13},  # 涨停
+    {"d": "2026-10-12", "o": 21.50, "h": 21.50, "l": 20.29, "c": 20.38},
+    {"d": "2026-10-13", "o": 20.36, "h": 20.61, "l": 19.87, "c": 19.91},
+]
+
+
+class Test铁律四_涨停实体回吐:
+    def test_涨停身份被正确识别(self):
+        """10-08 收 19.21 × 1.1 = 21.13 = 10-09 收=高 ⇒ 真涨停。"""
+        assert is_true_limit_up(BARS_600882, 2) is True
+
+    def test_涨停判定必须用前收盘做基准(self):
+        """⚑ 回归：早先版本用**当日开盘价**做基准 ⇒ 跳空高开的涨停（开19.99）涨幅只 +5.70%
+        ⇒ 漏判涨停。正确基准是**前收盘** 19.21。"""
+        b = BARS_600882[2]
+        assert (b["c"] / b["o"] - 1) * 100 < 6.0        # 用开盘算只有 +5.70%（不涨停）
+        assert abs((b["c"] / BARS_600882[1]["c"] - 1) * 100 - 10.0) < 0.35
+
+    def test_创业板大涨不误标涨停(self):
+        """⚑ 回归：301087 10-09 实体 +13.5%（创业板涨停幅 20%）**不是涨停**，只算大阳。"""
+        bars = [
+            {"d": "d0", "o": 50.0, "h": 50.0, "l": 50.0, "c": 50.0},
+            {"d": "d1", "o": 52.0, "h": 56.0, "l": 52.0, "c": 56.0},   # +13.5%
+            {"d": "d2", "o": 55.0, "h": 55.5, "l": 54.0, "c": 55.0},
+        ]
+        assert is_true_limit_up(bars, 1) is False
+        bb = find_breakout_body(bars)
+        assert bb is not None and bb["is_limit_up"] is False
+
+    def test_实体全废被正确判出(self):
+        """老罗原话：「走弱了两天把涨停板实体吃完了」。"""
+        r = check_body_retest(BARS_600882)
+        assert r["verdict"] == "实体全废"
+        assert r["date"] == "2026-10-09"
+        assert abs(r["body_low"] - 19.99) < 0.01        # 实体下沿＝涨停日开盘
+        assert abs(r["top"] - 21.13) < 0.01
+        assert r["after_low"] < r["body_low"]            # 19.87 < 19.99 吃穿了
+        assert r["ret_pct"] >= 100.0
+        assert r["close_below_body"] is True
+
+    def test_与突破位结论相反时按实体优先(self):
+        """核心场景：突破位 19.41 收盘仍站上（有效），但实体全废 ⇒ 结论相反。"""
+        e = check_breakout_edge(BARS_600882, 19.41)
+        assert e["verdict"] == "有效"                    # 单看突破位＝没问题
+        r = check_body_retest(BARS_600882)
+        assert r["verdict"] == "实体全废"                # 加实体复核＝已被否定
+        # 反例守卫：若有人把实体阈值改松让它不再触发，这个测试会炸
+        assert r["ret_pct"] >= BODY_GONE
+
+    def test_实体完好不被误判(self):
+        """反例：301087 可孚医疗实体 53.38→59.93，后续最低 54.34 未破下沿 ⇒ 实体完好。"""
+        bars = [
+            {"d": "2026-10-08", "o": 52.80, "h": 54.95, "l": 52.10, "c": 52.80},
+            {"d": "2026-10-09", "o": 53.38, "h": 59.93, "l": 52.81, "c": 59.93},
+            {"d": "2026-10-12", "o": 59.98, "h": 59.98, "l": 57.00, "c": 57.05},
+            {"d": "2026-10-13", "o": 57.05, "h": 56.96, "l": 54.34, "c": 56.00},
+        ]
+        r = check_body_retest(bars)
+        assert r["verdict"] == "实体完好"
+        assert r["ret_pct"] < BODY_RECOVER
+
+    def test_最后一根不被当突破阳(self):
+        """⚑ 回归：早先版本取最后一天当突破阳，而它「后续最低」就是它自己的最低价
+        ⇒ 等于自噬，**天天误报「实体全废」**（300785 就是这么误报的 162%）。"""
+        bars = BARS_600882[:-1] + [
+            {"d": "2026-10-13", "o": 20.36, "h": 20.61, "l": 19.87, "c": 19.91},
+        ]
+        bb = find_breakout_body(bars)
+        # 真正的突破阳是 10-09（第2根），不是 10-13 这根 +3.87% 的小阳
+        assert bb is not None and bb["date"] == "2026-10-09"
+
+    def test_大阳涨停日当最后一根时报无突破阳(self):
+        """反例：当天就是突破阳 ⇒ 后面没有「后续」，无从回吐 ⇒ 不该误报实体全废。"""
+        bars = [
+            {"d": "2026-10-08", "o": 19.26, "h": 19.54, "l": 19.11, "c": 19.21},
+            {"d": "2026-10-09", "o": 19.99, "h": 21.13, "l": 19.44, "c": 21.13},
+        ]
+        assert find_breakout_body(bars) is None
+        assert check_body_retest(bars)["verdict"] == "无突破阳"
+
+    def test_无突破阳时明说不许用均线代替(self):
+        """反例：301069 凯盛新材爬坡型，最近10根最大实体仅 3.87% ⇒ 无参照物。"""
+        bars = [{"d": f"d{i}", "o": 15.0 + i * 0.1, "h": 15.5 + i * 0.1,
+                 "l": 14.8 + i * 0.1, "c": 15.2 + i * 0.1} for i in range(12)]
+        r = check_body_retest(bars)
+        assert r["verdict"] == "无突破阳"
+        assert "不许拿均线代替" in r["note"]
+
+    def test_空数据不崩(self):
+        assert check_body_retest([])["verdict"] == "无数据"
+
+    def test_实体阈值可解释且有注释(self):
+        import breakout_hold as m
+        src = open(m.__file__, encoding="utf-8").read()
+        for name in ("BODY_MIN_PCT", "BODY_GONE", "BODY_GONE_HARD", "BODY_RECOVER"):
+            assert f"{name} = " in src, name
+            assert f"{name} " in src

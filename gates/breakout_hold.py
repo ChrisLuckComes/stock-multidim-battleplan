@@ -28,6 +28,18 @@ breakout_hold.py —— 突破有效性闸门（突破位有没有被守住）
     资金流向**本身分不清**，必须配突破位状态：
       突破位收盘未丢 ⇒ 偏洗盘；收盘已丢 ⇒ 偏失败/派发。
 
+⚑⚑⚑ 铁律四（2026-10-14 老罗 600882 妙可蓝多加定）：**「突破位没破」不等于「突破有效」
+    —— 还要查突破阳（含涨停）的大阳实体有没有被吃完。**
+    实例：10-09 涨停封死（收=高=21.13，10-08 收 19.21×1.1=21.13 验证），
+    实体 19.99(开)→21.13(收)，幅度 +5.70%。
+    10-12、10-13 连跌两天 ⇒ 10-13 收 19.91，**较实体下沿 19.99 已 −0.40%**，
+    自涨停收盘 21.13 回吐 (21.13−19.91)/(21.13−19.99) = **107% ⇒ 实体吃光**。
+    而此时「突破位 19.41（9-30 高）收盘仍站上 +2.58%」——单看突破位会判「结构完好」，
+    **与实体全废的结论完全相反**（老罗原话：「走弱了两天把涨停板实体吃完了」）。
+    ⇒ 大阳/涨停实体下沿＝当日所有买家的共同成本，**比突破位更贴近真实持仓成本**，
+    收盘跌破实体下沿 ⇒ 这批买家整体浮亏 ⇒ 突破质量已被否定。
+
+⚑ **实体回吐率** = (阳线顶 − 后续最低) / (阳线顶 − 实体下沿)；≥100% 即实体全废。
 ⚑ **ATR 倍数口径**：`undercut_atr` = 刺破幅度 ÷ ATR。经验判据
     <1.0×ATR＝正常插针；≥1.0 黄牌；≥1.5 红牌（是回吐不是插针）。
     阈值可解释、可改，**不做隐式自适应**。
@@ -57,6 +69,14 @@ except Exception:
 UNDERCUT_ATR_ALERT = 1.0      # 刺破 ≥1.0×ATR ⇒ 黄牌（洗盘嫌疑）
 UNDERCUT_ATR_BAD = 1.5        # 刺破 ≥1.5×ATR ⇒ 红牌（回吐嫌疑，突破质量差）
 RECLAIM_BUFFER_ATR = 0.15     # 失败确认线 = 突破位 − 0.15×ATR（收盘跌破即失败）
+
+# ── 铁律四：大阳/涨停实体回吐 ───────────────────────────────────────────
+BODY_MIN_PCT = 4.0            # 实体涨幅 ≥4% 才算「突破阳」（够格当参照物）
+BODY_LOOKBACK = 10            # 在最近 N 根里找突破阳
+BODY_GONE = 100.0             # 回吐率 ≥100% ⇒ 实体全废（当日买家整体浮亏）
+BODY_GONE_HARD = 130.0        # 回吐率 ≥130% ⇒ 红牌（深度回吐，突破质量已否定）
+BODY_RECOVER = 90.0           # 回吐率 ≤90% ⇒ 实体基本保住（洗盘）
+LIMIT_PCT_NEAR = 9.5          # 实体涨幅 ≥9.5% 视为涨停（沪 10% / 深主板 10%）
 
 
 def atr(bars, n=14):
@@ -151,6 +171,150 @@ def check_flow_vs_edge(flow_signed, edge):
             "再多的净流入也可能是接回筹码，不能当洗盘证据" % inflow)
 
 
+def is_true_limit_up(bars, i, tol=0.35):
+    """真涨停判定：**收盘 == 最高**（封死收盘）且**涨幅贴近该板涨停幅度**。
+
+    ⚑⚑ 涨幅基准必须用**前收盘价**，**不能用当日开盘价**（老罗 2026-10-14 实例）：
+      600882 妙可蓝多 10-09 是**真涨停**（10-08 收 19.21 × 1.1 = 21.13 = 10-09 收=高），
+      但当日**跳空开在 19.99**，用开盘做基准涨幅只有 +5.70% ⇒ 会漏判涨停。
+      涨停股常常高开，用开盘算会系统性低估。
+
+    ⚑ 老罗 2026-10-14 纠正过这个标签：10-09 可孚医疗 301087 曾被我标成「涨停」，
+      但**创业板/科创板涨停幅度是 20%**，+13.5% 只是大阳线、**不是涨停**。
+      主板 10%、创业板/科创板 20%、ST 5% —— 这里用「贴近 10% 或 20%」自动判，
+      不写死板号，ST（5%）不认作涨停（量级太小，实体参照意义弱）。
+    """
+    if not bars or i <= 0 or i >= len(bars):
+        return False
+    b = bars[i]
+    prev = bars[i - 1].get("c")
+    if not prev or b.get("h") != b["c"]:
+        return False                    # 收盘必须 == 最高（封死）
+    pct = (b["c"] / prev - 1.0) * 100.0
+    for lim in (10.0, 20.0):
+        if abs(pct - lim) <= tol:
+            return True
+    return False
+
+
+def find_breakout_body(bars, lookback=None, min_pct=None):
+    """找最近一根「够格当参照物」的大阳/涨停实体。
+
+    铁律四：突破阳实体下沿 = 当日所有买家的共同成本，**比突破位更贴近真实持仓成本**。
+    实体涨幅 ≥BODY_MIN_PCT 才算（太小的不够格），≥LIMIT_PCT_NEAR 额外标 is_limit_up。
+    返回 dict 或 None。
+    """
+    if not bars:
+        return None
+    lb = BODY_LOOKBACK if lookback is None else lookback
+    mp = BODY_MIN_PCT if min_pct is None else min_pct
+    best = None
+    start = max(1, len(bars) - lb)
+    # ⚑ 最后一根**不能**当突破阳：它后面没有「后续」，回吐率无意义
+    #   （早先版本拿它自己的最低价当 after_low ⇒ 等于自噬，天天误报「实体全废」）。
+    end = len(bars) - 1
+    for i in range(start, end):
+        b = bars[i]
+        o = b.get("o")
+        if not o:
+            continue
+        body_pct = (b["c"] / o - 1.0) * 100.0
+        if body_pct < mp:
+            continue
+        body_low = min(o, b["c"])          # 实体下沿（阳线实体）
+        top = b["c"]
+        # 后续区间的最低价（i 之后一定非空，因为 i < end）
+        after = bars[i + 1:]
+        after_low = min((x.get("l", x["c"]) for x in after), default=low_last(bars))
+        span = top - body_low
+        ret = ((top - after_low) / span * 100.0) if span > 0 else 0.0
+        cand = {
+            "date": b["d"], "open": o, "close": b["c"], "high": b.get("h", b["c"]),
+            "low": b.get("l", o), "body_pct": body_pct, "body_low": body_low,
+            "top": top, "after_low": after_low, "ret_pct": ret,
+            "is_limit_up": is_true_limit_up(bars, i),
+            "index": i,
+        }
+        # 取**最新**的一根够格阳线（突破是最近发生的事）
+        if best is None or cand["index"] > best["index"]:
+            best = cand
+    return best
+
+
+def low_last(bars):
+    return bars[-1].get("l", bars[-1]["c"]) if bars else 0.0
+
+
+def check_body_retest(bars, body=None, atr_v=None):
+    """铁律四：大阳/涨停实体有没有被吃完（突破质量复核）。
+
+    与 `check_breakout_edge` **互补、不重叠**：
+      check_breakout_edge = 突破位（前置压力位）守没守住
+      check_body_retest  = 突破阳实体（当日买家成本）吃没吃完
+    两者可以给出相反结论（正是老罗 600882 的情形），此时**实体回吐优先**：
+    实体全废 = 当日所有买家浮亏 = 突破质量已被否定，比「突破位还在」更致命。
+
+    返回 dict：verdict / ret_pct / body_low / top / is_limit_up / note
+    """
+    if not bars:
+        return {"verdict": "无数据", "ret_pct": None,
+                "note": "无日线，实体回吐未复核"}
+    bb = body or find_breakout_body(bars)
+    if not bb:
+        return {"verdict": "无突破阳", "ret_pct": None, "body_low": None,
+                "note": ("最近 %d 根内无实体涨幅 ≥%.0f%% 的突破阳，"
+                         "**没有大阳实体可作参照物**（不许拿均线代替）"
+                         % (BODY_LOOKBACK, BODY_MIN_PCT))}
+    close = bars[-1]["c"]
+    top = bb["top"]
+    body_low = bb["body_low"]
+    after = bars[bb["index"] + 1:]
+    after_low = min((x.get("l", x["c"]) for x in after), default=low_last(bars))
+    span = top - body_low
+    ret = ((top - after_low) / span * 100.0) if span > 0 else 0.0
+    close_below = close < body_low
+
+    if ret >= BODY_GONE_HARD:
+        verdict = "实体全废·深度回吐"
+    elif ret >= BODY_GONE:
+        verdict = "实体全废"
+    elif close_below:
+        verdict = "收盘破实体下沿"
+    elif ret <= BODY_RECOVER:
+        verdict = "实体完好"
+    else:
+        verdict = "实体部分回吐"
+
+    tag = "涨停" if bb["is_limit_up"] else "大阳"
+    if verdict == "实体全废·深度回吐":
+        hint = ("**%s %s 实体（%.2f→%.2f，+%.2f%%）已被后续最低 %.2f 全部吃光、还多吐 %.0f%%**"
+                "⇒ 这批买家**整体浮亏**，突破质量已被否定（不是洗盘）"
+                % (tag, bb["date"], body_low, top, bb["body_pct"], after_low, ret - 100.0))
+    elif verdict == "实体全废":
+        hint = ("**%s %s 实体被吃光**（回吐 %.0f%%，最低 %.2f ≤ 实体下沿 %.2f）"
+                "⇒ 当日买家整体浮亏，**收盘 %.2f 已跌破实体下沿**"
+                % (tag, bb["date"], ret, after_low, body_low, close))
+    elif verdict == "收盘破实体下沿":
+        hint = ("**收盘 %.2f 跌破实体下沿 %.2f** ⇒ 实体未完全吃光但已破当日成本，"
+                "突破质量转弱" % (close, body_low))
+    elif verdict == "实体完好":
+        hint = ("实体保住了（回吐仅 %.0f%%）⇒ 突破质量尚可，洗盘嫌疑小" % ret)
+    else:
+        hint = "实体部分回吐（%.0f%%），仍在实体区间内，暂未破当日成本" % ret
+
+    return {
+        "date": bb["date"], "is_limit_up": bb["is_limit_up"],
+        "body_low": body_low, "top": top, "body_pct": bb["body_pct"],
+        "after_low": after_low, "ret_pct": ret,
+        "close": close, "close_below_body": close_below,
+        "verdict": verdict, "hint": hint,
+        "reclaim_at": body_low,
+        "note": ("%s实体 %.2f→%.2f｜实体下沿(=当日买家成本) %.2f｜"
+                 "后续最低 %.2f｜**回吐 %.0f%%**｜现价 %.2f"
+                 % (tag, body_low, top, body_low, after_low, ret, close)),
+    }
+
+
 # ────────────────────────────── CLI ──────────────────────────────
 def auto_level(bars):
     """自动取活平台沿（rule123.living_platform + pivots）；取不到返回 None。
@@ -207,9 +371,23 @@ def main():
     print(f" {e['note']}")
     if e.get("fail_at"):
         print(f" 失败确认线（收盘跌破）：{e['fail_at']:.2f}")
+
+    # ★ 铁律四：大阳/涨停实体回吐
+    br = check_body_retest(bars)
+    print()
+    print(" ── 实体回吐复核（铁律四）" + "─" * 32)
+    print(f" 结论：{br['verdict']}")
+    print(f" {br.get('note') or ''}")
+    if br.get("hint"):
+        print(f" {br['hint']}")
+    if br.get("ret_pct") is not None and br["ret_pct"] >= 100.0:
+        print()
+        print(" ⚠ 与突破位结论冲突：**按实体回吐优先**——突破位还在 ≠ 突破有效。")
+        print("   实体被吃光 = 当日所有买家整体浮亏 = 突破质量已被否定，不是洗盘。")
+
     print()
     print(" ⚠ 铁律：突破复核的参照物只能是突破位，不许用均线代替"
-          +("（本次突破位来源：命令行 --level）" if a.level else "（本次= 活平台沿）"))
+          + ("（本次突破位来源：命令行 --level）" if a.level else "（本次= 活平台沿）"))
     return 0
 
 

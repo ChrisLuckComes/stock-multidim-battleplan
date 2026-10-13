@@ -1098,8 +1098,42 @@ def build_breakout_hold_gate(a, n):
     if ed.get("fail_at"):
         tail = ("　｜<b>收盘跌破 %.2f</b> 即确认失败"
                 % ed["fail_at"])
-    return ("<span class='%s'>突破有效性闸门：%s</span> —— %s%s%s"
-            % (cls or "g-no", esc(v), esc(str(ed.get("note") or "")), tail, tip))
+
+    # ★★ 铁律四：突破位守住 ≠ 突破有效，还要查大阳/涨停实体有没有被吃完。
+    #   老罗 600882 妙可蓝多 10-09 涨停（19.99→21.13），两天走弱后收 19.91，
+    #   较实体下沿 −0.40%、自涨停收盘回吐 111% ⇒ **实体吃光**；
+    #   而突破位 19.41 当时仍站上 +2.58% ⇒ 单看突破位会误判「结构完好」。
+    body = ""
+    br = ed.get("body_retest")
+    if isinstance(br, dict) and br.get("ret_pct") is not None:
+        bv = str(br.get("verdict") or "—")
+        bcls = {"实体完好": "g-ok", "实体部分回吐": "g-warn",
+                "收盘破实体下沿": "g-warn",
+                "实体全废": "g-no", "实体全废·深度回吐": "g-no"}.get(bv, "")
+        over = ed.get("body_over_edge")
+        conflict = ed.get("body_edge_conflict")
+        body = ("<br><b>实体回吐复核（铁律四）</b>："
+                "<span class='%s'>%s</span> —— %s"
+                % (bcls or "g-no", esc(bv), esc(str(br.get("note") or ""))))
+        if over:
+            body += ("<br><b style='color:#c0392b'>⚠ 与突破位结论相反，按实体回吐优先</b>"
+                     "：突破位（%s）尚在，但**%s实体已被吃光** ⇒ 当日所有买家整体浮亏，"
+                     "突破质量已被否定，不是洗盘。"
+                     % (ed.get("level"), "涨停" if br.get("is_limit_up") else "大阳"))
+        elif conflict:
+            # 突破位还在但盘中深破/勉强有效 —— 不叫「相反」，只作质量提示
+            body += ("<br><b style='color:#c0392b'>⚠ 突破质量已否定</b>：突破位（%s）虽未收盘跌破，"
+                     "但**%s实体已被吃光** ⇒ 当日所有买家整体浮亏。"
+                     % (ed.get("level"), "涨停" if br.get("is_limit_up") else "大阳"))
+        if br.get("hint"):
+            body += ("<br><span style='opacity:.85'>%s</span>"
+                     % esc(str(br["hint"])))
+    elif isinstance(br, dict) and br.get("verdict") == "无突破阳":
+        body = ("<br><b>实体回吐复核</b>：<span class='g-no'>无突破阳</span> —— %s"
+                % esc(str(br.get("note") or "")))
+
+    return ("<span class='%s'>突破有效性闸门：%s</span> —— %s%s%s%s"
+            % (cls or "g-no", esc(v), esc(str(ed.get("note") or "")), tail, tip, body))
 
 
 def build_scr_gate(a, n):

@@ -1294,6 +1294,7 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
             out["meta"]["name"] = _nm
     # ★ 2026-10-14 突破有效性闸门（gates/breakout_hold.py）：老罗三条铁律。
     #   ⚑⚑ **突破买法复核的参照物只能是突破位，不许换成均线**（301087 可孚医疗教训）。
+    #   ⚑ **突破位守住 ≠ 突破有效**：还要查突破阳/涨停实体有没有被吃完（600882 妙可蓝多教训）。
     #   ⚑ 失败不得影响主流程（增强项，不是闸门）。
     if not is_us:
         try:
@@ -1303,6 +1304,22 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
             try:
                 _e["flow_note"] = _BH.check_flow_vs_edge(
                     (out.get("scr") or {}).get("main_cost_flow"), _e)
+            except Exception:
+                pass
+            # ★ 铁律四：大阳/涨停实体回吐。两者可给相反结论，此时**实体回吐优先**
+            #   （实体全废 = 当日所有买家浮亏 = 突破质量已被否定，比「突破位还在」更致命）。
+            #   ⚠ `body_over_edge` 只在**突破位确实还在**时才置 True —— 若突破位也已破，
+            #   两者是「同向都坏」，不该报成「结论相反」（否则会写出「突破位尚在」这种错话）。
+            try:
+                _br = _BH.check_body_retest(bars)
+                _br["edge_verdict"] = _e.get("verdict")
+                _edge_intact = _e.get("verdict") in ("有效", "勉强有效")
+                _body_gone = _br.get("ret_pct") is not None \
+                    and _br["ret_pct"] >= 100.0
+                _e["body_retest"] = _br
+                _e["body_over_edge"] = bool(_edge_intact and _body_gone)
+                _e["body_edge_conflict"] = bool(
+                    _body_gone and _e.get("verdict") == "有效")
             except Exception:
                 pass
             out["breakout_hold"] = _e
