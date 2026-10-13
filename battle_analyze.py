@@ -1322,6 +1322,17 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
                     _body_gone and _e.get("verdict") == "有效")
             except Exception:
                 pass
+            # ★ 铁律五：跌量 vs 涨量（**相对量能**）。老罗 2026-10-14 定 ——
+            #   「可孚是缩量回调我认可不是派发；妙可是放量下跌，相比突破上涨前面都是爆量」。
+            #   ⚑ 我曾用「换手才 3%、不算放量」反驳，错方向：放量/缩量本就是相对概念。
+            #   ⚑ 只作为「洗盘 vs 派发」的定性证据，**不否决可孚那类缩量回调的好票**。
+            try:
+                _vv = _BH.check_vol_vs_body(bars, body=(_e.get("body_retest") or {}))
+                _vv["body_gone"] = bool(_e.get("body_over_edge")
+                                        or _e.get("body_edge_conflict"))
+                _e["vol_vs_body"] = _vv
+            except Exception:
+                pass
             out["breakout_hold"] = _e
         except Exception as e:                  # noqa: BLE001
             out["breakout_hold"] = {"error": "%s: %s" % (type(e).__name__, e)}

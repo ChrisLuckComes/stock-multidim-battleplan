@@ -1132,6 +1132,25 @@ def build_breakout_hold_gate(a, n):
         body = ("<br><b>实体回吐复核</b>：<span class='g-no'>无突破阳</span> —— %s"
                 % esc(str(br.get("note") or "")))
 
+    # ★★ 铁律五：跌量 vs 涨量（相对量能）—— 洗盘 vs 派发的分水岭。
+    #   老罗：「可孚是缩量回调我认可不是派发；妙可是放量下跌，相比突破上涨前面都是爆量了」。
+    #   ⚑ 量能必须相对（跌日量÷突破阳量），绝对换手率会骗人（我曾用「才 3% 不算放量」反驳，错方向）。
+    #   ⚑ 实证 n=1186：放量跌+破实体 = 之后3日 −2.14%（最差）；缩量跌+破实体 −0.77%；
+    #     缩量跌+守住实体 −0.47%（最好）。⇒ **缩量回调不否决好票，放量破实体才致命**。
+    vv = ed.get("vol_vs_body")
+    if isinstance(vv, dict) and vv.get("verdict") in ("放量跌", "缩量跌", "平量跌"):
+        vvv = str(vv.get("verdict"))
+        vcls = {"放量跌": "g-no", "缩量跌": "g-ok", "平量跌": "g-warn"}[vvv]
+        body += ("<br><b>量能对比（铁律五）</b>：<span class='%s'>%s</span> —— %s"
+                 % (vcls, esc(vvv), esc(str(vv.get("note") or ""))))
+        if vvv == "放量跌" and vv.get("body_gone"):
+            body += ("<br><b style='color:#c0392b'>⚠ 放量跌 + 实体已破 = 最坏组合</b>"
+                     "（实证 n=1186：之后3日均值 −2.14%，全负占比最高）"
+                     "⇒ <b>倾向派发，不是洗盘</b>。")
+        elif vvv == "缩量跌" and not vv.get("body_gone"):
+            body += ("<br><span style='opacity:.85'>缩量回调且实体未破 ⇒ 倾向"
+                     "<b>洗盘/假突破</b>，不否决持有与低吸。</span>")
+
     return ("<span class='%s'>突破有效性闸门：%s</span> —— %s%s%s%s"
             % (cls or "g-no", esc(v), esc(str(ed.get("note") or "")), tail, tip, body))
 

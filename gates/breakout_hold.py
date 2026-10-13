@@ -78,6 +78,13 @@ BODY_GONE_HARD = 130.0        # 回吐率 ≥130% ⇒ 红牌（深度回吐，�
 BODY_RECOVER = 90.0           # 回吐率 ≤90% ⇒ 实体基本保住（洗盘）
 LIMIT_PCT_NEAR = 9.5          # 实体涨幅 ≥9.5% 视为涨停（沪 10% / 深主板 10%）
 
+# ── 铁律五：跌量 vs 涨量（**相对量能**，不是绝对换手） ─────────────────────
+# ⚑⚑⚑ 老罗 2026-10-14 纠正：判断「跌得放量还是缩量」**必须拿跌日量与突破阳量比**，
+#     拿绝对换手率说事是错的（"换手才 3%，不算放量"）。
+#     因为"放量/缩量"本身就是相对概念 —— 9 月地量 0.4% 时 3% 是天量，10 月 3% 就是缩量。
+VOL_EXPAND = 1.0              # 跌日量 > 突破阳量 × 1.0 ⇒ 放量跌
+VOL_SHRINK = 0.7              # 跌日量 < 突破阳量 × 0.7 ⇒ 缩量跌（真·缩量回调）
+
 
 def atr(bars, n=14):
     """Wilder ATR（与 levels.py / rule123.py 同口径）。"""
@@ -307,11 +314,91 @@ def check_body_retest(bars, body=None, atr_v=None):
         "body_low": body_low, "top": top, "body_pct": bb["body_pct"],
         "after_low": after_low, "ret_pct": ret,
         "close": close, "close_below_body": close_below,
+        # ⚑⚑ 必须带出 index：check_vol_vs_body 复用本结果时靠它定位后续区间。
+        #   缺了它会退回「按日期回找 body_vol」，而 after 退化成整条 bars ⇒
+        #   量能对比会取到几个月前的下跌日（600882 曾取到 2026-03-17）。
+        "index": bb.get("index"),
         "verdict": verdict, "hint": hint,
         "reclaim_at": body_low,
         "note": ("%s实体 %.2f→%.2f｜实体下沿(=当日买家成本) %.2f｜"
                  "后续最低 %.2f｜**回吐 %.0f%%**｜现价 %.2f"
                  % (tag, body_low, top, body_low, after_low, ret, close)),
+    }
+
+
+def check_vol_vs_body(bars, body=None, lookback=None):
+    """铁律五：**跌量 vs 涨量（相对量能）** —— 洗盘还是派发，两者唯一的分水岭。
+
+    ⚑⚑⚑ 老罗 2026-10-14 定：
+        「可孚医疗是缩量回调，我还能认可不是派发；妙可蓝多是放量下跌，
+         相比突破上涨前面都是爆量了」
+
+    ⚑⚑⚑ **量能必须取相对值，不能用绝对换手率**（我曾用「换手才 3%，不算放量」反驳老罗，错方向）：
+        放量/缩量本身是相对概念 —— 9 月地量 0.4% 时 3% 是天量，10 月 3% 就是缩量。
+        口径 = **跌日成交量 ÷ 突破阳当天成交量**：
+          > VOL_EXPAND(1.0) ⇒ 放量跌；< VOL_SHRINK(0.7) ⇒ 缩量跌；中间 ⇒ 平量跌。
+
+    ⚑ **与实体回吐（铁律四）交叉才最准**（实证 n=1186 只沪深票下跌日）：
+        放量跌 + 已破实体下沿 ⇒ 之后 3 日均值 **−2.14%**（最差格）
+        缩量跌 + 已破实体下沿 ⇒ 之后 3 日均值 −0.77%
+        缩量跌 + 守住实体下沿 ⇒ 之后 3 日均值 −0.47%（相对最好）
+      ⇒ **放量 + 破实体 = 最坏组合**，与「缩量回调 = 洗盘」的老罗直觉一致。
+
+    返回 dict：verdict（放量跌/缩量跌/平量跌/无突破阳/无量能数据）
+    """
+    if not bars:
+        return {"verdict": "无数据", "note": "无日线，量能对比未复核"}
+    bb = body or find_breakout_body(bars, lookback=lookback)
+    if not bb:
+        return {"verdict": "无突破阳", "note": "无突破阳可作量能对比基准"}
+    i = bb.get("index")
+    # ⚑⚑ 没有 index 就**不做回退** —— 回退会让 after 退化成整条 bars，
+    #   量能对比会取到几个月前的下跌日（600882 曾取到 2026-03-17）。
+    #   宁可明说「无法定位」，也不给一个错的量。
+    if i is None:
+        return {"verdict": "无法定位突破阳", "body_date": bb.get("date"),
+                "note": ("突破阳记录缺少 index（date=%s），无法确定其后的区间，"
+                         "**量能对比跳过**（宁可跳过也不给错的量）" % bb.get("date"))}
+    body_vol = None
+    if 0 <= i < len(bars):
+        body_vol = bars[i].get("v") or bars[i].get("vol") or bars[i].get("volume")
+    if not body_vol:
+        return {"verdict": "无量能数据", "note": "该数据源无成交量字段，量能对比跳过"}
+
+    after = bars[i + 1:] if i is not None else bars
+    # ⚑⚑ 必须用**下标偏移**找前一日，**不能用 `after.index(b)` 按值找** ——
+    #   日线里有**数值完全相同的重复 bar**（多日一字/地量），`index()` 会匹配到更早的行
+    #   ⇒ 曾把「10-12 的量」取成「2026-03-17 的量」（600882 实测）。
+    downs = []
+    for j, b in enumerate(after):
+        if not b.get("v"):
+            continue
+        prev_c = bars[i + j]["c"] if (i is not None and i + j > 0) else b.get("o")
+        if b["c"] < prev_c:
+            downs.append(b)
+    if not downs:
+        return {"verdict": "无下跌日", "body_vol": body_vol,
+                "note": "突破阳之后尚无下跌日"}
+    d0 = downs[0]
+    d_vol = d0.get("v") or d0.get("vol") or d0.get("volume")
+    ratio = d_vol / body_vol
+    if ratio > VOL_EXPAND:
+        verdict = "放量跌"
+    elif ratio < VOL_SHRINK:
+        verdict = "缩量跌"
+    else:
+        verdict = "平量跌"
+
+    tag = "涨停" if bb.get("is_limit_up") else "大阳"
+    txt = {"放量跌": "（**放量下跌**）", "缩量跌": "（缩量回调）",
+           "平量跌": "（平量）"}[verdict]
+    return {
+        "verdict": verdict, "ratio": ratio, "body_vol": body_vol,
+        "down_vol": d_vol, "down_date": d0.get("d"),
+        "body_date": bb.get("date"),
+        "note": ("%s %s 成交量 %.1f万手 → 首个下跌日 %s %.1f万手 = **%.2f×**%s"
+                 % (tag, bb.get("date"), body_vol / 1e4, d0.get("d"),
+                    d_vol / 1e4, ratio, txt)),
     }
 
 
@@ -385,9 +472,27 @@ def main():
         print(" ⚠ 与突破位结论冲突：**按实体回吐优先**——突破位还在 ≠ 突破有效。")
         print("   实体被吃光 = 当日所有买家整体浮亏 = 突破质量已被否定，不是洗盘。")
 
+    # ★ 铁律五：跌量 vs 涨量（相对量能）
+    vv = check_vol_vs_body(bars, body=br)
+    if vv.get("verdict") in ("放量跌", "缩量跌", "平量跌"):
+        print()
+        print(" ── 量能对比（铁律五）" + "─" * 33)
+        print(f" 结论：{vv['verdict']}")
+        print(f" {vv.get('note') or ''}")
+        if vv["verdict"] == "放量跌" and br.get("ret_pct") is not None \
+                and br["ret_pct"] >= 100.0:
+            print(" ⚠ **放量跌 + 实体已破 = 最坏组合** ⇒ 倾向派发，不是洗盘。")
+        elif vv["verdict"] == "缩量跌" and not (
+                br.get("ret_pct") is not None and br["ret_pct"] >= 100.0):
+            print(" ℹ 缩量回调且实体未破 ⇒ 倾向洗盘/假突破，不否决持有与低吸。")
+    else:
+        print()
+        print(f" ── 量能对比（铁律五）：{vv.get('verdict')} —— {vv.get('note') or ''}")
+
     print()
     print(" ⚠ 铁律：突破复核的参照物只能是突破位，不许用均线代替"
           + ("（本次突破位来源：命令行 --level）" if a.level else "（本次= 活平台沿）"))
+    print(" ⚠ 铁律五补充：量能必须取**相对值**（跌日量÷突破阳量），绝对换手率会骗人。")
     return 0
 
 

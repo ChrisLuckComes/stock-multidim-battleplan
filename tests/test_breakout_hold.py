@@ -22,6 +22,8 @@ from breakout_hold import (  # noqa: E402
     # 铁律四
     BODY_MIN_PCT, BODY_GONE, BODY_GONE_HARD, BODY_RECOVER,
     check_body_retest, find_breakout_body, is_true_limit_up,
+    # 铁律五
+    VOL_EXPAND, VOL_SHRINK, check_vol_vs_body,
 )
 # ⚑ 这三个常量名历史上被我打错过（UNDECUT_*），断言守住真名，防止再犯。
 assert hasattr(sys.modules["breakout_hold"], "UNDERCUT_ATR_BAD")
@@ -247,5 +249,96 @@ class Test铁律四_涨停实体回吐:
         import breakout_hold as m
         src = open(m.__file__, encoding="utf-8").read()
         for name in ("BODY_MIN_PCT", "BODY_GONE", "BODY_GONE_HARD", "BODY_RECOVER"):
+            assert f"{name} = " in src, name
+            assert f"{name} " in src
+
+
+# ══════════════════════════════════════════════════════════════════
+# 铁律五（2026-10-14 老罗 600882 vs 301087 对照加定）：
+#   「可孚是缩量回调我认可不是派发；妙可是放量下跌，相比突破上涨前面都是爆量了」
+#   ⚑⚑ 量能必须取**相对值**（跌日量 ÷ 突破阳量），绝对换手率会骗人。
+# ══════════════════════════════════════════════════════════════════
+
+# 600882 妙可蓝多真实日线 + 真实成交量（东财逐日，10-09/10-12/10-13）
+BARS_600882_V = [
+    {"d": "2026-09-30", "o": 18.71, "h": 19.41, "l": 18.56, "c": 19.31, "v": 42000},
+    {"d": "2026-10-08", "o": 19.26, "h": 19.54, "l": 19.11, "c": 19.21, "v": 38000},
+    {"d": "2026-10-09", "o": 19.99, "h": 21.13, "l": 19.44, "c": 21.13, "v": 156100},
+    {"d": "2026-10-12", "o": 21.50, "h": 21.50, "l": 20.29, "c": 20.38, "v": 163900},
+    {"d": "2026-10-13", "o": 20.36, "h": 20.61, "l": 19.87, "c": 19.91, "v": 121700},
+]
+# 301087 可孚医疗真实日线 + 真实成交量
+BARS_301087_V = [
+    {"d": "2026-10-08", "o": 52.80, "h": 54.95, "l": 52.10, "c": 52.80, "v": 25000},
+    {"d": "2026-10-09", "o": 53.38, "h": 59.93, "l": 52.81, "c": 59.93, "v": 96600},
+    {"d": "2026-10-12", "o": 59.98, "h": 59.98, "l": 57.00, "c": 57.05, "v": 60600},
+    {"d": "2026-10-13", "o": 57.05, "h": 56.96, "l": 54.34, "c": 56.00, "v": 40400},
+]
+
+
+class Test铁律五_跌量vs涨量:
+    def test_妙可蓝多判为放量跌(self):
+        """老罗：「妙可蓝多是放量下跌，相比突破上涨前面都是爆量了」。"""
+        r = check_vol_vs_body(BARS_600882_V)
+        assert r["verdict"] == "放量跌"
+        assert abs(r["ratio"] - 163900 / 156100) < 0.005     # 1.05x
+        assert r["down_date"] == "2026-10-12"
+
+    def test_可孚医疗判为缩量跌(self):
+        """老罗：「可孚医疗那种缩量回调我还能认可不是派发」。"""
+        r = check_vol_vs_body(BARS_301087_V)
+        assert r["verdict"] == "缩量跌"
+        assert abs(r["ratio"] - 60600 / 96600) < 0.005      # 0.63x
+        assert r["down_date"] == "2026-10-12"
+
+    def test_两只票方向相反(self):
+        """核心对照：同样的涨停/大阳 + 同样连跌两天，量能给完全相反的定性。"""
+        a = check_vol_vs_body(BARS_600882_V)["verdict"]
+        b = check_vol_vs_body(BARS_301087_V)["verdict"]
+        assert a == "放量跌" and b == "缩量跌"
+
+    def test_放量跌不得用绝对换手率判(self):
+        """⚑ 回归：我曾用「换手才 2~3%，不算放量」反驳老罗，**错方向**。
+        两票换手都只有 2~3%（同一个量级），但相对突破阳量一个 1.05x 一个 0.63x。"""
+        assert BARS_600882_V[3]["v"] > BARS_600882_V[2]["v"]      # 跌日量 > 涨日量
+        assert BARS_301087_V[2]["v"] < BARS_301087_V[1]["v"]      # 跌日量 < 涨日量
+        assert check_vol_vs_body(BARS_600882_V)["verdict"] != check_vol_vs_body(
+            BARS_301087_V)["verdict"]
+
+    def test_缺index时明说跳过而不给错量(self):
+        """⚑ 回归：早先版本缺 index 会退回「按日期回找 body_vol」，而 after 退化成整条 bars
+        ⇒ 把「10-12 的量」取成「2026-03-17 的量」（600882 实测）。**宁可跳过也不给错的量。**"""
+        br = check_body_retest(BARS_600882_V)
+        br.pop("index", None)                                    # 模拟缺 index
+        r = check_vol_vs_body(BARS_600882_V, body=br)
+        assert r["verdict"] == "无法定位突破阳"
+        assert "宁可跳过也不给错的量" in r["note"]
+
+    def test_重复bar不会取错前一日(self):
+        """⚑ 回归：日线里有数值完全相同的重复 bar，用 `list.index()` 按值找会匹配到更早的行。"""
+        bars = [
+            {"d": "2026-03-17", "o": 19.99, "h": 21.13, "l": 19.44, "c": 21.13, "v": 156100},
+            {"d": "2026-10-08", "o": 19.26, "h": 19.54, "l": 19.11, "c": 19.21, "v": 38000},
+            {"d": "2026-10-09", "o": 19.99, "h": 21.13, "l": 19.44, "c": 21.13, "v": 156100},
+            {"d": "2026-10-12", "o": 21.50, "h": 21.50, "l": 20.29, "c": 20.38, "v": 163900},
+        ]
+        r = check_vol_vs_body(bars)
+        assert r["down_date"] == "2026-10-12"                    # 不是 2026-03-17
+        assert r["verdict"] == "放量跌"
+
+    def test_无量能字段优雅降级(self):
+        r = check_vol_vs_body([{"d": "2026-10-09", "o": 19.99, "h": 21.13,
+                                "l": 19.44, "c": 21.13},
+                               {"d": "2026-10-12", "o": 21.50, "h": 21.50,
+                                "l": 20.29, "c": 20.38}])
+        assert r["verdict"] in ("无量能数据", "无突破阳", "无法定位突破阳")
+
+    def test_无日线不崩(self):
+        assert check_vol_vs_body([])["verdict"] == "无数据"
+
+    def test_量能阈值可解释且有注释(self):
+        import breakout_hold as m
+        src = open(m.__file__, encoding="utf-8").read()
+        for name in ("VOL_EXPAND", "VOL_SHRINK"):
             assert f"{name} = " in src, name
             assert f"{name} " in src
