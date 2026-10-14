@@ -342,3 +342,43 @@ class Test铁律五_跌量vs涨量:
         for name in ("VOL_EXPAND", "VOL_SHRINK"):
             assert f"{name} = " in src, name
             assert f"{name} " in src
+
+
+class TestAutoLevel集成契约:
+    """⚑ 回归（2026-10-15 002244/600830 实测崩）：
+
+    `auto_level()` 返回 **(price, kind) 二元组**；`check_breakout_edge(bars, level)`
+    只吃标量。battle_analyze 曾把整包传进去 ⇒ `close >= level`
+    抛 `TypeError: '>=' not supported between instances of 'float' and 'tuple'`，
+    整个突破闸门静默降级成 `{"error": ...}`（**不报错、只是没结论**，最危险的一种失败）。
+    """
+
+    def test_auto_level_返回二元组(self):
+        import breakout_hold as m
+        r = m.auto_level(BARS)
+        assert isinstance(r, tuple) and len(r) == 2, r
+        price, kind = r
+        assert price is None or isinstance(price, (int, float)), price
+
+    def test_auto_level_别名只给价位(self):
+        import breakout_hold as m
+        assert m._auto_level(BARS) == m.auto_level(BARS)[0]
+
+    def test_整包传入不会静默通过_必须炸或已解包(self):
+        """反面：直接把二元组当 level 传 ⇒ 必然抛 TypeError（所以调用方必须解包）。"""
+        import breakout_hold as m
+        with pytest.raises(TypeError):
+            m.check_breakout_edge(BARS, m.auto_level(BARS))
+
+    def test_battle_analyze_调用处必须解包(self):
+        """源码契约：防以后有人改回标量接收 / 或把 auto_level 返回值直接嵌传。"""
+        p = os.path.join(_ROOT, "battle_analyze.py")
+        src = open(p, encoding="utf-8").read()
+        assert "check_breakout_edge(bars, _BH.auto_level(bars))" not in src, \
+            "auto_level 返回二元组，禁止整包嵌传给 check_breakout_edge"
+        hits = [l for l in src.splitlines()
+                if "_BH.auto_level(" in l and "def " not in l]
+        assert hits, "battle_analyze.py 应调用 _BH.auto_level"
+        for l in hits:
+            assert l.lstrip().startswith("_lvl, _lvl_kind = ") or ", _lvl_kind" in l, \
+                f"auto_level 必须解包成 (price, kind)：{l.strip()}"

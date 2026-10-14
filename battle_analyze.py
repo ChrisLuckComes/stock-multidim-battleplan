@@ -1299,8 +1299,13 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
     if not is_us:
         try:
             import breakout_hold as _BH
-            _lvl = _BH.auto_level(bars)
+            # ⚠ auto_level 返回 **(price, kind) 二元组**（kind 供报告标明突破位来源：
+            #   正在压的未破沿 / 刚被破的沿）。**必须解包**，整包传给 check_breakout_edge
+            #   会让 `close >= level` 炸成 "float vs tuple"（2026-10-15 002244/600830 实测）。
+            _lvl, _lvl_kind = _BH.auto_level(bars)
             _e = _BH.check_breakout_edge(bars, _lvl)
+            if _lvl_kind:
+                _e["level_kind"] = _lvl_kind
             try:
                 _e["flow_note"] = _BH.check_flow_vs_edge(
                     (out.get("scr") or {}).get("main_cost_flow"), _e)
