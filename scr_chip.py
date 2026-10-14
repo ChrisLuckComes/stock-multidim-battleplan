@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SCR 筹码集中度计算器（A股）——给代码即算，输出一眼结论（买 / 持 / 卖 / 观察）。
+"""SCR 筹码集中度计算器（A股 / 美股）——给代码即算，输出一眼结论（买 / 持 / 卖 / 观察）。
 
 来源与方法（老罗 2026-10-13 提供《SCR筹码集中度计算方法.xlsx》）：
     SCR    = (H − L) / (H + L) × 100%
@@ -17,9 +17,15 @@
       绝对数值会有偏差；**方向性判读（压缩 / 发散 / 锁仓 / 派发）不受影响**。
 
 用法：
-    python scr_chip.py <6位代码>                 # 人读结论（一眼：买 / 持 / 卖 / 观察）
+    python scr_chip.py <6位代码>                 # A 股：人读结论（一眼：买 / 持 / 卖 / 观察）
+    python scr_chip.py NVDA                     # 美股：字母代码自动识别（或 TSLA / SOXS）
+    python scr_chip.py NVDA --us                # 美股：显式强制（代码混排/防误判时用）
     python scr_chip.py <code> --json out_cn/scr_<code>.json
     python scr_chip.py --selftest                # 用截图实测值回归 SCR 公式
+
+美股数据：东财美股日线（http 明文通道，secid 前缀 105=纳斯达克 / 106=纽交所，自动探测）。
+换手率 f61 与 A 股同字段，故 SCR / 衰减模型直接复用；成交量单位美股为「股」（非手），
+已在 chip_model 内区分。美股资金流接口本环境常连不上 → 主力成本退「低位带均价」口径（不致命）。
 """
 import argparse
 import concurrent.futures as cf
@@ -43,6 +49,20 @@ EM_KLINE = ("https://push2his.eastmoney.com/api/qt/stock/kline/get"
 EM_FFLOW = ("https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
             "?lmt=0&klt=101&secid={secid}&fields1=f1,f2,f3,f7"
             "&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63")
+# ── 美股端点：东财美股走 **http 明文**（本环境 HTTPS 被中间设备拦截，同 rule123.bars_from_em_us）──
+#    secid 前缀 105=纳斯达克 / 106=纽交所（em_us_secid 探测）；field 布局与 A 股一致
+#    （f51..f61 同样在第 11 位 f61 给换手率），故 _parse_kline 一套解析两市场复用。
+EM_KLINE_US = ("http://push2his.eastmoney.com/api/qt/stock/kline/get"
+               "?secid={secid}&klt=101&fqt=1&end=20500101&lmt={lmt}"
+               "&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61")
+EM_FFLOW_US = ("http://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
+               "?lmt=0&klt=101&secid={secid}&fields1=f1,f2,f3,f7"
+               "&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63")
+
+# ── 市场识别：6 位数字＝A 股；含字母（NVDA / TSLA / SOXS）＝美股 ──
+US_HINT = re.compile(r"[A-Za-z]")
+def is_us_code(code):
+    return bool(US_HINT.search(str(code)))
 
 # ── 判据常数（源自 Excel「公式与说明」+「筹码峰回测逻辑」两表 + 老罗聊天记录口径）──
 SCR_TIGHT = 10.0          # SCR90 < 10%  高度集中
@@ -169,20 +189,66 @@ def _get_json(url, timeout=20, retries=2):
     raise RuntimeError(f"东财接口失败：{last}")
 
 
-def secid_of(code):
-    code = str(code).strip().zfill(6)
+def _get_json_us(url, timeout=20, retries=2):
+    """美股源取数：**http 明文优先，https 兜底**（东财美股 HTTPS 在本环境被中间设备拦截）。
+
+    与 A 股 `_get_json`（仅 https）分开，避免给 A 股请求也试 http 拖慢；美股专属。
+    """
+    last = None
+    for _ in range(retries):
+        for scheme in ("http", "https"):
+            u = url.replace("https://", scheme + "://").replace("http://", scheme + "://")
+            try:
+                req = urllib.request.Request(u, headers=UA)
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    return json.loads(r.read().decode("utf-8"))
+            except Exception as e:          # 单方案失败换下一方案，都不行才抛
+                last = e
+                time.sleep(0.3)
+    raise RuntimeError(f"东财美股接口失败：{last}")
+
+
+def secid_of(code, us_mode=False):
+    code = str(code).strip()
+    if us_mode:
+        return em_us_secid(code)
+    code = code.zfill(6)
     return ("1." if code.startswith(("6", "9")) else "0.") + code
 
 
-def fetch_bars(code, n=120):
-    """东财前复权日线 → (bars, name)；bars 旧→新。
+_EM_US_CACHE = {}          # sym -> "105.SYM" / "106.SYM"（进程内缓存，命中不重探）
 
-    东财 kline 字段序：日期,开,收,高,低,量(手),额(元),振幅,涨跌幅,涨跌额,换手率(流通口径)
-    ⚡ 名字直接取 kline 的 data.name —— 省掉一整次 quote 请求（老罗要求提速，实测省 ~0.15s）。
+
+def em_us_secid(sym):
+    """东财美股 secid 前缀探测：105=纳斯达克、106=纽交所（结果缓存）。
+
+    ⚠ 必须走 http（本环境 HTTPS 被中间设备拦截）。返回形如 "105.NVDA"。
+    ETF（SOXS/SOXX/SMH…）同样适用——东财把它们按交易所归到 105/106。
     """
-    secid = secid_of(code)
-    kd = _get_json(EM_KLINE.format(secid=secid, lmt=n)).get("data") or {}
-    name = kd.get("name") or code
+    s = str(sym).upper()
+    if s in _EM_US_CACHE:
+        return _EM_US_CACHE[s]
+    for pre in ("105", "106"):
+        try:
+            j = _get_json_us(
+                f"http://push2his.eastmoney.com/api/qt/stock/kline/get"
+                f"?secid={pre}.{s}&klt=101&fqt=1&end=20500101&lmt=2"
+                f"&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56")
+            if ((j.get("data") or {}).get("klines") or []):
+                _EM_US_CACHE[s] = f"{pre}.{s}"
+                return _EM_US_CACHE[s]
+        except Exception:
+            continue
+    raise RuntimeError(f"东财未识别美股 {sym}（105/106 均无数据，或网络不通）")
+
+
+def _parse_kline(kd):
+    """东财 kline 文本 → (bars, name)。A 股与美股**共用**（字段布局一致：f51..f61 在第 11 位 f61 给换手率）。
+
+    bars 旧→新；字段：d,o,c,h,l,v,amt,turnover。
+    ⚠ 注意：A 股 v=手（模型内 ×100 转股），美股 v=股（模型内不转）。解析层不区分，量纲在 chip_model 处理。
+    """
+    name = kd.get("name") or ""
     bars = []
     for line in kd.get("klines") or []:
         p = line.split(",")
@@ -195,35 +261,84 @@ def fetch_bars(code, n=120):
                          "turnover": float(p[10])})
         except ValueError:
             continue
+    return bars, name
+
+
+def fetch_bars(code, n=120):
+    """A 股东财前复权日线 → (bars, name)；bars 旧→新。
+
+    东财 kline 字段序：日期,开,收,高,低,量(手),额(元),振幅,涨跌幅,涨跌额,换手率(流通口径)
+    ⚡ 名字直接取 kline 的 data.name —— 省掉一整次 quote 请求（老罗要求提速，实测省 ~0.15s）。
+    """
+    secid = secid_of(code)
+    kd = _get_json(EM_KLINE.format(secid=secid, lmt=n)).get("data") or {}
+    bars, name = _parse_kline(kd)
+    name = name or code
     if not bars:
         raise RuntimeError(f"东财未返回 {code} 日线（停牌/代码错？）")
     return bars, name
 
 
-def fetch_fflow(code):
-    """东财逐日资金流 → {日期: 主力净流入占成交比 ρ(0~1)}，只取净买入（出流出记 0）。
+def fetch_bars_us(sym, n=120):
+    """美股东财前复权日线 → (bars, name)；bars 旧→新。必须走 http（见 _get_json_us）。
 
-    字段序：日期,主力净额,小单净额,中单净额,大单净额,超大单净额,**主力占比**,…,收盘价,涨跌幅。
+    换手率 f61 与 A 股同一位置，故 _parse_kline 直接复用；成交量单位为**股**（非手）。
+    """
+    secid = em_us_secid(sym)
+    kd = _get_json_us(EM_KLINE_US.format(secid=secid, lmt=n)).get("data") or {}
+    bars, name = _parse_kline(kd)
+    name = name or str(sym).upper()
+    if not bars:
+        raise RuntimeError(f"东财未返回美股 {sym} 日线（代码错/未上市/网络不通？）")
+    return bars, name
+
+
+def _parse_fflow(fd):
+    """东财资金流文本 → {日期: 主力净流入占成交比 ρ(0~1)}，只取净买入（出流记 0）。
+
+    字段序：日期,主力净额,…,**主力占比(p[6])**,…。取不到返回 {}（上层退备用口径）。
+    """
+    out = {}
+    for line in (fd.get("klines") or []):
+        p = line.split(",")
+        if len(p) >= 7:
+            try:
+                out[p[0]] = max(0.0, float(p[6])) / 100.0
+            except ValueError:
+                continue
+    return out
+
+
+def fetch_fflow(code):
+    """A 股东财逐日资金流 → {日期: 主力净流入占成交比 ρ(0~1)}，只取净买入（出流出记 0）。
+
     ⚠ 接口只给**净额**、不给主力「买入额」⇒ ρ 是净买入口径的近似。取不到就返回 {}（上层会退到备用口径）。
     """
     try:
         d = _get_json(EM_FFLOW.format(secid=secid_of(code))).get("data") or {}
-        out = {}
-        for line in d.get("klines") or []:
-            p = line.split(",")
-            if len(p) >= 7:
-                try:
-                    out[p[0]] = max(0.0, float(p[6])) / 100.0
-                except ValueError:
-                    continue
-        return out
+        return _parse_fflow(d)
+    except Exception:
+        return {}
+
+
+def fetch_fflow_us(sym):
+    """美股东财逐日资金流 → {日期: 主力净流入占比 ρ}。
+
+    ⚠ 实测东财美股 fflow 接口在本环境常连不上（Remote end closed）；连不上就返回 {}，
+    上层 main_cost 自动退到「低位带均价」口径——**不致命**，仅主力成本精度下降。
+    """
+    try:
+        secid = em_us_secid(sym)
+        d = _get_json_us(EM_FFLOW_US.format(secid=secid)).get("data") or {}
+        return _parse_fflow(d)
     except Exception:
         return {}
 
 
 # ─────────────────────────── 取数编排（并行 + 同日缓存） ───────────────────────────
-def _cache_path(code):
-    return os.path.join(CACHE_DIR, f"scr_{str(code).zfill(6)}.json")
+def _cache_path(code, us_mode=False):
+    base = (f"us_{str(code).upper()}" if us_mode else str(code).zfill(6))
+    return os.path.join(CACHE_DIR, f"scr_{base}.json")
 
 
 def _cache_valid(payload, now):
@@ -239,59 +354,53 @@ def _cache_valid(payload, now):
     return (now - ts).total_seconds() <= INTRADAY_TTL
 
 
-def fetch_all(code, n=120, use_cache=True, now=None):
+def fetch_all(code, n=120, use_cache=True, now=None, us_mode=False):
     """**并行**取日线 + 资金流（两路同时发），同日命中磁盘缓存时 0 网络。
 
     ⚡ 提速要点（实测：三次串行 0.52s → 两路并行 + 去 quote ≈ 0.2s，缓存命中 ≈ 0.01s）：
       ① 名字改从 kline 拿，砍掉一整次 quote 请求；
       ② 日线与资金流并发（原来还是串行的）；
       ③ 同日磁盘缓存（收盘后当日有效，盘中 120s TTL，与 bars_source 同一套判据）。
+    ⚡ 美股走 us_mode：kline/fflow 用 http 端点（_get_json_us）、secid 用 em_us_secid 探测。
     返回 (bars, name, fflow)。
     """
     now = now or dt.datetime.now()
-    path = _cache_path(code)
+    path = _cache_path(code, us_mode=us_mode)
     if use_cache and os.path.isfile(path):
         try:
             with open(path, encoding="utf-8") as f:
                 payload = json.load(f)
             if _cache_valid(payload, now) and payload.get("bars"):
-                return payload["bars"], payload.get("name") or str(code), payload.get("fflow") or {}
+                return payload["bars"], payload.get("name") or (
+                    str(code).upper() if us_mode else str(code)), payload.get("fflow") or {}
         except Exception:
             pass                                  # 缓存坏了就重取，不因此失败
 
-    secid = secid_of(code)
-    with cf.ThreadPoolExecutor(max_workers=2) as ex:
-        f_k = ex.submit(_get_json, EM_KLINE.format(secid=secid, lmt=n))
-        f_f = ex.submit(_get_json, EM_FFLOW.format(secid=secid))
-        kd = (f_k.result() or {}).get("data") or {}
-        try:
-            fd = (f_f.result() or {}).get("data") or {}
-        except Exception:
-            fd = {}                               # 资金流失败不致命：主力成本会退到备用口径
+    secid = secid_of(code, us_mode=us_mode)
+    if us_mode:
+        with cf.ThreadPoolExecutor(max_workers=2) as ex:
+            f_k = ex.submit(_get_json_us, EM_KLINE_US.format(secid=secid, lmt=n))
+            f_f = ex.submit(_get_json_us, EM_FFLOW_US.format(secid=secid))
+            kd = (f_k.result() or {}).get("data") or {}
+            try:
+                fd = (f_f.result() or {}).get("data") or {}
+            except Exception:
+                fd = {}                           # 美股资金流失败不致命：退低位带口径
+    else:
+        with cf.ThreadPoolExecutor(max_workers=2) as ex:
+            f_k = ex.submit(_get_json, EM_KLINE.format(secid=secid, lmt=n))
+            f_f = ex.submit(_get_json, EM_FFLOW.format(secid=secid))
+            kd = (f_k.result() or {}).get("data") or {}
+            try:
+                fd = (f_f.result() or {}).get("data") or {}
+            except Exception:
+                fd = {}                           # 资金流失败不致命：主力成本会退到备用口径
 
-    name = kd.get("name") or str(code)
-    bars = []
-    for line in kd.get("klines") or []:
-        p = line.split(",")
-        if len(p) < 11:
-            continue
-        try:
-            bars.append({"d": p[0], "o": float(p[1]), "c": float(p[2]),
-                         "h": float(p[3]), "l": float(p[4]), "v": float(p[5]),
-                         "amt": float(p[6]), "turnover": float(p[10])})
-        except ValueError:
-            continue
+    name = kd.get("name") or (str(code).upper() if us_mode else str(code))
+    bars, _ = _parse_kline(kd)
     if not bars:
         raise RuntimeError(f"东财未返回 {code} 日线（停牌/代码错？）")
-
-    fflow = {}
-    for line in (fd.get("klines") or []):
-        p = line.split(",")
-        if len(p) >= 7:
-            try:
-                fflow[p[0]] = max(0.0, float(p[6])) / 100.0
-            except ValueError:
-                continue
+    fflow = _parse_fflow(fd)
 
     if use_cache:
         try:
@@ -307,7 +416,7 @@ def fetch_all(code, n=120, use_cache=True, now=None):
 
 
 # ─────────────────────────── 筹码分布模型 ───────────────────────────
-def chip_model(bars, keep_last=8, main_rho=None, decay_k=1.0):
+def chip_model(bars, keep_last=8, main_rho=None, decay_k=1.0, us_mode=False):
     """三角分布 + 换手衰减。返回 (prices, dist, snaps, bin_w, miss, main_dist)。
 
     `main_rho` = {日期: 主力净买入占成交比} ⇒ 同步累出**主力筹码分布** `main_dist`：
@@ -335,7 +444,10 @@ def chip_model(bars, keep_last=8, main_rho=None, decay_k=1.0):
     snaps = []
     for b in bars:
         r = min(max(b["turnover"] / 100.0, 0.0), 1.0) if b["turnover"] > 0 else med_r
-        l, h, vol = b["l"], b["h"], b["v"] * 100.0          # 手 → 股
+        l, h = b["l"], b["h"]
+        # ⚠ 量纲：A 股 v=手（×100 转股）；美股 v=股（不转）。VWAP = amt/vol 两市场都成立
+        #   （A 股 amt 元 / 股数 ⇒ 元/股；美股 amt 美元 / 股数 ⇒ 美元/股）。
+        vol = (b["v"] * 100.0) if not us_mode else b["v"]
         tri = [0.0] * n_bins
         if h <= l:                                          # 一字板：全堆在该价
             tri[min(int((l - lo) / w), n_bins - 1)] = vol
@@ -688,14 +800,19 @@ def state_action_of(state, close, M, p15, p85, scr90, profit=None):
 _VERDICT_ORDER = {"卖": 0, "买": 1, "持": 2, "观察": 3}
 
 
-def run_batch(codes, n=120, half_life=CHIP_HALF_LIFE, decay_k=None, workers=6):
-    """并发分析多只，返回 [(code, result|None, err|None)]。"""
+def run_batch(codes, n=120, half_life=CHIP_HALF_LIFE, decay_k=None, workers=6, force_us=None):
+    """并发分析多只，返回 [(code, result|None, err|None)]。
+
+    force_us: True=全部按美股；False=全部按 A 股；None=逐码自动识别（含字母判美股）。
+    """
     out = [None] * len(codes)
 
     def work(i):
         code = codes[i]
+        um = True if force_us is True else (is_us_code(code) if force_us is None else False)
         try:
-            out[i] = (code, analyze(code, n=n, decay_k=decay_k, half_life=half_life), None)
+            out[i] = (code, analyze(code, n=n, decay_k=decay_k, half_life=half_life,
+                                   us_mode=um), None)
         except Exception as e:      # 单只失败不影响整批
             out[i] = (code, None, f"{type(e).__name__}: {e}")
 
@@ -716,12 +833,13 @@ def render_batch(rows):
           f"{'偏离主力':>9}{'获利盘':>8}{'位置':>8}  {'筹码状态':<20}{'开仓':<6}交易侧")
     print("─" * 112)
     for code, r, _ in ok:
+        cur = r.get("cur", "¥")
         mc = r.get("main_cost")
         gap = f"{(r['close'] / mc - 1) * 100:+.1f}%" if mc else "—"
         pos = "—" if r["dist_pos"] is None else f"{r['dist_pos'] * 100:.0f}%"
         st = r.get("state") or "—"
-        print(f"{code:<7}{r['name'][:8]:<9}{r['close']:>7.2f}{r['scr90']:>6.1f}%"
-              f"{r['scr70']:>6.1f}%{(mc if mc else 0):>9.2f}{gap:>9}"
+        print(f"{code:<7}{r['name'][:8]:<9}{cur}{r['close']:>6.2f}{r['scr90']:>6.1f}%"
+              f"{r['scr70']:>6.1f}%{cur}{(mc if mc else 0):>8.2f}{gap:>9}"
               f"{r['profit']:>7.1f}%{pos:>8}  {st:<14}"
               f"{'✅可' if r.get('state_allow_new') else '⛔否':<6}{r['verdict']}"
               + ("" if r["main_src"] == "资金流" else "·主力成本=低位带"))
@@ -732,8 +850,8 @@ def render_batch(rows):
 
 
 # ─────────────────────────── 主流程 ───────────────────────────
-def analyze(code, n=120, decay_k=None, half_life=CHIP_HALF_LIFE):
-    bars, name, main_rho_now = fetch_all(code, n=n)
+def analyze(code, n=120, decay_k=None, half_life=CHIP_HALF_LIFE, us_mode=False):
+    bars, name, main_rho_now = fetch_all(code, n=n, us_mode=us_mode)
     if len(bars) < MIN_BARS:
         raise RuntimeError(f"{code} 只有 {len(bars)} 根日线（< {MIN_BARS}），不足以判读筹码，不出结论")
 
@@ -745,7 +863,8 @@ def analyze(code, n=120, decay_k=None, half_life=CHIP_HALF_LIFE):
         decay_k = solve_decay_k(bars, half_life=half_life)
     main_rho = main_rho_now                       # 逐日主力净买入占比（算主力成本用，已并行取到）
     prices, dist, snaps, w, miss, m_dist = chip_model(bars, keep_last=KEEP,
-                                                      main_rho=main_rho, decay_k=decay_k)
+                                                      main_rho=main_rho, decay_k=decay_k,
+                                                      us_mode=us_mode)
 
     def summary(d, close):
         p5 = cost_at(prices, d, 5)
@@ -839,7 +958,9 @@ def analyze(code, n=120, decay_k=None, half_life=CHIP_HALF_LIFE):
     state_act = state_action_of(state, close, M, p15, p85, scr90, profit)
 
     return {
-        "code": str(code).zfill(6), "name": name, "as_of": last["d"],
+        "code": (str(code).upper() if us_mode else str(code).zfill(6)),
+        "name": name, "as_of": last["d"], "us_mode": us_mode,
+        "cur": ("$" if us_mode else "¥"),
         "bars": len(bars), "close": close, "turnover": turnover, "vol_ratio": vol_ratio,
         "scr90": scr90, "scr70": scr70, "M": M, "profit": profit,
         "p5": p5, "p15": p15, "p85": p85, "p95": p95,
@@ -859,9 +980,11 @@ def analyze(code, n=120, decay_k=None, half_life=CHIP_HALF_LIFE):
 
 
 def render(r):
+    cur = r.get("cur", "¥")
+    mkt = "美股" if r.get("us_mode") else "A股"
     line = "═" * 66
     print(line)
-    print(f" SCR 筹码集中度 · {r['code']} {r['name']} · 截至 {r['as_of']}")
+    print(f" SCR 筹码集中度 · [{mkt}] {r['code']} {r['name']} · 截至 {r['as_of']}")
     print(line)
     _st = r.get("state") or "—"
     # ⚑ 2026-10-14 修：原用r['verdict']（旧四态）当「交易侧」，导致**所有票都打「观察」**
@@ -873,20 +996,20 @@ def render(r):
     print(f"   理由：{r.get('state_why') or r['why']}")
     print(f"   动作：{r.get('state_action') or r['action']}")
     print("─" * 66)
-    print(f" 现价 {r['close']:.2f}｜换手 {r['turnover']:.2f}%｜量比 {r['vol_ratio']:.2f}×"
+    print(f" 现价 {cur}{r['close']:.2f}｜换手 {r['turnover']:.2f}%｜量比 {r['vol_ratio']:.2f}×"
           f"｜衰减 k={r['decay_k']:.3f}（{'按半衰期 ' + str(r['half_life']) + ' 日自求' if r['k_auto'] else '手动'}）")
     print(f" SCR90 {r['scr90']:.2f}%｜SCR70 {r['scr70']:.2f}%"
           f"｜近 5 日 SCR90 {'→'.join(f'{v:.1f}' for v in r['scr_hist'][-5:])}")
     print(f" 90% 筹码 {r['p5']:.2f}~{r['p95']:.2f}｜70% 筹码（峰区）{r['p15']:.2f}~{r['p85']:.2f}")
-    bp = f"{r['peak_price']:.2f}（低位带 {r['low_lo']:.2f}~{r['low_hi']:.2f}）"
+    bp = f"{cur}{r['peak_price']:.2f}（低位带 {cur}{r['low_lo']:.2f}~{cur}{r['low_hi']:.2f}）"
     if not r["below_now"]:
-        bp = f"无 — 低位带已抬到现价 {r['close']:.2f} 之上"
+        bp = f"无 — 低位带已抬到现价 {cur}{r['close']:.2f} 之上"
     mc = r["main_cost"]
     if mc:
         gap = (r["close"] / mc - 1) * 100
         tag = "" if r["main_src"] == "资金流" else f"（资金流取不到，退低位带口径）"
-        print(f" 主力成本 {mc:.2f}{tag}｜现价相对主力成本 {gap:+.1f}%")
-    print(f" 平均成本 {r['M']:.2f}｜获利盘 {r['profit']:.1f}%｜主峰 {r['main_price']:.2f}"
+        print(f" 主力成本 {cur}{mc:.2f}{tag}｜现价相对主力成本 {gap:+.1f}%")
+    print(f" 平均成本 {cur}{r['M']:.2f}｜获利盘 {r['profit']:.1f}%｜主峰 {cur}{r['main_price']:.2f}"
           f"｜底部峰 {bp}｜{'单峰' if r['n_peak'] <= 1 else str(r['n_peak']) + ' 峰（分歧）'}")
     if r["dist_pos"] is not None:
         pos = ("峰区上方 %.0f%%" % (r["dist_pos"] * 100)) if r["dist_pos"] > 1 else (
@@ -934,12 +1057,14 @@ def selftest():
 
 
 def main():
-    ap = argparse.ArgumentParser(description="SCR 筹码集中度计算器（A股）")
-    ap.add_argument("code", nargs="?", help="6 位 A 股代码（与 --batch 二选一）")
+    ap = argparse.ArgumentParser(description="SCR 筹码集中度计算器（A股 / 美股）")
+    ap.add_argument("code", nargs="?", help="6 位 A 股代码，或美股字母代码如 NVDA（与 --batch 二选一）")
     ap.add_argument("--batch", default=None,
                     help="批量：逗号/空格分隔的多个代码（一次进程跑完，摊掉解释器启动开销）")
     ap.add_argument("--workers", type=int, default=6, help="批量并发取数线程数（默认 6）")
     ap.add_argument("--n", type=int, default=120, help="回看日线根数（默认 120）")
+    ap.add_argument("--us", dest="us", choices=["1", "0"], default=None,
+                    help="强制市场：1=按美股(字母代码也可省略)、0=按 A 股；省略则按代码自动识别")
     ap.add_argument("--json", default=None, help="结构化输出路径（建议 out_cn/scr_<code>.json）")
     ap.add_argument("--decay-k", type=float, default=None, dest="decay_k",
                     help="手动指定换手衰减系数（默认 None＝按 --half-life 自求）")
@@ -951,8 +1076,10 @@ def main():
         return selftest()
     if a.batch:
         codes = [c.strip() for c in re.split(r"[,，\s]+", a.batch) if c.strip()]
+        force_us = None if a.us is None else (a.us == "1")
         t0 = time.perf_counter()
-        rows = run_batch(codes, n=a.n, decay_k=a.decay_k, half_life=a.half_life, workers=a.workers)
+        rows = run_batch(codes, n=a.n, decay_k=a.decay_k, half_life=a.half_life,
+                        workers=a.workers, force_us=force_us)
         rc = render_batch(rows)
         print(f" {len(codes)} 只 · 耗时 {time.perf_counter() - t0:.2f}s"
               f"（并发 {a.workers} 路取数）")
@@ -967,8 +1094,10 @@ def main():
         return rc
     if not a.code:
         ap.error("请给代码（或 --batch 批量），或用 --selftest")
+    force_us = None if a.us is None else (a.us == "1")
+    us_mode = (force_us is True) or (force_us is None and is_us_code(a.code))
     try:
-        r = analyze(a.code, n=a.n, decay_k=a.decay_k, half_life=a.half_life)
+        r = analyze(a.code, n=a.n, decay_k=a.decay_k, half_life=a.half_life, us_mode=us_mode)
     except Exception as e:
         print(f"✗ {a.code}：{e}")
         return 1
