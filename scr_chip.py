@@ -59,6 +59,17 @@ EM_FFLOW_US = ("http://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
                "?lmt=0&klt=101&secid={secid}&fields1=f1,f2,f3,f7"
                "&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63")
 
+# ── 备用源：腾讯行情（2026-10-15 加）—— 东财整体不可用时兜底，避免筹码面「交白卷」 ──
+# 起因：众生药业 002317 连跑两次 scr_chip 都「东财接口失败：Remote end closed」。
+#   实测根因是**东财 HTTPS 在本环境被中间设备拦**（http 明文正常），已修（见 _get_json）；
+#   但若哪天 http 也断/封 IP，筹码面就彻底没数 ⇒ 必须有第二个源，不能只有一个供应商。
+# 腾讯能给什么：fqkline 给**前复权日线 OHLCV(手)**，qt.gtimg.cn 给实时报价
+#   （38=换手率% · 44=流通市值亿 · 3=现价）。**没有成交额 amt、没有历史逐日换手率**
+#   ⇒ 换手率自算（见 tx_float_shares，自洽口径+对拍自检），amt 填 0 走 chip_model 既有兜底。
+TX_KLINE = ("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+            "?param={sym},day,,,{n},qfq")
+TX_QUOTE = "https://qt.gtimg.cn/q={sym}"
+
 # ── 市场识别：6 位数字＝A 股；含字母（NVDA / TSLA / SOXS）＝美股 ──
 US_HINT = re.compile(r"[A-Za-z]")
 def is_us_code(code):
@@ -176,27 +187,19 @@ def solve_decay_k(bars, half_life=CHIP_HALF_LIFE):
 
 
 # ─────────────────────────────── 取数 ───────────────────────────────
-def _get_json(url, timeout=20, retries=2):
-    last = None
-    for i in range(retries):
-        try:
-            req = urllib.request.Request(url, headers=UA)
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                return json.loads(r.read().decode("utf-8"))
-        except Exception as e:              # 网络抖动：重试后仍失败就抛，不用假数
-            last = e
-            time.sleep(0.4 * (i + 1))
-    raise RuntimeError(f"东财接口失败：{last}")
+def _get_json(url, timeout=20, retries=2, schemes=("http", "https")):
+    """东财取数：**http 明文优先、https 兜底**（A 股与美股现在同一套）。
 
+    ⚠ 2026-10-15 实测根因：本环境 push2his 的 **HTTPS 被中间设备拦截**（Remote end
+    closed connection），而 **http 明文通道完全正常**（同样 secid 能取回带换手率/成交额
+    的完整日线）。原 A 股路径只走 https ⇒ 东财一被拦就整条断（众生药业 002317 暴露）；
+    美股路径 `_get_json_us` 早就用 http 绕过了，A 股没跟上 —— 此处统一，不再两套。
 
-def _get_json_us(url, timeout=20, retries=2):
-    """美股源取数：**http 明文优先，https 兜底**（东财美股 HTTPS 在本环境被中间设备拦截）。
-
-    与 A 股 `_get_json`（仅 https）分开，避免给 A 股请求也试 http 拖慢；美股专属。
+    多方案逐 scheme 重试：http 成功即返回（比原来更快，因为不再死等 https 超时）。
     """
     last = None
-    for _ in range(retries):
-        for scheme in ("http", "https"):
+    for i in range(retries):
+        for scheme in schemes:
             u = url.replace("https://", scheme + "://").replace("http://", scheme + "://")
             try:
                 req = urllib.request.Request(u, headers=UA)
@@ -205,7 +208,17 @@ def _get_json_us(url, timeout=20, retries=2):
             except Exception as e:          # 单方案失败换下一方案，都不行才抛
                 last = e
                 time.sleep(0.3)
-    raise RuntimeError(f"东财美股接口失败：{last}")
+        time.sleep(0.2 * (i + 1))
+    raise RuntimeError(f"东财接口失败：{last}")
+
+
+def _get_json_us(url, timeout=20, retries=2):
+    """美股源取数：与 A 股同通道（http 优先、https 兜底），保留函数名以兼容旧调用。
+
+    历史注释曾说「与 A 股分开，避免给 A 股请求也试 http 拖慢」—— 2026-10-15 实测表明
+    http 才是本环境唯一可靠的通道，分开反而让 A 股踩坑，故统一到 `_get_json`。
+    """
+    return _get_json(url, timeout=timeout, retries=retries)
 
 
 def secid_of(code, us_mode=False):
@@ -335,6 +348,91 @@ def fetch_fflow_us(sym):
         return {}
 
 
+# ─────────────────────────── 备用源：腾讯行情 ───────────────────────────
+def tx_symbol(code):
+    """6 位 A 股代码 → 腾讯符号（sz002317 / sh600830；6、9 开头归沪市）。"""
+    c = str(code).strip().zfill(6)
+    return ("sh" if c.startswith(("6", "9")) else "sz") + c
+
+
+def _tx_get(url, timeout=15, tries=2, gbk=True):
+    """腾讯接口取文本（qt.gtimg.cn 是 **GBK** 编码，必须显式解码，否则中文乱码）。"""
+    last = None
+    for i in range(tries):
+        try:
+            req = urllib.request.Request(url, headers=UA)
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                raw = r.read()
+            return raw.decode("gbk" if gbk else "utf-8", errors="replace")
+        except Exception as e:
+            last = e
+            time.sleep(0.4 * (i + 1))
+    raise RuntimeError(f"腾讯接口失败：{last}")
+
+
+def tx_float_shares(sym):
+    """实时报价 → (流通股本「手」, 接口给的当日换手率%)。
+
+    ⚠ 腾讯**不给流通股本** ⇒ 自洽反解：float_shares(股) = 流通市值(元) / 现价，手 = 股/100。
+      字段位：3=现价、38=换手率(%)、44=流通市值(亿)。
+    ★ 自洽原则（不许抄外部数）：用反解出的股本**回算当日换手率**，与接口给的 38 位对拍；
+      偏差 > 25% 说明字段错位或数据源异常 ⇒ **返回 None 让上层放弃备用源**，
+      宁可报错也不用错数（换手率直接决定筹码衰减率，错了整个 SCR 都是假的）。
+    """
+    txt = _tx_get(TX_QUOTE.format(sym=sym))
+    if "=" not in txt:
+        return None, None
+    f = txt.split("=", 1)[1].strip().strip('";').split("~")
+    if len(f) < 45:
+        return None, None
+    try:
+        close = float(f[3])
+        turn_pct = float(f[38])
+        float_mv_yi = float(f[44])          # 流通市值（亿元）
+    except (ValueError, IndexError):
+        return None, None
+    if close <= 0 or float_mv_yi <= 0:
+        return None, None
+    shares_hand = float_mv_yi * 1e8 / close / 100.0      # 股 → 手
+    return shares_hand, turn_pct
+
+
+def fetch_bars_tx(code, n=120):
+    """腾讯前复权日线 → (bars, name)；字段布局与 `_parse_kline` 对齐（d,o,c,h,l,v,amt,turnover）。
+
+    ⚠⚠ **备用源是降精度替代，不是等价替代**（不许静默降级，调用方必须显示来源）：
+      ① **换手率**：腾讯日线不给 ⇒ 自算 turnover = 当日成交量(手) / 流通股本(手)。
+         流通股本取**当前值钉死**（tx_float_shares 反解），窗口内若有增发/解禁会偏；
+         但对拍过：002317 自算 6.97% vs 接口 6.97%，量级可靠。
+      ② **成交额 amt**：腾讯日线不给 ⇒ 填 0，chip_model 会退回 (l+h)/2 当三角峰值。
+      ⇒ 衰减率与 VWAP 都比东财口径粗，**结论置信度要降一档**，报告必须标明。
+    """
+    sym = tx_symbol(code)
+    j = json.loads(_tx_get(TX_KLINE.format(sym=sym, n=n), gbk=False))
+    node = ((j.get("data") or {}).get(sym) or {})
+    rows = node.get("qfqday") or node.get("day") or []
+    if not rows:
+        raise RuntimeError(f"腾讯未返回 {code} 日线（代码错/停牌？）")
+    name = node.get("qt") or {}
+    name = (name.get(sym) or [None, None, None, None, None, None])[1] if isinstance(name, dict) else ""
+    shares_hand, _ = tx_float_shares(sym)
+    bars = []
+    for r in rows:
+        if len(r) < 6:
+            continue
+        try:
+            v = float(r[5])                 # 成交量（手）
+        except ValueError:
+            continue
+        turn = (v / shares_hand * 100.0) if shares_hand else 0.0
+        bars.append({"d": r[0], "o": float(r[1]), "c": float(r[2]),
+                     "h": float(r[3]), "l": float(r[4]),
+                     "v": v, "amt": 0.0, "turnover": turn})
+    if not bars:
+        raise RuntimeError(f"腾讯 {code} 日线解析为空")
+    return bars, (name or str(code))
+
+
 # ─────────────────────────── 取数编排（并行 + 同日缓存） ───────────────────────────
 def _cache_path(code, us_mode=False):
     base = (f"us_{str(code).upper()}" if us_mode else str(code).zfill(6))
@@ -362,7 +460,20 @@ def fetch_all(code, n=120, use_cache=True, now=None, us_mode=False):
       ② 日线与资金流并发（原来还是串行的）；
       ③ 同日磁盘缓存（收盘后当日有效，盘中 120s TTL，与 bars_source 同一套判据）。
     ⚡ 美股走 us_mode：kline/fflow 用 http 端点（_get_json_us）、secid 用 em_us_secid 探测。
-    返回 (bars, name, fflow)。
+    返回 (bars, name, fflow)；要拿数据来源（东财 / 腾讯备用源）用 `fetch_all_meta`。
+    """
+    bars, name, fflow, _m = fetch_all_meta(code, n=n, use_cache=use_cache,
+                                           now=now, us_mode=us_mode)
+    return bars, name, fflow
+
+
+def fetch_all_meta(code, n=120, use_cache=True, now=None, us_mode=False,
+                   allow_fallback=True):
+    """同 `fetch_all`，额外返回 meta=数据来源。**想知道数从哪来的就调这个**。
+
+    meta = {"kline": "em"|"tx", "fflow": "em"|"none", "note": str, "em_err": str?}
+    ★ 铁律（老罗）：**降级绝不静默** —— 走了备用源必须在 meta 里写明，
+      由调用方显示出来 / 写进报告，否则「筹码面有数」就是假的安全感。
     """
     now = now or dt.datetime.now()
     path = _cache_path(code, us_mode=us_mode)
@@ -371,36 +482,14 @@ def fetch_all(code, n=120, use_cache=True, now=None, us_mode=False):
             with open(path, encoding="utf-8") as f:
                 payload = json.load(f)
             if _cache_valid(payload, now) and payload.get("bars"):
-                return payload["bars"], payload.get("name") or (
-                    str(code).upper() if us_mode else str(code)), payload.get("fflow") or {}
+                return (payload["bars"], payload.get("name") or (
+                    str(code).upper() if us_mode else str(code)),
+                    payload.get("fflow") or {}, payload.get("meta") or {})
         except Exception:
             pass                                  # 缓存坏了就重取，不因此失败
 
-    secid = secid_of(code, us_mode=us_mode)
-    if us_mode:
-        with cf.ThreadPoolExecutor(max_workers=2) as ex:
-            f_k = ex.submit(_get_json_us, EM_KLINE_US.format(secid=secid, lmt=n))
-            f_f = ex.submit(_get_json_us, EM_FFLOW_US.format(secid=secid))
-            kd = (f_k.result() or {}).get("data") or {}
-            try:
-                fd = (f_f.result() or {}).get("data") or {}
-            except Exception:
-                fd = {}                           # 美股资金流失败不致命：退低位带口径
-    else:
-        with cf.ThreadPoolExecutor(max_workers=2) as ex:
-            f_k = ex.submit(_get_json, EM_KLINE.format(secid=secid, lmt=n))
-            f_f = ex.submit(_get_json, EM_FFLOW.format(secid=secid))
-            kd = (f_k.result() or {}).get("data") or {}
-            try:
-                fd = (f_f.result() or {}).get("data") or {}
-            except Exception:
-                fd = {}                           # 资金流失败不致命：主力成本会退到备用口径
-
-    name = kd.get("name") or (str(code).upper() if us_mode else str(code))
-    bars, _ = _parse_kline(kd)
-    if not bars:
-        raise RuntimeError(f"东财未返回 {code} 日线（停牌/代码错？）")
-    fflow = _parse_fflow(fd)
+    bars, name, fflow, meta = _fetch_raw(code, n=n, us_mode=us_mode,
+                                         allow_fallback=allow_fallback)
 
     if use_cache:
         try:
@@ -408,11 +497,57 @@ def fetch_all(code, n=120, use_cache=True, now=None, us_mode=False):
             tmp = path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump({"saved_at": now.isoformat(timespec="seconds"), "name": name,
-                           "bars": bars, "fflow": fflow}, f, ensure_ascii=False)
+                           "bars": bars, "fflow": fflow, "meta": meta},
+                          f, ensure_ascii=False)
             os.replace(tmp, path)
         except Exception:
             pass
-    return bars, name, fflow
+    return bars, name, fflow, meta
+
+
+def _fetch_raw(code, n=120, us_mode=False, allow_fallback=True):
+    """真正发请求：**东财优先 → 腾讯备用源兜底**（仅 A 股；美股暂无备用源）。
+
+    ⚠ 日线与资金流并发；任一失败都不致命（资金流只影响主力成本的一个口径）。
+    ⚠ 东财日线**整体**拿不到才降级腾讯 —— 不是「东财慢」就换，避免正常波动下乱换源。
+    """
+    secid = secid_of(code, us_mode=us_mode)
+    meta = {"kline": "em", "fflow": "em", "note": ""}
+    kd, fd = {}, {}
+    getter = _get_json_us if us_mode else _get_json
+    with cf.ThreadPoolExecutor(max_workers=2) as ex:
+        f_k = ex.submit(getter, (EM_KLINE_US if us_mode else EM_KLINE).format(secid=secid, lmt=n))
+        f_f = ex.submit(getter, (EM_FFLOW_US if us_mode else EM_FFLOW).format(secid=secid))
+        try:
+            kd = (f_k.result() or {}).get("data") or {}
+        except Exception as e:                    # 东财日线挂了 → 交给下面的备用源
+            meta["em_err"] = f"{type(e).__name__}: {e}"
+            kd = {}
+        try:
+            fd = (f_f.result() or {}).get("data") or {}
+        except Exception:
+            fd = {}                               # 资金流失败不致命：主力成本退到备用口径
+
+    name = kd.get("name") or (str(code).upper() if us_mode else str(code))
+    bars, _ = _parse_kline(kd)
+
+    if not bars and allow_fallback and not us_mode:
+        bars, name = fetch_bars_tx(code, n=n)     # ★ 备用源（腾讯）
+        meta["kline"] = "tx"
+        meta["note"] = (
+            "东财日线不可用，已降级【腾讯备用源】：换手率由「成交量/流通股本」自算"
+            "（股本取当前值，窗口内增发/解禁会偏），成交额缺失 ⇒ 三角峰值退回 (高+低)/2。"
+            "衰减率与 VWAP 精度低于东财口径，结论降一档置信度")
+    if not bars:
+        raise RuntimeError(f"日线取数失败：东财未返回 {code}（停牌/代码错？）"
+                           + (f"；腾讯备用源也不可用：{meta.get('em_err')}" if us_mode else ""))
+
+    fflow = _parse_fflow(fd)
+    if not fflow:
+        meta["fflow"] = "none"                    # 主力成本会退到「低位带均价」口径
+    if meta["kline"] == "tx":
+        meta["fflow"] = "none"                    # 腾讯无资金流 ⇒ 同上
+    return bars, name, fflow, meta
 
 
 # ─────────────────────────── 筹码分布模型 ───────────────────────────
@@ -851,7 +986,7 @@ def render_batch(rows):
 
 # ─────────────────────────── 主流程 ───────────────────────────
 def analyze(code, n=120, decay_k=None, half_life=CHIP_HALF_LIFE, us_mode=False):
-    bars, name, main_rho_now = fetch_all(code, n=n, us_mode=us_mode)
+    bars, name, main_rho_now, _meta = fetch_all_meta(code, n=n, us_mode=us_mode)
     if len(bars) < MIN_BARS:
         raise RuntimeError(f"{code} 只有 {len(bars)} 根日线（< {MIN_BARS}），不足以判读筹码，不出结论")
 
@@ -976,6 +1111,10 @@ def analyze(code, n=120, decay_k=None, half_life=CHIP_HALF_LIFE, us_mode=False):
         "state_allow_new": STATE_ALLOW_NEW.get(state, False),
         "decay_k": decay_k, "k_auto": k_auto, "half_life": half_life,
         "turnover_missing": miss,
+        # ★ 数据来源（备用源不许静默降级，必须逐层带出去）
+        "kline_src": _meta.get("kline", "em"),
+        "fflow_src": _meta.get("fflow", "em"),
+        "src_note": _meta.get("note", ""),
     }
 
 
@@ -986,6 +1125,11 @@ def render(r):
     print(line)
     print(f" SCR 筹码集中度 · [{mkt}] {r['code']} {r['name']} · 截至 {r['as_of']}")
     print(line)
+    # ★ 备用源必须显式亮出来：静默降级＝假的安全感（2026-10-15 众生药业 002317 踩过）
+    if r.get("kline_src") == "tx":
+        print(" ⚠⚠ 数据来源【腾讯备用源】(东财不可用)：换手率自算、成交额缺失 ⇒ 精度降一档")
+    if r.get("fflow_src") == "none":
+        print(" ⚠ 资金流未取到 ⇒ 主力成本退到「低位带均价」口径（不是资金流口径）")
     _st = r.get("state") or "—"
     # ⚑ 2026-10-14 修：原用r['verdict']（旧四态）当「交易侧」，导致**所有票都打「观察」**
     #   （verdict 在价格离开峰区时一律判观察），字段等于没信息量，且与下方
