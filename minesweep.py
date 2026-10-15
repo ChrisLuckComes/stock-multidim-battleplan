@@ -73,10 +73,25 @@ PER_CAT = {"解禁限售": 4, "应收计提": 5, "诉讼立案": 6, "减持": 8,
            "质押": 6, "担保": 3, "商誉减值": 4, "异动风险": 5, "业绩": 5}
 
 
+def _http_first(url):
+    """东财走 http 明文优先（本机 HTTPS 被中间设备拦，http 正常），其余 https 优先、http 兜底。"""
+    if url.startswith("https://") and ".eastmoney.com" in url:
+        return ["http://" + url[8:], url]
+    if url.startswith("https://"):
+        return [url, "http://" + url[8:]]
+    return [url]
+
+
 def _get(url, timeout=20):
-    req = urllib.request.Request(url, headers={"User-Agent": UA, "Referer": REF})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode("utf-8", "replace"))
+    last = None
+    for u in _http_first(url):
+        try:
+            req = urllib.request.Request(u, headers={"User-Agent": UA, "Referer": REF})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read().decode("utf-8", "replace"))
+        except Exception as e:
+            last = e
+    raise RuntimeError("取数失败 %s: %s" % (url[:80], last))
 
 
 def strip_html(h):

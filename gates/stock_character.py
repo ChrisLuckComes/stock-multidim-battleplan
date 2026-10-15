@@ -737,6 +737,15 @@ def reconcile_breakout(a):
 
 
 # ─────────────────────── 第二层：利好兑现习惯 ───────────────────────
+def _http_first(url):
+    """东财走 http 明文优先（本机 HTTPS 被中间设备拦，http 正常），其余 https 优先、http 兜底。"""
+    if url.startswith("https://") and ".eastmoney.com" in url:
+        return ["http://" + url[8:], url]
+    if url.startswith("https://"):
+        return [url, "http://" + url[8:]]
+    return [url]
+
+
 def fetch_announcements_ex(code, until=None, max_pages=NEWS_PAGES, use_cache=True):
     """东财公告接口 → (anns, meta)。anns = [(YYYY-MM-DD, title)] 倒序，失败给 []。
 
@@ -780,12 +789,17 @@ def fetch_announcements_ex(code, until=None, max_pages=NEWS_PAGES, use_cache=Tru
         url = ("https://np-anotice-stock.eastmoney.com/api/security/ann?"
                "page_size=50&page_index=%d&ann_type=A&client_source=web"
                "&stock_list=%s" % (p, code))
-        req = urllib.request.Request(url, headers={
-            "User-Agent": bars_source.UA, "Referer": "https://data.eastmoney.com/"})
-        try:
-            with urllib.request.urlopen(req, timeout=15) as r:
-                d = json.loads(r.read().decode("utf-8"))
-        except Exception:
+        d = None
+        for u in _http_first(url):
+            req = urllib.request.Request(u, headers={
+                "User-Agent": bars_source.UA, "Referer": "https://data.eastmoney.com/"})
+            try:
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    d = json.loads(r.read().decode("utf-8"))
+                break
+            except Exception:
+                continue
+        if d is None:
             meta["stop_reason"] = "接口请求失败（第 %d 页）" % p
             break
         lst = (d.get("data") or {}).get("list") or []

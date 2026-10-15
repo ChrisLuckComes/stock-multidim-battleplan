@@ -79,13 +79,23 @@ def limit_pct(code: str) -> float:
     return 20.0 if code[:3] in ("300", "301", "688", "689") else 10.0
 
 
+def _http_first(url: str):
+    """东财走 http 明文优先（本机 HTTPS 被中间设备拦，http 正常），其余 https 优先、http 兜底。"""
+    if url.startswith("https://") and ".eastmoney.com" in url:
+        return ["http://" + url[8:], url]
+    if url.startswith("https://"):
+        return [url, "http://" + url[8:]]
+    return [url]
+
+
 def _get(url: str, tries: int = 3):
-    for i in range(tries):
-        try:
-            req = urllib.request.Request(url, headers=_HDR)
-            return json.load(urllib.request.urlopen(req, timeout=25))
-        except Exception:
-            time.sleep(0.8 * (i + 1))
+    for u in _http_first(url):
+        for i in range(tries):
+            try:
+                req = urllib.request.Request(u, headers=_HDR)
+                return json.load(urllib.request.urlopen(req, timeout=25))
+            except Exception:
+                time.sleep(0.8 * (i + 1))
     return None
 
 

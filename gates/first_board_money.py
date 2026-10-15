@@ -65,15 +65,25 @@ MICRO_FLOAT_CAP = 3e9       # 30 亿
 BIG_FLOAT_CAP = 1e10        # 100 亿
 
 
+def _http_first(url):
+    """东财走 http 明文优先（本机 HTTPS 被中间设备拦，http 正常），其余 https 优先、http 兜底。"""
+    if url.startswith("https://") and ".eastmoney.com" in url:
+        return ["http://" + url[8:], url]
+    if url.startswith("https://"):
+        return [url, "http://" + url[8:]]
+    return [url]
+
+
 def _get(url, hdr=_H, tries=3, timeout=20):
     last = None
-    for _ in range(tries):
-        try:
-            req = urllib.request.Request(url, headers=hdr)
-            return json.loads(urllib.request.urlopen(req, timeout=timeout).read().decode("utf-8", "ignore"))
-        except Exception as e:                  # noqa: BLE001 取数失败必须显式暴露
-            last = e
-            time.sleep(1.2)
+    for u in _http_first(url):
+        for _ in range(tries):
+            try:
+                req = urllib.request.Request(u, headers=hdr)
+                return json.loads(urllib.request.urlopen(req, timeout=timeout).read().decode("utf-8", "ignore"))
+            except Exception as e:                  # noqa: BLE001 取数失败必须显式暴露
+                last = e
+                time.sleep(1.2)
     raise RuntimeError("取数失败 %s: %s" % (url[:80], last))
 
 

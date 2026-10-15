@@ -11,6 +11,7 @@ disable-model-invocation: true
 > **取数**：WorkBuddy 已连接通达信时优先使用 `tdx_lookup` / `tdx_quotes` / `tdx_kline`；不可用时依次降级到 `wb-finance-skill`、`fetch_market.py`。结构判定只用 `rule123.py`。通达信取数结果先用 `snapshot_from_tdx.py` 落成统一快照（**当日多只票一次取完**时用 `--batch <一段含多个返回的文本|目录>`，默认落到 `data/tdx/`），再喂 `rule123.py --data` / `probe_intraday.py --data`（禁止手工拼 `bars`）。所有日线取数（`scanner` / `watch_cn` / `pool_us`）已统一走 `bars_source.py` 三级链路 **本地快照 → 磁盘缓存 → 网络**，所以 `watch_cn.py --snap-dir data/tdx` / `pool_us.py --snap-dir data/tdx` 可**全离线**出复盘；报告首部会把「快照/缓存/网络各多少只」打出来。缓存状态与清理：`python bars_source.py --stat|--clear`。
 >
 > **基本面取数**：`tdx_security_deep_info` 返回 80–160KB，**必然超 token 落盘** ⇒ 拿到落盘路径后直接 `python tdx_deep_fin.py <落盘文件> --fin`（自动解析 + 按报告期排序去重 + 单位换算 + **单季/累计口径反查**），不要再手写 `python -c` 逐字段试。坑与口径细节见 [data-operations.md](references/data-operations.md) 第 11 条。
+> ⚠ **TDX 是备选数据源**：通达信连接器需授权且有额度积分限制（老罗 2026-10-15 额度已耗尽）。免费公开源（东财/新浪/腾讯）优先；TDX 仅在免费源失败或需 F10 财务深度时回退，不要作为取数首选。
 
 ## 执行原则
 

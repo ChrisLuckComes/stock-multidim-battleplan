@@ -102,7 +102,7 @@ stock-multidim-battleplan/
 ```
 
 - **SKILL.md**：精简入口与任务路由，保持在 500 行以内；详细策略按需读取 `references/`，避免每次调用加载全部案例与规则。
-- **fetch_market.py**：通用取数兜底。WorkBuddy 已连接通达信时优先走通达信连接器；否则再用 wb-finance-skill。两者都不可用时（如 Cursor / 通用 Agent）才运行本脚本。
+- **fetch_market.py**：通用取数兜底（零密钥公开源：A 股东方财富 / 美股 Nasdaq→Yahoo→stooq）。**默认主源就是这些免费公开接口**；通达信连接器（`tdx_*`）与 wb-finance-skill 仅作备选（TDX 需授权且有额度限制，老罗 2026-10-15 定）。免费源失败时 WorkBuddy 才回退 TDX；两者都不可用（如 Cursor / 通用 Agent）时 `fetch_market.py` 直接接管。
 - **rule123.py**：输出 `mode`（platform_break / w_bottom_break / flag_tl_break / line_pullback / downtrend_tl_break / impulse_pause / wait）和 `priority`（1=优先T1，2=次优先T2），以及 `stop_plan` / `targets`。
 
 ---
@@ -118,7 +118,7 @@ git clone https://github.com/ChrisLuckComes/stock-multidim-battleplan.git \
 ```
 
 重启 / 刷新 WorkBuddy 后，在对话中输入 `/stock-multidim-battleplan 贵州茅台`。
-> WorkBuddy 已连接通达信时，行情优先走 `tdx_lookup` / `tdx_quotes` / `tdx_kline`；连接器不可用时再走 `wb-finance-skill`。本仓库脚本作为结构判定兜底。
+> 行情默认走免费公开源（`bars_source` 新浪 / `fetch_market` 东财 / `market_regime` 腾讯）；WorkBuddy 已连接通达信且免费源失败时，才回退到 `tdx_lookup` / `tdx_quotes` / `tdx_kline`。TDX 仅备选，本仓库脚本是结构判定主源。
 
 ### B. Cursor
 Cursor 的 skills 目录为 `~/.cursor/skills/`。把整个仓库放进去即可（Cursor 通过 `disable-model-invocation: true` 字段确保仅显式 `/stock-multidim-battleplan` 触发，不自动误触发）：
@@ -145,7 +145,7 @@ python --version   # 需 3.8+
 
 - **Python 3.8+**（运行 `fetch_market.py` / `rule123.py`）。
 - **联网**（脚本实时抓取东方财富 / Nasdaq 公开行情，零密钥、零付费）。
-- **可选 · 通达信连接器 / wb-finance-skill**：WorkBuddy 中通达信连接器优先，wb-finance-skill 次之；两者不可用不影响本仓库功能，`fetch_market.py` 会接管。
+- **可选 · 通达信连接器 / wb-finance-skill（仅备选）**：TDX 需授权且有额度积分限制，老罗 2026-10-15 确认额度已耗尽。**默认不依赖**；免费公开源（东财/Nasdaq/新浪/腾讯）为主，TDX 仅在免费源失败或需盘中快照/F10 深度时回退。两者不可用不影响本仓库功能，`fetch_market.py` 会接管。
 - **Node.js**：非必需。本仓库不提供、也不需要 Node 脚本；行情一律用 `fetch_market.py`。
 
 ---

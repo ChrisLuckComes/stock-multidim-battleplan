@@ -35,15 +35,25 @@ BASE = ("https://push2ex.eastmoney.com/getTopicZTPool?ut=7eea3edcaed734bea9cbfc2
         "&dpt=wz.ztzt&Pageindex=0&pagesize=300&sort=fbt%3Aasc&date=")
 
 
+def _http_first(url):
+    """东财走 http 明文优先（本机 HTTPS 被中间设备拦，http 正常），其余 https 优先、http 兜底。"""
+    if url.startswith("https://") and ".eastmoney.com" in url:
+        return ["http://" + url[8:], url]
+    if url.startswith("https://"):
+        return [url, "http://" + url[8:]]
+    return [url]
+
+
 def _get(url, tries=3, timeout=20):
     last = None
-    for _ in range(tries):
-        try:
-            req = urllib.request.Request(url, headers=_H)
-            return json.loads(urllib.request.urlopen(req, timeout=timeout).read().decode("utf-8", "ignore"))
-        except Exception as e:              # noqa: BLE001
-            last = e
-            time.sleep(1.2)
+    for u in _http_first(url):
+        for _ in range(tries):
+            try:
+                req = urllib.request.Request(u, headers=_H)
+                return json.loads(urllib.request.urlopen(req, timeout=timeout).read().decode("utf-8", "ignore"))
+            except Exception as e:              # noqa: BLE001
+                last = e
+                time.sleep(1.2)
     print("⚠ 取数失败 %s (%s)" % (url[-24:], last))
     return None
 
