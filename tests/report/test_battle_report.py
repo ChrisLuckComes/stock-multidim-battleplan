@@ -480,7 +480,13 @@ class TestRender(unittest.TestCase):
 
 
 class TestAnalyzeOffline(unittest.TestCase):
-    """analyze() 端到端（离线）：显式传快照，分钟线取数被替换掉。"""
+    """analyze() 端到端（离线）：显式传快照，分钟线取数被替换掉。
+
+    ⚑ 2026-10-15：本类用例一律显式 `strength_gate=False` —— 测的是 analyze 下游
+    （struct/plan/odds/peers/摘要），合成/固定快照的强度判定归
+    tests/test_strength_gate.py 专测，两件事不互相拖后腿（合成序列曾被判 WEAK
+    硬中止，把下游断言全打成 KeyError）。
+    """
 
     def setUp(self):
         self.bars = synth_bars()
@@ -499,7 +505,8 @@ class TestAnalyzeOffline(unittest.TestCase):
 
     def test_analyze_produces_bundle(self):
         res = BA.analyze("600000", account=50000, data_file=self.tmp,
-                         intraday=False, n=len(self.bars))
+                         intraday=False, n=len(self.bars),
+                         strength_gate=False)
         self.assertEqual(res["meta"]["code"], "600000")
         self.assertAlmostEqual(res["meta"]["basis_close"],
                                round(self.bars[-1]["c"], 2), places=2)
@@ -539,6 +546,7 @@ class TestAnalyzeOffline(unittest.TestCase):
                 n=len(self.bars),
                 peers=["600183", "300476", "not-a-code", "603078"],
                 peer_names={"600183": "生益科技"},
+                strength_gate=False,
             )
         finally:
             BA.peer_row = orig
@@ -611,7 +619,8 @@ class TestAnalyzeOffline(unittest.TestCase):
 
     def test_summarize_runs(self):
         res = BA.analyze("600000", account=50000, data_file=self.tmp,
-                         intraday=False, n=len(self.bars))
+                         intraday=False, n=len(self.bars),
+                         strength_gate=False)
         txt = "\n".join(BA.summarize(res))
         self.assertIn("全档赔率", txt)
         self.assertIn("模式", txt)
@@ -625,7 +634,8 @@ class TestAnalyzeOffline(unittest.TestCase):
         2026-06-15 +83.0%、兆易创新 603986 2026-04-29 +74.1%，且无副作用）。
         """
         res = BA.analyze("600000", account=50000, data_file=self.tmp,
-                         intraday=False, n=len(self.bars))
+                         intraday=False, n=len(self.bars),
+                         strength_gate=False)
         res["plan"]["buy_zone"]["fills_policy"] = "limit_reclaim"
         res["plan"]["buy_zone"]["limit_px"] = 52.5
         res["plan"]["t0_tail"] = {"trigger": 54.0, "hard_stop": 50.0}
@@ -696,9 +706,10 @@ class TestTieLineAndCash(unittest.TestCase):
         if not os.path.exists(self.SNAP):
             self.skipTest("缺少 data/tdx/601208.json 快照")
         base = BA.analyze("601208", account=50000, data_file=self.SNAP,
-                          intraday=False)
+                          intraday=False, strength_gate=False)
         capped = BA.analyze("601208", account=50000, cash=6000,
-                            data_file=self.SNAP, intraday=False)
+                            data_file=self.SNAP, intraday=False,
+                            strength_gate=False)
         b, c = base["odds_recommend"], capped["odds_recommend"]
         # ⚑ cash=6000 时本票 1 手（5201）本来就装得下 ⇒ 封顶不触发，两者相等是
         #   **正确行为**，旧断言 `b > c` 过严（2026-10-10 修正；与同步无关，
@@ -708,7 +719,8 @@ class TestTieLineAndCash(unittest.TestCase):
         self.assertEqual(capped["meta"]["cash"], 6000)
         # 现金装不下 1 手 ⇒ 必须真的砍到 0，而不是照买
         tight = BA.analyze("601208", account=50000, cash=3000,
-                           data_file=self.SNAP, intraday=False)
+                           data_file=self.SNAP, intraday=False,
+                           strength_gate=False)
         t = tight["odds_recommend"]
         self.assertLess(t["amount"], b["amount"])
         self.assertLessEqual(t["amount"], 3000)

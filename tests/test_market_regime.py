@@ -4,7 +4,7 @@
 
 覆盖：
 - 指数三态判定（up / caution / down / unknown）
-- 板块→宽基指数兜底映射 + 非A股豁免
+- 板块→宽基指数兜底映射 + 美股 QQQ/SPY 分流（老罗 2026-10-15：美股同套 RS 逻辑）
 - 个股 RS 脱钩（leader）判定
 - 复合 gate：up 不干预；caution+RS弱→仅禁突破类；down+RS弱→全禁；RS强→豁免
 - 开关关闭不干预
@@ -184,11 +184,24 @@ def test_e2e_switch_off():
     assert mkt["broad_state"] == "unknown"  # 关闭时不取数
 
 
-def test_e2e_non_ash_exempt():
-    # 美股代码不取数、自然豁免
-    mkt = MR.compute_market_regime("CF", _bars(list(range(100, 131))), enabled=True)
-    assert mkt["broad_state"] == "unknown"
-    assert "不适用" in (mkt["note"] or "")
+def test_e2e_us_broad():
+    # 美股 ticker（老罗 2026-10-15）：宽基走 QQQ/SPY（腾讯 usXXXX 同一取数通道），
+    # 与 A 股同一套 RS 逻辑，不再「非A股豁免」
+    idx_bars, dates = _patch_index(list(range(130, 99, -1)))   # 宽基下行
+    stock = _bars(list(range(100, 131)), dates)                # 个股上行（对 QQQ 脱钩）
+    mkt = MR.compute_market_regime("ALAB", stock, enabled=True)
+    assert mkt["broad_index"] == "usQQQ"
+    assert mkt["broad_state"] == "down"
+    assert mkt["leader"] is True
+    assert mkt["rs"]["ok"] is True
+
+
+def test_select_broad_us_chain():
+    # 分流纯函数：A 股板块链 / 美股 QQQ+SPY 链 / 显式覆盖
+    assert MR.select_broad_indices("ALAB") == ["usQQQ", "usSPY"]
+    assert MR.select_broad_indices("600183")[0] == "sh000001"      # 沪主板块链不变
+    assert MR.select_broad_indices("301069")[0] == "sz399006"      # 创业板链不变
+    assert MR.select_broad_indices("ALAB", regime_index="usSPY")[0] == "usSPY"
 
 
 if __name__ == "__main__":

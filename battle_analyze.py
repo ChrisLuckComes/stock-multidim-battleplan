@@ -901,10 +901,55 @@ def is_us_code(code):
     return True
 
 
+# ────────────────────────────── 个股强度前置闸门（老罗 2026-10-15 定） ──────────────────────────────
+
+def _strength_gate(code, bars, is_us=False, name=None):
+    """个股强度快判（quick_strength）调用 + 异常兜底。
+
+    返回 quick_strength 结果 dict。闸门自身故障（导入失败 / 判定炸）时不阻断
+    主流程 —— 与 market_regime 同一哲学：记 reasons、按 NEUTRAL 放行，
+    把问题交给后续闸门和报告层暴露，而不是让整条分析崩掉。
+    """
+    try:
+        from gates.quick_strength import quick_strength
+        return quick_strength(code, bars, name=name)
+    except Exception as e:
+        return {"verdict": "NEUTRAL", "code": str(code), "name": name or str(code),
+                "reasons": ["强度闸门异常（%s）→ 按 NEUTRAL 放行，不阻断主流程" % e]}
+
+
+def _print_strength_abort(res):
+    """硬中止时的人类可读输出：结论 + 指标 + **不通过的理由**（老罗：必须给理由）。"""
+    qs = res.get("strength_gate") or {}
+    m = qs.get("metrics") or {}
+    md = res.get("meta") or {}
+    L = []
+    L.append("=" * 72)
+    L.append(" %s %s   个股强度前置闸门：%s ⛔ 硬中止（不跑完整报告）"
+             % (md.get("code"), md.get("name"), qs.get("verdict", "WEAK")))
+    L.append("=" * 72)
+    L.append(" 不满足「跑一下」前置条件 —— 只回强度结论，完整分析流程未执行。")
+    if m:
+        L.append(" 收盘/MA20      : %s / %s（站上MA20：%s）"
+                 % (m.get("last_close"), m.get("ma20"), m.get("above_ma20")))
+        L.append(" MA10/MA20      : %s / %s（MA10>MA20：%s）"
+                 % (m.get("ma10"), m.get("ma20"), m.get("ma10_gt_ma20")))
+        L.append(" MA20斜率       : %s%%" % m.get("ma20_slope"))
+        L.append(" 近20日/5日收益 : %s%% / %s%%" % (m.get("ret20"), m.get("ret5")))
+        L.append(" RS斜率(对宽基) : %s（leader：%s）   宽基状态：%s"
+                 % (m.get("rs_slope"), m.get("leader"), qs.get("broad_state")))
+    L.append(" 不通过的理由：")
+    for r in (qs.get("reasons") or []):
+        L.append("   - %s" % r)
+    L.append("→ 结论：强度不达标，按纪律硬中止；如需强行分析加 --no-strength。")
+    print("\n".join(L))
+
+
 def analyze(code, account=None, peers=None, data_file=None, n=330,
             intraday=True, min_scale=5, name=None, theme=None,
             peer_names=None, no_cache=False, cash=None,
-            auto_peers=True, auto_peer_n=5, scr=True):
+            auto_peers=True, auto_peer_n=5, scr=True,
+            strength_gate=True):
     # ★ 账户 / 现金口径一律从 account_config 现取（env > .env > DEFAULTS），
     #   不在签名里写 50000 —— 那是「代码写死」，改配置还得改代码。
     code = str(code).strip()
@@ -967,6 +1012,22 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
             }
     if not bars or len(bars) < 60:
         raise SystemExit("日线不足（拿到 %d 根）→ 无法定结构" % len(bars))
+
+    # ★ 个股强度前置闸门（老罗 2026-10-15 定：前置判断；WEAK 硬中止、不跑完整
+    #   报告，但必须给出不通过的理由）。A 股/美股同一套通用逻辑 —— quick_strength
+    #   只用 bars + RS，宽基由 market_regime 按代码自动分流，不按市场重复实现。
+    if strength_gate:
+        qs = _strength_gate(code, bars, is_us=is_us,
+                            name=name or market_data.get("name"))
+        if qs.get("verdict") == "WEAK":
+            return {
+                "meta": {"code": code, "name": name or market_data.get("name"),
+                         "market": "US" if is_us else "CN", "src": src,
+                         "bars": len(bars), "abort": True},
+                "aborted": True,
+                "abort_reason": "strength_weak",
+                "strength_gate": qs,
+            }
 
     # 2) rule123 结构判定（走 evaluate，与 CLI 完全同源）
     tmp = os.path.join(tempfile.gettempdir(), "battle_%s.json" % code)
@@ -1380,6 +1441,8 @@ def main():
     ap.add_argument("--quiet", action="store_true")
     ap.add_argument("--no-scr", action="store_true",
                     help="跳过筹码面 scr_chip（批量扫描提速用；单票报告默认必跑）")
+    ap.add_argument("--no-strength", action="store_true",
+                    help="跳过个股强度前置闸门（默认开：WEAK 硬中止不跑报告，见 gates/quick_strength）")
     a = ap.parse_args()
 
     # ★ 永久黑名单前置闸门（2026-09-27）：命中后直接退出，连日线都不拉。
@@ -1408,7 +1471,14 @@ def main():
                       name=a.name, theme=a.theme, peer_names=pnames,
                       no_cache=a.no_cache, cash=cash,
                       auto_peers=not a.no_auto_peers,
-                      auto_peer_n=a.auto_peer_n, scr=not a.no_scr)
+                      auto_peer_n=a.auto_peer_n, scr=not a.no_scr,
+                      strength_gate=not a.no_strength)
+        # ★ 个股强度前置闸门硬中止：不写 analysis json、不跑 summarize，
+        #   打印强度结论 + 不通过的理由，继续下一只（批量不被单只中断）。
+        if isinstance(res, dict) and res.get("aborted"):
+            if not a.quiet:
+                _print_strength_abort(res)
+            continue
         out_path = a.out or os.path.join(HERE, "out_us" if _is_us else "out_cn",
                                         "analysis_%s.json" % _c.upper())
         md = os.path.dirname(out_path)

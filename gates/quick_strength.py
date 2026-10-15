@@ -16,6 +16,10 @@
 
 RS 取数走 market_regime 的腾讯免费接口；取不到（离线/限流）时 RS 标 unknown，
 不因此判弱（避免误杀），仅在「MA10<=MA20 且 RS 明确负」时才用 RS 参与判弱。
+
+市场通用（老罗 2026-10-15）：判定逻辑只依赖 bars + RS，A 股/美股同一套、
+不按市场重复实现；宽基由 market_regime.select_broad_indices 按代码分流
+（A 股板块宽基 / 美股 QQQ+SPY），RS 用不到时才标 unknown。
 """
 import os
 import sys
@@ -65,7 +69,8 @@ def quick_strength(code, bars, broad_bars=None, name=None):
 
     参数
     ----
-    code       : 6 位 A 股代码（美股/无效码 RS 维度自然 unknown）
+    code       : 6 位 A 股代码或美股 ticker（宽基由 market_regime 分流：
+                 A 股板块指数 / 美股 QQQ+SPY；取不到 RS 才 unknown）
     bars       : 个股日线 [{d,o,h,l,c,v}...]（旧→新）
     broad_bars : 可选宽基日线；不传则由 compute_market_regime 自动取（腾讯免费源）
     name       : 显示名
@@ -176,6 +181,8 @@ def quick_strength(code, bars, broad_bars=None, name=None):
 # ───────────────────────────── 免费源取数（腾讯，沙箱/本机均可达） ─────────────────────────────
 def _tencent_prefix(code):
     c = str(code).strip()
+    if c.isalpha():                      # 美股 ticker（如 ALAB / QQQ），腾讯 usXXXX
+        return "us" + c
     if c.startswith(("6", "9")):
         return "sh" + c
     if c.startswith(("8", "4", "920")):

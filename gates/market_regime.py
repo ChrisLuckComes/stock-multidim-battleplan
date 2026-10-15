@@ -16,8 +16,12 @@
 广度（涨跌家数 / 涨停跌停比）：仅作标记（breadth_marker），日常不干预，
 极端值才提示（C 决策：只标记不入场）。本模块不单独取广度数据，留字段供上游接入。
 
-开关：默认开（market_regime_enabled=True）。仅 A 股（6 位代码）生效；
-美股（字母代码）/ 无效代码不取数、自然豁免。
+开关：默认开（market_regime_enabled=True）。市场分流（老罗 2026-10-15：美股也要有
+regime，与 A 股同一套 RS 逻辑，不重复实现）：
+- A 股（6 位代码）按板块选宽基（BROAD_BY_BOARD）；
+- 美股（字母 ticker）选 QQQ / SPY（纳指100ETF 主、标普500ETF 备，腾讯 usXXXX
+  与 A 股指数同一取数通道，fetch_index_bars 通用）；
+- 无效码走美股链兜底，取数失败自然 unknown、gate 不拦截。
 """
 
 import json
@@ -34,6 +38,9 @@ BROAD_BY_BOARD = {
     "sz":  ["sz399001", "sz399006"],          # 深主/中小 → 深证成指, 创业板指
     "bj":  ["bj899050", "sh000001"],          # 北交 → 北证50, 上证
 }
+# 美股宽基（老罗 2026-10-15）：纳指100ETF 主、标普500ETF 备。
+# 腾讯 usXXXX 与 A 股指数同一取数通道（fetch_index_bars 通用，零改动）。
+US_BROAD = ["usQQQ", "usSPY"]
 
 
 def _board_of(code):
@@ -54,15 +61,29 @@ def _board_of(code):
     return "sh"
 
 
+def _is_us_ticker(code):
+    """字母 ticker（美股）判定；与 battle_analyze.is_us_code 同口径（6 位数字=A 股）。"""
+    c = str(code or "").strip()
+    return bool(c) and not (c.isdigit() and len(c) == 6)
+
+
 def select_broad_indices(code, regime_index=None):
     """返回待评估的宽基指数代码列表（按兜底顺序）。
 
-    regime_index: 用户显式覆盖宽基基准（如已知属于中证1000→sh000852、
-    沪深300→sh000300）。传了就优先用它，其后仍接板块兜底链。
+    A 股：按板块映射（BROAD_BY_BOARD）；美股 ticker：US_BROAD（QQQ/SPY）。
+    regime_index: 用户显式覆盖宽基基准（A 股如已知属中证1000→sh000852；
+    美股如 usQQQ）。传了就优先用它，其后仍接市场兜底链。
     """
+    board = _board_of(code)
+    if board is not None:
+        chain = BROAD_BY_BOARD.get(board, ["sh000001"])
+    elif _is_us_ticker(code):
+        chain = list(US_BROAD)                 # 美股：QQQ 主、SPY 备
+    else:
+        chain = ["sh000001"]                   # 无效码兜底：取数失败自然 unknown
     if regime_index:
-        return [regime_index] + BROAD_BY_BOARD.get(_board_of(code), ["sh000001"])
-    return BROAD_BY_BOARD.get(_board_of(code), ["sh000001"])
+        return [regime_index] + chain
+    return chain
 
 
 # ───────────────────────────── 指数取数（腾讯 qfq 日K，个股/指数通用） ─────────────────────────────
@@ -206,7 +227,8 @@ _REGIME_SENSITIVE_KEYS = ("pre_breakout", "next_day_chase")
 def compute_market_regime(code, stock_bars, enabled=True, regime_index=None):
     """汇总宽基维度 + RS 维度，返回 market_regime 信息 dict。
 
-    失败时（取数失败 / 非 A 股 / 开关关）返回 state=unknown，gate 自然不拦截。
+    失败时（取数失败 / 无效码 / 开关关）返回 state=unknown，gate 自然不拦截。
+    A 股与美股均走完整流程；宽基链由 select_broad_indices 按市场分流。
     """
     info = {
         "enabled": enabled,
@@ -219,9 +241,8 @@ def compute_market_regime(code, stock_bars, enabled=True, regime_index=None):
     if not enabled:
         info["note"] = "市场regime开关关闭"
         return info
-    if _board_of(code) is None:        # 美股 / 无效代码 → 不取数、自然豁免
-        info["note"] = "非A股标的·市场regime不适用"
-        return info
+    # A 股 / 美股 ticker 都往下走（宽基链由 select_broad_indices 分流）；
+    # 无效码/取数失败 → note 留痕、state 保持 unknown，gate 自然不拦截。
 
     indices = select_broad_indices(code, regime_index=regime_index)
     broad = None
