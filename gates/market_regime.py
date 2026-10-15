@@ -95,11 +95,28 @@ _CACHE_TTL = 600.0
 
 
 def fetch_index_bars(index_code, n=65):
-    """拉指数 qfq 日K → [{d,o,h,l,c,v}]（旧→新）。失败返回 None（静默降级）。"""
+    """拉指数 qfq 日K → [{d,o,h,l,c,v}]（旧→新）。失败返回 None（静默降级）。
+
+    市场分流（老罗 2026-10-15 实测修正）：A 股指数走腾讯 qfq 日K；美股宽基
+    （usXXXX，如 usQQQ/usSPY）走 bars_source.us_quote 三级链路 —— 腾讯美股日K
+    只回稀疏快照（实测 usQQQ 请求 140 根仅得 2 根、usALAB 仅 1 根），喂不饱
+    index_regime 的 MA10/MA20 与 RS 的 20 日窗口。两条路都失败才返回 None。
+    """
     now = time.time()
     hit = _CACHE.get(index_code)
     if hit and (now - hit[0]) < _CACHE_TTL:
         return hit[1]
+    if str(index_code).startswith("us"):        # 美股宽基 → 项目既有美股链路
+        try:
+            import bars_source as BS
+            q, _notes = BS.us_quote(str(index_code)[2:], min_bars=n, use_cache=True)
+            out = [{"d": b["d"], "o": b["o"], "h": b["h"], "l": b["l"],
+                    "c": b["c"], "v": b.get("v")} for b in (q.get("bars") or [])]
+        except Exception:
+            out = []
+        if out:
+            _CACHE[index_code] = (now, out)
+        return out or None
     url = ("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
            "?param=%s,day,,,%d,qfq" % (index_code, n))
     try:

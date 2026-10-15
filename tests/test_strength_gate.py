@@ -56,6 +56,40 @@ def test_is_us_ticker():
     assert MR._is_us_ticker("688543") is False
 
 
+# ───────────────────────────── 取数分流契约（2026-10-15 实测修正） ─────────────────────────────
+def test_fetch_index_bars_us_routes_to_bars_source():
+    """美股宽基不走腾讯日K（实测稀疏：n=140 仅得 1~2 根），转 bars_source.us_quote。
+
+    ⚑ 替身必须复刻 us_quote 的真实签名 —— 它返回 (quote, notes) 二元组
+    （battle_analyze 里就是 q, notes = BS.us_quote(...)），按 dict 写替身
+    会漏掉「tuple 解包」这个真 bug（2026-10-15 实测踩过：except 吞掉
+    AttributeError → 静默取空）。
+    """
+    import bars_source as BS
+    fake = _mk([100.0 + i for i in range(40)])
+    orig = BS.us_quote
+    BS.us_quote = lambda sym, **k: ({"ticker": sym, "bars": fake}, [])
+    try:
+        MR._CACHE.pop("usQQQ", None)
+        got = MR.fetch_index_bars("usQQQ", n=65)
+        assert got == fake, "美股宽基必须转 us_quote 且原样返回其 bars"
+    finally:
+        BS.us_quote = orig
+        MR._CACHE.pop("usQQQ", None)
+
+
+def test_fetch_stock_bars_us_routes_to_bars_source():
+    """CLI 取数：美股 ticker 同样转 us_quote（腾讯美股日K 稀疏不可用）。"""
+    import bars_source as BS
+    fake = _mk([100.0 + i for i in range(40)])
+    orig = BS.us_quote
+    BS.us_quote = lambda sym, **k: ({"ticker": sym, "bars": fake}, [])
+    try:
+        assert QS.fetch_stock_bars("ALAB") == fake
+    finally:
+        BS.us_quote = orig
+
+
 # ───────────────────────────── quick_strength 美股路径 ─────────────────────────────
 def test_quick_strength_us_strong():
     # 美股个股持续上行 + QQQ 宽基平盘 ⇒ 跑赢大盘 + 自身多头排列 → STRONG

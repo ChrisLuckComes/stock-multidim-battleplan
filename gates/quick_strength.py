@@ -178,11 +178,9 @@ def quick_strength(code, bars, broad_bars=None, name=None):
     return out
 
 
-# ───────────────────────────── 免费源取数（腾讯，沙箱/本机均可达） ─────────────────────────────
+# ───────────────────────────── 免费源取数（A股腾讯 / 美股 bars_source） ─────────────────────────────
 def _tencent_prefix(code):
     c = str(code).strip()
-    if c.isalpha():                      # 美股 ticker（如 ALAB / QQQ），腾讯 usXXXX
-        return "us" + c
     if c.startswith(("6", "9")):
         return "sh" + c
     if c.startswith(("8", "4", "920")):
@@ -190,8 +188,21 @@ def _tencent_prefix(code):
     return "sz" + c
 
 
-def fetch_stock_bars_tencent(code, n=140):
-    """腾讯前复权日线（免费源），返回 [{d,o,h,l,c,v}] 旧→新，失败返回 []。"""
+def fetch_stock_bars(code, n=140):
+    """个股日线 → [{d,o,h,l,c,v}]（旧→新），失败返回 []。
+
+    市场分流（老罗 2026-10-15 实测修正）：A 股走腾讯前复权日K；美股 ticker 走
+    bars_source.us_quote 三级链路 —— 腾讯美股日K只回稀疏快照（实测 n=140 仅得
+    1~2 根），强度判定要 25+ 根，只有项目既有美股链路能给满。
+    """
+    c = str(code).strip()
+    if c.isalpha():                      # 美股 ticker（如 ALAB）
+        try:
+            import bars_source as BS
+            q, _notes = BS.us_quote(c, min_bars=n, use_cache=True)
+            return list(q.get("bars") or [])
+        except Exception:
+            return []
     sym = _tencent_prefix(code)
     url = (f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
            f"?param={sym},day,,,{n},qfq")
@@ -224,7 +235,7 @@ def main():
         d = json.load(open(a.data, encoding="utf-8"))
         bars = d.get("bars") or (d.get("data", {}) or {}).get("bars")
     if not bars and not a.no_fetch:
-        bars = fetch_stock_bars_tencent(a.code)
+        bars = fetch_stock_bars(a.code)
     if not bars:
         print(f"[{a.code}] 无法取数（免费源不可达或本地文件无 bars）→ 强度判定中止")
         return 1

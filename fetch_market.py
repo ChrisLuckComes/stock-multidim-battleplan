@@ -495,17 +495,96 @@ def fetch_us_stooq(symbol):
     }
 
 
+def _fetch_text_fallback(url, timeout=20, retries=2):
+    """文本拉取（东财域名自动 http 优先，与 fetch_json_fallback 同模式）。
+
+    给 jsonp 类接口用 —— fetch_json 内部 json.loads，非 JSON 文本会直接炸。
+    """
+    primary, fallback = url, None
+    if url.startswith("https://") and ".eastmoney.com/" in url:
+        primary = "http://" + url[8:]
+        fallback = url
+    elif url.startswith("https://"):
+        fallback = "http://" + url[8:]
+    last = None
+    for u in [primary] + ([fallback] if fallback else []):
+        for n in range(retries):
+            try:
+                req = urllib.request.Request(u, headers=HEADERS)
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    return r.read().decode("utf-8", "ignore")
+            except Exception as e:
+                last = e
+                if n + 1 < retries:
+                    time.sleep(0.3 * (n + 1))
+    raise last
+
+
+def fetch_us_sina(symbol):
+    """新浪美股日K兜底（ETF/指数宽基专用，实测 2026-10-15）。
+
+    背景：QQQ/SPY 在 nasdaq（官方 API 不返 ETF/指数历史）、Yahoo（本机 502）、
+    stooq（无数据）、东财（secid 有效但 kline 接口对美股返空）四源全败；
+    新浪 jsonp 接口返回 2001 年起完整历史，是宽基取数的可靠兜底。
+    仅日线，spot 取末根收盘（与 stooq 源同口径）。
+    """
+    sym = symbol.strip().upper()
+    # ⚠ 两处坑（2026-10-15 实测）：① 不用 % 格式化——URL 里的 %20（jsonp 变量名
+    #   var%20_x）会被当成格式符吞掉；② 回调名在**路径段**不是 query——
+    #   jsonp_v2.php/var%20_x=/US_MinKService.getDailyK?symbol=X&___qn=3，
+    #   写成 ?var%20_x= 新浪只回 var _x=(null)。
+    url = ("https://stock.finance.sina.com.cn/usstock/api/jsonp_v2.php"
+           "/var%20_x=/US_MinKService.getDailyK?symbol=" + sym + "&___qn=3")
+    t = _fetch_text_fallback(url).strip()
+    i = t.find("=(")
+    if i >= 0:
+        t = t[i + 2:]
+    for suffix in (");", ")", ";"):
+        if t.endswith(suffix):
+            t = t[:-len(suffix)]
+            break
+    bars = []
+    for r in json.loads(t):
+        try:
+            bars.append({"d": r["d"], "o": float(r["o"]), "c": float(r["c"]),
+                         "h": float(r["h"]), "l": float(r["l"]),
+                         "v": float(r.get("v") or 0)})
+        except (KeyError, TypeError, ValueError):
+            continue
+    if not bars:
+        raise RuntimeError("sina 未返回 %s 日线" % symbol)
+    last = bars[-1]
+    prev_close = bars[-2]["c"] if len(bars) > 1 else last["o"]
+    change_pct = round((last["c"] - prev_close) / prev_close * 100, 2) if prev_close else None
+    return {
+        "ticker": symbol,
+        "market": "US",
+        "name": symbol,
+        "session": "Closed",
+        "as_of": None,
+        "spot": last["c"],
+        "prev_close": prev_close,
+        "open": last["o"], "high": last["h"], "low": last["l"], "volume": last["v"],
+        "turnover": None,
+        "change_pct": change_pct,
+        "pe_ttm": None, "pb": None, "market_cap": None, "float_cap": None,
+        "bars": bars,
+        "source": "sina",
+    }
+
+
 def fetch_us(symbol):
-    """美股取数：Nasdaq → Yahoo → stooq，逐源降级并汇总失败原因。"""
+    """美股取数：Nasdaq → Yahoo → stooq → 新浪，逐源降级并汇总失败原因。"""
     errs = []
     for name, fn in (("nasdaq", fetch_us_nasdaq),
                      ("yahoo", fetch_us_yahoo),
-                     ("stooq", fetch_us_stooq)):
+                     ("stooq", fetch_us_stooq),
+                     ("sina", fetch_us_sina)):
         try:
             return fn(symbol)
         except Exception as e:
             errs.append(f"{name}={type(e).__name__}:{str(e)[:70]}")
-    raise RuntimeError(f"美股 {symbol} 三源全失败 → " + " | ".join(errs))
+    raise RuntimeError(f"美股 {symbol} 各源均失败 → " + " | ".join(errs))
 
 
 def resolve_out_path(out_path, market):
