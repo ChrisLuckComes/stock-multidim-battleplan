@@ -32,16 +32,29 @@ def sector_risk_of(code, analysis, leader_code=None, leader_status=None, sector_
     Args:
         code: 本票代码（后排候选）
         analysis: battle_analyze 输出的 analysis dict（含 peers）
-        leader_code: 显式指定龙头代码（否则取 peers 中 d20 最高者）
+        leader_code: 显式指定龙头代码（否则取「本票 vs peers」d20 最高者）
         leader_status: 龙头真实状态（severe_abnormal/halt_check/limit_down/
                         limit_up/continuous_limit/normal），由外部注入
         sector_chg: 板块当日涨幅(%)（交易日注入；非交易日 None）
     Returns:
         dict: {risk, leader_code, leader_name, leader_d20, leader_status,
-               sector_chg, need_recheck, reason}
+               is_self_leader, sector_chg, need_recheck, reason}
+
+    ⚑ 龙头识别含本票自身（老罗 2026-10-16 纠正）：本票 20 日涨幅 ≥ 全部 peers 时，
+    **本票自己就是龙头**（如乐鑫 688018 +11.7% > 思特威 +8.3%），此时不存在
+    「后排寄生」问题，把同行标成龙头是误判。显式 leader_code 仍最高优先。
     """
     peers = (analysis.get("peers") or []) if isinstance(analysis, dict) else []
-    # 1) 找龙头：peers 中 d20（20日涨幅）最高者；指定 leader_code 优先
+    meta = (analysis.get("meta") or {}) if isinstance(analysis, dict) else {}
+    # 本票自身 20 日涨幅（struct.range_change['20d']；旧 json 缺该键时为 None）
+    self_d20 = None
+    rc = (analysis.get("struct") or {}).get("range_change") if isinstance(analysis, dict) else None
+    if isinstance(rc, dict):
+        v = rc.get("20d")
+        if isinstance(v, (int, float)):
+            self_d20 = float(v)
+
+    # 1) 找龙头：本票与 peers 同台比 d20；指定 leader_code 优先
     leader = None
     for p in peers:
         if not isinstance(p, dict):
@@ -56,11 +69,25 @@ def sector_risk_of(code, analysis, leader_code=None, leader_status=None, sector_
             if isinstance(p, dict) and str(p.get("code")) == str(leader_code):
                 leader = p
                 break
-    leader_info = {
-        "code": (leader or {}).get("code") or leader_code,
-        "name": (leader or {}).get("name"),
-        "d20": (leader or {}).get("d20"),
-    }
+    # 本票 d20 ≥ peers 最高 ⇒ 本票即龙头（显式指定 leader_code 时尊重指定，不覆盖）
+    is_self = False
+    if not leader_code and self_d20 is not None:
+        peer_top = None
+        for p in peers:
+            if isinstance(p, dict) and isinstance(p.get("d20"), (int, float)):
+                if peer_top is None or p["d20"] > peer_top:
+                    peer_top = float(p["d20"])
+        if peer_top is None or self_d20 >= peer_top:
+            is_self = True
+    if is_self:
+        leader_info = {"code": meta.get("code") or str(code),
+                       "name": meta.get("name"), "d20": self_d20}
+    else:
+        leader_info = {
+            "code": (leader or {}).get("code") or leader_code,
+            "name": (leader or {}).get("name"),
+            "d20": (leader or {}).get("d20"),
+        }
 
     # 2) 评级
     risk = "safe"
@@ -96,7 +123,12 @@ def sector_risk_of(code, analysis, leader_code=None, leader_status=None, sector_
             reasons.append("板块当日大跌 %.1f%% → 退潮确认，后排禁买" % sector_chg)
 
     if not reasons:
-        reasons.append("板块龙头状态平稳，未见严重异动/退潮信号（交易日需复核当日涨幅与连板）")
+        if is_self:
+            reasons.append("本票即板块龙头（20日 +%.1f%%），无后排寄生问题；"
+                           "龙头状态平稳，未见严重异动/退潮信号（交易日需复核当日涨幅与连板）"
+                           % self_d20)
+        else:
+            reasons.append("板块龙头状态平稳，未见严重异动/退潮信号（交易日需复核当日涨幅与连板）")
 
     return {
         "risk": risk,
@@ -104,6 +136,7 @@ def sector_risk_of(code, analysis, leader_code=None, leader_status=None, sector_
         "leader_name": leader_info["name"],
         "leader_d20": leader_info["d20"],
         "leader_status": leader_status,
+        "is_self_leader": is_self,
         "sector_chg": sector_chg,
         "need_recheck": (sector_chg is None),
         "reason": "；".join(reasons),

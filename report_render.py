@@ -1016,15 +1016,18 @@ def build_sector_risk(a, n):
                  risk, "<span class='badge'>%s</span>" % risk)
     lead = ""
     if sr.get("leader_name") or sr.get("leader_code"):
-        lead = "<b>板块龙头</b>：%s%s" % (
+        lead = "<b>板块龙头</b>：%s%s%s" % (
             esc(str(sr.get("leader_name") or sr.get("leader_code"))),
-            ("（20日 +%.0f%%）" % sr["leader_d20"]) if sr.get("leader_d20") is not None else "")
+            ("（20日 +%.0f%%）" % sr["leader_d20"]) if sr.get("leader_d20") is not None else "",
+            " · <b>本票即龙头</b>" if sr.get("is_self_leader") else "")
     need = " ⚠ 当日涨幅/连板需交易日复核" if sr.get("need_recheck") else ""
+    title = ("板块状态风险（本票即龙头）" if sr.get("is_self_leader")
+             else "板块状态风险（后排闸门）")
     return (
-        "<div class='card'><h3>板块状态风险（后排闸门）</h3>"
+        "<div class='card'><h3>%s</h3>"
         "<p>风险等级：%s%s</p>%s"
         "<p class='note'>%s</p></div>"
-        % (badge, need, lead, esc(str(sr.get("reason", ""))))
+        % (title, badge, need, lead, esc(str(sr.get("reason", ""))))
     )
 
 
