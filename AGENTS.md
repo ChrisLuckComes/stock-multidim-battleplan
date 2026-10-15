@@ -226,6 +226,17 @@ P95 就被撑高，**明显在吸筹的票也会算出 SCR90 20%+ 被判「发�
 - ★★ **「现价 vs 主力成本」与「你的成本 vs 主力成本」是两件事，不许混说**（老罗 10-14 追问后定）：前者＝主力浮盈/浮亏（主力被套＝护城河失效）；后者＝你的成本优势（低于是好事）。⚑ 主力成本是**估算参考位不是地板价**，主力被套 ≠ 主力会护盘；真正的安全垫是硬止损。
 - 顺带修了名字兜底：日线快照常不带 name，导致报告 H1 退化成 6 位代码（688543 已踩）⇒ 用 scr 拿到的东财名字回填 `meta.name`。
 
+### 1f. 跑一下前置强度闸门（quick_strength · 2026-10-15 老罗定）
+
+> **纪律**：以后用户说「跑一下」某票，**先判个股强度**，强度不达标（WEAK）**只回强度结论、不跑完整报告**（battle_analyze）。强度达标（STRONG/NEUTRAL）才进入完整报告流程。
+
+- 工具：`python gates/quick_strength.py <6位code>` —— 默认**腾讯免费源**取数（**不走 TDX**，见 references/data-operations.md 取数优先级），复用 `market_regime` 的 RS 线算相对强度；宽基取数失败（离线/限流）时 RS 标 unknown、不误杀。
+- 三档：`STRONG`（收盘>MA20 且 MA20 向上 且 MA10>MA20 且 RS 不落后）/ `NEUTRAL`（上方盘整、短弱但 MA20 仍向上）/ `WEAK`（收盘<MA20 或 MA20 向下 或 短弱+RS 负）。
+- **WEAK 处理**：直接回复强度结论（含 MA/RS/收益/回撤指标 + 理由），**明确告知「不跑 battle_analyze 完整报告」**；不进 1b/1c 的 session_decide，也不进完整报告。
+- **STRONG/NEUTRAL 处理**：正常进入 `battle_analyze → notes → report_render` 完整报告（报告内部仍会跑 market_regime 闸门、顶部K线、筹码等）。
+- ⚠️ 强度闸门与 market_regime 闸门是**两道独立闸**：强度闸过滤「个股自身/相对弱势」，market_regime 闸在报告内过滤「大环境向下且非龙头」。强度 STRONG 不代表报告一定 recommend——最终以报告为准。
+- 取数：强度快判默认腾讯免费源；TDX 连接器因额度限制已降级为备选（references/data-operations.md），免费源失败才回退 TDX，**不要作为取数首选**。
+
 ---
 
 ## 2. 账户配置边界 / Forbidden

@@ -5202,11 +5202,14 @@ def attach_higher_ride(result, bars):
     return result
 
 
-def plan_entry(bars, ev, sym=None):
-    """公开入口：`_plan_entry_core` 的结果再套一层顶部标志 K 线闸门。
+def plan_entry(bars, ev, sym=None, *, market_regime_enabled=True, regime_index=None):
+    """公开入口：`_plan_entry_core` 的结果再套各层闸门。
 
     ★ `sym` 用于永久黑名单的**出口兜底**（CLI 已在 player入口拦截，这里防的是
     有人绕过 CLI 直接调本函数——回测脚本 / probe / 其他编排入口）。
+    ★ `market_regime_enabled`（默认开，老罗 2026-10-15 拍板）：市场状态闸门 ——
+    宽基 MA10/MA20 三态 + 个股 RS 脱钩检测，宽基向下时 RS 强（龙头/防御）豁免、不误杀。
+    `regime_index` 可显式覆盖宽基基准（如已知属中证1000→sh000852）。
     """
     result = apply_top_signal_gate(_plan_entry_core(bars, ev), bars, ev, _TOP_VETO)
     result = TS_TOP.apply_month_blacklist(result, bars)
@@ -5215,7 +5218,15 @@ def plan_entry(bars, ev, sym=None):
         result = BL.apply_user_blacklist(result, sym)
     except Exception:
         pass
-    return attach_higher_ride(result, bars)
+    result = attach_higher_ride(result, bars)
+    try:  # 市场状态闸门（取数失败/非A股/开关关 → 自然豁免，不阻断主流程）
+        from gates.market_regime import compute_market_regime, apply_market_regime_gate
+        mkt = compute_market_regime(sym, bars, enabled=market_regime_enabled,
+                                    regime_index=regime_index)
+        result = apply_market_regime_gate(result, mkt, enabled=market_regime_enabled)
+    except Exception:
+        pass
+    return result
 
 
 def _t0_takeover(result, t0):
@@ -5591,7 +5602,7 @@ def build_ev(bars, drop_live=False, ticker=None):
     return ev, bars, meta
 
 
-def evaluate(sym, data_file=None, eod=False):
+def evaluate(sym, data_file=None, eod=False, *, market_regime_enabled=True, regime_index=None):
     bars, last_q, qmeta = get_bars(sym, data_file)
     _us = qmeta or {}                       # 美股：session/as_of/prev_close
     sym_code = str(sym).split(".")[0] if sym else ""
@@ -5605,7 +5616,9 @@ def evaluate(sym, data_file=None, eod=False):
     if live_bar is not None:
         ev_stale, _, _ = build_ev(bars_closed, ticker=sym_code)
         if ev_stale is not None:
-            stale_plan = plan_entry(bars_closed, ev_stale)
+            stale_plan = plan_entry(bars_closed, ev_stale, sym,
+                                    market_regime_enabled=market_regime_enabled,
+                                    regime_index=regime_index)
     # 盘中未收盘：默认禁止 recommend（量能不可判）；--eod 丢弃末根
     live = is_live_bar(bars, market=market)
     drop_live = bool(eod or False)
@@ -5616,7 +5629,9 @@ def evaluate(sym, data_file=None, eod=False):
     if live and not drop_live and live_bar is None:
         # 仍算出结构，但强制不买。注意：能吃上真实盘中 OHLC 时（live_bar 非空）
         # 不走这里 —— 那条路径给得出可执行结构，见下方「盘中口径」段。
-        plan = plan_entry(bars, ev)
+        plan = plan_entry(bars, ev, sym,
+                           market_regime_enabled=market_regime_enabled,
+                           regime_index=regime_index)
         plan["recommend"] = False
         plan["verdict"] = "盘中数据未收盘，量能不可判"
         plan["note"] = (
@@ -5641,7 +5656,9 @@ def evaluate(sym, data_file=None, eod=False):
         }
         return out_live
 
-    plan = plan_entry(bars, ev)
+    plan = plan_entry(bars, ev, sym,
+                       market_regime_enabled=market_regime_enabled,
+                       regime_index=regime_index)
     setup = plan["setup"]
     recommend = plan["recommend"]
     note = plan["note"]
@@ -5757,7 +5774,8 @@ def evaluate(sym, data_file=None, eod=False):
                "ride_redirected", "ma_ride_week", "ma_ride_month",
                "top_signal", "top_signal_veto",
                "month_super_yin", "month_one_star", "month_star_pair",
-               "month_merged_star", "blacklist"):
+               "month_merged_star", "blacklist",
+               "market_regime", "market_regime_veto"):
         if plan.get(_k) is not None:
             out[_k] = plan[_k]
 
@@ -5861,6 +5879,8 @@ if __name__ == "__main__":
     syms, data_map = [], {}
     eod = False
     out_path = None
+    market_regime_enabled = True
+    regime_index = None
     i = 0
     while i < len(args):
         a = args[i]
@@ -5878,6 +5898,14 @@ if __name__ == "__main__":
             eod = True
             i += 1
             continue
+        if a == "--no-market-regime":
+            market_regime_enabled = False
+            i += 1
+            continue
+        if a == "--regime-index":
+            regime_index = args[i + 1]
+            i += 2
+            continue
         if a == "--out":
             out_path = args[i + 1]
             i += 2
@@ -5891,7 +5919,8 @@ if __name__ == "__main__":
     for s in syms:
         df = data_map.get(s.upper())
         try:
-            r = evaluate(s, df, eod=eod)
+            r = evaluate(s, df, eod=eod, market_regime_enabled=market_regime_enabled,
+                         regime_index=regime_index)
         except Exception as e:
             r = {"sym": s, "verdict": "ERR", "reason": f"{type(e).__name__}: {e}"}
         res.append(r)
