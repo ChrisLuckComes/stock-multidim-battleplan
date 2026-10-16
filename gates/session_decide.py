@@ -107,6 +107,19 @@ CHASE_DEV_PCT = 6.0
 #   改为 cap 上方容差带内仍可买（按实际价重算 R，必须仍 ≥RR_QUALIFIED）。
 #   含义：买区是「小的浮动范围」而非「固定点位」。可用 --cap-tol-pct 调整，也可由计划买区携带。
 CAP_TOL_PCT = 0.02
+# 计划目标距现价 ≤ 此倍数 × ATR，视为目标已贴脸、盈亏比失真，改问盘中通道。
+NEAR_TARGET_ATR = 0.5
+
+
+def target_is_stale(price, target, atr):
+    """目标已在现价或贴到 0.5×ATR 以内。没有目标不算失真，仍走原「补 target」拒绝。"""
+    if target is None or price is None:
+        return False
+    if float(target) <= float(price) + 1e-9:
+        return True
+    if atr and float(atr) > 0:
+        return (float(target) - float(price)) <= NEAR_TARGET_ATR * float(atr)
+    return False
 
 
 def board_limit_ratio(code):
@@ -607,7 +620,7 @@ def chase_risk(minutes, lookback=20, ratio=6.0, gap_min=1.0, dev_max=6.0):
 
 
 def decide(day, summary, entry, stop, target, cap=None, account=None,
-            risk_scale=1.0, quality=None, cap_tol_pct=None):
+            risk_scale=1.0, quality=None, cap_tol_pct=None, atr=None):
     """核心判定。返回结构化结果，供 CLI 与测试用。
 
     ★ 盘中口径（老罗 2026-10-09 14:26 定调）：
@@ -691,6 +704,8 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
         "burst": burst,
         "chase": chase,
         "cap_gates": gates,
+        "handoff": False,
+        "risk_scale": risk_scale,
     }
 
     def _reject(reason):
@@ -700,6 +715,18 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
         elif wait_px is not None and price > wait_px and soft_cap is not None and price > soft_cap:
             out["reason"] = reason + " 买点窗口已过（容差带上沿 %.2f）。" % soft_cap
         return out
+
+    def _handoff(why):
+        out["handoff"] = True
+        out["handoff_why"] = why
+        out["arm_price"] = None
+        out["arm_note"] = "计划价已过，改看盘中通道"
+        out["reason"] = why
+        out["action"] = "不买"
+        return out
+
+    tight = (gates or {}).get("tightest")
+    stale_tgt = target_is_stale(price, target, atr)
 
     if price <= stop:
         return _reject("现价已在止损下方，不接飞刀。")
@@ -740,6 +767,14 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
         if dev > CHASE_DEV_PCT and not near_zone:
             return _reject(tape["text"] + " 价格已远离分时均线（%+.1f%%），不追高。" % dev)
     if buy_cap is not None and price > buy_cap + 1e-9 and not near_zone:
+        if tight == "显式cap":
+            return _reject("现价 %.2f 高于你给的买入上限 %.2f，不交接盘中通道。"
+                           % (price, buy_cap))
+        if tight == "昨收+2%闸" or stale_tgt:
+            return _handoff(
+                "现价 %.2f 已高出计划买区（上限 %.2f，卡住的是%s）。"
+                "不抬昨晚挂单价，改看盘中通道。"
+                % (price, buy_cap, tight or "—"))
         return _reject("现价 %.2f 高于买入上限 %.2f（容差带 %.2f 仍超）。"
                        % (price, buy_cap, soft_cap))
     if target is None:
@@ -751,6 +786,10 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
         out["arm_note"] = ""
         return _reject("计划无目标价，赔率算不出（不是买点）。先补 target 再判。")
     if rr is None or rr < RR_QUALIFIED:
+        if stale_tgt:
+            return _handoff(
+                "计划目标 %.2f 已贴到现价 %.2f，盈亏比失真。改看盘中通道。"
+                % (target, price))
         return _reject("现价盈亏比 %s，低于 %.1f。" % (
             ("%.2f" % rr) if rr is not None else "—", RR_QUALIFIED))
 
@@ -817,6 +856,9 @@ def render(d):
     lines.append("分时  %s  %s" % (d["tape"]["label"], d["tape"]["text"]))
     lines.append("窗口  全天已出现 %d 根落在昨收 0%%～2%%" % d["dip_minutes"])
     lines.append("结论  %s。%s" % (d["action"], d["reason"]))
+    if d.get("channel_source"):
+        lines.append("来源  盘中通道·%s（计划买区已过，止损 %.2f，目标 %.2f）"
+                     % (d["channel_source"], d["channel_stop"], d["channel_target"]))
     if d.get("near_zone"):
         lines.append("◆ 浮动买区：现价 %.2f 落在 cap %.2f 上方容差带（≤%.2f，+%.1f%%）内，"
                      "按实际价重算 R 仍合格 ⇒ 视为计划内。"
@@ -900,6 +942,81 @@ def render(d):
                      "质量闸默认只提示，要否决须加 --quality-strict）。")
     lines.append("不打板。止损目标沿用计划。T+1：当日买入当日没有止损腿。")
     return "\n".join(lines)
+
+
+def apply_channel_handoff(d, channel, account=None):
+    """计划买区已过时，用盘中通道的价重算。通道盈亏比仍要 ≥1.5，否则维持不买。"""
+    if not d.get("handoff"):
+        return d
+    act = (channel or {}).get("action")
+    why = (channel or {}).get("why") or "通道无信号"
+    src = (channel or {}).get("source")
+    d["channel"] = {"source": src, "why": why,
+                    "entry": None if not act else act.get("entry")}
+    if not act:
+        d["reason"] = "计划买区已过。盘中通道不放行：%s" % why
+        d["action"] = "不买"
+        return d
+    entry = float(act["entry"])
+    stop = float(act["stop"])
+    target = act.get("target1")
+    if target is None or float(target) <= entry:
+        target = limit_up_price(d.get("pre"), d.get("code"))
+    rr = long_rr(entry, float(target), stop) if target is not None else None
+    if rr is None or rr < RR_QUALIFIED:
+        shown = ("%.2f" % rr) if rr is not None else "—"
+        d["reason"] = ("计划买区已过。盘中通道·%s 给出 %.2f / 止损 %.2f，"
+                       "盈亏比 %s 低于 %.1f，不买。"
+                       % (src or "—", entry, stop, shown, RR_QUALIFIED))
+        d["action"] = "不买"
+        return d
+    size = size_for(d["code"], entry, stop, account=account,
+                    risk_scale=d.get("risk_scale") or 1.0)
+    if not size["qty"]:
+        d["reason"] = "盘中通道放行但买得起的手数算不出来（钱不够或价高于硬顶）。"
+        d["size"] = size
+        d["action"] = "不买"
+        return d
+    d["action"] = "能买"
+    d["limit_buy"] = round_px(entry)
+    d["channel_source"] = src
+    d["channel_stop"] = round_px(stop)
+    d["channel_target"] = round_px(target)
+    d["rr_plan"] = d.get("rr")
+    d["rr"] = rr
+    d["size"] = size
+    d["arm_price"] = None
+    d["arm_note"] = ""
+    d["reason"] = ("盘中通道·%s。限价 %.2f，止损 %.2f，目标 %.2f，R %.2f。"
+                   "这笔不沿用昨晚挂单价。"
+                   % (src, d["limit_buy"], d["channel_stop"],
+                      d["channel_target"], rr))
+    return d
+
+
+def channels_for_session(code, day, account=None):
+    """用当日 1 分钟合成 5 分钟，按昨收结构问三条盘中通道。取数失败写进 why。"""
+    import probe_intraday as P
+    import rule123 as R
+    import bars_source as BS
+    minutes = day.get("minutes") or []
+    date = (day.get("date") or "")[:10]
+    mins5 = P.aggregate_5m(minutes, date)
+    if len(mins5) < 3:
+        return {"action": None, "source": None, "why": "5分钟线不足"}
+    prefix = "sh" if str(code)[0] in "69" else "sz"
+    bars, _src, _notes = BS.ash_bars(prefix, str(code), n=80)
+    if not bars or len(bars) < 20:
+        return {"action": None, "source": None, "why": "日线不足"}
+    if date and str(bars[-1].get("d") or "")[:10] == date:
+        basis = bars[:-1]
+    else:
+        basis = list(bars)
+    if len(basis) < 20:
+        return {"action": None, "source": None, "why": "基准日线不足"}
+    atr_v = R.atr14(basis)
+    prev = basis[-1]["c"]
+    return P.eval_ash_intraday(mins5, code, atr_v, prev, basis, account=account)
 
 
 def main(argv=None):
@@ -991,11 +1108,18 @@ def main(argv=None):
         except Exception as e:                      # 质量闸不得因自身故障挡住决策
             quality = {"level": "unknown", "scale": 1.0,
                        "blocks": [], "notes": ["质量闸异常：%s" % e], "facts": {}}
+    atr_v = _cn_atr14(args.code)
     d = decide(
         day, summary, entry, stop, target,
         cap=cap, account=args.account, risk_scale=args.risk_scale,
-        quality=quality, cap_tol_pct=cap_tol_pct,
+        quality=quality, cap_tol_pct=cap_tol_pct, atr=atr_v,
     )
+    if d.get("handoff"):
+        try:
+            ch = channels_for_session(args.code, day, account=args.account)
+        except Exception as e:
+            ch = {"action": None, "source": None, "why": "通道取数失败：%s" % e}
+        d = apply_channel_handoff(d, ch, account=args.account)
     d["plan_src"] = plan_src
     decide_ms = (time.perf_counter() - t1) * 1000.0
     d["elapsed_ms"] = round(fetch_ms + decide_ms, 1)

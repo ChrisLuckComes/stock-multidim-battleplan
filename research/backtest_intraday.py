@@ -230,42 +230,50 @@ def run_A_burst(ctx):
 
 
 def run_B_break(ctx):
-    """通道 B：关键位突破 —— 盘前定 K，5 分钟收盘站上即触发。"""
+    """通道 B：关键位突破。返回 (可交易信号, 回踩种子或 None)。
+
+    收盘打穿上限时这一根不买，种子的参照价是触发价，交给通道 C。
+    有效突破仍按旧口径成交，种子参照价是该根收盘。
+    """
     if not ctx.kb:
-        return []
+        return [], None
     atr, lim, thr = ctx.atr, ctx.lim, ctx.thr
     if (lim - thr) / lim * 100 < P.ASH_LIMIT_BUFFER * 100:
-        return []             # 触发价贴涨停 → 本通道今日关闭
+        return [], None
     j = None
     for k, b in enumerate(ctx.mins):
         if k * MIN_SCALE < P.ASH_BREAK_MIN_OFF:
-            continue          # 开盘 15 分钟噪音
+            continue
         if b["c"] > thr:
             j = k
             break
     if j is None:
-        return []             # 未突破
+        return [], None
     entry = round(ctx.mins[j]["c"], 2)
     if entry > ctx.cap_px:
-        return []             # 越过追高上限 → 加速段，A股 T+1 不接
+        return [], {"j": j, "S": P.pullback_anchor("overshoot", entry, thr),
+                    "via": "overshoot"}
     if (lim - entry) / lim * 100 < P.ASH_LIMIT_BUFFER * 100:
-        return []             # 成交价贴涨停
+        return [], None
     if not ctx.tgt_b or ctx.tgt_b <= entry:
-        return []
+        return [], None
     if ctx.stop_k >= entry:
-        return []
-    return [sig("通道B(关键位突破)", j, entry, ctx.stop_k, ctx.tgt_b,
+        return [], None
+    sigs = [sig("通道B(关键位突破)", j, entry, ctx.stop_k, ctx.tgt_b,
                 {"kind": ctx.kb["kind"], "dist_atr": ctx.kb["dist_atr"]})]
+    seed = {"j": j, "S": P.pullback_anchor("hit", entry, thr), "via": "hit"}
+    return sigs, seed
 
 
-def run_C_pullback(ctx, sigs_B):
-    """通道 C：突破回踩确认 —— 需二·B 当日曾有效放行（不管它现在新不新鲜）。"""
-    if not sigs_B:
+def run_C_pullback(ctx, seed):
+    """通道 C：突破回踩确认。种子来自有效突破，或打穿上限后的触发价。"""
+    if not seed:
         return []
-    sb = sigs_B[0]
-    j_b, S = sb["j"], sb["entry_sig"]
+    j_b, S = seed["j"], seed["S"]
     atr, lim = ctx.atr, ctx.lim
     tgt = ctx.tgt_b
+    name = ("通道C(打穿后回踩)" if seed.get("via") == "overshoot"
+            else "通道C(回踩确认)")
     for j in range(j_b + 1, len(ctx.mins)):
         pc = P.pullback_confirm(ctx.mins[:j + 1], j_b, S, atr)
         st = pc["state"]
@@ -273,7 +281,6 @@ def run_C_pullback(ctx, sigs_B):
             return []
         if st != "ok":
             continue
-        # 逐根增长窗口 → 第一次 ok 必然新鲜；仍照 probe 再校一次
         if pc["j"] < (j + 1) - P.PULLBACK_FRESH:
             return []
         entry = pc["entry"]
@@ -281,11 +288,12 @@ def run_C_pullback(ctx, sigs_B):
         if stop >= entry:
             return []
         if (lim - entry) / lim * 100 < P.ASH_LIMIT_BUFFER * 100:
-            return []         # 贴板不接
+            return []
         if not tgt or tgt <= entry:
             return []
-        return [sig("通道C(回踩确认)", pc["j"], entry, stop, tgt,
-                    {"S": S, "cheaper": round(S - entry, 2),
+        return [sig(name, pc["j"], entry, stop, tgt,
+                    {"S": S, "via": seed.get("via"),
+                     "cheaper": round(S - entry, 2),
                      "risk_B": round(S - ctx.stop_k, 2),
                      "risk_C": round(entry - stop, 2)})]
     return []
@@ -533,9 +541,9 @@ def collect(code, daily, mins, days, detail=False):
         d_lo = min(b["l"] for b in ctx.mins)
         d_op = ctx.mins[0]["o"]
         d_gap = round((d_op - ctx.prev_c) / ctx.prev_c * 100, 2)
-        sb = run_B_break(ctx)
+        sb, seed = run_B_break(ctx)
         found = run_baseline_preorder(ctx) + run_A_burst(ctx) + sb \
-            + run_C_pullback(ctx, sb) + run_BO_preorder(ctx) + run_BO_early(ctx)
+            + run_C_pullback(ctx, seed) + run_BO_preorder(ctx) + run_BO_early(ctx)
         for s in found:
             # 次根开盘成交价：信号根收盘之后的第一笔可成交价。
             # 信号落在最后一根 → 用次日开盘（收盘信号的真实成交价）。
@@ -609,17 +617,18 @@ def collect(code, daily, mins, days, detail=False):
 # 报告
 # ------------------------------------------------------------------
 ORDER = ["预案单(回踩)", "通道A(量能突变)", "通道B(关键位突破)",
-         "通道C(回踩确认)", "突破预案单", "突破预案单·早进"]
+         "通道C(回踩确认)", "通道C(打穿后回踩)", "突破预案单", "突破预案单·早进"]
 LABEL = {"预案单(回踩)": "预案单（回踩大阳·旧基线）",
          "通道A(量能突变)": "通道A 量能突变",
          "通道B(关键位突破)": "通道B 关键位突破",
          "通道C(回踩确认)": "通道C 回踩确认",
+         "通道C(打穿后回踩)": "通道C 打穿后回踩",
          "突破预案单": "突破预案单（盘前条件单）",
          "突破预案单·早进": "突破预案单·早进（开盘价）"}
 # 同一天、同一只票有多个信号时，先花掉额度的顺序（老罗口径：C > A > B；
 # 盘前条件单最靠前，它先挂上就先占额度；旧预案单最后）。
-PRIORITY = ["突破预案单", "突破预案单·早进", "通道C(回踩确认)", "通道A(量能突变)",
-            "通道B(关键位突破)", "预案单(回踩)"]
+PRIORITY = ["突破预案单", "突破预案单·早进", "通道C(回踩确认)", "通道C(打穿后回踩)",
+            "通道A(量能突变)", "通道B(关键位突破)", "预案单(回踩)"]
 
 
 def report(agg, scope, sym_days=0):

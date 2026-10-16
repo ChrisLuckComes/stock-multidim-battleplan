@@ -266,7 +266,8 @@ def rolling_sma_last(bars, n):
 def intraday_action_from_probe(probe_out):
     """提取盘中通道的**可执行先手仓**（2026-10-16 老罗口径：盘中决策要真能用）。
 
-    盘中决策分两层：昨收预案单 + 盘中通道（量能突变 / 关键位突破）。
+    盘中决策分两层：昨收预案单 + 盘中通道（量能突变 / 关键位突破 / 回踩确认）。
+    只取一笔，顺序固定：量能突变，其次关键位突破，最后回踩。不叠加仓位。
     旧交付层只读预案层 —— 预案一 wait，首屏就演「结论：不做」，盘中通道放行的
     先手仓被整层埋掉（利元亨 688499 2026-10-16 11:00 踏空正因：③振幅按 ATR
     已放行，信号却到不了读者）。本函数把可执行动作提出来，与预案**并列不覆盖**。
@@ -275,7 +276,9 @@ def intraday_action_from_probe(probe_out):
     （probe 侧 allow 已置 False，见 probe_intraday 量能突变/突破通道）。
     """
     po = probe_out or {}
-    for key, label in (("intraday", "盘中量能突变"), ("ash_break", "关键位突破")):
+    for key, label in (("intraday", "盘中量能突变"),
+                       ("ash_break", "关键位突破"),
+                       ("ash_pullback", "回踩确认")):
         act = (po.get(key) or {}).get("action")
         if act:
             src = ("%s先手仓：挂 %.2f / 止损 %.2f / %s 股 / 估算最大亏 %s 元"

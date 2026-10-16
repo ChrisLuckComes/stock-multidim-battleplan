@@ -1332,9 +1332,16 @@ def probe(code, qty=None, account=None, asof=None, min_scale=5, replay=False,
                       f" → 买不到 / 买到即开板，本通道今天关闭")
                 out["ash_break"] = {"anchor": K, "allow": False, "reason": "贴近涨停"}
             elif rej:
-                print(f"  [触发] ✗ {rej[0]['d'][11:16]} 收 {rej[0]['c']:.2f}"
-                      f" 已越过上限 {cap_px:.2f} → 属加速段，A股 T+1 不接")
-                out["ash_break"] = {"anchor": K, "allow": False, "reason": "越过上限"}
+                b_rej, j_rej = rej
+                print(f"  [触发] ✗ {b_rej['d'][11:16]} 收 {b_rej['c']:.2f}"
+                      f" 已越过上限 {cap_px:.2f} → 属加速段，这一根不买")
+                s_ref = pullback_anchor("overshoot", b_rej["c"], thr)
+                pb_ctx = {"j": j_rej, "S": s_ref, "K": K,
+                          "tgt": near_resistance(b2, K, atr_v),
+                          "at": b_rej["d"][11:16], "via": "overshoot"}
+                print(f"  → 回踩参照钉在触发价 {s_ref:.2f}（不钉打穿收盘 {b_rej['c']:.2f}）")
+                out["ash_break"] = {"anchor": K, "allow": False, "reason": "越过上限",
+                                    "pullback_ref": s_ref}
             elif not hit:
                 print(f"  [触发] ✗ 至今未站上 {thr:.2f} → 未突破")
                 out["ash_break"] = {"anchor": K, "allow": False, "reason": "未触发"}
@@ -1346,8 +1353,9 @@ def probe(code, qty=None, account=None, asof=None, min_scale=5, replay=False,
                 if (lim - entry) / lim * 100 >= ASH_LIMIT_BUFFER * 100:
                     # 通道 C 的前置：只要「曾有效突破」（未越上限、未贴涨停）即可。
                     # C 专为「错过了第一根」而设，故不要求通道 B 当前新鲜。
-                    pb_ctx = {"j": j, "S": entry, "K": K, "tgt": None,
-                              "at": b["d"][11:16]}
+                    pb_ctx = {"j": j, "S": pullback_anchor("hit", entry, thr),
+                              "K": K, "tgt": None,
+                              "at": b["d"][11:16], "via": "hit"}
                 print(f"  [触发] {'✓' if fresh_k else '⚠ 已过去 ' + str(len(mins) - 1 - j) + ' 根'}"
                       f"  {b['d'][11:16]} 收 {entry:.2f}"
                       f"   量 = 当日均量 {rel:.1f} 倍"
@@ -1413,9 +1421,14 @@ def probe(code, qty=None, account=None, asof=None, min_scale=5, replay=False,
         K, S = pb_ctx["K"], pb_ctx["S"]
         print()
         print(f"── 二·C、回踩确认（{min_scale} 分钟 · 强势票唯一给得起的入场点） ──")
-        print(f"  启动点 S = {S:.2f}（二·B 触发根 {pb_ctx['at']} 收盘）"
-              f"   回踩带 {S - band:.2f} ~ {S + band:.2f}"
-              f"   下沿破位即作废")
+        if pb_ctx.get("via") == "overshoot":
+            print(f"  参照价 S = {S:.2f}（突破触发价；{pb_ctx['at']} 打穿上限，那一根不买）"
+                  f"   回踩带 {S - band:.2f} ~ {S + band:.2f}"
+                  f"   下沿破位即作废")
+        else:
+            print(f"  启动点 S = {S:.2f}（二·B 触发根 {pb_ctx['at']} 收盘）"
+                  f"   回踩带 {S - band:.2f} ~ {S + band:.2f}"
+                  f"   下沿破位即作废")
         pc = pullback_confirm(mins, pb_ctx["j"], S, atr_v)
         st = pc["state"]
         if st == "pending":
@@ -1489,11 +1502,26 @@ def probe(code, qty=None, account=None, asof=None, min_scale=5, replay=False,
                     print(f"     不做 —— {no_ash_reason(code, account, entry)}")
                 print(f"     ⚠ T+1：止损是**明天**用的 —— 明日开盘破 {stop_c:.2f} "
                       f"直接走；未破持有，收盘失守 {stop_c:.2f} 仍走")
+                _c_act = None
+                if n:
+                    _c_act = {"kind": "回踩确认", "entry": entry,
+                              "stop": stop_c, "qty": n,
+                              "est_loss": round(n * risk),
+                              "risk_pct": round(risk / entry * 100, 2),
+                              "pct_account": (round(n * entry / account * 100, 1)
+                                              if account else None),
+                              "target1": pb_ctx.get("tgt"),
+                              "note": "T+1：止损为次日口径，跳空实际亏损只大不小"}
+                else:
+                    _wait_src.append("回踩确认通道放行但资金不够："
+                                     + no_ash_reason(code, account, entry))
                 out["ash_pullback"] = {"state": "ok", "at": pc["at"], "S": S,
                                        "entry": entry, "stop": stop_c,
                                        "low": low, "risk": round(risk, 2),
                                        "target1": pb_ctx["tgt"],
-                                       "cheaper_vs_B": round(S - entry, 2)}
+                                       "cheaper_vs_B": round(S - entry, 2),
+                                       "via": pb_ctx.get("via") or "hit",
+                                       "allow": bool(n), "action": _c_act}
 
     # ---------- 3) 次级观察位 ----------
     print()
@@ -1580,6 +1608,13 @@ PULLBACK_VOL_MULT = 2.0    # 回踩各根量 < max(启动根量, 当日此前均
 # 较大者，阈值 2.0 与通道 A 的 2.5 倍爆量门槛同量级。
 PULLBACK_STOP_ATR = 0.10   # 止损：回踩低点 − 0.10×ATR
 PULLBACK_FRESH = 2         # 企稳根须在最近 2 根内（过期不追）
+
+
+def pullback_anchor(kind, entry, thr):
+    """回踩参照价。打穿上限时钉突破触发价，不钉打穿那根的收盘。"""
+    if kind == "overshoot":
+        return round(float(thr), 2)
+    return round(float(entry), 2)
 # 为什么不能沿用 A 股的固定 2.5%：2.5% 是「绝对百分比」，而美股 ATR/H 普遍 3–5%
 # （ILMN 4.13%、MDB 5.7%），同一把尺子在高波动市场会系统性偏严 —— 实测 ILMN 9/15
 # 启动前振幅 3.41%（=0.83×ATR）被 2.5% 拦掉，但它相对自身波动率并不算大。
@@ -1654,6 +1689,204 @@ def near_resistance(bars, K, atr_v, window=RES_WINDOW, min_gap=0.20):
         return None
     ups = sorted({h for _, h in Hs if h > K + min_gap * atr_v})
     return ups[0] if ups else None
+
+
+def _bucket_end(t):
+    """1 分钟时刻 → 5 分钟桶的结束标签。09:30 / 13:00 并进下一桶。"""
+    h, mi = int(t[:2]), int(t[3:5])
+    if t in ("09:30", "13:00"):
+        mi += 5
+    elif mi % 5 != 0:
+        mi += 5 - (mi % 5)
+    if mi >= 60:
+        h += 1
+        mi -= 60
+    if h > 15 or (h == 15 and mi > 0):
+        return None
+    return "%02d:%02d" % (h, mi)
+
+
+def aggregate_5m(minutes, date):
+    """1 分钟（t=HH:MM）合成 5 分钟。标签用桶结束时刻，供通道判定复用。"""
+    buckets = {}
+    order = []
+    day = (date or "")[:10]
+    for m in minutes or []:
+        t = str(m.get("t") or "")[:5]
+        if len(t) < 5 or t[2] != ":":
+            continue
+        end = _bucket_end(t)
+        if end is None:
+            continue
+        px_o, px_h, px_l, px_c = float(m["o"]), float(m["h"]), float(m["l"]), float(m["c"])
+        vol = float(m.get("v") or 0)
+        b = buckets.get(end)
+        if b is None:
+            buckets[end] = {"d": "%s %s" % (day, end), "o": px_o, "h": px_h,
+                            "l": px_l, "c": px_c, "v": vol}
+            order.append(end)
+        else:
+            b["h"] = max(b["h"], px_h)
+            b["l"] = min(b["l"], px_l)
+            b["c"] = px_c
+            b["v"] += vol
+    return [buckets[k] for k in order]
+
+
+def _channel_action(kind, entry, stop, qty, account, target, extra):
+    risk = entry - stop
+    act = {"kind": kind, "entry": round(entry, 2), "stop": round(stop, 2),
+           "qty": qty, "est_loss": round(qty * risk),
+           "risk_pct": round(risk / entry * 100, 2) if entry else None,
+           "pct_account": (round(qty * entry / account * 100, 1) if account else None),
+           "target1": target,
+           "note": "T+1：止损为次日口径，跳空实际亏损只大不小"}
+    act.update(extra or {})
+    return act
+
+
+def eval_ash_intraday(mins, code, atr_v, prev_c, basis_bars=None,
+                      account=None, kb=None):
+    """截至当前的 5 分钟线，按优先级给至多一笔盘中动作。
+
+    顺序：量能突变 > 关键位突破 > 回踩。打穿上限不买那一根，回踩参照钉触发价。
+    无动作时 why 写明通道为何不放行。不打印。
+    """
+    if account is None:
+        account = _AC.cfg()["ash_account"]
+    if not mins or not atr_v or atr_v <= 0 or not prev_c:
+        return {"action": None, "source": None, "why": "通道数据不足"}
+    code = str(code)
+    lim = ash_limit_price(code, prev_c)
+    op = mins[0]["o"]
+    notes = []
+
+    hm = mins[-1]["d"][11:16]
+    burst_act = None
+    if hm < BURST_AFTER:
+        notes.append("量能突变时间窗未到")
+    else:
+        hits = vol_bursts(mins)
+        if not hits:
+            notes.append("无量能突变")
+        else:
+            i, ratio, _pm = hits[-1]
+            fresh = i >= len(mins) - 2 and i >= 1
+            if not fresh:
+                notes.append("量能突变已过期")
+            else:
+                pre = mins[:i]
+                pre_h = max(b["h"] for b in pre) if pre else op
+                pre_l = min(b["l"] for b in pre) if pre else op
+                amp = (pre_h - pre_l) / pre_l if pre_l else 0
+                trigger = mins[i - 1]["c"]
+                if (lim - trigger) / lim * 100 < ASH_LIMIT_BUFFER * 100:
+                    notes.append("量能突变贴涨停")
+                elif amp > amp_gate_max(op, atr_v):
+                    notes.append("启动前振幅过大")
+                elif trigger > op + CHASE_ATR * atr_v:
+                    notes.append("量能突变越过开盘+1倍ATR")
+                else:
+                    stop = min(pre_l, mins[i]["l"]) - 0.10 * atr_v
+                    n = ash_lots(account, trigger, stop, code) if stop < trigger else None
+                    if n:
+                        tgt = near_resistance(basis_bars, trigger, atr_v) if basis_bars else None
+                        burst_act = _channel_action(
+                            "先手1/3仓", trigger, stop, n, account, tgt,
+                            {"burst_at": mins[i]["d"][11:16],
+                             "ratio": round(ratio, 1)})
+                    else:
+                        notes.append("量能突变资金不够")
+
+    if kb is None and basis_bars:
+        kb = key_break_level(basis_bars, atr_v, prev_c)
+    break_act = None
+    pull_act = None
+    if not kb:
+        notes.append("上方无可突破位")
+    else:
+        K = kb["level"]
+        thr = K + BREAK_BUF_ATR * atr_v
+        cap_px = key_break_cap(op, K, atr_v, "ASH")
+        stop_k = round(K - BREAK_STOP_ATR * atr_v, 2)
+        if (lim - thr) / lim * 100 < ASH_LIMIT_BUFFER * 100:
+            notes.append("突破触发价贴涨停")
+        else:
+            status, j, bar = "none", None, None
+            for j_i, b in enumerate(mins):
+                if j_i * 5 < ASH_BREAK_MIN_OFF:
+                    continue
+                if b["c"] > thr:
+                    status = "overshoot" if b["c"] > cap_px else "hit"
+                    j, bar = j_i, b
+                    break
+            seed = None
+            if status == "none":
+                notes.append("关键位未触发")
+            elif status == "overshoot":
+                notes.append("关键位打穿上限，这一根不买")
+                seed = {"j": j, "S": pullback_anchor("overshoot", bar["c"], thr),
+                        "via": "overshoot", "at": bar["d"][11:16]}
+            else:
+                entry = round(bar["c"], 2)
+                fresh_k = j >= len(mins) - 2
+                near = (lim - entry) / lim * 100 < ASH_LIMIT_BUFFER * 100
+                if not near:
+                    seed = {"j": j, "S": pullback_anchor("hit", entry, thr),
+                            "via": "hit", "at": bar["d"][11:16]}
+                if fresh_k and not near and stop_k < entry:
+                    n = ash_lots(account, entry, stop_k, code)
+                    if n:
+                        tgt = near_resistance(basis_bars, K, atr_v) if basis_bars else None
+                        break_act = _channel_action(
+                            "突破试仓", entry, stop_k, n, account, tgt,
+                            {"at": bar["d"][11:16]})
+                    else:
+                        notes.append("关键位突破资金不够")
+                elif not fresh_k:
+                    notes.append("关键位突破已过期")
+                elif near:
+                    notes.append("关键位突破贴涨停")
+            if seed:
+                pc = pullback_confirm(mins, seed["j"], seed["S"], atr_v)
+                st = pc.get("state")
+                if st == "ok":
+                    entry = pc["entry"]
+                    stop_c = round(pc["low"] - PULLBACK_STOP_ATR * atr_v, 2)
+                    fresh_c = pc["j"] >= len(mins) - PULLBACK_FRESH
+                    near = (lim - entry) / lim * 100 < ASH_LIMIT_BUFFER * 100
+                    if not fresh_c:
+                        notes.append("回踩企稳已过期")
+                    elif near:
+                        notes.append("回踩入场贴涨停")
+                    elif stop_c >= entry:
+                        notes.append("回踩止损不低于入场")
+                    else:
+                        n = ash_lots(account, entry, stop_c, code)
+                        if n:
+                            tgt = near_resistance(basis_bars, kb["level"], atr_v) if basis_bars else None
+                            pull_act = _channel_action(
+                                "回踩确认", entry, stop_c, n, account, tgt,
+                                {"at": pc["at"], "via": seed["via"], "S": seed["S"]})
+                        else:
+                            notes.append("回踩确认资金不够")
+                elif st == "pending":
+                    notes.append("打穿或突破后尚未回踩")
+                elif st == "waiting":
+                    notes.append("已进回踩带，尚未企稳")
+                elif st == "failed":
+                    notes.append("回踩跌破下沿")
+                elif st == "heavy":
+                    notes.append("回踩段放量")
+
+    if burst_act:
+        return {"action": burst_act, "source": "量能突变", "why": ""}
+    if break_act:
+        return {"action": break_act, "source": "关键位突破", "why": ""}
+    if pull_act:
+        return {"action": pull_act, "source": "回踩确认", "why": ""}
+    return {"action": None, "source": None,
+            "why": "；".join(notes) if notes else "通道无信号"}
 
 
 def breakout_preorder(bars, atr_v, last_c, profile="us"):
