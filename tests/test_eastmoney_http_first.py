@@ -14,7 +14,14 @@ sys.path.insert(0, HERE)
 
 
 def _load(name, rel):
-    spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, rel))
+    """按 DEV 的子目录结构加载；INST 是「两代布局」（老代文件扁平钉在根），
+    故子目录找不到时按 basename 兜底 —— 否则安装副本收集阶段直接 FileNotFoundError。"""
+    path = os.path.join(HERE, rel)
+    if not os.path.exists(path):
+        flat = os.path.join(HERE, os.path.basename(rel))
+        if os.path.exists(flat):
+            path = flat
+    spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
