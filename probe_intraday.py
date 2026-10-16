@@ -30,10 +30,20 @@ UA = {"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn/"}
 BURST_MA_BARS = 5      # 量能突变基准 = 前 N 根均量（老罗 2026-09-17 改定义）
 BURST_MULT = 2.0       # 量能突变：当根 >= 前 BURST_MA_BARS 根均量 x BURST_MULT
 BURST_AFTER = "10:00"  # 时间窗下沿
-PRE_AMP_MAX = 0.025    # 启动前当日振幅上限
+PRE_AMP_MAX = 0.025    # 启动前当日振幅上限（ATR 口径的地板，见 CN_PRE_AMP_ATR）
+CN_PRE_AMP_ATR = 1.0   # 蓄势门槛按 ATR 归一化：≤ max(2.5%, 1.0×ATR/开盘价)
+                       # 2026-10-16 老罗拍板 A 方案·直接合入，对齐美股 US_PRE_AMP_ATR=1.0。
+                       # 起因：利元亨 688499 2026-10-16 11:00 量能突变 3.1× 被固定 2.5%
+                       # 误杀（启动前振幅 4.53%）→ 高波动票的量能突变永远过不了闸。
 CHASE_ATR = 1.0        # 触发价 <= 开盘 + 1.0xATR
 ASH_LOT_MAIN = 100     # 主板 60/00、创业板 300/301
 ASH_LOT_STAR = 200     # 科创板 688/689
+# ★ 实验开关（2026-10-16 老罗拍板 A 方案）：A 股盘中并入「今日半根」刷新结构。
+#   默认**关** —— 昨收口径仍是主路径；开关只让「盘中口径」与昨收预案**并列显示、
+#   不覆盖**。利元亨 688499 2026-10-16 11:00 回测通过后才考虑默认开。
+#   量按已过交易分钟 ÷ 240 折算全天口径（对齐美股 project_session_volume）——
+#   不折算会把「放量」误判成「缩量」，把买点压掉（Grok 2026-10-16 指出）。
+ASH_MERGE_LIVE_BAR = False
 
 # ── 账户 / 组合层仓位（人与钱 → env / .env；策略常数仍写死）──
 # 旧「账户 × 30%」单笔闸门已移除（老罗 2026-09-17：单笔不超过 5 万即可），单笔
@@ -786,8 +796,75 @@ def _print_knife_edge(plan):
           f"｜ ★ 在上沿买、不等平台突破 —— 成本优势通常 5~10%")
 
 
+def _ash_elapsed_min(hm):
+    """已过交易分钟（09:30 起算，扣午休 11:30–13:00；全日 240 分钟）。"""
+    try:
+        h, m = int(str(hm)[:2]), int(str(hm)[3:5])
+    except (TypeError, ValueError):
+        return 0
+    t = h * 60 + m
+    if t <= 9 * 60 + 30:
+        return 0
+    if t <= 11 * 60 + 30:
+        return t - (9 * 60 + 30)
+    return (11 * 60 + 30 - 9 * 60 - 30) + max(0, t - 13 * 60)
+
+
+def amp_gate_max(op, atr_v):
+    """启动前振幅门槛：max(2.5%, 1.0×ATR/开盘价)。
+
+    2026-10-16 老罗拍板 A 方案直接合入（③），与美股 US_PRE_AMP_ATR 同口径；
+    回测（research/backtest_intraday.py）与线上共用本函数，阈值不复制。
+    """
+    if not op:
+        return PRE_AMP_MAX
+    return max(PRE_AMP_MAX, CN_PRE_AMP_ATR * atr_v / op)
+
+
+def ash_live_bar(sym, today, until=None, min_scale=5, mins=None):
+    """实验（ASH_MERGE_LIVE_BAR）：分钟线合成「截至 until 的今日半根」K 线。
+
+    与美股 merge_intraday_bar 同思路：把今日未走完的半根并进 basis，
+    build_ev/plan_entry 就会把「今日站上平台沿」算成 fresh_break，买区从
+    昨收回踩位刷到突破位 —— 补上「已经拉起来」那段（利元亨 11:00 案例）。
+
+    量能口径：`v` = 累计量 × 240 / 已过分钟（折算全天口径，避免半天量比
+    整日均量被误判成「缩量」而压掉买点）；`v_raw` = 真实累计量。
+    半根量天然不精确 ⇒ 本开关默认关、须回测（老罗 2026-10-16 口径）。
+
+    `mins`：调用方预取的分钟线（回测缓存/测试注入用）；None = 现取。
+    """
+    if mins is None:
+        mins = kline(sym, min_scale, 240)
+    mins = [b for b in mins if b["d"].startswith(today)]
+    if until:
+        mins = [b for b in mins if b["d"][11:16] <= until]
+    if not mins:
+        return None
+    last_hm = mins[-1]["d"][11:16]
+    elapsed = _ash_elapsed_min(last_hm)
+    v_acc = sum(b["v"] for b in mins)
+    v_full = v_acc * 240.0 / elapsed if elapsed > 0 else v_acc
+    return {"d": today, "o": mins[0]["o"], "h": max(b["h"] for b in mins),
+            "l": min(b["l"] for b in mins), "c": mins[-1]["c"],
+            "v": v_full, "v_raw": v_acc, "live": True,
+            "elapsed_min": elapsed, "asof_min": last_hm}
+
+
+def replay_drop_last(daily, asof, live):
+    """回放时是否丢日线末根（2026-10-16 off-by-one 修复，见 probe asof 分支）。
+
+    只有末根**确实是 asof 当日**才丢 —— 新浪日线盘中不含当日半根
+    （东财才含），回放「今天」时日线末根是昨天，无条件丢会把昨天一起丢、
+    基准日变成前天（688499 2026-10-16 11:00 实测踩过）。过去日期回放
+    不受影响（日线含当日整根，丢它 = 用昨收，正确）。
+    """
+    return bool(live and daily and daily[-1]["d"][:10] == asof)
+
+
 def probe(code, qty=None, account=None, asof=None, min_scale=5, replay=False,
-          until=None, us_account=None, date=None, data_file=None, market_data=None):
+          until=None, us_account=None, date=None, data_file=None, market_data=None,
+          merge_live=False):
     # ★ 默认值现取（不在签名里写 50000 / 5000）：配置改了不必改代码
     if account is None:
         account = _AC.cfg()["ash_account"]
@@ -814,7 +891,7 @@ def probe(code, qty=None, account=None, asof=None, min_scale=5, replay=False,
     if asof:
         daily = [b for b in daily if b["d"][:10] <= asof]
         live = bool(replay)          # --asof 默认=该日收盘后；加 --replay 则=该日盘中
-        drop_last = live
+        drop_last = replay_drop_last(daily, asof, live)
     else:
         # 「是否盘中」与「末根要不要丢」必须分开：新浪日线盘中不含当日半根，
         # 只靠 is_live_bar 会把交易时段误判成已收盘并跳过盘中确认。
@@ -835,6 +912,32 @@ def probe(code, qty=None, account=None, asof=None, min_scale=5, replay=False,
     # 必须在这里先算：room_and_cap 会执行 stop_plan 的「铁律二」并回写买区
     # （硬止损与买区冲突时上抬买区下沿）。放在打印之前，报告才和实际挂单价一致。
     rc = room_and_cap(b2, z, plan["mode"], atr_v)
+
+    # ★ 实验开关（2026-10-16 老罗拍板 A）：A 股盘中并入今日半根 → 「盘中口径」。
+    #   与昨收预案**并列**、不覆盖；默认关（ASH_MERGE_LIVE_BAR / --ash-merge-live）。
+    _live_bar = _plan_i = _z_i = _atr_i = None
+    if merge_live and live:
+        _today = asof or snap["date"]
+        _live_bar = ash_live_bar(sym, _today, until=until, min_scale=min_scale)
+        if _live_bar:
+            _ev_i, _b2_i, _mi = build_ev(basis + [_live_bar], ticker=code)
+            if _ev_i is not None:
+                _plan_i = plan_entry(_b2_i, _ev_i)
+                _z_i = _plan_i.get("buy_zone") or {}
+                _atr_i = atr14(_b2_i)
+
+    # ★ wait 来源显式化（2026-10-16 交付层，Grok 建议4 / 盟固利 301487 教训）：
+    #   probe 可买却被筹码闸拦下 ≠ probe 给 wait —— 分层记账，报告只渲染不解释。
+    _wait_src = []
+    if not plan["recommend"]:
+        _wait_src.append("预案层：recommend=False（%s）"
+                         % (plan.get("note") or plan.get("mode")))
+    _ts0 = plan.get("top_signal") or {}
+    if _ts0.get("block"):
+        _b0 = _ts0.get("best") or {}
+        _wait_src.append("顶部K线：已确认 %s %s（%s）→ 避雷"
+                         % (_b0.get("d") or "", _b0.get("pattern_cn") or "",
+                            _ts0.get("block_reason") or ""))
 
     out = {
         "code": code, "name": snap["name"], "sym": sym,
@@ -877,6 +980,42 @@ def probe(code, qty=None, account=None, asof=None, min_scale=5, replay=False,
         print(f" ⚠ 止损冲突 : {z['stop_warning']}")
     if plan.get("note"):
         print(f" note       : {plan['note']}")
+
+    # ── 盘中口径（实验开关 --ash-merge-live，默认关）──
+    # 与上方昨收预案**并列**、不覆盖：两套基准日各自成立，读者自己对比。
+    if _live_bar is not None:
+        print()
+        print("── 盘中口径（实验开关 --ash-merge-live · 默认关） ──")
+        if _plan_i is None:
+            print("  并入今日半根后结构不可判 —— 实验口径不输出，仍按昨收预案")
+        else:
+            print(f"  今日半根   : 截至 {_live_bar['asof_min']}（已过 "
+                  f"{_live_bar['elapsed_min']} 分钟）  "
+                  f"O{_live_bar['o']:.2f} H{_live_bar['h']:.2f} "
+                  f"L{_live_bar['l']:.2f} C{_live_bar['c']:.2f}")
+            print(f"  量能折算   : 累计 {_live_bar['v_raw']:,.0f} → 全天口径 "
+                  f"{_live_bar['v']:,.0f}（×240/{_live_bar['elapsed_min']}）")
+            print(f"  结构       : 模式 {_plan_i['mode']}  "
+                  f"recommend={_plan_i['recommend']}")
+            _zt_i = ("（已作废 · 勿挂单）" if _z_i.get("invalid")
+                     else f"{_z_i.get('primary_lo')} ~ {_z_i.get('primary_hi')}")
+            print(f"  买区       : {_zt_i}   防守位 {_z_i.get('invalidation')}")
+            print("  ⚠ 实验口径：与昨收预案并列，**不覆盖**；默认关，"
+                  "回测验证通过前不得作为下单依据")
+        out["intraday_basis"] = {
+            "enabled": True, "asof_min": _live_bar["asof_min"],
+            "bar": {k: _live_bar[k] for k in ("o", "h", "l", "c")},
+            "v_projected": _live_bar["v"], "v_raw": _live_bar["v_raw"],
+            "elapsed_min": _live_bar["elapsed_min"],
+            "mode": (_plan_i or {}).get("mode"),
+            "recommend": (_plan_i or {}).get("recommend"),
+            "zone_lo": _z_i.get("primary_lo") if _z_i else None,
+            "zone_hi": _z_i.get("primary_hi") if _z_i else None,
+            "defend": _z_i.get("invalidation") if _z_i else None,
+        }
+    elif merge_live and live:
+        out["intraday_basis"] = {"enabled": True,
+                                 "error": "今日分钟线为空（非交易时段/停牌）"}
 
     # ---------- 1) 预案单 ----------
     print()
@@ -1071,12 +1210,14 @@ def probe(code, qty=None, account=None, asof=None, min_scale=5, replay=False,
             cap = op + CHASE_ATR * atr_v
             lim = ash_limit_price(code, basis[-1]["c"])
             c5 = (lim - trigger) / lim * 100 >= ASH_LIMIT_BUFFER * 100
-            c2, c3, c4 = True, amp <= PRE_AMP_MAX, trigger <= cap
+            amp_max = amp_gate_max(op, atr_v)
+            c2, c3, c4 = True, amp <= amp_max, trigger <= cap
             print(f"  [2 量能突变] ✓ {mins[i]['d'][11:16]} 量 {mins[i]['v'] / 100:,.0f} 手"
                   f" = 前 {BURST_MA_BARS} 根均量 {pm / 100:,.0f} 手的 {ratio:.1f} 倍"
                   f"{'' if fresh else f'  ⚠ 已过去 {len(mins) - 1 - i} 根，信号过期'}")
             print(f"  [3 蓄势位置] {'✓' if c3 else '✗'} 启动前振幅 {amp * 100:.2f}% "
-                  f"{'≤' if c3 else '>'} {PRE_AMP_MAX * 100:.1f}%")
+                  f"{'≤' if c3 else '>'} {amp_max * 100:.2f}%"
+                  f"（=max(2.5%, {CN_PRE_AMP_ATR:.1f}×ATR/开盘价 {op:.2f}））")
             print(f"  [4 未追高 ] {'✓' if c4 else '✗'} 可挂价 {trigger:.2f} "
                   f"{'≤' if c4 else '>'} 开盘+1.0ATR = {cap:.2f}")
             print(f"  [5 离涨停 ] {'✓' if c5 else '✗'} 涨停 {lim:.2f}，"
@@ -1085,6 +1226,22 @@ def probe(code, qty=None, account=None, asof=None, min_scale=5, replay=False,
                   f"（A股专有：贴板买不到 / 买到即开板）")
             ok = c1 and c2 and c3 and c4 and c5 and fresh
             print(f"  → {'✅ 允许先手 1/3 仓，挂 ' + format(trigger, '.2f') if ok else '❌ 不满足，只观察'}")
+            if not ok:
+                # wait 来源逐条记账（2026-10-16 交付层）：哪条闸否的，写清楚
+                _why = []
+                if not c1:
+                    _why.append(f"时间窗 {hm}<{BURST_AFTER}")
+                if not c3:
+                    _why.append(f"启动前振幅 {amp * 100:.2f}%>门槛 "
+                                f"{amp_max * 100:.2f}%（启动前不够安静）")
+                if not c4:
+                    _why.append(f"触发价 {trigger:.2f}>开盘+1.0ATR {cap:.2f}（追高）")
+                if not c5:
+                    _why.append(f"距涨停仅 {(lim - trigger) / lim * 100:.2f}%"
+                                f"<{ASH_LIMIT_BUFFER * 100:.1f}%（贴板）")
+                if not fresh:
+                    _why.append(f"信号已过去 {len(mins) - 1 - i} 根（过期）")
+                _wait_src.append("盘中量能突变通道否：" + "；".join(_why))
             if ok:
                 stop = min(pre_l, mins[i]["l"]) - 0.10 * atr_v
                 n = ash_lots(account, trigger, stop, code)
@@ -1107,6 +1264,8 @@ def probe(code, qty=None, account=None, asof=None, min_scale=5, replay=False,
             print(f"  [2 量能突变] ✗ 今日尚无「≥前 {BURST_MA_BARS} 根均量 × "
                   f"{BURST_MULT:.1f}」的分钟量 → 无启动信号")
             print("  → ❌ 不试仓")
+            _wait_src.append(f"盘中量能突变通道：今日尚无「≥前 {BURST_MA_BARS} 根均量 × "
+                             f"{BURST_MULT:.1f}」的分钟量")
             out["intraday"] = {"burst_at": None, "allow": False}
     elif not live:
         print()
@@ -1331,6 +1490,12 @@ def probe(code, qty=None, account=None, asof=None, min_scale=5, replay=False,
         print()
         _print_vp_regime(vp, "四")
         out["vp"] = vp
+    # wait 来源汇总（2026-10-16 交付层，Grok 建议4）：预案层 / 盘中通道 / 顶部K线
+    # 分层记账 —— 「probe 可买但报告像在等」这类歧义，从此有据可查。
+    out["wait_source"] = _wait_src
+    if _wait_src:
+        print()
+        print(" wait 来源  : " + " ｜ ".join(_wait_src))
     return out
 
 
@@ -2014,7 +2179,8 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None,
               f"{'' if fresh else f'  ⚠ 已过去 {n_eff - 1 - i} 根，信号过期'}")
         print(f"  [3 蓄势位置] {'✓' if c3 else '✗'} 启动前振幅 {amp * 100:.2f}% "
               f"{'≤' if c3 else '>'} {amp_max * 100:.2f}%"
-              f"（=max(2.5%, {US_PRE_AMP_ATR:.1f}×ATR%)；A 股为固定 2.5%）")
+              f"（=max(2.5%, {US_PRE_AMP_ATR:.1f}×ATR%)；A 股同口径 "
+              f"CN_PRE_AMP_ATR={CN_PRE_AMP_ATR:.1f}，2026-10-16 起对齐）")
         print(f"  [4 未追高 ] {'✓' if c4 else '✗'} 可挂价 {trigger:.2f} "
               f"{'≤' if c4 else '>'} 开盘+1.0ATR = {cap_px:.2f}")
         ok = c1 and c2 and c3 and c4 and fresh
@@ -2210,6 +2376,9 @@ if __name__ == "__main__":
     ap.add_argument("--min-scale", type=int, default=5)
     ap.add_argument("--replay", action="store_true", help="强制按盘中口径回放")
     ap.add_argument("--until", default=None, help="截断到 HH:MM（模拟当时时点）")
+    ap.add_argument("--ash-merge-live", action="store_true",
+                    help="实验：A股盘中并入今日半根刷新结构（默认关；"
+                         "与昨收预案并列不覆盖，回测通过前不作下单依据）")
     ap.add_argument("--us-account", type=float, default=_AC.cfg()["us_account"],
                     help="美股账户美元（默认 US_ACCOUNT / .env，见 account_config.py）")
     ap.add_argument("--date", default=None,
@@ -2233,7 +2402,7 @@ if __name__ == "__main__":
     for c in a.codes:
         try:
             probe(c, a.qty, a.account, a.asof, a.min_scale, a.replay, a.until,
-                  a.us_account, a.date, a.data)
+                  a.us_account, a.date, a.data, merge_live=a.ash_merge_live)
         except Exception as e:
             print(f"[{c}] ERR {type(e).__name__}: {e}")
         print()

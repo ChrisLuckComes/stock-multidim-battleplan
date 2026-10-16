@@ -914,16 +914,25 @@ def intraday_bar(sym, meta, bars, fetch=None):
     }
 
 
-def merge_intraday_bar(sym, bars, meta, market="US", fetch=None):
+def merge_intraday_bar(sym, bars, meta, market="US", fetch=None, live_bar=None):
     """把今日盘中未收盘 bar 并入日线序列 → (bars2, live_bar|None)。
 
     并入后 build_ev / plan_entry 会自然地把「今日站上平台沿」算成 fresh_break，
     买区随之从昨收的回踩位刷到突破位 —— 这是「不再永远等回踩」的关键。
-    量能字段缺 A 股（东财日线盘中不返回当日半根，meta 为空）→ 自动不合成。
-    `fetch` 仅供测试注入 5 分钟线，生产走默认取数。
+
+    2026-10-16（老罗拍板 A 方案）：market="ASH" **不再无条件 return**。
+    原前提「东财日线盘中不返回当日半根、meta 为空」已过时（东财/腾讯实测
+    均返回当日半根）。ASH 改由调用方（probe_intraday 实验开关
+    ASH_MERGE_LIVE_BAR，默认关）用分钟线自行合成半根后经 `live_bar` 传入；
+    不传 = 保持旧行为（不并入）。
+    `fetch` 仅供测试注入 5 分钟线（美股路径），生产走默认取数。
     """
-    if not bars or market == "ASH":
+    if not bars:
         return bars, None
+    if market == "ASH":
+        if not live_bar:
+            return bars, None
+        return bars + [live_bar], live_bar
     b = intraday_bar(sym, meta, bars, fetch=fetch)
     if not b:
         return bars, None

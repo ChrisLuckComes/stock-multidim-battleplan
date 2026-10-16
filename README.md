@@ -295,8 +295,12 @@ python research/backtest_intraday.py --days 10 --no-cache
    = **最多同时 3 笔**。组合层 20 个交易日 −2.37%（/10 万总资金），单时点最大占用 99.8%。
 5. **一批「未决参数」其实是非约束参数**：`BREAK_DMAX_ASH`（0.40~1.00 结果几乎相同）、
    `BURST_MA_BARS`（3/5/10 接近）、`BO_NEAR_ASH`（0.40~0.80 非单调 = 噪声）、
-   `PULLBACK_VOL_MULT` / `PRE_AMP_MAX` 同理。继续调这些数字没有边际收益，
+   `PULLBACK_VOL_MULT` 同理。继续调这些数字没有边际收益，
    边际收益在「通道有效性」本身。
+   ⚑ 例外：`PRE_AMP_MAX` 的**固定 2.5% 形态**已于 2026-10-16 废弃，改为
+   `amp_gate_max(op, atr)=max(2.5%, 1.0×ATR/开盘价)`（CN_PRE_AMP_ATR，对齐
+   美股）—— 利元亨 688499 11:00 量能突变 3.1× 被 2.5% 误杀（振幅 4.53%）。
+   这是**口径变更**不是调参，回测与线上共用 `amp_gate_max`。
 
 回测同时逼出两个真缺陷，均已修：
 

@@ -1347,6 +1347,31 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
         out["scr"] = None
         if not is_us:
             out["scr_skipped"] = True
+    # ★ 2026-10-16 交付层（Grok 建议4 + 盟固利 301487 教训）：最终「等/不做」
+    #   必须写明来源 —— probe 可买但被筹码闸拦下，与 probe 本身给 wait 是两回事；
+    #   不写清楚，读者会以为引擎漏判（当天下午盟固利 +5.97% 的争议正源于此）。
+    _vsrc = []
+    _po = out.get("probe") or {}
+    _po_pre = _po.get("pre_order") or {}
+    if _po.get("recommend"):
+        _vsrc.append("probe 预案可买（限价 %s / 硬止损 %s）"
+                     % (_po_pre.get("limit"), _po_pre.get("stop_hard")))
+    else:
+        _vsrc.append("probe 预案不可买（%s）"
+                     % (_po.get("note") or _po.get("mode") or ""))
+    for _w in (_po.get("wait_source") or []):
+        _vsrc.append(_w)
+    _scr_d = out.get("scr") or {}
+    if _scr_d and not _scr_d.get("error"):
+        _vsrc.append("筹码闸：%s ⇒ %s（%s）"
+                     % (_scr_d.get("state"), _scr_d.get("state_trade"),
+                        "✅允许新开仓" if _scr_d.get("state_allow_new")
+                        else "⛔不允许新开仓"))
+    _tv_d = out.get("top_verdict") or {}
+    if _tv_d.get("level") in ("block", "alert"):
+        _vsrc.append("顶部K线：%s %s" % (_tv_d.get("level"),
+                                        _tv_d.get("pattern_cn") or ""))
+    out["verdict_source"] = _vsrc
     # ★ 名字兜底：日线快照里常不带 name，报告 H1 会退化成 6 位代码（688543 已踩）。
     #   scr_chip 走东财 kline、一定带名字 ⇒ 拿到了就补上，不额外发请求。
     if not is_us and out.get("scr") and not out["scr"].get("error"):

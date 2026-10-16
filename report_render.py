@@ -771,17 +771,23 @@ def build_oneline(a, n):
         return n["thesis_plain"]
     p = a.get("plan") or {}
     rec = pick_rec(a) or {}
+    # ★ 2026-10-16 交付层：结论必须带来源（预案层 / 盘中通道 / 筹码闸 / 顶部K线）——
+    #   「probe 可买、报告却像在等」的歧义从此消除（盟固利 301487 2026-10-16 教训）。
+    _vs = a.get("verdict_source") or []
+    _src_txt = ("<br>结论来源：" + esc(" ｜ ".join(_vs[:4]))) if _vs else ""
     if not rec:
         return ("结论：<b>不做</b> —— 引擎未给出合格档（mode=%s · recommend=%s），"
-                "不凭形态硬凑一个价。" % (esc(p.get("mode")), p.get("recommend")))
+                "不凭形态硬凑一个价。%s"
+                % (esc(p.get("mode")), p.get("recommend"), _src_txt))
     # ⚑ R 标签必须反映真实口径（MEMORY §3.5）：t1 算不出时引擎会回落到远端墙算 R，
     #   东岳硅材 300821 那样会得出 33.78 这种数字 —— 写在结论第一句而不标注，
     #   等于拿虚高赔率当决策依据。
     _r1_is_t1 = not rec.get("r1_basis") or str(rec["r1_basis"]).startswith("t1")
     _rlbl = "R→t1" if _r1_is_t1 else "R（t1 缺失·按远端墙）"
     return ("结论：<b>%s 挂限价买</b>，止损 <b>%s</b>，%s <b>%s</b>；"
-            "收盘破止损即离场；<b>不追价</b> —— 等不到的价等于 0。"
-            % (num(rec.get("entry")), num(rec.get("stop")), _rlbl, num(rec.get("r1"))))
+            "收盘破止损即离场；<b>不追价</b> —— 等不到的价等于 0。%s"
+            % (num(rec.get("entry")), num(rec.get("stop")), _rlbl,
+               num(rec.get("r1")), _src_txt))
 
 
 def build_summary(a, n):

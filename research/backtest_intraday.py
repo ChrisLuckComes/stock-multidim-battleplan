@@ -216,8 +216,8 @@ def run_A_burst(ctx):
         trigger = upto[i - 1]["c"]
         if (lim - trigger) / lim * 100 < P.ASH_LIMIT_BUFFER * 100:
             continue          # 贴涨停，买不到
-        if amp > P.PRE_AMP_MAX:
-            continue          # 启动前不够安静
+        if amp > P.amp_gate_max(op, atr):
+            continue          # 启动前不够安静（ATR 口径，2026-10-16 起与线上同公式）
         if trigger > op + P.CHASE_ATR * atr:
             continue          # 追高
         stop = min(pre_l, upto[i]["l"]) - 0.10 * atr
