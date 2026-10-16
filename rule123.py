@@ -33,6 +33,11 @@
      上方不成立，如上海机场 10-13 临界观察）⇒ 盘中排列成立即买、不要求过突破高点；
      主卖点（动态）= 三短均线多头排列一打乱（MA5<MA7 或 MA7<MA10）即卖出；兜底硬止损
      = MA20/MA60 中更近者。优先级（老罗裁决）：其他战法优先，本战法排链尾最后判断。
+  8. meteor_pit 流星砸坑（T0 分支，2026-10-16 老罗定）：天量高点 → 圆弧浅坑回调
+     （5日线下拐、10日线守住、坑底距天量高点回撤≤15%）→ 站上5日线即买（强确认=站上
+     天量日5日线价位）。是上升趋势动能再入场（非底部反转），止损锚=坑底，盈亏比高；
+     与出水芙蓉（ma_reclaim_break）并列、不混同。接管规则同 T0 家族（wait/自否/「大阳后」
+     家族时接管；recommend=True 强形态不抢标，仅并列挂载）。★ 用户明确授权新增（非 AI 自拟）。
   wait = 没有可执行模式，或距买位 >2×ATR
 
 HH 两两比较不作门控。cond2 = 自 P1 未再创新低。不用 MA60。
@@ -4298,6 +4303,194 @@ def ma_bull_align(bars, ev, atr_v, last_c):
     }
 
 
+def meteor_pit(bars, ev, atr_v, last_c):
+    """★ T0 分支：流星砸坑（2026-10-16 老罗定，图例四段结构量化）。
+
+    老罗原话：「增加 T0 模式分支，和出水芙蓉有点类似但不完全一样，流星砸坑，
+    很容易抓到主升浪，盈亏比高，买点仅需要站上五日线。」
+
+    与 T0 出水芙蓉（ma_reclaim_break）的区别（单列分支的理由）：
+      · 出水芙蓉 = 底部转势，一次性收复全部均线 + 过昨高（阻力墙在上方）；
+        本战法 = **天量坑回收**——拉升途中放天量见短期高点 → 圆弧浅坑回调
+        （5日下拐但 10 日线守住）→ 站回 5 日线即买。是**上升趋势中的动能再入场**，
+        不是底部反转。
+      · 买点更低、更早：出水芙蓉要过昨高（位置高）；本战法站上 5 日线即触发，
+        止损锚是**坑底**（圆弧坑最低点）——买点贴 MA5、止损在坑底，盈亏比天然高。
+      · 天量是本战法的灵魂：没有天量高点就没有「坑」——量能在这里是**结构要件**
+        （不是 T0 那种可降级的确认提示）。
+
+    判据（图例四段量化）：
+      ① 天量高点：存在天量日 i（距今 4~15 根），v[i] ≥ 1.8×前20日均量 且为
+         局部窗口（前25~后5根）最大量；h[i] 为前后 8/12 根内最高价（放量拉升最高点）；
+         天量日较 5 日前收盘净涨（拉升背景）。
+      ② 回调坑：天量日后至少 2 根回调；5 日线在回调中下拐（较天量日 MA5 回落 ≥0.5%）。
+      ③ 未有效跌破 10 日线：回调段收盘跌破 MA10 ≤ 1 根且 2 日内收回；
+         现价回到 MA10 上方（坑守住）；圆弧浅坑：坑底距天量日最高点回撤 ≤ 15%。
+      ④ 确认（买点）：今日收盘站上 5 日线 且 高于昨日收盘（回升动能）；
+         强确认 = 站上天量日的 5 日线价位（图例「天量处5日线高点」）。
+      防追高：现价距 5 日线 ≤ 5%（买点=站上五日线，远离 5 日线即追高，不再给入场）；
+         且现价 ≤ 天量日最高点 ×1.05（形态已走完的不追）。
+
+    卖点：主卖 = 收盘跌回 5 日线下方（动能再衰竭）；硬止损 = 坑底（收盘破）。
+    优先级：T0 分支——接管规则与 T0 同族（mode==wait / 原买法自否 / 「大阳后」家族
+    时接管；recommend==True 的强形态不抢标，仅并列挂载 result["meteor_pit"]）。
+    市场状态闸门：登记进 ALL_MODES（宽基 down 且 RS 弱时同样全禁），不进
+    REGIME_SENSITIVE_MODES（与 ma_reclaim_break/ma_bull_align 同为 T0/T1 动能族）。
+    """
+    if not bars or len(bars) < 40 or not atr_v or atr_v <= 0 or last_c is None:
+        return None
+    n = len(bars)
+    closes = [b["c"] for b in bars]
+    highs = [b["h"] for b in bars]
+    lows = [b["l"] for b in bars]
+    vols = [float(b.get("v") or 0) for b in bars]
+    if min(closes) is None or n < 40:
+        return None
+
+    def ma_at(arr_len, i):
+        return sma_at(closes, arr_len, i)
+
+    # ① 找天量高点：距今 4~15 根（形态要新鲜）
+    cand = None
+    for i in range(max(20, n - 15), n - 3):
+        v_i = vols[i]
+        if v_i <= 0:
+            continue
+        w0, w1 = max(0, i - 25), min(n, i + 6)
+        pre = vols[w0:i]
+        if not pre:
+            continue
+        pre_avg = sum(pre) / len(pre)
+        if pre_avg <= 0 or v_i < 1.8 * pre_avg or v_i != max(vols[w0:w1]):
+            continue  # 非天量
+        if highs[i] != max(highs[max(0, i - 8):min(n, i + 12)]):
+            continue  # 非放量拉升最高点
+        if i < 5 or closes[i] <= closes[i - 5]:
+            continue  # 无拉升背景
+        cand = i
+        break  # 取最近的天量日
+    if cand is None:
+        return None
+    i = cand
+    ma5_at_vol = ma_at(5, i)
+    ma5_now = ma_at(5, n - 1)
+    ma10_now = ma_at(10, n - 1)
+    if None in (ma5_at_vol, ma5_now, ma10_now):
+        return None
+
+    # ②③ 回调坑质量
+    pb = range(i + 1, n)          # 回调段（含今日）
+    pullback_days = n - 1 - i     # 天量日次日起至今日的根数
+    # 5日线下拐：天量大阳会把 MA5 抬很高，浅坑里 MA5 难跌破「天量日 MA5」；
+    # 故改用「MA5 自坑后峰值回落 ≥0.5%」（MA5 见顶拐头），贴合图例弧顶拐弯。
+    _ma5_after = [ma_at(5, k) for k in range(i, n) if ma_at(5, k) is not None]
+    _peak_ma5 = max(_ma5_after) if _ma5_after else None
+    ma5_now = ma_at(5, n - 1)
+    ma5_down = (_peak_ma5 is not None and ma5_now is not None
+                and ma5_now < _peak_ma5 * 0.995)
+    breaks = [k for k in pb if closes[k] < ma_at(10, k)]
+    recovered = True
+    if len(breaks) > 1:
+        recovered = False
+    elif len(breaks) == 1:
+        k = breaks[0]
+        # 破后 2 日内收盘收回 MA10
+        recovered = any(
+            closes[j] > ma_at(10, j) for j in range(k + 1, min(k + 3, n))
+        )
+    pit_low = min(lows[i + 1:])
+    depth_pct = (highs[i] - pit_low) / highs[i] * 100 if highs[i] else 99.0
+    vol_ratio = round(vols[i] / (sum(vols[max(0, i - 20):i]) / 20), 2) \
+        if sum(vols[max(0, i - 20):i]) > 0 else None
+
+    # ④ 确认信号
+    above_ma5 = last_c > ma5_now
+    rising = n >= 2 and last_c > closes[-2]
+    above_ma10 = last_c > ma10_now
+    strong_confirm = last_c > ma5_at_vol
+    # 防追高：买点 = 站上五日线；远离 5 日线（>5%）或已越过天量高点 5% 不追
+    dist_ma5_pct = (last_c - ma5_now) / ma5_now * 100
+    not_chase = dist_ma5_pct <= 5.0 and last_c <= highs[i] * 1.05
+
+    recommend = bool(above_ma5 and rising and above_ma10 and ma5_down
+                     and recovered and not_chase and depth_pct <= 15.0)
+
+    hard = round(pit_low, 2)
+    risk_pct = (last_c - hard) / last_c * 100 if last_c else None
+    risk_atr = round((last_c - hard) / atr_v, 2) if last_c else None
+    _why = []
+    if not above_ma5:
+        _why.append(f"收{last_c:.2f}未站上MA5({ma5_now:.2f})")
+    if not rising:
+        _why.append("收盘未高于昨日（无回升动能）")
+    if not above_ma10:
+        _why.append(f"现价仍在MA10({ma10_now:.2f})下方（坑未守住）")
+    if not ma5_down:
+        _why.append("5日线未下拐（无回调坑结构）")
+    if not recovered:
+        _why.append("回调收盘有效跌破MA10（坑破位）")
+    if depth_pct > 15.0:
+        _why.append(f"坑太深（回撤{depth_pct:.1f}%>15%，非圆弧浅坑）")
+    if not not_chase:
+        _why.append(f"距MA5 {dist_ma5_pct:+.1f}% 或已越过天量高点（追高，不接）")
+
+    _note = (
+        f"【T0·流星砸坑】天量日 {bars[i]['d']}（量 {vol_ratio}×前20日均量）拉升见高点 "
+        f"{highs[i]:.2f} → 圆弧回调 {pullback_days} 根（坑底 {pit_low:.2f}，"
+        f"回撤 {depth_pct:.1f}%，10日线{'守住' if recovered else '未守住'}）→ "
+        f"今日收 {last_c:.2f} 站上5日线 {ma5_now:.2f}"
+        + ("（强确认：已过天量日5日线高点 %.2f）" % ma5_at_vol if strong_confirm
+           else f"（弱确认：天量日5日线高点 {ma5_at_vol:.2f} 在上方，进一步空间锚）")
+        + f"。硬止损=坑底 {hard}（收盘破），风险 {risk_pct:.2f}%（{risk_atr}×ATR）；"
+        f"主卖=收盘跌回5日线下方。很容易抓到主升浪，盈亏比高（老罗 2026-10-16 定）。"
+    )
+    return {
+        "setup_kind": "meteor_pit",
+        "mode": "meteor_pit" if recommend else None,
+        "tier": "T0",
+        "priority": 1,
+        "role": "primary_entry",
+        "recommend": recommend,
+        "why": "；".join(_why) if _why else "四段结构齐备",
+        "vol_bar": {"d": bars[i]["d"], "i": i, "high": round(highs[i], 2),
+                    "vol_ratio": vol_ratio},
+        "pullback_days": pullback_days,
+        "pit_low": round(pit_low, 2),
+        "depth_pct": round(depth_pct, 1),
+        "ma5_at_vol": round(ma5_at_vol, 2),
+        "strong_confirm": strong_confirm,
+        "ma_state": {"ma5": round(ma5_now, 2), "ma10": round(ma10_now, 2)},
+        "hard_stop": hard,
+        "stop_anchor": "坑底",
+        "risk_pct": round(risk_pct, 2) if risk_pct is not None else None,
+        "risk_atr": risk_atr,
+        "note": _note,
+        "buy_zone": {
+            "level": round(last_c, 2),
+            "primary_lo": hard,
+            "primary_hi": round(ma5_at_vol if strong_confirm else ma5_now, 2),
+            "in_zone": True,
+            "type": (f"T0·流星砸坑（天量坑回撤{depth_pct:.1f}%·"
+                     f"{'强' if strong_confirm else '弱'}确认）"),
+            "anchor": "meteor_pit",
+            "struct_stop": hard,
+            "struct_anchor": f"坑底@{hard}（收盘破）",
+            "hard_stop": hard,
+            "hard_anchor": "坑底",
+            "invalidation": hard,
+            "hard": hard,
+            "stop_basis": (
+                "圆弧坑最低点（天量日后回调段含今日的最低价）——收盘跌破即离场；"
+                "主卖（动态）= 收盘跌回5日线下方"
+            ),
+            "struct_exec": STRUCT_EXEC,
+            "hard_exec": HARD_EXEC,
+            "hard_dist_atr": risk_atr,
+            "hard_noise": bool(risk_atr is not None and risk_atr < NOISE_ROOM_ATR),
+        },
+    }
+
+
 def _is_dual_crea(bars):
     """判断是否创业板/科创板（20% 涨跌幅）—— 用代码前缀兜底。
 
@@ -4586,6 +4779,18 @@ def _plan_entry_core(bars, ev):
         #   其他 recommend==True 的形态  → 保留原 mode，T0 仅并列挂载（先到先做）
         if _ride_any:
             result["ma_ride"] = _ride_any
+        # ★ 2026-10-16 老罗定：T0 分支「流星砸坑」接管（与 T0 同族，特异性更高故先于 T0）。
+        #   仅当原 mode 无可执行买点（wait / 自否 / 「大阳后」家族）时接管；
+        #   recommend==True 的强形态不抢标，仅并列挂载 result["meteor_pit"]。
+        if mp and mp.get("recommend"):
+            _mp_tk = (
+                result.get("mode") == "wait"
+                or not result.get("recommend")
+                or result.get("mode") in ("impulse_pause",)
+                or "大阳" in str(result.get("verdict") or "")
+            )
+            if _mp_tk:
+                result = _meteor_pit_takeover(result, mp)
         if t0:
             result["ma_reclaim"] = t0
             result["tier_t0"] = "T0"
@@ -4626,6 +4831,9 @@ def _plan_entry_core(bars, ev):
         # ★ 2026-10-13：T1 短均线多头排列状态（含「临界观察·暂不买」）始终挂载，供报告消费。
         if mab:
             result["ma_bull_align"] = mab
+        # ★ 2026-10-16：T0 分支「流星砸坑」状态始终挂载，供报告/盯盘方案消费。
+        if mp:
+            result["meteor_pit"] = mp
         # ★ 2026-09-24（老罗三轮）：「沿线」是趋势背景，当日形态是事件 —— 定优先级。
         #   他原话：「振华 603067 翻成 line_ride 后，但平台突破是客观存在的，这个优先级，
         #   你要想想到底怎么判定。否则所有股大部分时间都是沿均线走的。」
@@ -4701,6 +4909,10 @@ def _plan_entry_core(bars, ev):
     #   无论当日 mode 是谁，都把它的状态挂到结果（含上海机场式「临界观察·暂不买」），
     #   供报告/盯盘方案消费 —— 与 T0 的 `ma_reclaim` 同处理。
     mab = ma_bull_align(bars, ev, atr_v, last_c)
+    # ★ 2026-10-16 老罗定：T0 分支「流星砸坑」（独立 mode，与出水芙蓉并列、不混同）。
+    #   天量坑回收：拉升放天量见高点 → 圆弧浅坑（5日下拐、10日线守住）→ 站回5日线买。
+    #   始终计算并挂载；接管规则与 T0 同族（见 pack() 内 `_meteor_pit_takeover`）。
+    mp = meteor_pit(bars, ev, atr_v, last_c)
     # ★ 2026-09-24：`ma_ride` **与 T0 是否成立无关** —— 状态本身就要能给报告看。
     #   东材 601208 09-24 收 56.44 已创 25 日新高（头上无墙）⇒ T0 不成立，但它就是
     #   `line_ride`；只在 T0 成立时才算 ride，等于老罗问的那只票恰恰看不到答案。
@@ -5226,6 +5438,52 @@ def plan_entry(bars, ev, sym=None, *, market_regime_enabled=True, regime_index=N
         result = apply_market_regime_gate(result, mkt, enabled=market_regime_enabled)
     except Exception:
         pass
+    return result
+
+
+def _meteor_pit_takeover(result, mp):
+    """★ 流星砸坑接管（2026-10-16 老罗定）：与 _t0_takeover 同族 —— 当日原买法为
+    wait / 不推荐 / 「大阳后」家族时，由「天量坑回收·站上5日线」接管为首选入口。
+
+    recommend==True 的强形态（平台/W底/旗形/下降趋势线突破、沿线回踩）不抢标，
+    流星砸坑仅并列挂载 result["meteor_pit"]（已在其计算处完成）。
+    接管后 mode=meteor_pit、优先级 T0（1）、path=A（趋势延续入场族）、setup=pullback，
+    止损锚改为坑底（圆弧坑最低点），与主升浪前的最佳盈亏比节点对齐。
+    """
+    z = dict(mp["buy_zone"])
+    _prev_z = result.get("buy_zone") or {}
+    _prev_mode = result.get("mode")
+    _prev_verdict = result.get("verdict")
+    result["mode"] = "meteor_pit"
+    result["priority"] = 1
+    result["setup"] = "pullback"
+    result["path"] = "A"
+    result["tier"] = "T0"
+    result["verdict"] = "T0·流星砸坑（天量坑回收·站上5日线）"
+    result["recommend"] = True
+    result["prev_verdict"] = _prev_verdict
+    result["meteor_pit_superseded_mode"] = _prev_mode
+    result["note"] = mp["note"]
+    result["exec"] = None
+    result["buy_zone"] = z
+    result["stop_plan"] = {
+        "struct": mp["hard_stop"],
+        "struct_anchor": f"坑底@{mp['hard_stop']}（收盘破）",
+        "hard": mp["hard_stop"],
+        "hard_anchor": "坑底",
+        "trigger": None,
+        "struct_exec": STRUCT_EXEC,
+        "hard_exec": HARD_EXEC,
+        "hard_dist_atr": mp.get("risk_atr"),
+        "hard_noise": bool((mp.get("risk_atr") or 9) < NOISE_ROOM_ATR),
+        "stop_basis": z["stop_basis"],
+        "meteor_pit": True,
+    }
+    for _k in ("gate", "relaxed", "relaxed_reason", "state"):
+        if _prev_z.get(_k) is not None:
+            z[f"prev_{_k}"] = _prev_z[_k]
+    result.pop("stop_above_price", None)
+    result.pop("stop_warning", None)
     return result
 
 
@@ -5770,6 +6028,7 @@ def evaluate(sym, data_file=None, eod=False, *, market_regime_enabled=True, regi
     #   ★ 2026-09-24 追加 `t0_held_for_ride`：line_ride 态下 T0 不接管，若这个
     #     标记被 rebuild 丢掉，报告就看不出「T0 条件成立但不该追」的原因。
     for _k in ("ma_reclaim", "tier_t0", "t0_held_for_ride", "t0_tail",
+               "meteor_pit", "meteor_pit_superseded_mode",
                "ma_ride", "ride_priority",
                "ride_redirected", "ma_ride_week", "ma_ride_month",
                "top_signal", "top_signal_veto",

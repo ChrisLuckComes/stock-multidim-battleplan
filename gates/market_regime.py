@@ -233,7 +233,7 @@ def stock_rs(stock_bars, idx_bars, window=20):
 # ───────────────────────────── 七种买法 & 突破类集合（与 rule123 同步） ─────────────────────────────
 ALL_MODES = ("ma_reclaim_break", "platform_break", "flag_tl_break",
              "w_bottom_break", "line_pullback", "impulse_pause",
-             "downtrend_tl_break", "ma_bull_align")
+             "downtrend_tl_break", "ma_bull_align", "meteor_pit")
 # 突破 / 追涨类（宽基 caution/down 时优先拦；与 rule123.BREAKOUT_MODES + ma_reclaim_break 对应）
 REGIME_SENSITIVE_MODES = ("platform_break", "w_bottom_break", "flag_tl_break",
                           "downtrend_tl_break", "ma_reclaim_break")
