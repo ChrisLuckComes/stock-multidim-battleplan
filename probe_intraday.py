@@ -1258,8 +1258,26 @@ def probe(code, qty=None, account=None, asof=None, min_scale=5, replay=False,
                 else:
                     lot = first_lot_of(code)
                     print(f"     不做 —— {no_ash_reason(code, account, trigger)}")
+            # ★ 2026-10-16 老罗口径「盘中决策要真能用，不能每次都不买」：
+            #   先手仓必须**落库**（旧代码只打印）—— 不落 dict 报告层就拿不到，
+            #   预案层一 wait 首屏必演「结论：不做」，③放行的信号整层被埋
+            #   （利元亨 688499 11:00 踏空正因）。action 带全可执行字段。
+            _act = None
+            if ok and n:
+                _act = {"kind": "先手1/3仓", "entry": trigger,
+                        "stop": round(stop, 2), "qty": n,
+                        "est_loss": round(n * (trigger - stop)),
+                        "risk_pct": round(risk_pct, 2),
+                        "pct_account": (round(n * trigger / account * 100, 1)
+                                        if account else None),
+                        "burst_at": mins[i]["d"][11:16],
+                        "note": "T+1：止损为次日口径，跳空实际亏损只大不小"}
+            elif ok and not n:
+                _wait_src.append("盘中量能突变通道放行但资金不够："
+                                 + no_ash_reason(code, account, trigger))
             out["intraday"] = {"burst_at": mins[i]["d"][11:16], "ratio": round(ratio, 1),
-                               "trigger": trigger, "fresh": bool(fresh), "allow": bool(ok)}
+                               "trigger": trigger, "fresh": bool(fresh),
+                               "allow": bool(ok and n), "action": _act}
         else:
             print(f"  [2 量能突变] ✗ 今日尚无「≥前 {BURST_MA_BARS} 根均量 × "
                   f"{BURST_MULT:.1f}」的分钟量 → 无启动信号")
@@ -1368,10 +1386,24 @@ def probe(code, qty=None, account=None, asof=None, min_scale=5, replay=False,
                     print(f"     ⚠ T+1：今天买入今天卖不掉 —— 上面的止损是**明天**用的：")
                     print(f"        明日开盘破 {stop_k:.2f} → 直接走；未破 → 持有，"
                           f"收盘失守 {stop_k:.2f} 仍走")
+                    # 同 2026-10-16 口径：试仓动作落库（只打印 = 报告层看不到）
+                    _ab_act = ({"kind": "突破试仓", "entry": entry,
+                                "stop": stop_k, "qty": n,
+                                "est_loss": round(n * risk),
+                                "risk_pct": round(risk / entry * 100, 2),
+                                "pct_account": (round(n * entry / account * 100, 1)
+                                                if account else None),
+                                "target1": tgt,
+                                "note": "T+1：止损为次日口径，跳空实际亏损只大不小"}
+                               if n else None)
+                    if not n:
+                        _wait_src.append("关键位突破通道放行但资金不够："
+                                         + no_ash_reason(code, account, entry))
                     out["ash_break"] = {"anchor": K, "kind": kb["kind"],
                                         "at": b["d"][11:16], "entry": entry,
                                         "stop": stop_k, "risk": round(risk, 2),
-                                        "target1": tgt, "allow": True,
+                                        "target1": tgt, "allow": bool(n),
+                                        "action": _ab_act,
                                         "t1_note": "T+1 止损为次日口径"}
 
     # ---------- 2c) 通道 C：分钟级回踩确认（需 2b 已触发） ----------

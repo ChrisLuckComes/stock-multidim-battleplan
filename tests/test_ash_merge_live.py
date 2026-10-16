@@ -55,7 +55,7 @@ class TestElapsedMin:
 # ① 半根合成 + 量折算
 # ------------------------------------------------------------------
 def _fake_minutes(day="2026-10-16"):
-    """09:35–11:00 共 27 根 5 分钟线，量恒 1000。"""
+    """09:35–11:00 共 18 根 5 分钟线，量恒 1000。"""
     out = []
     h, m = 9, 35
     while (h, m) <= (11, 0):
@@ -153,3 +153,69 @@ class TestSwitchDefaults:
     def test_replay_drop_last_not_live(self):
         daily = _BARS + [{"d": "2026-10-16"}]
         assert P.replay_drop_last(daily, "2026-10-16", False) is False
+
+
+# ------------------------------------------------------------------
+# 2026-10-16 追加：盘中先手仓落库 + 首屏并列展示
+# 老罗口径：「盘中决策要真能用，不能每次都不买导致踏空」
+#   · probe 侧：action 落库（旧代码只打印 ⇒ 报告层拿不到）
+#   · battle_analyze：intraday_action_from_probe 提取 + verdict_source 并列
+#   · report_render：预案 wait 时首屏改演「盘中先手仓」而非「不做」
+# ------------------------------------------------------------------
+_ACT = {"kind": "先手1/3仓", "entry": 41.68, "stop": 39.89, "qty": 417,
+        "est_loss": 746, "risk_pct": 4.29, "pct_account": 34.8,
+        "burst_at": "10:55",
+        "note": "T+1：止损为次日口径，跳空实际亏损只大不小"}
+
+
+class TestIntradayActionFromProbe:
+    def test_burst_channel_action_extracted(self):
+        import battle_analyze as BA
+        act, src = BA.intraday_action_from_probe(
+            {"intraday": {"allow": True, "action": _ACT}})
+        assert act == _ACT
+        assert "盘中量能突变先手仓" in src
+        assert "41.68" in src and "39.89" in src and "746" in src
+
+    def test_break_channel_action_extracted(self):
+        import battle_analyze as BA
+        act, src = BA.intraday_action_from_probe(
+            {"ash_break": {"allow": True, "action": dict(_ACT, kind="突破试仓")}})
+        assert act["kind"] == "突破试仓" and "关键位突破先手仓" in src
+
+    def test_no_action_returns_none(self):
+        import battle_analyze as BA
+        assert BA.intraday_action_from_probe({"intraday": {"allow": False}}) == (None, None)
+        assert BA.intraday_action_from_probe({}) == (None, None)
+        assert BA.intraday_action_from_probe(None) == (None, None)
+
+    def test_unaffordable_channel_has_no_action(self):
+        # 资金不够：allow=False 且无 action（旧代码 allow=True 却打印「不做」——
+        # 假放行；现在口径统一：钱不够是硬约束，通道不出 action）
+        import battle_analyze as BA
+        act, src = BA.intraday_action_from_probe(
+            {"intraday": {"allow": False, "action": None}})
+        assert act is None and src is None
+
+
+class TestOnelineSurfacesIntradayAction:
+    """首屏结论：预案 wait 但盘中通道放行 → 必须先手仓，不能演「不做」。"""
+
+    def _a(self):
+        return {"plan": {"mode": "wait", "recommend": False},
+                "intraday_action": _ACT,
+                "verdict_source": ["probe 预案不可买（大阳当日不追）",
+                                   "盘中量能突变先手仓：挂 41.68 / 止损 39.89 / 417 股"]}
+
+    def test_headline_is_intraday_entry(self):
+        import report_render as RR
+        line = RR.build_oneline(self._a(), {})
+        assert "盘中先手 1/3 仓" in line
+        assert "41.68" in line and "39.89" in line and "746" in line
+        assert "结论：<b>不做</b>" not in line
+
+    def test_without_action_still_says_no(self):
+        import report_render as RR
+        a = self._a()
+        a.pop("intraday_action")
+        assert "结论：<b>不做</b>" in RR.build_oneline(a, {})

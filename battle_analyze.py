@@ -263,6 +263,30 @@ def rolling_sma_last(bars, n):
     return sum(closes) / len(closes)
 
 
+def intraday_action_from_probe(probe_out):
+    """提取盘中通道的**可执行先手仓**（2026-10-16 老罗口径：盘中决策要真能用）。
+
+    盘中决策分两层：昨收预案单 + 盘中通道（量能突变 / 关键位突破）。
+    旧交付层只读预案层 —— 预案一 wait，首屏就演「结论：不做」，盘中通道放行的
+    先手仓被整层埋掉（利元亨 688499 2026-10-16 11:00 踏空正因：③振幅按 ATR
+    已放行，信号却到不了读者）。本函数把可执行动作提出来，与预案**并列不覆盖**。
+
+    返回 (action|None, 来源行|None)。资金不够的通道不出 action
+    （probe 侧 allow 已置 False，见 probe_intraday 量能突变/突破通道）。
+    """
+    po = probe_out or {}
+    for key, label in (("intraday", "盘中量能突变"), ("ash_break", "关键位突破")):
+        act = (po.get(key) or {}).get("action")
+        if act:
+            src = ("%s先手仓：挂 %.2f / 止损 %.2f / %s 股 / 估算最大亏 %s 元"
+                   "（占账户 %s%%；T+1 跳空实际亏损只大不小）"
+                   % (label, act.get("entry") or 0, act.get("stop") or 0,
+                      act.get("qty"), "%d" % (act.get("est_loss") or 0),
+                      act.get("pct_account")))
+            return act, src
+    return None, None
+
+
 def entry_candidates(bars, plan, probe_out, atr_v, odds_from_probe=None):
     """入场候选：上方（突破跟单类）/ 现价 / 下方（低吸类）。
 
@@ -1361,6 +1385,12 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
                      % (_po.get("note") or _po.get("mode") or ""))
     for _w in (_po.get("wait_source") or []):
         _vsrc.append(_w)
+    # ★ 盘中通道先手仓并列展示（2026-10-16 老罗口径）：预案层 wait ≠ 无可执行
+    #   动作。没有这一行，③（振幅按 ATR）放行的先手仓到不了报告首屏 ——
+    #   「每次都不买/踏空」的交付层根因。插在预案行之后、wait 原因之前。
+    _ia_act, _ia_src = intraday_action_from_probe(_po)
+    if _ia_src:
+        _vsrc.insert(1, _ia_src)
     _scr_d = out.get("scr") or {}
     if _scr_d and not _scr_d.get("error"):
         _vsrc.append("筹码闸：%s ⇒ %s（%s）"
@@ -1372,6 +1402,10 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
         _vsrc.append("顶部K线：%s %s" % (_tv_d.get("level"),
                                         _tv_d.get("pattern_cn") or ""))
     out["verdict_source"] = _vsrc
+    # ★ 盘中先手仓结构化字段（report_render 首屏结论用）：预案 wait 时
+    #   首屏改演「盘中先手 1/3 仓」而不是「不做」—— 老罗 2026-10-16 口径。
+    if _ia_act:
+        out["intraday_action"] = _ia_act
     # ★ 名字兜底：日线快照里常不带 name，报告 H1 会退化成 6 位代码（688543 已踩）。
     #   scr_chip 走东财 kline、一定带名字 ⇒ 拿到了就补上，不额外发请求。
     if not is_us and out.get("scr") and not out["scr"].get("error"):

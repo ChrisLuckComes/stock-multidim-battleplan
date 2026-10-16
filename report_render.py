@@ -776,6 +776,17 @@ def build_oneline(a, n):
     _vs = a.get("verdict_source") or []
     _src_txt = ("<br>结论来源：" + esc(" ｜ ".join(_vs[:4]))) if _vs else ""
     if not rec:
+        # ★ 2026-10-16 老罗口径「盘中决策要真能用，不能每次都不买」：
+        #   预案层 wait ≠ 无可执行动作 —— 盘中通道（量能突变/关键位突破）放行的
+        #   先手仓必须上首屏，否则③放行的信号永远到不了读者（利元亨 11:00 正因）。
+        #   与预案**并列不覆盖**：预案行的 wait 原因仍在「结论来源」里。
+        _ia = a.get("intraday_action") or {}
+        if _ia:
+            return ("结论：<b>盘中先手 1/3 仓 · 挂 %s</b>，止损 <b>%s</b>，"
+                    "估算最大亏约 %s 元（T+1 跳空，实际只大不小）；"
+                    "预案层仍 %s（wait 原因见结论来源）。%s"
+                    % (num(_ia.get("entry")), num(_ia.get("stop")),
+                       num(_ia.get("est_loss"), 0), esc(p.get("mode")), _src_txt))
         return ("结论：<b>不做</b> —— 引擎未给出合格档（mode=%s · recommend=%s），"
                 "不凭形态硬凑一个价。%s"
                 % (esc(p.get("mode")), p.get("recommend"), _src_txt))
