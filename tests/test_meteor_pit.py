@@ -28,9 +28,12 @@ def _build_baseline(n, start=10.0, step=0.05, vol=2.0, date0="2026-"):
 
 
 def _with_meteor_pattern(n=60, spike_i=52, spike_vol=60.0, pit_low_close=12.70,
-                         today_close=13.70, pullback_lows=None, pullback_closes=None):
+                         today_close=13.70, pullback_lows=None, pullback_closes=None,
+                         price_peak_offset=0, peak_high=15.5):
     """基线 + 天量高点(拉升) + 圆弧浅坑(5日下拐、10日线守住) + 今日站上5日线。
 
+    price_peak_offset>0 时：量尖峰日仍为 spike_i，但价格高点（坑顶）挪到 spike_i+offset
+    （量价峰值解耦型，用于验证 ★ 2026-10-16 A 放宽）。
     返回 (bars, 天量日索引, 预期坑底)。
     """
     bars = _build_baseline(n)
@@ -50,12 +53,20 @@ def _with_meteor_pattern(n=60, spike_i=52, spike_vol=60.0, pit_low_close=12.70,
         c = closes.get(k, 13.0)
         l = lows.get(k, round(c - 0.15, 2))
         bars[k] = _bar(bars[k]["d"], c - 0.05, c + 0.1, l, c, 2.0)
+    # ★ A放宽验证：坑顶（价格高点）可落在量尖峰日之后（量价解耦）
+    # 坑顶日用「上影线高点」：仅 high 抬高、close 保持基线，避免抬高 MA10 扰动 recovered 判据
+    if price_peak_offset > 0:
+        pk = spike_i + price_peak_offset
+        pb = bars[pk]
+        bars[pk] = _bar(pb["d"], peak_high - 0.2, peak_high, peak_high - 0.4,
+                        pb["c"], 2.0)
     # 今日：站上5日线 + 收阳 + 在10日线上方
     tb = bars[n - 1]
     bars[n - 1] = _bar(tb["d"], today_close - 0.1, today_close + 0.15,
                        round(today_close - 0.15, 2), today_close, 3.0)
-    # 坑底 = 回调段最低 low
-    pit_low = min(bars[k]["l"] for k in range(spike_i + 1, n))
+    peak_i = spike_i + price_peak_offset if price_peak_offset > 0 else spike_i
+    # 坑底 = 坑顶日次日起最低 low（A放宽后坑顶可能 ≠ 天量日）
+    pit_low = min(bars[k]["l"] for k in range(peak_i + 1, n))
     return bars, spike_i, round(pit_low, 2)
 
 
@@ -80,6 +91,16 @@ def suite():
     ok &= _test("正向-天量日命中", r and r.get("vol_bar", {}).get("i") == si)
     ok &= _test("正向-强确认", r and r.get("strong_confirm"))
 
+    # 1b) ★ A放宽：区域放量（量尖峰日 ≠ 价格最高点，量价峰值解耦）→ 仍命中
+    bars1b, _, _ = _with_meteor_pattern(price_peak_offset=3, peak_high=15.5)
+    r1b = rule123.meteor_pit(bars1b, ev, rule123.atr14(bars1b), bars1b[-1]["c"])
+    ok &= _test("正向-A放宽-区域放量(量价解耦)→recommend",
+                r1b is not None and bool(r1b.get("recommend")))
+    ok &= _test("正向-A放宽-坑顶锚定到价格高点",
+                r1b and r1b.get("vol_bar", {}).get("high") == 15.5)
+    ok &= _test("正向-A放宽-坑顶日≠天量日",
+                r1b and r1b.get("vol_bar", {}).get("i") == 52)
+
     # 2) 负向：无天量（量能恒定）→ None
     bars2 = _build_baseline(60, vol=2.0)
     r2 = rule123.meteor_pit(bars2, ev, rule123.atr14(bars2), bars2[-1]["c"])
@@ -91,10 +112,10 @@ def suite():
     ok &= _test("负向-未站上MA5→不recommend",
                 r3 is not None and not r3.get("recommend"))
 
-    # 4) 负向：坑太深（>15%）→ 不 recommend
-    bars4, _, _ = _with_meteor_pattern(pit_low_close=11.80)  # 坑底 11.65，回撤>15%
+    # 4) 负向：坑太深（>25%，★ A放宽后上限为25%）→ 不 recommend
+    bars4, _, _ = _with_meteor_pattern(pit_low_close=10.50)  # 坑底 10.35，回撤≈27%>25%
     r4 = rule123.meteor_pit(bars4, ev, rule123.atr14(bars4), bars4[-1]["c"])
-    ok &= _test("负向-坑太深>15%→不recommend",
+    ok &= _test("负向-坑太深>25%→不recommend",
                 r4 is not None and not r4.get("recommend"))
 
     # 5) 负向：10日线有效跌破（连破2根）→ 不 recommend

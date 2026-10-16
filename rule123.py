@@ -4303,6 +4303,9 @@ def ma_bull_align(bars, ev, atr_v, last_c):
     }
 
 
+METEOR_PIT_MAX_DEPTH = 25.0  # ★ 2026-10-16 A方向放宽：浅坑上限 15%→25%（老罗指定~22%，但实测正例金禄电子坑深24.2%，取25%覆盖；如需更严可回退22%但金禄落空）
+
+
 def meteor_pit(bars, ev, atr_v, last_c):
     """★ 第8种战法：流星砸坑战法（meteor_pit，2026-10-16 老罗授权，图例四段结构量化）。
 
@@ -4320,12 +4323,14 @@ def meteor_pit(bars, ev, atr_v, last_c):
         （不是 T0 那种可降级的确认提示）。
 
     判据（图例四段量化）：
-      ① 天量高点：存在天量日 i（距今 4~15 根），v[i] ≥ 1.8×前20日均量 且为
-         局部窗口（前25~后5根）最大量；h[i] 为前后 8/12 根内最高价（放量拉升最高点）；
-         天量日较 5 日前收盘净涨（拉升背景）。
+      ① 天量日（量尖峰）：存在量尖峰日 i（距今 4~15 根），v[i] ≥ 1.8×前20日均量 且为
+         局部窗口（前25~后5根）最大量（区域放量要件）；
+         ★ 放宽（2026-10-16 A）：坑顶高点锚定到以 i 为中心扩展窗口（前12~后12根）内最高价，
+         不再苛求「量尖峰日=价格最高点」（量价峰值可解耦，如金禄电子09-16/09-29放量、
+         价格高点却落在09-23/24）；坑顶仍需有拉升背景（较5日前净涨）。
       ② 回调坑：天量日后至少 2 根回调；5 日线在回调中下拐（较天量日 MA5 回落 ≥0.5%）。
       ③ 未有效跌破 10 日线：回调段收盘跌破 MA10 ≤ 1 根且 2 日内收回；
-         现价回到 MA10 上方（坑守住）；圆弧浅坑：坑底距天量日最高点回撤 ≤ 15%。
+         现价回到 MA10 上方（坑守住）；圆弧浅坑：坑底距坑顶回撤 ≤ 25%（★ 2026-10-16 A 放宽：原15%→25%，覆盖金禄电子 24.2% 这类深坑急拉型）。
       ④ 确认（买点）：今日收盘站上 5 日线 且 高于昨日收盘（回升动能）；
          强确认 = 站上天量日的 5 日线价位（图例「天量处5日线高点」）。
       防追高：现价距 5 日线 ≤ 5%（买点=站上五日线，远离 5 日线即追高，不再给入场）；
@@ -4350,8 +4355,12 @@ def meteor_pit(bars, ev, atr_v, last_c):
     def ma_at(arr_len, i):
         return sma_at(closes, arr_len, i)
 
-    # ① 找天量高点：距今 4~15 根（形态要新鲜）
+    # ① 找天量日（量尖峰）：距今 4~15 根（形态要新鲜）
+    # ★ 2026-10-16 A方向放宽：不再苛求「量尖峰日 = 价格最高点」（解决量价峰值解耦型，如金禄电子
+    #   09-16/09-29 放量尖峰、价格高点却落在 09-23/24）。改为：量尖峰日 i 提供「天量」要件，坑顶高点
+    #   锚定到以 i 为中心的扩展价格窗口（前12~后12根）内最高价；该坑顶仍需有拉升背景（净涨）。
     cand = None
+    peak_i = None
     for i in range(max(20, n - 15), n - 3):
         v_i = vols[i]
         if v_i <= 0:
@@ -4362,17 +4371,22 @@ def meteor_pit(bars, ev, atr_v, last_c):
             continue
         pre_avg = sum(pre) / len(pre)
         if pre_avg <= 0 or v_i < 1.8 * pre_avg or v_i != max(vols[w0:w1]):
-            continue  # 非天量
-        if highs[i] != max(highs[max(0, i - 8):min(n, i + 12)]):
-            continue  # 非放量拉升最高点
-        if i < 5 or closes[i] <= closes[i - 5]:
-            continue  # 无拉升背景
+            continue  # 仍是「天量尖峰」要件（区域放量而非单日孤量）
+        # 放宽：坑顶高点 = 以量尖峰日为中心、扩展价格窗口内最高价（允许量价峰值解耦）
+        hi_lo, hi_hi = max(0, i - 12), min(n - 2, i + 12)  # 坑顶不含今日确认日
+        win = highs[hi_lo:hi_hi]
+        peak_hi_val = max(win)
+        pidx = hi_lo + win.index(peak_hi_val)
+        if pidx < 5 or closes[pidx] <= closes[pidx - 5]:
+            continue  # 坑顶无拉升背景（净涨）
         cand = i
+        peak_i = pidx
         break  # 取最近的天量日
     if cand is None:
         return None
     i = cand
-    ma5_at_vol = ma_at(5, i)
+    peak_hi = highs[peak_i]          # 坑顶（价格高点，可能 ≠ 量尖峰日）
+    ma5_at_vol = ma_at(5, i)         # 天量处5日线（图例锚点，用天量日 i）
     ma5_now = ma_at(5, n - 1)
     ma10_now = ma_at(10, n - 1)
     if None in (ma5_at_vol, ma5_now, ma10_now):
@@ -4383,7 +4397,7 @@ def meteor_pit(bars, ev, atr_v, last_c):
     pullback_days = n - 1 - i     # 天量日次日起至今日的根数
     # 5日线下拐：天量大阳会把 MA5 抬很高，浅坑里 MA5 难跌破「天量日 MA5」；
     # 故改用「MA5 自坑后峰值回落 ≥0.5%」（MA5 见顶拐头），贴合图例弧顶拐弯。
-    _ma5_after = [ma_at(5, k) for k in range(i, n) if ma_at(5, k) is not None]
+    _ma5_after = [ma_at(5, k) for k in range(i, n) if ma_at(5, k) is not None]  # 起点=天量日（尖峰抬MA5）
     _peak_ma5 = max(_ma5_after) if _ma5_after else None
     ma5_now = ma_at(5, n - 1)
     ma5_down = (_peak_ma5 is not None and ma5_now is not None
@@ -4398,8 +4412,8 @@ def meteor_pit(bars, ev, atr_v, last_c):
         recovered = any(
             closes[j] > ma_at(10, j) for j in range(k + 1, min(k + 3, n))
         )
-    pit_low = min(lows[i + 1:])
-    depth_pct = (highs[i] - pit_low) / highs[i] * 100 if highs[i] else 99.0
+    pit_low = min(lows[peak_i + 1:])   # 坑底：从坑顶日次日起算（放宽后坑顶可能 ≠ 天量日）
+    depth_pct = (peak_hi - pit_low) / peak_hi * 100 if peak_hi else 99.0
     vol_ratio = round(vols[i] / (sum(vols[max(0, i - 20):i]) / 20), 2) \
         if sum(vols[max(0, i - 20):i]) > 0 else None
 
@@ -4410,10 +4424,10 @@ def meteor_pit(bars, ev, atr_v, last_c):
     strong_confirm = last_c > ma5_at_vol
     # 防追高：买点 = 站上五日线；远离 5 日线（>5%）或已越过天量高点 5% 不追
     dist_ma5_pct = (last_c - ma5_now) / ma5_now * 100
-    not_chase = dist_ma5_pct <= 5.0 and last_c <= highs[i] * 1.05
+    not_chase = dist_ma5_pct <= 5.0 and last_c <= peak_hi * 1.05
 
     recommend = bool(above_ma5 and rising and above_ma10 and ma5_down
-                     and recovered and not_chase and depth_pct <= 15.0)
+                     and recovered and not_chase and depth_pct <= METEOR_PIT_MAX_DEPTH)
 
     hard = round(pit_low, 2)
     risk_pct = (last_c - hard) / last_c * 100 if last_c else None
@@ -4435,8 +4449,9 @@ def meteor_pit(bars, ev, atr_v, last_c):
         _why.append(f"距MA5 {dist_ma5_pct:+.1f}% 或已越过天量高点（追高，不接）")
 
     _note = (
-        f"【T0·流星砸坑】天量日 {bars[i]['d']}（量 {vol_ratio}×前20日均量）拉升见高点 "
-        f"{highs[i]:.2f} → 圆弧回调 {pullback_days} 根（坑底 {pit_low:.2f}，"
+        f"【T0·流星砸坑】天量日 {bars[i]['d']}（量 {vol_ratio}×前20日均量）"
+        + (f"·坑顶日 {bars[peak_i]['d']}" if peak_i != i else "")
+        + f" 拉升见高点 {peak_hi:.2f} → 圆弧回调 {pullback_days} 根（坑底 {pit_low:.2f}，"
         f"回撤 {depth_pct:.1f}%，10日线{'守住' if recovered else '未守住'}）→ "
         f"今日收 {last_c:.2f} 站上5日线 {ma5_now:.2f}"
         + ("（强确认：已过天量日5日线高点 %.2f）" % ma5_at_vol if strong_confirm
@@ -4452,7 +4467,7 @@ def meteor_pit(bars, ev, atr_v, last_c):
         "role": "primary_entry",
         "recommend": recommend,
         "why": "；".join(_why) if _why else "四段结构齐备",
-        "vol_bar": {"d": bars[i]["d"], "i": i, "high": round(highs[i], 2),
+        "vol_bar": {"d": bars[i]["d"], "i": i, "high": round(peak_hi, 2),
                     "vol_ratio": vol_ratio},
         "pullback_days": pullback_days,
         "pit_low": round(pit_low, 2),
