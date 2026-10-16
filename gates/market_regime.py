@@ -230,7 +230,7 @@ def stock_rs(stock_bars, idx_bars, window=20):
     }
 
 
-# ───────────────────────────── 七种买法 & 突破类集合（与 rule123 同步） ─────────────────────────────
+# ───────────────────────────── 买法集合（七种 + 第8种流星砸坑战法，与 rule123 同步） ─────────────────────────────
 ALL_MODES = ("ma_reclaim_break", "platform_break", "flag_tl_break",
              "w_bottom_break", "line_pullback", "impulse_pause",
              "downtrend_tl_break", "ma_bull_align", "meteor_pit")
