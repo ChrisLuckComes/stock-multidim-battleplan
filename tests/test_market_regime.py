@@ -15,7 +15,24 @@ import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import pytest
+
 import gates.market_regime as MR
+
+# ⚑ 本文件自己钉宽基取数（`_patch_index` 直接改 MR.fetch_index_bars、用例内不还原），
+#   故标 market_regime —— conftest 不再重复钉；同时用 autouse 夹具**兜底还原**，
+#   免得补丁顺着 pytest 会话污染后续模块（2026-10-17 修：此前泄漏把
+#   tests/test_strength_gate.py 的 usQQQ 分流断言打红）。
+pytestmark = pytest.mark.market_regime
+
+
+@pytest.fixture(autouse=True)
+def _restore_index_fetch():
+    orig = MR.fetch_index_bars
+    try:
+        yield
+    finally:
+        MR.fetch_index_bars = orig
 
 
 def _dates(n, start="2026-09-01"):

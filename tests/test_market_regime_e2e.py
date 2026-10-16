@@ -12,8 +12,31 @@ import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import pytest
+
 import rule123
 import gates.market_regime as MR
+
+# ⚑ 本文件在用例内改写 MR.compute_market_regime / rule123._plan_entry_core / rule123.get_bars，
+#   标 market_regime 让 conftest 不重复钉宽基；并用 autouse 夹具**兜底还原这三个全局** ——
+#   2026-10-17 修：此前不还原，顺着 pytest 会话污染后面所有调用 plan_entry/evaluate 的模块
+#   （实测：本文件先跑 ⇒ 后面 15 项全红；改完顺序即绿，是典型顺序依赖）。
+pytestmark = pytest.mark.market_regime
+
+
+@pytest.fixture(autouse=True)
+def _restore_globals():
+    saved = (MR.compute_market_regime,
+             getattr(rule123, "_plan_entry_core", None),
+             getattr(rule123, "get_bars", None))
+    try:
+        yield
+    finally:
+        MR.compute_market_regime = saved[0]
+        if saved[1] is not None:
+            rule123._plan_entry_core = saved[1]
+        if saved[2] is not None:
+            rule123.get_bars = saved[2]
 
 
 def _make_bars(n=120):

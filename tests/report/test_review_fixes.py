@@ -26,21 +26,14 @@ from rule123 import (
     zone_from_demand,
 )
 
-# ⚑ 宽基闸门确定性化（2026-10-15）：plan_entry 内的 market_regime 默认联网取真实
-#   宽基 —— 宽基 down 日会把本文件各用例守护的买法行为 veto 成 wait（今天实测
-#   2026-10-15 上证宽基 down，两个用例被误杀；网络取数失败时反而全绿 ⇒ 结论随
-#   真实行情翻转，这是隐性 flaky）。本文件测的是 rule123 买法/修复本身，
-#   market_regime 闸门的回归归 tests/test_market_regime.py —— 在此统一固定宽基
-#   为 up，让本文件的结论只取决于被测逻辑，不取决于今天大盘。
-import gates.market_regime as _MR
-
-
-def _fixed_up_index(code, n=65):
-    return [{"d": "2026-09-%02d" % (i % 30 + 1), "o": 100.0 + i, "h": 101.0 + i,
-             "l": 99.0 + i, "c": 100.0 + i, "v": 1e6} for i in range(40)]
-
-
-_MR.fetch_index_bars = _fixed_up_index
+# ⚑ 宽基闸门确定性化（2026-10-15 定口径，2026-10-17 收口到 conftest）：
+#   plan_entry 内的 market_regime 默认联网取真实宽基 —— 宽基 down 日会把本文件各用例
+#   守护的买法行为 veto 成 wait（实测 2026-10-15 上证宽基 down，两个用例被误杀；
+#   网络取数失败时反而全绿 ⇒ 结论随真实行情翻转，是隐性 flaky）。
+#   原先**在模块级**直接改 `MR.fetch_index_bars` 且从不还原，会顺着 pytest 会话污染
+#   后续模块（谁先跑决定谁红）。现在统一交给 tests/conftest.py 的
+#   market_regime_neutral 夹具：按用例钉宽基为上行、用完自动还原。
+#   ⇒ 本文件不再动全局；market_regime 闸门自身的回归归 tests/test_market_regime*.py。
 
 
 def _bar(d, o, h, l, c, v=1e6):

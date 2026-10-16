@@ -575,11 +575,17 @@ class TestAnalyzeOffline(unittest.TestCase):
         self.assertAlmostEqual(z["primary_hi"], 53.84, places=2)
         self.assertAlmostEqual(z["struct_stop"], 48.03, places=2)
         self.assertAlmostEqual(res["struct"]["atr14"], 3.281, places=3)
-        # 主表：买区下沿 50.39 / 结构止损 48.03 → R = 2.25
+        # 主表：MA10(滚动) 50.45 / 结构止损 48.03 → R = 2.17
+        # ⚑ 2026-10-17 复核更新（钉值随口径迁移，不是新 bug）：
+        #   entry_candidates 自 2026-10-11 起 ① 下方均线档改用 rolling_sma_last
+        #   （含当日实时近似）；② 「买区下沿」档被结构完整性闸门剔除（贴/破结构止损的
+        #   纸面高赔率档）。⇒ 主表对应行 50.39 → 50.45（MA10 滚动）、
+        #   52.01 → 52.24（5 日 VWAP）；目标位 t1 未变（两行回算均为 55.70），
+        #   R 随买点微降 2.25 → 2.17。
         prim = {r["entry"]: r for r in res["odds_primary"]}
-        self.assertIn(50.39, prim)
-        self.assertAlmostEqual(prim[50.39]["r1"], 2.25, places=2)
-        self.assertAlmostEqual(prim[52.01]["r1"], 0.93, places=2)
+        self.assertIn(50.45, prim)
+        self.assertAlmostEqual(prim[50.45]["r1"], 2.17, places=2)
+        self.assertAlmostEqual(prim[52.24]["r1"], 0.82, places=2)
         # A 股推荐档必须高于硬止损、不高于买区上沿
         rec = res["odds_recommend"]
         self.assertIsNotNone(rec)

@@ -21,6 +21,8 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+import pytest
+
 import gates.market_regime as MR
 import gates.quick_strength as QS
 import battle_analyze as BA
@@ -57,6 +59,7 @@ def test_is_us_ticker():
 
 
 # ───────────────────────────── 取数分流契约（2026-10-15 实测修正） ─────────────────────────────
+@pytest.mark.real_broad   # ⚑ 这条测的就是 MR.fetch_index_bars 本身的取数分流，不能被 conftest 钉掉
 def test_fetch_index_bars_us_routes_to_bars_source():
     """美股宽基不走腾讯日K（实测稀疏：n=140 仅得 1~2 根），转 bars_source.us_quote。
 
