@@ -4821,6 +4821,22 @@ def _plan_entry_core(bars, ev):
             )
             if _mp_tk:
                 result = _meteor_pit_takeover(result, mp)
+                # ⚑ 2026-10-19 补：接管把 buy_zone / 止损锚整块换成了流星砸坑的，
+                #   但 targets 仍是**原 mode** 算的 —— 而接管只发生在原 mode 为
+                #   wait / 自否 / 大阳后家族，这些情形 `_plan_entry_core` 的
+                #   targets 分支（mode=="wait" 直接不进）压根没产出 ⇒ 目标位为空、
+                #   盈亏比缺失（实证 002244 滨江集团 / 301286 侨源股份因此无 R）。
+                #   这里用新 zone 重算，与其它 mode 保持同一目标口径。
+                try:
+                    _tg2 = targets(bars, "meteor_pit", result["buy_zone"], atr_v,
+                                   last_c, Hs_all or [], ev)
+                except Exception:
+                    _tg2 = None
+                if _tg2:
+                    result["targets"] = _tg2
+                    for _k in ("target1", "target2", "rr_target1"):
+                        if _tg2.get(_k) is not None:
+                            result["buy_zone"][_k] = _tg2[_k]
         if t0:
             result["ma_reclaim"] = t0
             result["tier_t0"] = "T0"
@@ -5461,6 +5477,18 @@ def plan_entry(bars, ev, sym=None, *, market_regime_enabled=True, regime_index=N
     except Exception:
         pass
     result = attach_higher_ride(result, bars)
+    # ⚑ 买区区间归一化（2026-10-19）：各买法给 buy_zone 时直接取
+    #   primary_lo=止损锚 / primary_hi=均线锚，**没有 min/max 保护**。
+    #   当均线锚低于止损锚（如 002244 流星砸坑：MA5 9.02 < 坑底 9.21）会出现
+    #   primary_lo > primary_hi 的倒置区间 —— 报告/选股器据此显示的「买区
+    #   9.21~9.02」会直接误导挂单。这里在出口统一纠正，原值留 raw 备查。
+    _z = result.get("buy_zone")
+    if isinstance(_z, dict):
+        _lo, _hi = _z.get("primary_lo"), _z.get("primary_hi")
+        if isinstance(_lo, (int, float)) and isinstance(_hi, (int, float)) and _lo > _hi:
+            _z["primary_lo_raw"], _z["primary_hi_raw"] = _lo, _hi
+            _z["primary_lo"], _z["primary_hi"] = _hi, _lo
+            _z["zone_swapped"] = True
     try:  # 市场状态闸门（取数失败/非A股/开关关 → 自然豁免，不阻断主流程）
         from gates.market_regime import compute_market_regime, apply_market_regime_gate
         mkt = compute_market_regime(sym, bars, enabled=market_regime_enabled,

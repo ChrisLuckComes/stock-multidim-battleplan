@@ -208,6 +208,7 @@ MODE_CN = {
     "breakout": "突破", "line_pullback": "回踩均线", "pullback": "回踩",
     "ma_ride": "均线骑行", "ma_reclaim_break": "均线收复突破", "ma_bull_align": "均线多头",
     "impulse_pause": "脉冲停顿", "wait": "无信号",
+    "downtrend_tl_break": "下降趋势线突破", "w_bottom_break": "W底突破",
 }
 
 
@@ -269,7 +270,7 @@ def render_html(rows, session, today, stat):
         tr.append(
             "<tr><td class='code'>%s</td><td>%s</td><td><span class='v %s'>%s</span></td>"
             "<td><b>%s</b></td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
-            "<td>%s</td><td>%s</td></tr>" % (
+            "<td>%s</td><td>%s</td><td>%s</td></tr>" % (
                 r["code"], r.get("name", ""), (r.get("verdict") or "").lower(),
                 r.get("verdict", ""), MODE_CN.get(r["mode"], r["mode"]),
                 r.get("spot") if r.get("spot") is not None else "-",
@@ -284,7 +285,7 @@ def render_html(rows, session, today, stat):
 body{font-family:-apple-system,"Segoe UI",Microsoft YaHei,sans-serif;margin:24px;background:#fff;color:#1a1a1a}
 h1{font-size:20px;margin:0 0 4px}.mut{color:#888;font-size:12px}
 .kv{background:#f6f8fa;border-radius:8px;padding:12px 16px;margin:12px 0;font-size:13px;line-height:1.9}
-table{border-collapse:collapse;width:100%;font-size:13px;margin-top:8px}
+table{border-collapse:collapse;width:100%%;font-size:13px;margin-top:8px}
 th,td{border:1px solid #e3e6ea;padding:6px 8px;text-align:right;white-space:nowrap}
 th{background:#f0f3f6;text-align:right}
 td:nth-child(2),td:nth-child(4){text-align:left}
