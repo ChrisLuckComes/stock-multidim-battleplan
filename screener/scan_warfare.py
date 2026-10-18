@@ -148,6 +148,10 @@ def judge(conn, code, name, cache, last_session):
         "mode": mode,
         "recommend": bool(plan.get("recommend")),
         "path": plan.get("path"),
+        # ⚑ T0 出水芙蓉**成立**但当日被其他战法占了 mode（仅并列挂载 result["ma_reclaim"]）
+        #   —— 这类票在单看 mode 的结果表里会「消失」。挂载与否不改变当日决策，但
+        #   复查/盯盘要看得见（老罗 2026-10-19 追问「出水芙蓉怎么没有」的二层原因）。
+        "t0_ready": bool((plan.get("ma_reclaim") or {}).get("recommend")),
         "buy_lo": z.get("primary_lo"), "buy_hi": z.get("primary_hi"),
         "in_zone": z.get("in_zone"),
         "stop": sp.get("hard") or sp.get("struct") or z.get("hard_stop") or z.get("struct_stop"),
@@ -206,7 +210,11 @@ def midday_recap(rows, top, today, verbose=True):
 MODE_CN = {
     "meteor_pit": "流星砸坑", "platform_break": "平台突破", "flag_tl_break": "牛旗突破",
     "breakout": "突破", "line_pullback": "回踩均线", "pullback": "回踩",
-    "ma_ride": "均线骑行", "ma_reclaim_break": "均线收复突破", "ma_bull_align": "均线多头",
+    "ma_ride": "均线骑行",
+    # ⚑ 命名以老罗口径为准（README §七种买法 第0条 / SKILL.md 第188行）：
+    #   「出水芙蓉」= T0 ma_reclaim_break（用户 2026-09-27 命名）。此前映射成
+    #   「均线收复突破」，导致全市场扫描结果里这批票认不出来（2026-10-19 老罗追问）。
+    "ma_reclaim_break": "出水芙蓉(T0)", "ma_bull_align": "短线多头",
     "impulse_pause": "脉冲停顿", "wait": "无信号",
     "downtrend_tl_break": "下降趋势线突破", "w_bottom_break": "W底突破",
 }
