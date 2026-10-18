@@ -253,6 +253,29 @@ P95 就被撑高，**明显在吸筹的票也会算出 SCR90 20%+ 被判「发�
 - **依赖**：tdxpy 为可选依赖，未装则静默禁用；需在运行脚本的 Python 里 `pip install tdxpy`（或 `pip install mootdx`）。
 - CLI：`python fetch/tdx_client.py sh600036 -n 140`（显式调用即启用）；`--servers` 看短名单与冷却状态。回归 `python -m pytest tests/test_tdx_fallback.py -q`（全 mock tdxpy，零联网）。
 
+### 1h. baostock 次主力兜底（fetch/bao_fallback.py · 2026-10-19 老罗拍板「和其他源保持一致」）
+
+> **触发**：`ash_bars` 网络层 sina 返回空之后、TDX 兜底**之前**，试一次 baostock 日线。
+> 链路全貌：**sina（主力）→ baostock（次主力）→ tdx（三级兜底）→ 空**。
+> **默认关**：环境变量 `ASH_BAO_FALLBACK=1` 才启用。
+
+- ⚑⚑ **三条铁律**（代码 docstring 同款，改前必读）：
+  1. **adjustflag='3' 钉死不复权** —— 与 sina / tdx 同口径、干净互换。⚠ 绝不是
+     `screener/bao_store.py` 的前复权 '2'：那边横向排序、这边战术执行，口径不同是
+     刻意设计。老罗问过「能否拿到数据后统一处理为前复权」—— **已否决**：① 仓库无
+     复权因子数据、新浪无复权参数，统一无数据基础；② 前复权以最新为基准、除权即
+     全历史漂移，会毁掉缓存「落盘即定稿」契约；③ 战术价位必须与实盘同口径，前复权
+     价直接挂错价位（招行 2026-07 除权前后实测差 1.0 元）；
+  2. **默认关 + 低强度** —— 进程内登录一次复用、不逐次登出（baostock 官方对频繁
+     login 有限流风险）；不写 screener.db、不碰 screener 多进程 worker；
+  3. **volume 单位=股**，与新浪一致无需换算（tdx 那边是手才 ×100）。
+- **历史疑问澄清（老罗 2026-10-19 问「之前一直跑前复权，数据都有问题吗」）**：
+  扫描排序场景前复权是**正确选择**（消除除权断裂）；战术执行链路实证**零处**读
+  screener.db（battle_analyze / rule123 / watch_cn / probe 全走 ash_bars 不复权），
+  **历史结论不用推翻**。隐患是 bao_store docstring 曾误称「与 bars_source 口径一致」，
+  已同日本次修正。
+- **依赖**：baostock 为可选依赖，未装则静默禁用；CLI `python fetch/bao_fallback.py sh600036 -n 5`（显式调用即启用）。回归 `python -m pytest tests/test_bao_fallback.py -q`（全 mock，零联网）。
+
 ---
 
 ## 2. 账户配置边界 / Forbidden

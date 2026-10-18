@@ -17,7 +17,14 @@
 口径边界（不做什么）：
   - 不猜节假日。节假日只会让缓存**多失效一次**（多抓一次），不会给出错数据。
   - 不做复权。源是什么口径就是什么口径（新浪日 K 不复权，见 data-operations.md；
-    tdx 兜底亦为不复权、与新浪同口径，成交量已由手换算成股，见 fetch/tdx_client.py）。
+    tdx 兜底亦为不复权、与新浪同口径，成交量已由手换算成股，见 fetch/tdx_client.py；
+    baostock 次主力兜底 adjustflag='3' 不复权、成交量单位股无需换算，
+    见 fetch/bao_fallback.py）。
+  - ⚠ 绝不为「统一口径」把兜底源改成前复权（老罗 2026-10-19 提过，已否决）：
+    ① 仓库无复权因子数据、新浪无复权参数，统一无数据基础；② 前复权以最新为基准、
+    除权即全历史漂移，会毁掉缓存「落盘即定稿」契约；③ 战术价位（挂单/止损）必须
+    与实盘同口径，前复权价直接挂错价位（招行 2026-07 除权前后实测差 1.0 元）。
+    前复权只存在于 screener.db（横向排序专用），两个数据层刻意不统一，见 AGENTS.md 1h 节。
 
 用法（脚本侧）：
     from bars_source import ash_bars, us_quote
@@ -405,6 +412,27 @@ def snapshot_stale(snap, market, now=None, mtime=None):
 
 
 # ─────────────────────────── 统一入口 ───────────────────────────
+def _bao_fallback(prefix, code, n):
+    """sina 返回空后的 baostock 次主力兜底（2026-10-19 老罗拍板；默认关，见 fetch/bao_fallback.py）。
+
+    双副本兼容：DEV 布局 `fetch/bao_fallback.py`，INST 平铺 `bao_fallback.py`
+    （与 _tdx_fallback 同一模式）。
+    baostock 未装 / 兜底未启用时返回 ([], None) —— 不刷屏、不影响主路径。
+    链路顺序：sina（主力）→ **baostock（次主力）**→ tdx（三级兜底）。
+    """
+    try:
+        try:
+            from fetch.bao_fallback import bao_daily_ash
+        except ImportError:
+            from bao_fallback import bao_daily_ash
+    except Exception:
+        return [], None
+    try:
+        return bao_daily_ash(prefix, code, n)
+    except Exception as e:
+        return [], f"baostock 兜底异常已忽略（{e.__class__.__name__}: {e}）"
+
+
 def _tdx_fallback(prefix, code, n):
     """sina 返回空后的通达信协议兜底（2026-10-19 老罗拍板；默认关，见 fetch/tdx_client.py）。
 
@@ -469,7 +497,15 @@ def ash_bars(prefix, code, n=140, *, fetch=sina_raw, snap_dirs=None,
     bars = fetch(prefix, code, n=n)
     src_tag = "sina"
     if not bars:
-        # sina 失败 → 通达信协议兜底（2026-10-19 老罗拍板；默认关，ASH_TDX_FALLBACK=1 才启用）
+        # sina 失败 → baostock 次主力兜底（2026-10-19 老罗拍板；默认关，ASH_BAO_FALLBACK=1 才启用；
+        # adjustflag='3' 不复权与 sina 同口径，见 fetch/bao_fallback.py）
+        bao_bars, bao_note = _bao_fallback(prefix, code, n)
+        if bao_note:
+            notes.append(bao_note)
+        if bao_bars:
+            bars, src_tag = bao_bars, "bao"
+    if not bars:
+        # sina/bao 都失败 → 通达信协议三级兜底（2026-10-19 老罗拍板；默认关，ASH_TDX_FALLBACK=1 才启用）
         tdx_bars, tdx_note = _tdx_fallback(prefix, code, n)
         if tdx_note:
             notes.append(tdx_note)
