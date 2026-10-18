@@ -31,6 +31,9 @@ GRAVE = dict(o=11.20, h=11.80, l=11.19, c=11.20, v=3.0e6)
 WEAK = dict(o=11.15, h=11.20, l=10.80, c=10.90)      # 次日走弱 → 确认
 NEUT = dict(o=11.20, h=11.35, l=11.10, c=11.25)      # 次日中性 → 仍待确认
 ENGULF = dict(o=11.25, h=11.95, l=11.20, c=11.90)    # 次日反包 → 推翻
+# T0 在末根重新接管用的上涨日（见 test_confirmed_vetoes_recommend_after_t0_takeover 说明）。
+# 收盘必须**高于前一根**（WEAK 10.90）—— 出水芙蓉要求信号日收涨（2026-10-19 C 口径）。
+UP = dict(o=10.95, h=11.60, l=10.90, c=11.50)
 
 
 def app(bars, rows):
@@ -70,9 +73,21 @@ def test_signal_day_does_not_veto():
 
 
 def test_confirmed_vetoes_recommend_after_t0_takeover():
-    """② + ①：core 推荐（T0 已接管）→ 闸门必须把它压成 False。"""
-    core, g = gated([GRAVE, WEAK])
+    """② + ①：core 推荐（T0 已接管）→ 闸门必须把它压成 False。
+
+    ⚠ fixture 为何要在「确认日」之后再补一根 UP（2026-10-19）：
+      出水芙蓉要求**信号日收涨**（老罗 2026-10-19 定的 C 口径，见 rule123.ma_reclaim_break ①-B）。
+      旧 fixture 让 T0 接管发生在
+      WEAK 那一根上，而 WEAK 的作用是「次日走弱 ⇒ 确认」，其定义就是
+      `WEAK.c < GRAVE.c`（低于顶部信号日的收盘）—— 与「收涨」在**同一根 K 线上
+      数学互斥**。所以把两者拆开：GRAVE/WEAK 负责把顶部形态确认掉，再补一根 UP
+      （收于 11.50 > WEAK 10.90）让 T0 在末根合法接管。这样测的仍是同一件事 ——
+      「顶部已确认后，当日新出现的 T0 接管必须被闸门压成否决」，且场景更贴近实盘
+      （确认发生在过去，接管发生在当下）。
+    """
+    core, g = gated([GRAVE, WEAK, UP])
     assert core["recommend"] is True, "前提：裸引擎在 T0 接管下 recommend=True"
+    assert core["mode"] == "ma_reclaim_break", "前提：确实是 T0（出水芙蓉）接管"
     assert g["recommend"] is False and g["top_signal_veto"] is True
     assert g["top_signal"]["state"] == "confirmed"
     assert "顶部确认·否决" in g["verdict"]
