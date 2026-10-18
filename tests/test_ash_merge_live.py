@@ -128,9 +128,12 @@ class TestMergeIntradayBar:
 # 开关默认关 + 回放口径 off-by-one 修复
 # ------------------------------------------------------------------
 class TestSwitchDefaults:
-    def test_merge_switch_default_off(self):
-        # ★ 铁律：① 是实验开关，默认关。谁默认开谁回滚。
-        assert P.ASH_MERGE_LIVE_BAR is False
+    def test_merge_switch_default_on(self):
+        # ★ 2026-10-19 老罗拍板：默认**开**（盘中选股要「提前判断」，半根是必要
+        #   输入；只作昨收主口径的**并列参考**、不覆盖，误杀由人工复核兜底）。
+        #   此前（2026-10-16）默认关是基于「C4 上涨窗口误杀赢家」的回测结论，
+        #   现由老罗显式推翻 —— 谁再改回 False 谁回滚。
+        assert P.ASH_MERGE_LIVE_BAR is True
 
     def test_probe_signature_has_merge_live(self):
         import inspect
