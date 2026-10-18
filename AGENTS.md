@@ -276,6 +276,24 @@ P95 就被撑高，**明显在吸筹的票也会算出 SCR90 20%+ 被判「发�
   已同日本次修正。
 - **依赖**：baostock 为可选依赖，未装则静默禁用；CLI `python fetch/bao_fallback.py sh600036 -n 5`（显式调用即启用）。回归 `python -m pytest tests/test_bao_fallback.py -q`（全 mock，零联网）。
 
+### 1i. 全市场选股器（screener/ · 2026-10-19 建）
+
+> 三个脚本：`bao_store.py`（数据层）· `scan_warfare.py`（扫描层）· `scr_sweep.py`（筹码闸）。
+> **完整用法与换机重建手册见 `screener/DEPLOY.md`** —— 拉源码 → 建数据 → 建定时任务，全在里面。
+
+- **口径**：`baostock` **前复权**（`adjustflag='2'`）+ 本地 SQLite `data/screener.db`（215MB，**不入库**）。
+  与战术执行链路（sina/tdx **不复权**）**刻意分家**，禁止混用（见 1g/1h）。
+- **三个已踩过的坑**：① 东财 clist 本机被拒 ⇒ universe 走新浪分页（**每页硬上限 100**）；
+  ② baostock 取数 ≈0.75ms/根，`DEFAULT_START='2025-07-01'`（320 根）才跑得动，2024 起要 2.7 小时；
+  ③ 多进程下 ~30% chunk 整批失败 ⇒ **按票多轮重试**（默认 5 轮），不是整块丢给串行；
+  ④ `--refresh` **必须把 `--workers` 传进 `refresh_bars`**（`3548cc0` 修，否则串行 44min）。
+- **ST 铁律**：`is_st()` 判据在**数据层**建清单时就剔除（涨跌幅 5%、流动性差、随时退市），
+  扫描层同判据双保险（名称在两次刷新之间可能变 ST）。
+- **定时任务（绑机器、不随 git 走）**：盘中 11:30（不刷新，读本地库 + 半根复评 top 60）、
+  收盘 15:20（`--refresh` + 扫描 + 筹码体检）。automation 存本地 `~/.workbuddy`，
+  **不跨设备同步** ⇒ 换机必须重建，prompt 原文在 `screener/DEPLOY.md` §5.3。
+- 回归：`python -m pytest tests/test_screener.py -q`（全 mock，零联网）。
+
 ---
 
 ## 2. 账户配置边界 / Forbidden
