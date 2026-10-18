@@ -16,7 +16,8 @@
 
 口径边界（不做什么）：
   - 不猜节假日。节假日只会让缓存**多失效一次**（多抓一次），不会给出错数据。
-  - 不做复权。源是什么口径就是什么口径（新浪日 K 不复权，见 data-operations.md）。
+  - 不做复权。源是什么口径就是什么口径（新浪日 K 不复权，见 data-operations.md；
+    tdx 兜底亦为不复权、与新浪同口径，成交量已由手换算成股，见 fetch/tdx_client.py）。
 
 用法（脚本侧）：
     from bars_source import ash_bars, us_quote
@@ -404,6 +405,26 @@ def snapshot_stale(snap, market, now=None, mtime=None):
 
 
 # ─────────────────────────── 统一入口 ───────────────────────────
+def _tdx_fallback(prefix, code, n):
+    """sina 返回空后的通达信协议兜底（2026-10-19 老罗拍板；默认关，见 fetch/tdx_client.py）。
+
+    双副本兼容：DEV 布局 `fetch/tdx_client.py`，INST 平铺 `tdx_client.py`
+    （与 test_eastmoney_http_first 的 INST 两代布局兜底同一模式）。
+    tdxpy 未装 / 兜底未启用时返回 ([], None) —— 不刷屏、不影响主路径。
+    """
+    try:
+        try:
+            from fetch.tdx_client import tdx_daily_ash
+        except ImportError:
+            from tdx_client import tdx_daily_ash
+    except Exception:
+        return [], None
+    try:
+        return tdx_daily_ash(prefix, code, n)
+    except Exception as e:
+        return [], f"tdx 兜底异常已忽略（{e.__class__.__name__}: {e}）"
+
+
 def ash_bars(prefix, code, n=140, *, fetch=sina_raw, snap_dirs=None,
              use_cache=True, use_snap=True, now=None):
     """A 股日线：本地快照 → 进程内记忆 → 磁盘缓存 → 网络。
@@ -446,10 +467,18 @@ def ash_bars(prefix, code, n=140, *, fetch=sina_raw, snap_dirs=None,
             return bars, "cache", notes
         notes.append(f"缓存未命中（{why}）")
     bars = fetch(prefix, code, n=n)
+    src_tag = "sina"
+    if not bars:
+        # sina 失败 → 通达信协议兜底（2026-10-19 老罗拍板；默认关，ASH_TDX_FALLBACK=1 才启用）
+        tdx_bars, tdx_note = _tdx_fallback(prefix, code, n)
+        if tdx_note:
+            notes.append(tdx_note)
+        if tdx_bars:
+            bars, src_tag = tdx_bars, "tdx"
     if not bars:
         return [], "net", notes + ["网络源返回空"]
     if use_cache:
-        cache_save("ASH", code, bars, "sina", now=now, min_len=_min_bars(n),
+        cache_save("ASH", code, bars, src_tag, now=now, min_len=_min_bars(n),
                    memo=not explicit)
     return bars, "net", notes
 

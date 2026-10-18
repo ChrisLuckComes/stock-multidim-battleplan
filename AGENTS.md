@@ -239,6 +239,22 @@ P95 就被撑高，**明显在吸筹的票也会算出 SCR90 20%+ 被判「发�
 
 ---
 
+### 1g. 通达信协议兜底（fetch/tdx_client.py · 2026-10-19 老罗拍板「1,2,3」）
+
+> **触发**：`ash_bars` 网络层 sina 返回空之后、放弃之前，试一次通达信协议日线兜底。
+> **默认关**：环境变量 `ASH_TDX_FALLBACK=1` 才启用（老罗：「有一个可以用的源就不错了，避免被封 IP」）。
+
+- ⚑⚑ **三条铁律**（代码 docstring 同款，改前必读）：
+  1. **默认关** —— 不设环境变量就不联网、零行为变化；
+  2. **钉死服务器**（2026-10-19 实证可用的 8 个国泰君安 IP 短名单），**绝不 mootdx bestip 自动选站**（≈ping 104 站的突发风暴 + 空站陷阱），**严禁运行时自动重探全部内置站**；
+  3. **低强度** —— 单次触发最多试 2 站（`ASH_TDX_MAX_SERVERS`）、连接后 0.4s 礼让、零并发、失败站 24h 冷却。
+- **服务器挂掉怎么办（老罗 2026-10-19 问）**：短名单内按序故障转移（最多 2 个）→ 全灭自动降级回现状（sina 空 → 返回空），**代码不作废**；`ASH_TDX_SERVER=127.0.0.1:7709` 可切本机通达信客户端（零封 IP 风险）；名单变更只靠显式改代码。
+- **口径**：TDX 协议 = 不复权原始价，与 sina（ash_bars 主源）**同口径**，可干净互换；成交量手→股已在出口换算。**screener（baostock 前复权）路径禁止接本源**（除权日前 TDX 高一个分红额）。
+- **依赖**：tdxpy 为可选依赖，未装则静默禁用；需在运行脚本的 Python 里 `pip install tdxpy`（或 `pip install mootdx`）。
+- CLI：`python fetch/tdx_client.py sh600036 -n 140`（显式调用即启用）；`--servers` 看短名单与冷却状态。回归 `python -m pytest tests/test_tdx_fallback.py -q`（全 mock tdxpy，零联网）。
+
+---
+
 ## 2. 账户配置边界 / Forbidden
 
 - **人与钱**（账户、主力/备用、单笔硬顶、风险预算%）→ `env` / `.env`（`account_config.py`）。
@@ -272,6 +288,7 @@ P95 就被撑高，**明显在吸筹的票也会算出 SCR90 20%+ 被判「发�
 | HTML 作战计划 | `reports/cn_<code>_<date>.html` | `report_render.py --out reports/cn_<code>_<date>.html` |
 | 扫雷缓存 `sweep_<code>.json` | `data/cache/`（minesweep 默认即此处） | `minesweep.py <code>`，**不传 `--out`** |
 | 运行日志 / stderr | `out_cn/run_<code>.txt`、`data/cache/*.txt` | shell 重定向 |
+| TDX 兜底服务器冷却状态 | `data/cache/tdx_server_state.json` | `fetch/tdx_client.py` 失败时自动写 |
 | 一次性草稿、探查输出、临时脚本 | `scratch/` | **用完删除** |
 | 研究脚本 + 实证输出 | 脚本 `research/*.py`；输出 json → `data/cache/` | 脚本入库，输出不入库 |
 
