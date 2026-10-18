@@ -49,6 +49,9 @@ VERSION = "1.0"
 
 # 全档赔率枚举的门槛
 MIN_RISK_ATR = 0.25          # 风险低于 0.25×ATR 的组合 = 纸面赔率，剔除
+# ★ 2026-10-18 老罗拍板 A 方案：流星砸坑专用推荐档的赔率门槛。
+#   沿用全局「R≥1.5 才做」的执行铁律（与 RR_GATE / us_session_decide 同一把尺）。
+METEOR_RR_GATE = 1.5
 BIG_YANG_BODY_ATR = 0.80     # 大阳判定：实体 ≥ 0.8×ATR
 TIE_LINE_LOOK = 8            # 贴线命中统计回看根数（output-pitfalls #21：±1% ≥2/8）
 PEER_WORKERS = 12            # 同行日线是网络 I/O；与 scan_all/enum.py 同上限，口径不变
@@ -570,9 +573,18 @@ def pick_recommend(rows, z, us=False, bars=None):
     A 股当日买入不能卖，仍在可预挂的回踩档里取「达成率×赔率」联合最高的一条。
     美股可以随时离场：现价或现价上方的档自己 R≥1.5，就推荐这档追涨，
     不因为下面还有 R 更大的回踩而改去等。
+
+    ★ 2026-10-18 流星砸坑例外（老罗拍板 A 方案）：该战法的买点**定义**就是
+      「站上5日线」，通用打分器会把推荐档压到最深的 MA20 档
+      （两个原因见 `_pick_recommend_meteor` 的注释），故优先走专用入口；
+      专用档不合格（赔率不够 / 取不到）才回落到通用选档，其他模式行为不变。
     """
     if us:
         return _pick_recommend_us(rows, z, bars=bars)
+    if (z or {}).get("anchor") == "meteor_pit":
+        r = _pick_recommend_meteor(rows, z, bars=bars)
+        if r is not None:
+            return r
     return _pick_recommend_cn(rows, z, bars=bars)
 
 
@@ -697,6 +709,58 @@ def _pick_recommend_cn(rows, z, bars=None):
     r["score"] = score
     r["exec_stop"] = round(exec_stop, 2) if exec_stop is not None else None
     return r
+
+
+def _pick_recommend_meteor(rows, z, bars=None):
+    """★ 流星砸坑专用推荐档（老罗 2026-10-18 拍板 A 方案）。
+
+    老罗原话：「我选择A，我就是冲着站上MA5来的，当然是在MA5附近买入。」
+    本战法的**定义性买点**就是「站上5日线」（rule123.py:4330「买点贴 MA5、
+    止损在坑底，盈亏比高」），所以推荐档必须是 **live MA5 附近的回踩档**，
+    止损锚坑底、目标锚坑顶（主升浪）。
+
+    ⚑ 为什么不走通用打分器 `_pick_recommend_cn` —— 它在流星砸坑上会**系统性选错**：
+      ① 天花板用的是 `zone_hi = primary_hi = ma5_at_vol`（**天量日**的 MA5，陈旧锚）。
+         live MA5 常略高于它（688499 实测 live 41.68 vs 天量日 41.61），
+         于是 `entry > zone_hi` 把「回踩 MA5」这一档**整档剔除**；
+      ② `exec_stop_of` 恒取坑底 ⇒ **固定止损下越深的档 R 越高**（688499：
+         MA20 档 R 5.74 vs MA5 档 0.87）⇒ 打分器必然滑向最深的 MA20/坑底档，
+         与「买点贴 MA5」的战法本意相反，等于让人白等 −8% 的深回踩。
+    故此处绕过通用打分，直接锚 live MA5 选档，并按**坑顶**重算 R
+    （通用 t1 是近端墙，会把「抓主升浪」的赔率算成 0.87 而自我否决）。
+
+    取不到合格档就返回 None ⇒ 上层回落到通用选档，不改变其他模式的行为。
+    """
+    pit_low = z.get("struct_stop")       # 坑底 = 硬止损 = 结构止损（同一锚）
+    peak_hi = z.get("peak_hi")           # 坑顶（天量窗口最高价）= 主升浪目标
+    ma5_now = z.get("ma5_now")           # live MA5 = 战法买点锚
+    if not all(isinstance(v, (int, float)) for v in (pit_low, peak_hi, ma5_now)):
+        return None
+    if peak_hi <= pit_low:
+        return None
+    # 只认「止损 = 坑底」这一执行口径的行（与 _primary_pool 同一把尺）
+    pool = [r for r in rows
+            if isinstance(r.get("stop"), (int, float))
+            and abs(r["stop"] - pit_low) < 0.005
+            and r.get("prehang")                     # 可隔夜预挂（回踩档）
+            and r.get("entry_kind") != "above"       # 不要上方突破档（无 buy-stop）
+            and r["entry"] > pit_low                 # 不接跌破坑底的飞刀
+            and (r.get("risk_atr") or 0) >= MIN_RISK_ATR]
+    if not pool:
+        return None
+    # 取离 live MA5 最近的那一档 —— 战法买点就是「站上5日线」⇒ 贴 MA5 买
+    best = min(pool, key=lambda r: abs(r["entry"] - ma5_now))
+    r1 = (peak_hi - best["entry"]) / (best["entry"] - pit_low)
+    if r1 < METEOR_RR_GATE:              # 赔率不够就不给（R≥1.5 铁律）
+        return None
+    best["r1"] = round(r1, 2)
+    best["r1_basis"] = "坑顶（流星砸坑·主升浪目标，非近端墙）"
+    ar, src = _attain_rate(best, bars)
+    best["attain_rate"] = round(ar, 3)
+    best["attain_src"] = src
+    best["score"] = round(r1 * ar, 3)
+    best["exec_stop"] = round(pit_low, 2)
+    return best
 
 
 def _pick_recommend_us(rows, z, bars=None):

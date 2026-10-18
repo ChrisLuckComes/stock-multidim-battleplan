@@ -4493,6 +4493,12 @@ def meteor_pit(bars, ev, atr_v, last_c):
             "level": round(last_c, 2),
             "primary_lo": hard,
             "primary_hi": round(ma5_at_vol if strong_confirm else ma5_now, 2),
+            # ★ 2026-10-18 老罗选 A 方案：流星砸坑的**定义性买点**是「站上5日线」，
+            #   故通用选档器必须拿得到 live MA5 与坑顶两个锚 —— 之前只带了坑底和
+            #   天量日 MA5（陈旧锚），导致推荐档被压到最深的 MA20 档。详见
+            #   battle_analyze._pick_recommend_meteor 的注释。
+            "peak_hi": round(peak_hi, 2),       # 坑顶 = 主升浪目标锚
+            "ma5_now": round(ma5_now, 2),       # live MA5 = 买点锚
             "in_zone": True,
             "type": (f"T0·流星砸坑（天量坑回撤{depth_pct:.1f}%·"
                      f"{'强' if strong_confirm else '弱'}确认）"),
