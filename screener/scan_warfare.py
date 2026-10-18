@@ -325,6 +325,7 @@ def main():
     ap.add_argument("--full", action="store_true", help="全量重拉日线（配合 --refresh）")
     ap.add_argument("--limit", type=int, default=None, help="只扫描前 N 只（试跑）")
     ap.add_argument("--top", type=int, default=DEFAULT_TOP, help="盘中复评候选上限")
+    ap.add_argument("--workers", type=int, default=6, help="刷新日线的并发进程数（默认 6）")
     ap.add_argument("--out-dir", default=OUT_DIR)
     args = ap.parse_args()
 
@@ -333,7 +334,10 @@ def main():
     if args.refresh_universe or not conn.execute("SELECT COUNT(*) FROM stocks").fetchone()[0]:
         store.refresh_universe(conn)
     if args.refresh:
-        store.refresh_bars(conn, full=args.full, limit=args.limit)
+        # ⚑ 必须显式传 workers：refresh_bars 的函数默认 workers=1（串行），
+        #   而 CLI 默认已是 6。漏传会让全市场刷新从 ~6 分钟拖到 ~44 分钟
+        #   （2026-10-19 实测：200 只 101s = 0.5s/只 ⇒ 5225 只 ≈ 44min）。
+        store.refresh_bars(conn, full=args.full, limit=args.limit, workers=args.workers)
     cache = ensure_broad(conn)
     index_last = max((b[-1]["d"] for b in cache.values() if b), default=None)
 
