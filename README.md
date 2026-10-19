@@ -110,23 +110,41 @@ stock-multidim-battleplan/
 ## 安装（多平台）
 
 ### A. WorkBuddy
-克隆到用户级技能目录：
+仓库只 clone 一次。skill 目录用目录联接指向仓库，不要在 skill 目录里再 clone 一份。
+
+Windows：
+
+```bat
+mklink /J "%USERPROFILE%\.workbuddy\skills\stock-multidim-battleplan" "<仓库根>"
+```
+
+macOS / Linux：
 
 ```bash
-git clone https://github.com/ChrisLuckComes/stock-multidim-battleplan.git \
-  ~/.workbuddy/skills/stock-multidim-battleplan
+ln -s "<仓库根>" ~/.workbuddy/skills/stock-multidim-battleplan
 ```
+
+`<仓库根>` 换成这次 clone 的目录。不要写死某台机器的盘符。
 
 重启 / 刷新 WorkBuddy 后，在对话中输入 `/stock-multidim-battleplan 贵州茅台`。
 > 行情默认走免费公开源（`bars_source` 新浪 / `fetch_market` 东财 / `market_regime` 腾讯）；WorkBuddy 已连接通达信且免费源失败时，才回退到 `tdx_lookup` / `tdx_quotes` / `tdx_kline`。TDX 仅备选，本仓库脚本是结构判定主源。
 
 ### B. Cursor
-Cursor 的 skills 目录为 `~/.cursor/skills/`。把整个仓库放进去即可（Cursor 通过 `disable-model-invocation: true` 字段确保仅显式 `/stock-multidim-battleplan` 触发，不自动误触发）：
+Cursor 的 skills 目录为 `~/.cursor/skills/`。同样用目录联接指向同一仓库（`disable-model-invocation: true` 确保仅显式 `/stock-multidim-battleplan` 触发）：
+
+Windows：
+
+```bat
+mklink /J "%USERPROFILE%\.cursor\skills\stock-multidim-battleplan" "<仓库根>"
+```
+
+macOS / Linux：
 
 ```bash
-git clone https://github.com/ChrisLuckComes/stock-multidim-battleplan.git \
-  ~/.cursor/skills/stock-multidim-battleplan
+ln -s "<仓库根>" ~/.cursor/skills/stock-multidim-battleplan
 ```
+
+与 WorkBuddy 指向同一次 clone。Agent 已经把仓库当工作区打开时，直接在该工作区跑，不必再换路径。
 
 在 Cursor 聊天中：`/stock-multidim-battleplan 赛轮轮胎`。无 wb-finance-skill 时，Agent 会自动改用 `fetch_market.py` 取数。
 

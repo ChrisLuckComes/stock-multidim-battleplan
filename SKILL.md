@@ -13,6 +13,15 @@ disable-model-invocation: true
 > **基本面取数**：`tdx_security_deep_info` 返回 80–160KB，**必然超 token 落盘** ⇒ 拿到落盘路径后直接 `python tdx_deep_fin.py <落盘文件> --fin`（自动解析 + 按报告期排序去重 + 单位换算 + **单季/累计口径反查**），不要再手写 `python -c` 逐字段试。坑与口径细节见 [data-operations.md](references/data-operations.md) 第 11 条。
 > ⚠ **TDX 是备选数据源**：通达信连接器需授权且有额度积分限制（老罗 2026-10-15 额度已耗尽）。免费公开源（东财/新浪/腾讯）优先；TDX 仅在免费源失败或需 F10 财务深度时回退，不要作为取数首选。另：`bars_source.ash_bars` 网络层新增**通达信协议兜底**（`fetch/tdx_client.py`，2026-10-19 老罗拍板）——sina 返回空才触发、**默认关**（`ASH_TDX_FALLBACK=1` 启用）、钉死实证可用服务器按序故障转移（最多 2 站）、失败 24h 冷却，与 MCP 连接器是两条独立路径；口径不复权与 sina 一致（成交量已手→股），**screener 前复权路径不接**。另：baostock **次主力**兜底（`fetch/bao_fallback.py`，2026-10-19 拍板）——sina 空且排在 tdx **前**触发、默认关（`ASH_BAO_FALLBACK=1`）、`adjustflag='3'` 不复权与 sina 同口径（volume 单位股无需换算），**screener 前复权路径同样不接**；「统一成前复权」已否决，论证见 AGENTS.md 1h 节。
 
+## 运行根（任何 Agent，禁止写死路径）
+
+仓库根 = 本 `SKILL.md` 所在目录。Cursor、WorkBuddy 或其他 Agent 同一条：
+
+1. 用这份 `SKILL.md` 的真实路径定位根（工作区根，或 skill 目录；目录联接的目标就是仓库）。
+2. 所有 `python *.py` 的工作目录设成这个根。参数只用相对路径：`out_cn/`、`out_us/`、`reports/`、`data/cache/`。
+3. 禁止写死盘符、用户名、某台机器的 clone 位置，也禁止把 HTML 写到用户主目录下的 `stock-reports`。
+4. 报告落点：A 股 `reports/cn_<code>_<YYYYMMDD>.html`，美股 `reports/us_<ticker>_<YYYYMMDD>.html`。`notes` 与 `analysis` 同目录。
+
 ## 执行原则
 
 1. 先确认市场、代码、分析时点和是否已收盘。

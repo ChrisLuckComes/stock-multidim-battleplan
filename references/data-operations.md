@@ -2,9 +2,7 @@
 
 ## 数据与脚本
 
-执行时用 skill 安装目录的**绝对路径**：
-- WorkBuddy：`~/.workbuddy/skills/stock-multidim-battleplan/`
-- Cursor：`C:\Users\luoyu\.cursor\skills\stock-multidim-battleplan\`
+执行时的工作目录 = 本仓库根（含 `SKILL.md` 的目录）。Cursor、WorkBuddy 或其他 Agent 都用这个根，不写死盘符或用户名。skill 目录若是指向仓库的联接，那就是同一个目录。
 
 ```bash
 python fetch_market.py 601233 --out data/601233.json

@@ -22,7 +22,7 @@ python battle_analyze.py 601208 --account 50000 --cash 28426 \
 
 # ② 出报告（模板 + 数据 + notes）
 python report_render.py --data out_cn/analysis_601208.json \
-    --notes notes.json --out "C:/Users/luoyunlai/stock-reports/601208-20260921.html"
+    --notes out_cn/notes_601208.json --out reports/cn_601208_20260921.html
 #    → 自动做标签配对自检，异常时 rc=1
 ```
 

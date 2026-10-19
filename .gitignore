@@ -13,6 +13,12 @@ out_us/*.err
 # gate 文本报告落盘（2026-10-09 补）：扫雷/股性等每次重跑都会重新生成，属可再生产物。
 out_cn/*.txt
 out_us/*.txt
+# 选股扫描产物（scan_warfare / scr_sweep）：jsonl 给下一步筹码体检读，md 是同一次的人读表。
+# 每次重跑都重新生成，和同目录 json/html 一样不入库。
+out_cn/*.jsonl
+out_us/*.jsonl
+out_cn/*.md
+out_us/*.md
 # 排障过程中的临时/复核中间产物（2026-10-09 补）：_tmp_*、_review_* 属一次性诊断文件，
 # 结论落定后即失效；out_cn/*.json 已覆盖其余分析产物。
 out_cn/_tmp_*.json

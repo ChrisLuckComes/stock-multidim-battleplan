@@ -150,11 +150,9 @@ cp .env.example .env     # 再按账户实际额度改：ASH_ACCOUNT / US_ACCOUN
 
 ### 5.2 创建方式
 
-⚑⚑ **cwds 指向哪个目录？指向你 `git clone` 出来的那份仓库根目录（DEV 侧），
-不要指向 WorkBuddy 的 skills 安装副本（INST，形如 `~/.workbuddy/skills/stock-multidim-battleplan`）。**
-理由：① INST 无 `.git`，拉不到更新；② INST 的 `data/` 是它自己的一份，
-跟你在 DEV 建的库不是同一个文件，两边数据会打架；③ 双副本同步方向是 **DEV → INST**，
-在 INST 上跑出来的产物不属于真源。
+⚑⚑ **cwds 指向仓库根**（含 `SKILL.md` 的那次 clone，不写死盘符）。
+skill 目录若已是指向该根的联接，两个路径是同一个目录。
+换机时先建联接，不要在 skill 目录再 clone 第二份——两份 `data/` 会各写各的。
 
 用 WorkBuddy 的 `automation_update` 工具（`mode: create`），字段：
 

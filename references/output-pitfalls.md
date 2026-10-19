@@ -2,7 +2,7 @@
 
 ## 输出规范
 
-- HTML 落盘 `$HOME\stock-reports\<TICKER>-YYYYMMDD.html`（不要写入代码仓库）。首屏结论 + 模式卡 + 入场/止损/目标1-目标2 + **量价分析（当日分钟复盘 + 近20日）** + **扫雷一行** + **双轨打分** + **龙头轻量对照（优先研究谁）**。不输出 Gamma 卡。CDN 被挡时再写 `*_standalone.html`。
+- HTML 落盘 `reports/cn_<code>_<YYYYMMDD>.html`（A股）或 `reports/us_<ticker>_<YYYYMMDD>.html`（美股）。`reports/` 已在 `.gitignore`，不入库。首屏结论 + 模式卡 + 入场/止损/目标1-目标2 + **量价分析（当日分钟复盘 + 近20日）** + **扫雷一行** + **双轨打分** + **龙头轻量对照（优先研究谁）**。不输出 Gamma 卡。CDN 被挡时再写 `*_standalone.html`。
 - 无文件环境：markdown 同等结构。
 - 对话附 200–300 字摘要（须含双轨分数 + 龙头优先结论）。关键数据标来源+日期。
 - 含买卖价位时附：
