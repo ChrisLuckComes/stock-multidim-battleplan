@@ -461,6 +461,8 @@ P95 就被撑高，**明显在吸筹的票也会算出 SCR90 20%+ 被判「发�
 
 - **★★ 月线否决**只保留**50% 大阴线**——其余月线形态**一律不干预日线级判断**（老罗 2026-09-26 定）**：老罗原话「**月线只看 50% 大阴线否决，其他的月线不要干预日线级别的判断**」。落地两处：① `top_signals.apply_month_blacklist` 的否决条件由 `sy or one or pair or merged` 收成 **`sy`（`month_super_yin`，`MONTH_SUPER_DROP = 0.50`）**；② `top_signals.top_verdict` 里的 `ban` 同样收成 `sy`（原文 `ban = sy or one or pair or merged` 会把 `higher_top.horizon` 打成「拉黑」）。`month_one_star` / `month_star_pair` / `month_merged_star` **照旧计算、照旧落进 `result` / `v`**（报告与 Agent 仍可看），只是**不再改 `recommend` / `verdict` / `note` / `pre_breakout` / `horizon`**。**改前代价（实证）**：**ALAB**（月线 2026-08 `long_star`）与 **VEEV**（月线 2026-03 `shooting_star`）两只日线/周线都是多头结构的票被整体打成「拉黑·只做空不做多」；**300569 2026-09-24（过牛旗那天）也被压成 `recommend=False`** —— 撤掉后同一天恢复为 **`mode=platform_break` / `recommend=True`**，即**一个真实的突破买点被月线形态越权拦掉了**。回归 `tests/top/test_month_top.py`（新增 `TestMonthBlacklistScope` 4 项 + 三条原「horizon=拉黑」断言改为「仍记录、不拉黑」）+ `tests/entry/test_300569_bull_flag.py`（`test_monthly_one_star_no_longer_blacklists_the_engine`）。
 
+- **引擎怎么说，就怎么做（老罗 2026-10-19，理工能科 002322）**：能不能买只认引擎已经算出的结论（`recommend`、T0 的 `expected_r` / `target_ext` / `rr_ext`）。`expected_r > 0` 就是能做。近端墙 `near_wall` 只是减仓参考，不许拿它当上涨天花板另算 R 去否决。触发价到放弃线之间差几分钱、差几十元，仍是同一张单，不许因固定价差一档否决。赔率表的 `targets.t1` / 空的 `odds_recommend` 与 T0 不一致时，以 T0 为准。
+
 ---
 
 ## 4. 改代码的唯一正确流程（老罗 2026-10-19 定：取消双副本，路径不写死）
