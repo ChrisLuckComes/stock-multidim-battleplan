@@ -49,6 +49,8 @@ def test_reading_labels():
     assert key == "big_buy"
     key, _ = reading(35.0, 38.0, 0.2, 0.6, -1e7, 1e7)
     assert key == "supply"
+    key, _ = reading(13.24, 13.13, 0.89, 0.80, -3.14e6, -4.6e6)
+    assert key == "digest"
     key, _ = reading(39.0, 38.0, 0.4, 0.2, 1e6, -1e6)
     assert key == "mixed"
 
@@ -109,7 +111,7 @@ def test_fact_and_verdict_share_reading():
     assert "超大单" in verdict["basis"]
 
 
-def test_conclude_three_ways():
+def test_conclude_four_ways():
     def pack(close, avg, pos, after, main, chg, done=True):
         day = {
             "frame": "minute", "session_done": done, "bench_name": "科创50",
@@ -130,9 +132,12 @@ def test_conclude_three_ways():
     pull = pack(39.0, 38.0, 0.4, 0.2, 1e6, 1.0)
     assert pull["label"] == "正常回调"
     assert pull["buy"] == "能等回踩接，不追"
-    sold = pack(47.9, 46.6, 0.84, 0.43, -6e6, 1.96)
-    assert sold["label"] == "正常回调"
-    assert sold["buy"] == "先不买"
+    # 理工能科型：收涨、位高、均价上、主力净卖 → 高位消化（不是回调）
+    digest = pack(47.9, 46.6, 0.84, 0.43, -6e6, 1.96)
+    assert digest["label"] == "高位消化"
+    assert digest["buy"] == "先不买，不追"
+    ligong = pack(13.24, 13.13, 0.89, 0.80, -3.14e6, 1.85)
+    assert ligong["label"] == "高位消化"
     dist = pack(35.0, 38.0, 0.2, 0.6, -1e7, -2.0)
     assert dist["label"] == "派发"
     assert dist["buy"] == "不买"
@@ -165,6 +170,6 @@ if __name__ == "__main__":
     test_minute_up_down_and_position()
     test_range_helpers()
     test_fact_and_verdict_share_reading()
-    test_conclude_three_ways()
+    test_conclude_four_ways()
     test_verdict_window_defaults_to_20_days()
     print("ok 9")
