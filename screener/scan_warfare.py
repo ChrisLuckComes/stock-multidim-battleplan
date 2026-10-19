@@ -219,6 +219,37 @@ MODE_CN = {
     "downtrend_tl_break": "下降趋势线突破", "w_bottom_break": "W底突破",
 }
 
+# ── 战法优先级（老罗框架口径：SKILL.md 第11/19条）──
+# 数值越小优先级越高。依据：T0(出水芙蓉)最高 → T1(平台=牛旗并列最高 > W底 > 沿线回踩)
+# → T2(脉冲停顿/下降趋势线突破)。未进 T0/T1/T2 文档的 mode 按性质就近落位，可调。
+METHOD_PRIORITY = {
+    "ma_reclaim_break": 0,   # 出水芙蓉(T0) · 最高优先（盈亏比最高）
+    "platform_break": 1,     # 平台突破 · T1 并列最高
+    "flag_tl_break": 1,      # 牛旗突破 · T1 并列最高（与平台同一件事）
+    "breakout": 1,           # 突破 · T1 级确认突破
+    "w_bottom_break": 2,     # W底突破 · T1：平台=牛旗 > W底
+    "line_pullback": 3,      # 回踩均线/沿线回踩 · T1 末
+    "ma_ride": 3,            # 均线骑行/沿线 · T1 末（背景态）
+    "pullback": 3,           # 回踩 · 通用回踩
+    "impulse_pause": 4,      # 脉冲停顿 · T2（大阳后缩量回踩）
+    "downtrend_tl_break": 4, # 下降趋势线突破 · T2
+    "meteor_pit": 5,         # 流星砸坑 · 专用回踩，低于 T2
+    "ma_bull_align": 6,      # 短线多头 · 背景态，最低
+}
+_PRIORITY_UNKNOWN = 99       # wait / None / 未登记 mode 兜底（排最后）
+
+# 强度档 → 数值（STRONG > NEUTRAL > WEAK）
+VERDICT_RANK = {"STRONG": 2, "NEUTRAL": 1, "WEAK": 0}
+
+
+def _sort_key(r):
+    """排序键：战法优先级（主） → 强度（辅） → R→t1（质量 tiebreaker）。"""
+    return (
+        METHOD_PRIORITY.get(r.get("mode"), _PRIORITY_UNKNOWN),
+        -VERDICT_RANK.get(r.get("verdict"), 0),
+        -(r.get("rr1") or 0),
+    )
+
 
 def render_md(rows, session, today, stat):
     cand = [r for r in rows if r.get("mode") not in (None, "wait")]
@@ -237,8 +268,8 @@ def render_md(rows, session, today, stat):
     L.append("")
     L.append("| 战法 | 只数 | 标的（强度/现价/买区/止损/t1） |")
     L.append("|---|---|---|")
-    for mode, items in sorted(by.items(), key=lambda kv: -len(kv[1])):
-        items.sort(key=lambda r: (not r.get("recommend"), -(r.get("rr1") or 0)))
+    for mode, items in sorted(by.items(), key=lambda kv: (METHOD_PRIORITY.get(kv[0], _PRIORITY_UNKNOWN), kv[0])):
+        items.sort(key=_sort_key)
         brief = "；".join(
             "%s %s %s | %.2f | %s~%s | %s | %s" % (
                 r["code"], r["name"], r.get("verdict", "")[:1], r.get("spot") or 0,
@@ -254,7 +285,7 @@ def render_md(rows, session, today, stat):
     L.append("")
     L.append("| 代码 | 名称 | 强度 | 战法 | 现价 | 买区下沿 | 买区上沿 | 止损 | t1 | R→t1 | 推荐 |")
     L.append("|---|---|---|---|---|---|---|---|---|---|---|")
-    for r in sorted(cand, key=lambda r: (not r.get("recommend"), -(r.get("rr1") or 0)))[:120]:
+    for r in sorted(cand, key=_sort_key)[:120]:
         L.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
             r["code"], r.get("name", ""), r.get("verdict", ""), MODE_CN.get(r["mode"], r["mode"]),
             r.get("spot"), r.get("buy_lo"), r.get("buy_hi"), r.get("stop"), r.get("t1"),
@@ -264,7 +295,7 @@ def render_md(rows, session, today, stat):
 
 def render_html(rows, session, today, stat):
     cand = [r for r in rows if r.get("mode") not in (None, "wait")]
-    cand.sort(key=lambda r: (not r.get("recommend"), -(r.get("rr1") or 0)))
+    cand.sort(key=_sort_key)
     sess_cn = "盘中 (11:30)" if session == "midday" else "收盘 (15:00 后)"
     tr = []
     for r in cand[:200]:
@@ -380,6 +411,7 @@ def main():
         rows = midday_recap(rows, args.top, today)
 
     cand = [r for r in rows if r.get("mode") not in (None, "wait")]
+    rows.sort(key=_sort_key)   # 全输出（含 jsonl）统一按 战法优先级→强度→R→t1 排序
     stat = {"scanned": len(codes), "passed_l1": l1, "weak": weak,
             "l0": sum(v for k, v in stages.items() if k.startswith("L0")),
             "stages": dict(stages)}
