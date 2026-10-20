@@ -365,12 +365,26 @@ def entry_candidates(bars, plan, probe_out, atr_v, odds_from_probe=None):
     return uniq
 
 
-def odds_matrix(entries, anchors, atr_v, t1, t2, last_c):
+def odds_matrix(entries, anchors, atr_v, t1, t2, last_c, walls=None):
     """全档赔率枚举。返回按 R→t1 降序的列表（已剔除纸面档）。
 
     R = (目标 − 买入) ÷ (买入 − 止损)。
     结构性约束：止损必须 < 买入；风险 ≥ MIN_RISK_ATR×ATR。
+
+    ★★ 2026-10-20 修（老罗质疑「R 锚定平台上沿」— 方案 A）：目标 **按每一档买价
+    独立求**，不再全票共用一个 t1 / 远端墙。
+      旧口径三重失真（301119 实测：现价 34.31、当日 +20% 涨停创新高）：
+        ① 海阔天空本应「不设目标」，却被 `_t1 = t1 or t2` 回落成近 20/60 根高点
+           wall_far=34.40 ≈ 现价 —— 凭空造了个最悲观的假目标，违背让利润奔跑；
+        ② 全票共用 t1 ⇒ 买价越贴上沿 R 越小，在 34.31 买入 R=(34.40−34.31)/risk ≈ 0；
+        ③ 薄止损撑出虚高 R（风险 0.67 档 R=3.42 vs 风险 3.42 档 R=0.83）。
+      新口径：目标 = **该买价 + 0.5×ATR 之上最近的一道墙**（walls = 上枢轴阶梯
+        ∪ 近端墙 ∪ ATH ∪ 引擎 t1/t2）；上方无墙 ⇒ 如实标「海阔天空·不设目标」、
+        r1 = None（不编造目标价）。
     """
+    # walls=None ⇒ 旧口径（全票共用 t1/t2），保证 tests/report/test_battle_report.py
+    # 等既有用例的向后兼容；主流程显式传入阶梯 ⇒ 走「每档买价独立求目标」新口径。
+    wall_list = sorted({float(p) for p in walls if p}) if walls is not None else None
     rows = []
     for e in entries:
         buy = e["price"]
@@ -388,9 +402,27 @@ def odds_matrix(entries, anchors, atr_v, t1, t2, last_c):
             #   4.06×ATR，200 股风险 1514 元 = 超预算 2 倍；而执行口径 56.69 仅 186 元）。
             #   修法：t1 算不出时回落到 t2（远端墙），让 R 有值、排序回到「赔率优先」。
             #   回落时标记 r1_basis，报告端可据此说明「R 用的是远端墙而非 t1」。
-            _t1 = t1 if t1 else t2
-            r1 = round((_t1 - buy) / risk, 2) if _t1 else None
-            r2 = round((t2 - buy) / risk, 2) if t2 else None
+            # ★ 2026-10-20 方案 A 覆盖：目标改按「本档买价 + 0.5×ATR 之上最近的墙」求。
+            #   `need` = 目标至少要高出买价 0.5×ATR，否则这笔单不值得做（覆盖摩擦+噪声）。
+            if wall_list is None:                       # 旧口径（兼容既有测试）
+                tgt1 = t1 if t1 else t2
+                tgt2 = t2
+                basis1 = ("t1" if t1 else
+                          ("t2·远端墙（t1 缺失回落）" if t2 else None))
+            else:                                       # 新口径：按本档买价求墙
+                need = buy + 0.5 * atr_v if atr_v else buy
+                tgt1 = next((p for p in wall_list if p >= need), None)
+                tgt2 = wall_list[-1] if wall_list else None
+                if tgt2 is not None and tgt1 is not None and tgt2 <= tgt1:
+                    tgt2 = None
+                if tgt1 is None:
+                    basis1 = "海阔天空·不设目标"
+                elif t1 and abs(tgt1 - t1) < max(0.01, atr_v * 0.05):
+                    basis1 = "t1"
+                else:
+                    basis1 = "近墙@%.2f（买价+0.5ATR之上）" % tgt1
+            r1 = round((tgt1 - buy) / risk, 2) if tgt1 else None
+            r2 = round((tgt2 - buy) / risk, 2) if tgt2 else None
             rows.append({
                 "entry_name": e["name"], "entry": buy, "entry_kind": e["kind"],
                 "need_pct": e["dist_pct"],
@@ -398,8 +430,10 @@ def odds_matrix(entries, anchors, atr_v, t1, t2, last_c):
                 "risk": _f(risk, 2), "risk_atr": _f(risk / atr_v, 2) if atr_v else None,
                 "risk_pct": _f(risk / buy * 100, 2),
                 "r1": r1, "r2": r2,
-                "r1_basis": ("t1" if t1 else
-                             ("t2·远端墙（t1 缺失回落）" if t2 else None)),
+                "r1_basis": basis1,
+                "t1_used": _f(tgt1, 2) if tgt1 else None,   # 本档实际采用的目标价
+                "t2_used": _f(tgt2, 2) if tgt2 else None,
+                "open_sky": tgt1 is None,                    # 上方无墙＝海阔天空
                 # 可预挂 = 买点在现价下方（A 股限价单可隔夜挂）
                 "prehang": buy <= last_c,
             })
@@ -1201,9 +1235,15 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
         wall_far = lv["20"]["hi"]
     ath = lv["250"]["hi"]
 
+    # ★ 2026-10-20 方案 A：目标阶梯 = 上枢轴（含 near_wall）∪ ATH ∪ 引擎 t1/t2。
+    #   odds_matrix 据此按「每档买价 + 0.5×ATR 之上最近的墙」独立求目标，
+    #   不再全票共用 wall_far（旧口径会让贴沿买入的 R→0）。
+    walls = sorted({float(x["price"]) for x in ups if x.get("price") is not None}
+                   | {float(v) for v in (t1, t2_engine, ath) if isinstance(v, (int, float))})
     anchors = stop_anchor_candidates(bars, plan, atr_v)
     entries = entry_candidates(bars, plan, probe_out, atr_v)
-    odds = odds_matrix(entries, anchors, atr_v, t1, wall_far if wall_far else t2_engine, last_c)
+    odds = odds_matrix(entries, anchors, atr_v, t1, wall_far if wall_far else t2_engine,
+                       last_c, walls=walls)
     odds = annotate_odds(odds, z, atr_v, last_c)
     rec = pick_recommend(odds, z, bars=bars, us=is_us)
     touch_px = None

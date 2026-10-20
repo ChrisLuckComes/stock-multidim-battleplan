@@ -584,8 +584,14 @@ class TestAnalyzeOffline(unittest.TestCase):
         #   R 随买点微降 2.25 → 2.17。
         prim = {r["entry"]: r for r in res["odds_primary"]}
         self.assertIn(50.45, prim)
-        self.assertAlmostEqual(prim[50.45]["r1"], 2.17, places=2)
-        self.assertAlmostEqual(prim[52.24]["r1"], 0.82, places=2)
+        # ⚑ 2026-10-20 复核更新（老罗质疑「R 锚定平台上沿」→ 采纳方案 A，钉值随口径迁移）：
+        #   目标由「全票共用 t1 / 远端墙 wall_far」改为「每档买价 + 0.5×ATR 之上最近的墙」
+        #   （odds_matrix 新增 walls 参数）。东材 50.45 档原目标 = t1 55.70（R 2.17），
+        #   新目标 = 近墙 52.89 ⇒ R 2.17 → 1.01；52.24 档近墙 55.50 ⇒ R 0.82 → 0.77。
+        #   方向正确：同一道墙下买价越低空间越大（49.34 档 R 2.71），贴沿档不再虚高
+        #   （53.84 档 R 0.29）；且 R→0 / 海阔天空回落成假目标的问题一并消除。
+        self.assertAlmostEqual(prim[50.45]["r1"], 1.01, places=2)
+        self.assertAlmostEqual(prim[52.24]["r1"], 0.77, places=2)
         # A 股推荐档必须高于硬止损、不高于买区上沿
         rec = res["odds_recommend"]
         self.assertIsNotNone(rec)
