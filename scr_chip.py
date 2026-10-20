@@ -49,6 +49,12 @@ INTRADAY_TTL = 120          # 盘中日线缓存有效期（秒）；收盘后�
 EM_KLINE = ("https://push2his.eastmoney.com/api/qt/stock/kline/get"
             "?secid={secid}&klt=101&fqt=1&end=20500101&lmt={lmt}"
             "&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61")
+# ── 北交所专用 kline（2026-10-20）：精简 fields1，绕开东财对 920/43/83/87 的限流抖动 ──
+#   实测同secid：`fields1=f1,f2,f3,f4,f5,f6` 连断 5 次，`fields1=f1,f2` 才偶通⇒ 属限流非参数语义问题。
+#   fields2 保持完整（含 f61 换手率），解析口径与 A 股完全一致（_parse_kline 复用）。
+EM_KLINE_BJ = ("https://push2his.eastmoney.com/api/qt/stock/kline/get"
+               "?secid={secid}&klt=101&fqt=1&end=20500101&lmt={lmt}"
+               "&fields1=f1,f2&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61")
 EM_FFLOW = ("https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
             "?lmt=0&klt=101&secid={secid}&fields1=f1,f2,f3,f7"
             "&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63")
@@ -190,7 +196,7 @@ def solve_decay_k(bars, half_life=CHIP_HALF_LIFE):
 
 
 # ─────────────────────────────── 取数 ───────────────────────────────
-def _get_json(url, timeout=20, retries=2, schemes=("http", "https")):
+def _get_json(url, timeout=20, retries=2, schemes=("http", "https"), sleep_scale=1.0):
     """东财取数：**http 明文优先、https 兜底**（A 股与美股现在同一套）。
 
     ⚠ 2026-10-15 实测根因：本环境 push2his 的 **HTTPS 被中间设备拦截**（Remote end
@@ -210,8 +216,8 @@ def _get_json(url, timeout=20, retries=2, schemes=("http", "https")):
                     return json.loads(r.read().decode("utf-8"))
             except Exception as e:          # 单方案失败换下一方案，都不行才抛
                 last = e
-                time.sleep(0.3)
-        time.sleep(0.2 * (i + 1))
+                time.sleep(0.3 * sleep_scale)
+        time.sleep(0.2 * (i + 1) * sleep_scale)
     raise RuntimeError(f"东财接口失败：{last}")
 
 
@@ -285,13 +291,35 @@ def fetch_bars(code, n=120):
 
     东财 kline 字段序：日期,开,收,高,低,量(手),额(元),振幅,涨跌幅,涨跌额,换手率(流通口径)
     ⚡ 名字直接取 kline 的 data.name —— 省掉一整次 quote 请求（老罗要求提速，实测省 ~0.15s）。
+
+    ⚠⚑ **北交所（920/43/83/87）需要更多重试**（2026-10-20 老罗报「920006 只有 1 根日线」实证）：
+    东财 push2his 对北交所secid 的连接**极易被掐断**（`RemoteDisconnected`），
+    且**不是 URL 参数问题** —— 实测 `fields1=f1,f2,f3,f4,f5,f6` 连试 5 次全断、
+    `fields1=f1,f2` 第 5 次才通（同secid 同 lmt）⇒ 属**限流抖动**。
+    对策：北交所走 **更多重试（5 次）+ 更长间隔 + 精简 fields1**，并在校验不足 MIN_BARS 时
+    自动用精简 fields1 再试一轮；仍失败才回落腾讯（腾讯对 920 段支持差，只会给 1 根）。
     """
     secid = secid_of(code)
-    kd = _get_json(EM_KLINE.format(secid=secid, lmt=n)).get("data") or {}
+    is_bj = ash_market.is_bj(code)
+    # 北交所：精简 fields1 + 更多重试 + 更长间隔（限流实测，见上方注释）
+    tpl = EM_KLINE_BJ if is_bj else EM_KLINE
+    retries = 5 if is_bj else 2
+    url = tpl.format(secid=secid, lmt=n)
+    kd = _get_json(url, retries=retries, timeout=25,
+                   sleep_scale=(2.0 if is_bj else 1.0)).get("data") or {}
     bars, name = _parse_kline(kd)
+    # 北交所：若仍不足 MIN_BARS，用另一个 fields1 组合再试一轮（东财对不同 fields 限流不同）
+    if is_bj and len(bars) < MIN_BARS:
+        alt = (EM_KLINE if tpl is EM_KLINE_BJ else EM_KLINE_BJ).format(secid=secid, lmt=n)
+        kd2 = _get_json(alt, retries=4, timeout=25, sleep_scale=2.0).get("data") or {}
+        b2, n2 = _parse_kline(kd2)
+        if len(b2) > len(bars):
+            bars, name = b2, (n2 or name)
     name = name or code
-    if not bars:
-        raise RuntimeError(f"东财未返回 {code} 日线（停牌/代码错？）")
+    if len(bars) < MIN_BARS:
+        raise RuntimeError(
+            f"东财未返回 {code} 足量日线（拿到 {len(bars)} 根 < {MIN_BARS}，"
+            f"{'北交所限流，已重试 5+4 次' if is_bj else '停牌/代码错？'}）")
     return bars, name
 
 
@@ -489,6 +517,9 @@ def fetch_all_meta(code, n=120, use_cache=True, now=None, us_mode=False,
             with open(path, encoding="utf-8") as f:
                 payload = json.load(f)
             if _cache_valid(payload, now) and payload.get("bars"):
+                # ⚠ 缓存里不足 MIN_BARS 的一律视为坏缓存（历史遗留：降级腾讯只返 1 根时写过盘）
+                if len(payload["bars"]) < MIN_BARS:
+                    raise ValueError("缓存不足 %d 根，视为坏缓存" % MIN_BARS)
                 return (payload["bars"], payload.get("name") or (
                     str(code).upper() if us_mode else str(code)),
                     payload.get("fflow") or {}, payload.get("meta") or {})
@@ -498,7 +529,10 @@ def fetch_all_meta(code, n=120, use_cache=True, now=None, us_mode=False,
     bars, name, fflow, meta = _fetch_raw(code, n=n, us_mode=us_mode,
                                          allow_fallback=allow_fallback)
 
-    if use_cache:
+    if use_cache and len(bars) >= MIN_BARS:
+        # ⚠⚑ **不足 MIN_BARS 的结果绝不写盘**（2026-10-20 老罗报「920006 只有 1 根日线」实证）：
+        # 降级到腾讯后北交所只返 1 根，若照样写盘 ⇒ 盘中 120s TTL 内每次都命中这条坏缓存，
+        # 表现为「刚重跑还是 1 根」，极难定位。宁可每次重取，也不落垃圾缓存。
         try:
             os.makedirs(CACHE_DIR, exist_ok=True)
             tmp = path + ".tmp"
@@ -522,9 +556,24 @@ def _fetch_raw(code, n=120, us_mode=False, allow_fallback=True):
     meta = {"kline": "em", "fflow": "em", "note": ""}
     kd, fd = {}, {}
     getter = _get_json_us if us_mode else _get_json
+    # ⚠⚑ **北交所必须用精简 fields1 的 BJ 模板 + 更多重试**（2026-10-20 老罗报
+    # 「920006 只有 1 根日线」实证）：东财对 920/43/83/87 的 secid 连接极易被掐断，
+    # 实测同 secid `fields1=f1,f2,f3,f4,f5,f6` 连断 5 次、精简 `fields1=f1,f2` 才偶通
+    # ⇒ 属限流抖动，非参数语义问题。故北交所走 EM_KLINE_BJ + 5 次重试 + 2× 间隔。
+    is_bj = (not us_mode) and ash_market.is_bj(code)
+    k_tpl = (EM_KLINE_BJ if is_bj else EM_KLINE) if not us_mode else EM_KLINE_US
+    f_tpl = EM_FFLOW_US if us_mode else EM_FFLOW
+    k_retry = 5 if is_bj else 2
+    f_sleep = 2.0 if is_bj else 1.0
     with cf.ThreadPoolExecutor(max_workers=2) as ex:
-        f_k = ex.submit(getter, (EM_KLINE_US if us_mode else EM_KLINE).format(secid=secid, lmt=n))
-        f_f = ex.submit(getter, (EM_FFLOW_US if us_mode else EM_FFLOW).format(secid=secid))
+        if is_bj:
+            f_k = ex.submit(getter, k_tpl.format(secid=secid, lmt=n),
+                            25, k_retry, ("http", "https"), f_sleep)
+            f_f = ex.submit(getter, f_tpl.format(secid=secid),
+                            25, k_retry, ("http", "https"), f_sleep)
+        else:
+            f_k = ex.submit(getter, k_tpl.format(secid=secid, lmt=n))
+            f_f = ex.submit(getter, f_tpl.format(secid=secid))
         try:
             kd = (f_k.result() or {}).get("data") or {}
         except Exception as e:                    # 东财日线挂了 → 交给下面的备用源
@@ -537,6 +586,18 @@ def _fetch_raw(code, n=120, us_mode=False, allow_fallback=True):
 
     name = kd.get("name") or (str(code).upper() if us_mode else str(code))
     bars, _ = _parse_kline(kd)
+
+    # ⚠ 北交所二次尝试：东财对不同 fields1 的限流不同，换另一个组合再来一轮
+    if is_bj and len(bars) < MIN_BARS:
+        alt_tpl = EM_KLINE if k_tpl is EM_KLINE_BJ else EM_KLINE_BJ
+        try:
+            kd2 = (_get_json(alt_tpl.format(secid=secid, lmt=n), timeout=25,
+                             retries=4, sleep_scale=2.0) or {}).get("data") or {}
+            b2, _n2 = _parse_kline(kd2)
+            if len(b2) > len(bars):
+                bars, name = b2, (kd2.get("name") or name)
+        except Exception as e:
+            meta["em_err"] = (meta.get("em_err", "") + f" | 二次尝试: {e}")[:200]
 
     if not bars and allow_fallback and not us_mode:
         bars, name = fetch_bars_tx(code, n=n)     # ★ 备用源（腾讯）
