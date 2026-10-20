@@ -1354,7 +1354,9 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
 
     valuation = None
     if not is_us:
-        secid = ("1." if prefix == "sh" else "0.") + code
+        # ⚠ 统一走 ash_market（920 北交所 secid 前缀 0；旧口径给 "1." ⇒ 东财返空）
+        import ash_market
+        secid = ash_market.em_secid(code)
         try:
             valuation = FM.fetch_ash_valuation(secid)
         except Exception as e:

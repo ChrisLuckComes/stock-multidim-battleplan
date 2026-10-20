@@ -42,10 +42,9 @@ THRESH = {
 
 
 def prefix_of(code):
-    code = str(code)
-    if code.startswith(("6", "9")):
-        return "sh"
-    return "sz"
+    """行情前缀。⚠ 统一走 ash_market（920 = 北交所 bj，此前判 sh）。"""
+    import ash_market
+    return ash_market.market_prefix(code)
 
 
 def load_bars(code, n=160):

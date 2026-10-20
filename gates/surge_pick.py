@@ -85,13 +85,9 @@ BOARD_MEMBER_MIN = 8
 
 
 def limit_up_pct(code):
-    """该票的涨停幅度（%）。ST 5%、双创 20%、北交所 30%、其余主板 10%。"""
-    c = str(code)
-    if c.startswith(("43", "83", "87", "88", "92")):
-        return 30.0
-    if c.startswith(("300", "301", "688", "689")):
-        return 20.0
-    return 10.0
+    """该票的涨停幅度（%）。⚠ 统一走 ash_market：北交所 30%（920 此前漏判）。"""
+    import ash_market
+    return ash_market.board_limit_ratio(code) * 100.0
 
 
 def _fmt_pct(v):
@@ -280,10 +276,10 @@ def earnings_tone(rows):
 # ─────────────────────────── 取数 ───────────────────────────
 
 def boards_of(code):
-    """个股所属板块（1 个请求）。返回 [{bk,name,chg}]。"""
-    pre = "1" if str(code).startswith(("6", "9")) else "0"
+    """个股所属板块（1 个请求）。返回[{bk,name,chg}]。"""
+    import ash_market
     u = ("https://push2.eastmoney.com/api/qt/slist/get?spt=3&fltt=2&invt=2"
-         "&fields=f12,f13,f14,f3,f152&secid=%s.%s&pn=1&pz=40&po=1&np=1" % (pre, code))
+         "&fields=f12,f13,f14,f3,f152&secid=%s&pn=1&pz=40&po=1&np=1" % ash_market.em_secid(code))
     j = fetch_json(u)
     return ((j or {}).get("data") or {}).get("diff") or []
 

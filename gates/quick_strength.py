@@ -180,12 +180,9 @@ def quick_strength(code, bars, broad_bars=None, name=None):
 
 # ───────────────────────────── 免费源取数（A股腾讯 / 美股 bars_source） ─────────────────────────────
 def _tencent_prefix(code):
-    c = str(code).strip()
-    if c.startswith(("6", "9")):
-        return "sh" + c
-    if c.startswith(("8", "4", "920")):
-        return "bj" + c
-    return "sz" + c
+    """腾讯行情前缀。⚠ 统一走 ash_market（920 = 北交所 bj，此前 920 会落到 sz）。"""
+    import ash_market
+    return ash_market.tx_prefix(code) + str(code).strip().zfill(6)
 
 
 def fetch_stock_bars(code, n=140):

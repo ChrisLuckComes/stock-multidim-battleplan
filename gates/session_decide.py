@@ -33,6 +33,7 @@ from account_config import cfg as account_cfg
 from gates.tape_review import load_day_fast, summarize, conclude
 from open_playbook import GAP_UP_MAX, RR_QUALIFIED, long_rr, max_entry_for_rr
 from probe_intraday import ash_lots, ash_risk_warning, first_lot_of
+import ash_market  # noqa: E402  A 股代码→市场/涨跌幅判定唯一真源（920=北交所 30%）
 
 import time
 
@@ -123,12 +124,12 @@ def target_is_stale(price, target, atr):
 
 
 def board_limit_ratio(code):
-    c = str(code)
-    if c.startswith(("300", "301", "688")):
-        return 0.20
-    if c.startswith(("8", "4")):
-        return 0.30
-    return 0.10
+    """涨跌幅上限。⚠ 统一走 ash_market（唯一真源）。
+
+    2026-10-20 老罗纠错：旧代码只认 ``8``/``4`` 开头判 30%，**漏了 ``92``**
+    ⇒ 北交所 920522 被当成主板 10% 算涨停价，把涨停/跌停价都判错。
+    """
+    return ash_market.board_limit_ratio(code)
 
 
 def limit_up_price(pre, code):

@@ -88,19 +88,15 @@ def _get(url, hdr=_H, tries=3, timeout=20):
 
 
 def is_sh(code):
-    return str(code).startswith(("5", "6", "9"))
+    """是否上交所。⚠ 统一走 ash_market：**9 开头不等于沪市**（920 是北交所）。"""
+    import ash_market
+    return ash_market.is_sh(code)
 
 
 def limit_pct(code, name=""):
-    """涨跌幅上限：主板10% / 双创20% / 北交所30% / ST 5%。"""
-    c = str(code)
-    if "ST" in (name or "").upper():
-        return 0.05
-    if c.startswith(("300", "688")):
-        return 0.20
-    if c.startswith(("4", "8", "92")):
-        return 0.30          # 北交所
-    return 0.10
+    """涨跌幅上限：主板10% / 双创20% / **北交所30%（含 920）** / ST 5%。"""
+    import ash_market
+    return ash_market.board_limit_ratio(code, name)
 
 
 def zt_state(bars, code, name=""):

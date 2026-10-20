@@ -41,6 +41,9 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 UA = {"User-Agent": "Mozilla/5.0"}
 ROOT = os.path.dirname(os.path.abspath(__file__))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+import ash_market  # noqa: E402  A股代码→市场/涨跌幅判定唯一真源（920=北交所，secid 前缀 0）
 CACHE_DIR = os.path.join(ROOT, "data", "cache")
 INTRADAY_TTL = 120          # 盘中日线缓存有效期（秒）；收盘后当日有效
 EM_KLINE = ("https://push2his.eastmoney.com/api/qt/stock/kline/get"
@@ -225,8 +228,8 @@ def secid_of(code, us_mode=False):
     code = str(code).strip()
     if us_mode:
         return em_us_secid(code)
-    code = code.zfill(6)
-    return ("1." if code.startswith(("6", "9")) else "0.") + code
+    # ⚠ 统一走 ash_market：北交所 920 → secid 前缀 0（旧代码给 "1." ⇒ 东财返空）
+    return ash_market.em_secid(code)
 
 
 _EM_US_CACHE = {}          # sym -> "105.SYM" / "106.SYM"（进程内缓存，命中不重探）
@@ -350,9 +353,13 @@ def fetch_fflow_us(sym):
 
 # ─────────────────────────── 备用源：腾讯行情 ───────────────────────────
 def tx_symbol(code):
-    """6 位 A 股代码 → 腾讯符号（sz002317 / sh600830；6、9 开头归沪市）。"""
+    """6 位 A 股代码 → 腾讯符号（sz002317 / sh600830 / bj920522）。
+
+    ⚠ 2026-10-20：旧口径「6、9 开头归沪市」把北交所 920 判成 sh920522 ⇒ 取不到数。
+    统一走ash_market.market_prefix。
+    """
     c = str(code).strip().zfill(6)
-    return ("sh" if c.startswith(("6", "9")) else "sz") + c
+    return ash_market.tx_prefix(c) + c
 
 
 def _tx_get(url, timeout=15, tries=2, gbk=True):

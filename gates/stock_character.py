@@ -166,10 +166,9 @@ _ANN_CACHE = os.path.join(bars_source.ROOT, "data", "cache")
 
 
 def prefix_of(code):
-    code = str(code)
-    if code.startswith(("6", "9")):
-        return "sh"
-    return "sz"
+    """行情前缀。⚠ 统一走ash_market（920 = 北交所 bj，此前判 sh）。"""
+    import ash_market
+    return ash_market.market_prefix(code)
 
 
 def detect_market(code):

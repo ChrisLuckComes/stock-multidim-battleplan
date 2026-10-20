@@ -86,6 +86,12 @@ US_TICKER_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9.\-]{0,9})")
 HOLD_STATUS = "持仓"
 
 
+def _prefix_of(code):
+    """行情前缀。⚠ 统一走 ash_market（920 = 北交所 bj；9 开头不等于沪市）。"""
+    import ash_market
+    return ash_market.market_prefix(code)
+
+
 def split_us_target(raw: str):
     """`MRVL 迈威尔科技` -> ("MRVL", "迈威尔科技")；名字缺失时名字回退成 ticker。"""
     t = (raw or "").strip()
@@ -255,7 +261,7 @@ def sync(positions: list[dict], pool: dict, check_only: bool,
                 entry = {
                     "code": pid,
                     "name": pos["name"],
-                    "prefix": meta.get("prefix") or ("sh" if pid.startswith(("6", "9")) else "sz"),
+                    "prefix": meta.get("prefix") or _prefix_of(pid),
                     # 板块优先取资料库「板块主题」，再退手工登记表
                     "theme": pos.get("theme") or meta.get("theme", ""),
                     "pos": new_pos,

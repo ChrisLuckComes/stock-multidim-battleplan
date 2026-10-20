@@ -9,10 +9,16 @@ code: 6位A股代码。例: 002557 600872 688001
 import sys, json, urllib.request, urllib.parse, argparse
 
 def sina_symbol(code: str) -> str:
-    code = code.strip()
-    if code.startswith(("6", "9")):      # 上交所 600/601/603/688/900
-        return "sh" + code
-    return "sz" + code                    # 深交所 000/002/300/003
+    """6 位 A 股代码 → 新浪符号。
+
+    ⚠ 2026-10-20：北交所 920 之前被 ``startswith(("6","9"))`` 判成 sh（新浪无 bj）
+    ⇒ 北交所票新浪取不到数。统一走 ash_market：920 归 sz 路（新浪北交所码同深市通道）。
+    """
+    import ash_market
+    c = code.strip().zfill(6)
+    if ash_market.is_sh(c):              # 上交所 600/601/603/688/689/900
+        return "sh" + c
+    return "sz" + c                       # 深交所 000/002/300/003 + 北交所 920
 
 def fetch_kline(code, n=140):
     sym = sina_symbol(code)

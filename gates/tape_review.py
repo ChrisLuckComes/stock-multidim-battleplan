@@ -29,11 +29,17 @@ _H = {"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"}
 BIG_AMT = 1_000_000
 SIDE = {1: "卖", 2: "买", 4: "中性"}
 
+import ash_market  # noqa: E402  A 股代码→市场判定唯一真源（920=北交所，secid 前缀 0）
+
 
 def secid_of(code):
-    code = str(code).strip()
-    market = "1" if code.startswith(("5", "6", "9")) else "0"
-    return market + "." + code
+    """东财 secid。⚠ 统一走 ash_market：北交所 920 一律 ``0.``。
+
+    2026-10-20 老罗实证：纳科诺尔 920522 被旧代码 ``startswith(("5","6","9"))``
+    判成上交所 ⇒ secid 拼成 ``1.920522`` ⇒ 东财返空 ⇒ session_decide 报 HTTP 502、
+    决策结论只能写「未知」。``0.920522`` 这条报价是通的。
+    """
+    return ash_market.em_secid(code)
 
 
 def bench_of(code):
