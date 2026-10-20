@@ -2,6 +2,16 @@
 # -*- coding: utf-8 -*-
 """全市场 A 股日线数据层：baostock（免费·无 token·无限流）+ SQLite 增量缓存。
 
+⚠ 源兜底（2026-10-19 老罗拍板）：本机出网不通 baostock 时，refresh 自动降级腾讯
+前复权(qfq)源，不会被单源卡死。baostock 登录带 8s 超时探针，超时/失败即切腾讯。
+源选择：--source auto(默认, baostock→腾讯) / baostock(强制) / tencent(强制)。
+
+⚠ 轻量增量（2026-10-19 老罗拍板）：基础数据已存在时，腾讯源**不重拉 800 天历史**，
+只复核最近 ~45 自然日 qfq 尾段（抓除权漂移）+ 分钟线合成「今日 1 根」补缺 →
+全市场刷新从 ~8min 降到 ~2min。仅 --full / 基础缺失(末根距今天数>STALE_GUARD) /
+检出除权漂移的票才走整票全量重拉（只重拉那只，不波及其他）。
+
+
 为什么这么建（老罗 2026-10-19 拍板）
 -----------------------------------
 `scan_all/scanner.py` 原来逐只走新浪取日线 —— 全市场 ~5000 只批量抓取会触发
@@ -28,9 +38,10 @@ Sequoia-X 默认用**后复权**，照抄会让历史价位整体漂移，结构
 用法
 ----
   python screener/bao_store.py --refresh-universe       # 拉/更新全市场清单
-  python screener/bao_store.py --refresh                # 增量更新全部日线
+  python screener/bao_store.py --refresh                # 增量更新全部日线（auto 源）
   python screener/bao_store.py --refresh --full         # 全量重拉（首次/修复）
   python screener/bao_store.py --refresh --limit 300    # 只更新前 300 只（试跑）
+  python screener/bao_store.py --refresh --source tencent   # 强制腾讯前复权源
   python screener/bao_store.py --stat                   # 库内统计
 """
 import os
@@ -41,6 +52,7 @@ import sqlite3
 import datetime
 import urllib.request
 import urllib.parse
+import threading
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -57,7 +69,15 @@ DEFAULT_START = "2025-07-01"
 OVERLAP_DAYS = 30       # 增量时回退的自然日 → 保证 ≥10 个交易日重叠用于校验
 MIN_BARS = 60           # 少于此数的票视为数据不足（停牌/次新）
 DIFF_TOL = 0.005        # 重叠校验容差 0.5%
+# ⚠ 轻量增量（2026-10-19 老罗拍板）：基础数据已存在时，腾讯源不重拉 800 天历史，
+#   只复核最近尾段 + 合成「今日 1 根」。下列两常量控制轻量模式的边界。
+STALE_GUARD = 12        # 库末根距今天数 ≤ 此值 ⇒ 视为「基础已存在」→ 走轻量增量；否则降级全量
+TAIL_CAL_DAYS = 45      # 轻量模式只复核最近 ~45 自然日（≈30 交易日）qfq 尾段，抓除权漂移
 UA = "Mozilla/5.0"
+# ⚠ 降频节流（2026-10-19 老罗拍板「降低频率避免被限流」）：腾讯 fqkline 主机对本机高频
+#   并发极敏感（step① 全量 5000×800 曾把它打挂，连累 scr_chip 降级也 501）。每次取数后
+#   强制节流，把有效速率压到 ~单线程 5~8 req/s，宁可慢也不触发封禁。
+TENCENT_THROTTLE = 0.12
 
 
 # ────────────────────────────── 代码工具 ──────────────────────────────
@@ -159,6 +179,33 @@ def bao_login():
     return bs
 
 
+def bao_login_safe(timeout=8):
+    """带超时探针：baostock 在本机出网不通时会**挂死**，必须限时。
+
+    返回已登录的 bs 模块；超时（线程未结束）或登录失败返回 None —— 交由腾讯源兜底，
+    绝不让整条刷新卡在 baostock 登录上（2026-10-19 本机出网不通，原 refresh 挂 50min）。
+    """
+    import baostock as _bs
+    holder = {}
+
+    def _do():
+        try:
+            lg = _bs.login()
+            if getattr(lg, "error_code", "-1") == "0":
+                holder["bs"] = _bs
+            else:
+                holder["err"] = getattr(lg, "error_msg", "login!=0")
+        except Exception as e:  # noqa: BLE001
+            holder["err"] = e
+
+    th = threading.Thread(target=_do, daemon=True)
+    th.start()
+    th.join(timeout)
+    if th.is_alive():
+        return None  # 超时 → 视为不可用
+    return holder.get("bs")
+
+
 def fetch_daily(bs, code, start=DEFAULT_START, end=None):
     """拉单只前复权日线，返回 bars=[{d,o,h,l,c,v}]（旧→新）。"""
     end = end or _today_bj()
@@ -181,6 +228,97 @@ def fetch_daily(bs, code, start=DEFAULT_START, end=None):
         except (TypeError, ValueError, KeyError):
             continue
     return bars
+
+
+def fetch_daily_tencent(code, start=DEFAULT_START, end=None, count=800):
+    """腾讯前复权(qfq)日线兜底源 → [{d,o,h,l,c,v}](旧→新)，v 由「手」换算成「股」。
+
+    ⚑ 与 baostock(adjustflag='2' 前复权)同口径；成交量腾讯是「手」，×100 对齐 baostock
+      的 v 字段（2026-10-19 对拍 600000：腾讯 922942 手 = 库内 92294209 股，正好 ×100）。
+    ⚑ 解析路径 data[code].qfqday；腾讯数组顺序为 [date, open, **close**, high, low, vol]
+      （close 在 high/low 之前，是腾讯的怪序，别照抄成 [o,h,l,c]）。
+    ⚑ 用于本机 baostock 出网不通时的兜底（grok 那台盒子也是腾讯拉前复权日线）。
+    """
+    end = end or _today_bj()
+    mk = market_of(code)
+    tcode = mk + str(code).strip().lstrip("sh.").lstrip("sz.").lstrip("bj.")
+    url = ("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=%s,day,%s,%s,%d,qfq"
+           % (tcode, start, end, int(count)))
+    bars = []
+    for _ in range(2):
+        try:
+            txt = _http_get(url, timeout=20, referer="https://gu.qq.com/")
+            js = json.loads(txt)
+            node = (js.get("data") or {}).get(tcode)
+            if not node:
+                break
+            arr = node.get("qfqday") or node.get("day") or []
+            for row in arr:
+                try:
+                    d = str(row[0])
+                    if d < start or d > end:
+                        continue
+                    bars.append({
+                        "d": d,
+                        "o": float(row[1]),
+                        "c": float(row[2]),
+                        "h": float(row[3]),
+                        "l": float(row[4]),
+                        "v": float(row[5]) * 100.0,  # 手→股，对齐 baostock
+                    })
+                except (TypeError, ValueError, IndexError):
+                    continue
+            break
+        except Exception:  # noqa: BLE001
+            time.sleep(0.3)
+    return bars
+
+
+def synth_today_bar_tencent(code):
+    """用腾讯分钟线合成今日(收盘)日 K → {d,o,h,l,c,v} 或 None。
+
+    收盘扫描的「今日这根 K」靠它补齐：日线源（baostock/腾讯日线）滞后、未发布当日 bar
+    时，用分钟线(09:30-15:00)合成。首根→开、末根→收、极值→高/低；末根累计量(手)×100
+    →股，对齐 baostock 的 v 口径（2026-10-19 对拍 600000：合成 v=540775手×100=54077500股）。
+    """
+    mk = market_of(code)
+    tcode = mk + str(code).strip().lstrip("sh.").lstrip("sz.").lstrip("bj.")
+    url = "https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=%s" % tcode
+    try:
+        txt = _http_get(url, timeout=20, referer="https://gu.qq.com/")
+        js = json.loads(txt)
+        node = (js.get("data") or {}).get(tcode) or {}
+        arr = (node.get("data") or {}).get("data") or []
+        if not arr:
+            return None
+        rows = []
+        for s in arr:
+            parts = str(s).split()
+            if len(parts) < 3:
+                continue
+            try:
+                rows.append((parts[0], float(parts[1]), float(parts[2])))
+            except ValueError:
+                continue
+        if not rows:
+            return None
+        o = rows[0][1]
+        c = rows[-1][1]
+        hi = max(r[1] for r in rows)
+        lo = min(r[1] for r in rows)
+        cum = rows[-1][2]  # 手（累计）
+        return {"d": _today_bj(), "o": o, "c": c, "h": hi, "l": lo, "v": cum * 100.0}
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def append_today_bar_if_missing(conn, code, bars):
+    """若 bars 末根早于今日，用分钟线合成今日 bar 落库（只写一根，不动历史）。"""
+    if not bars or bars[-1]["d"] >= _today_bj():
+        return
+    tb = synth_today_bar_tencent(code)
+    if tb:
+        save_bars(conn, code, [tb])
 
 
 def save_bars(conn, code, bars):
@@ -386,12 +524,17 @@ def _worker_fetch(tasks):
 
 
 def refresh_bars(conn, codes=None, full=False, limit=None, start=DEFAULT_START,
-                 sleep=0.0, verbose=True, progress=200, workers=1):
+                 sleep=0.0, verbose=True, progress=200, workers=1, source="auto"):
     """增量（或全量）刷新日线。
 
     full=False 时：从「库内末根 − OVERLAP_DAYS」开始拉，覆盖写重叠区；
     重叠校验不一致（个股除权导致前复权全历史漂移）→ 该票自动全量重拉。
     workers>1 走多进程（每个进程独立 login baostock），首次回填提速约 N 倍。
+
+    source:
+      auto     → 优先 baostock；登录超时/失败自动降级腾讯前复权（默认，避免单源卡死）
+      baostock → 强制 baostock，不可用直接报错
+      tencent  → 强制腾讯前复权（本机出网不通 baostock 时用；见 AGENTS.md 1h）
     """
     if codes is None:
         codes = all_codes(conn)
@@ -404,11 +547,29 @@ def refresh_bars(conn, codes=None, full=False, limit=None, start=DEFAULT_START,
     t0 = time.time()
     workers = max(1, int(workers or 1))
 
+    # ── 源选择：baostock 不可用时自动降级腾讯前复权源（避免单源卡死）──
+    bs_module = None
+    if source in ("auto", "baostock"):
+        bs_module = bao_login_safe()
+        if bs_module is None:
+            if source == "baostock":
+                raise RuntimeError("baostock 不可用且已强制 --source baostock")
+            source = "tencent"
+            if verbose:
+                print("⚠ baostock 登录超时/失败（本机出网不通）→ 自动降级腾讯前复权源",
+                      flush=True)
+    if verbose:
+        print("刷新源：%s" % source)
+
+    if source == "tencent":
+        return _refresh_bars_tencent(conn, codes, full=full, start=start, end=end,
+                                     verbose=verbose, progress=progress, workers=workers)
+
     if workers > 1 and len(codes) > workers:
         return _refresh_bars_mp(conn, codes, full=full, start=start,
                                 workers=workers, verbose=verbose)
 
-    bs = bao_login()
+    bs = bs_module or bao_login()
     ok = skip = refetch = 0
     try:
         for i, item in enumerate(codes, 1):
@@ -610,6 +771,219 @@ def _refresh_bars_mp(conn, codes, full=False, start=DEFAULT_START, workers=6,
     return {"ok": ok, "skip": skip, "refetch": refetch}
 
 
+def _refresh_bars_tencent(conn, codes, full=False, start=DEFAULT_START, end=None,
+                          verbose=True, progress=200, workers=2):
+    """腾讯前复权源刷新（无 baostock 依赖，永远不会被单源卡死）。
+
+    自动拆分轻量/全量（2026-10-19 老罗拍板「轻量版」）：
+      · full=True 或某票基础数据缺失/过旧(末根距今天数>STALE_GUARD)
+        → 走 _refresh_bars_tencent_full（整票 800 天覆盖写）。
+      · 基础已存在 → 走 _refresh_bars_tencent_light：只复核最近 ~45 自然日 qfq 尾段
+        （抓除权漂移）+ 分钟线合成「今日 1 根」补缺，不重拉全历史。
+    前者把全市场刷新从 ~8min 降到 ~2min（仅增量），且仍不被单源卡死。
+    """
+    end = end or _today_bj()
+    today = end
+    light_codes, full_codes = [], []
+    for item in codes:
+        code = item[0] if isinstance(item, tuple) else item
+        if full:
+            full_codes.append(item)
+            continue
+        md = max_date(conn, code)
+        if md is None:
+            full_codes.append(item)
+            continue
+        try:
+            gap = (datetime.date.fromisoformat(today)
+                   - datetime.date.fromisoformat(md)).days
+        except Exception:
+            gap = 999
+        if gap > STALE_GUARD:
+            full_codes.append(item)
+        else:
+            light_codes.append(item)
+    if verbose:
+        print("腾讯刷新拆分：轻量(只补增量) %d 只 / 全量 %d 只"
+              % (len(light_codes), len(full_codes)), flush=True)
+
+    stats = {"ok": 0, "skip": 0, "refetch": 0, "light": len(light_codes)}
+    if full_codes:
+        s = _refresh_bars_tencent_full(conn, full_codes, start=start, end=end,
+                                       verbose=verbose, progress=progress, workers=workers)
+        stats["ok"] += s.get("ok", 0)
+        stats["skip"] += s.get("skip", 0)
+        stats["refetch"] += s.get("refetch", 0)
+    if light_codes:
+        s = _refresh_bars_tencent_light(conn, light_codes, start=start, end=end,
+                                        verbose=verbose, progress=progress, workers=workers)
+        stats["ok"] += s.get("ok", 0)
+        stats["skip"] += s.get("skip", 0)
+        stats["refetch"] += s.get("refetch", 0)
+    meta_set(conn, "bars_updated", _today_bj())
+    meta_set(conn, "bars_source", "tencent")
+    if verbose:
+        print("日线刷新完成(腾讯前复权)：轻量%d只 全量%d只 跳过%d只"
+              % (stats["light"], len(full_codes), stats["skip"]), flush=True)
+    return dict(stats, source="tencent")
+
+
+def _refresh_bars_tencent_full(conn, codes, start=DEFAULT_START, end=None,
+                               verbose=True, progress=200, workers=2):
+    """腾讯前复权「整票全量」刷新（被 --full 或基础缺失票调用）。
+
+    并发拉取（I/O 密集，线程池安全；SQLite 写入回主线程避免并发写）。
+    每只全窗口拉取（start→end），整票覆盖写；不足 MIN_BARS 跳过（停牌/次新）。
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    end = end or _today_bj()
+    t0 = time.time()
+    nw = max(1, int(workers or 1))
+    ok = skip = 0
+    results = {}
+
+    def _fetch(item):
+        code = item[0] if isinstance(item, tuple) else item
+        try:
+            return code, fetch_daily_tencent(code, start=start, end=end)
+        finally:
+            time.sleep(TENCENT_THROTTLE)
+
+    try:
+        with ThreadPoolExecutor(max_workers=nw) as ex:
+            futs = [ex.submit(_fetch, it) for it in codes]
+            done = 0
+            for fut in as_completed(futs):
+                try:
+                    code, bars = fut.result()
+                except Exception:  # noqa: BLE001
+                    code, bars = None, []
+                results[code] = bars
+                done += 1
+                if verbose and done % progress == 0:
+                    print("  拉取(腾讯) %d/%d  用时%.0fs" % (done, len(codes), time.time() - t0),
+                          flush=True)
+    except Exception as e:  # noqa: BLE001
+        if verbose:
+            print("⚠ 腾讯并发拉取异常 %r，已尽力入库" % e, flush=True)
+
+    # 入库（单线程，避免 SQLite 并发写）
+    for code, bars in results.items():
+        if not code:
+            continue
+        try:
+            if not bars or len(bars) < MIN_BARS:
+                skip += 1
+                continue
+            save_bars(conn, code, bars)
+            append_today_bar_if_missing(conn, code, bars)  # 日线缺今日则补分钟线合成K
+            ok += 1
+            conn.commit()
+        except Exception as e:  # noqa: BLE001
+            skip += 1
+            if verbose:
+                print("ERR %s %r" % (code, e))
+    if verbose:
+        print("日线刷新完成(腾讯前复权·全量·并发%d)：写入%d 跳过%d  用时%.0fs"
+              % (nw, ok, skip, time.time() - t0), flush=True)
+    return {"ok": ok, "skip": skip, "refetch": 0, "source": "tencent"}
+
+
+def _refresh_bars_tencent_light(conn, codes, start=DEFAULT_START, end=None,
+                                verbose=True, progress=200, workers=2):
+    """腾讯前复权「轻量增量」刷新（基础数据已存在时）。
+
+    每只只做两件事，整体不重拉 800 天历史：
+      ① 拉最近 ~TAIL_CAL_DAYS 自然日的 qfq 尾段，与库内重叠区做除权漂移校验；
+         → 命中漂移则**就地降级全量重拉这 1 只**（不影响其他票）。
+      ② 用分钟线合成「今日 1 根」补缺（日线源未含当日的情形）。
+    耗时从全量 ~8min 降到 ~2min（仅增量），仍不被单源卡死。
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    end = end or _today_bj()
+    today = end
+    tail_start = (datetime.date.fromisoformat(today)
+                  - datetime.timedelta(days=TAIL_CAL_DAYS)).isoformat()
+    t0 = time.time()
+    nw = max(1, int(workers or 1))
+    ok = skip = refetch = 0
+
+    def _fetch(item):
+        code = item[0] if isinstance(item, tuple) else item
+        try:
+            tail = fetch_daily_tencent(code, start=tail_start, end=end, count=800)
+            tb = synth_today_bar_tencent(code)
+            return code, tail, tb
+        finally:
+            time.sleep(TENCENT_THROTTLE)
+
+    results = {}
+    try:
+        with ThreadPoolExecutor(max_workers=nw) as ex:
+            futs = [ex.submit(_fetch, it) for it in codes]
+            done = 0
+            for fut in as_completed(futs):
+                try:
+                    code, tail, tb = fut.result()
+                except Exception:  # noqa: BLE001
+                    code, tail, tb = None, [], None
+                results[code] = (tail, tb)
+                done += 1
+                if verbose and done % progress == 0:
+                    print("  轻量拉取(腾讯) %d/%d  用时%.0fs"
+                          % (done, len(codes), time.time() - t0), flush=True)
+    except Exception as e:  # noqa: BLE001
+        if verbose:
+            print("⚠ 腾讯轻量并发拉取异常 %r，已尽力入库" % e, flush=True)
+
+    for code, (tail, tb) in results.items():
+        if not code:
+            continue
+        try:
+            # ① 除权漂移检测：尾段与库内重叠区差超容差 → 该票降级全量重拉
+            if tail and _overlap_mismatch(conn, code, tail):
+                full_bars = fetch_daily_tencent(code, start=start, end=end, count=800)
+                if full_bars and len(full_bars) >= MIN_BARS:
+                    save_bars(conn, code, full_bars)
+                    append_today_bar_if_missing(conn, code, full_bars)
+                    ok += 1
+                    refetch += 1
+                    conn.commit()
+                    continue
+                skip += 1          # 全量也拉不到 → 跳过
+                conn.commit()
+                continue
+            # ② 尾段覆盖写（刷新最近 ~30 交易日，保持 qfq 口径最新）
+            if tail:
+                save_bars(conn, code, tail)
+            # ③ 合成今日 1 根补缺（日线源未含当日时）
+            md = max_date(conn, code)
+            added = False
+            if md != today and tb:
+                save_bars(conn, code, [tb])
+                added = True
+            if not tail and not added:
+                # 尾段没拉到、今日 bar 也没补上：
+                #   · 今日 bar 本就在库（md==today）→ 数据已最新 → 记 ok（无操作）；
+                #   · 真缺今日 bar 又取不到 → 记 skip（网络全断，无法补齐）。
+                if max_date(conn, code) == today:
+                    ok += 1
+                else:
+                    skip += 1
+                conn.commit()
+                continue
+            ok += 1
+            conn.commit()
+        except Exception as e:  # noqa: BLE001
+            skip += 1
+            if verbose:
+                print("ERR %s %r" % (code, e))
+    if verbose:
+        print("轻量增量完成(腾讯)：%d 只（含除权降级全量 %d）跳过%d  用时%.0fs"
+              % (ok, refetch, skip, time.time() - t0), flush=True)
+    return {"ok": ok, "skip": skip, "refetch": refetch, "source": "tencent"}
+
+
 def stat(conn):
     n_s = conn.execute("SELECT COUNT(*) FROM stocks").fetchone()[0]
     n_b = conn.execute("SELECT COUNT(*) FROM bars").fetchone()[0]
@@ -639,6 +1013,7 @@ def main():
             limit=(args[args.index("--limit") + 1] if "--limit" in args else None),
             start=(args[args.index("--start") + 1] if "--start" in args else DEFAULT_START),
             workers=int(args[args.index("--workers") + 1]) if "--workers" in args else 6,
+            source=(args[args.index("--source") + 1] if "--source" in args else "auto"),
         )
     elif "--stat" in args:
         print(json.dumps(stat(conn), ensure_ascii=False, indent=2))

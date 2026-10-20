@@ -259,7 +259,9 @@ def render_md(rows, session, today, stat):
     L = []
     L.append("# 全市场战法选股 · %s · %s" % (today, "盘中(11:30)" if session == "midday" else "收盘(15:00后)"))
     L.append("")
-    L.append("数据源：baostock 前复权 + SQLite（`screener/bao_store.py`）｜判定：rule123 各 mode")
+    src_label = "腾讯" if stat.get("bars_source") == "tencent" else "baostock"
+    L.append("数据源：%s 前复权 + SQLite（`screener/bao_store.py`）｜判定：rule123 各 mode ｜ 数据截止 %s"
+             % (src_label, stat.get("last_bar") or "-"))
     L.append("")
     L.append("- 扫描 %d 只 → 过强度闸 %d 只 → 有战法信号 **%d 只**" % (stat["scanned"], stat["passed_l1"], len(cand)))
     L.append("- L1 强度闸刷掉 **%d 只**（WEAK，未跑后续判定）" % stat["weak"])
@@ -334,7 +336,7 @@ td:nth-child(2),td:nth-child(4){text-align:left}
 .v.weak{background:#e6f4ea;color:#1e7e34}
 </style>
 <h1>全市场战法选股 · %s · %s</h1>
-<div class="mut">数据源：baostock 前复权 + SQLite ｜ 判定：rule123 各战法 mode ｜ 生成 %s</div>
+<div class="mut">数据源：baostock/腾讯 前复权 + SQLite ｜ 判定：rule123 各战法 mode ｜ 生成 %s</div>
 <div class="kv">
 扫描 <b>%d</b> 只 → 过强度闸 <b>%d</b> → 有战法信号 <b>%d</b> 只<br>
 L1 强度闸刷掉 <b>%d</b> 只（WEAK 直接出局，未跑后续判定）；L0 数据/停牌刷掉 <b>%d</b> 只
@@ -414,7 +416,10 @@ def main():
     rows.sort(key=_sort_key)   # 全输出（含 jsonl）统一按 战法优先级→强度→R→t1 排序
     stat = {"scanned": len(codes), "passed_l1": l1, "weak": weak,
             "l0": sum(v for k, v in stages.items() if k.startswith("L0")),
-            "stages": dict(stages)}
+            "stages": dict(stages),
+            "last_bar": (conn.execute("SELECT MAX(d) FROM bars").fetchone()[0]
+                         if hasattr(conn, "execute") else None),
+            "bars_source": store.meta_get(conn, "bars_source") or "baostock"}
 
     tag = "%s_%s" % (today, args.session)
     jp = os.path.join(args.out_dir, "screener_%s.jsonl" % tag)

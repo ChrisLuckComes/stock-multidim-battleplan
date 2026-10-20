@@ -984,11 +984,68 @@ def render_batch(rows):
     return 0
 
 
+# ─────────────────────────── 本地 db 读取（批量体检复用，规避限流） ───────────────────────────
+def bars_from_db(code, n=120, db_path=None):
+    """从本地 data/screener.db 读前复权日线，供 scr_sweep 等批量场景复用，避免重复打网络行情源。
+
+    返回与 fetch_bars_tx 同口径的 bars（v 以「手」为单位，amt=0，turnover 由
+    「成交量/流通股本」自算）；不足 MIN_BARS 或库中无该票返回 None ⇒ 调用方自动走网络兜底。
+
+    ⚠ 单位对齐（关键，踩过）：db 的 v 字段存的是「股」，而 scr_chip 内部 chip_model 对 A 股
+    做 `vol = b["v"] * 100`（股）⇒ 这里必须把 v 回退成「手」（÷100）再交出去，否则量纲翻倍、
+    SCR 衰减与 VWAP 全错。
+    """
+    import sqlite3
+    code = str(code).zfill(6)
+    db_path = db_path or os.path.join(ROOT, "data", "screener.db")
+    if not os.path.isfile(db_path):
+        return None
+    try:
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute("SELECT d,o,h,l,c,v FROM bars WHERE code=? ORDER BY d", (code,))
+        rows = cur.fetchall()
+        conn.close()
+    except Exception:
+        return None
+    if len(rows) < MIN_BARS:
+        return None
+    rows = rows[-max(n, MIN_BARS):]
+    sym = tx_symbol(code)
+    shares_hand, _ = tx_float_shares(sym)            # 流通股本（手）
+    bars = []
+    for d, o, h, l, c, v in rows:
+        v_shares = float(v) if v is not None else 0.0
+        v_hand = v_shares / 100.0                     # 股 → 手，对齐 scr_chip 内部 ×100 口径
+        turn = (v_hand / shares_hand * 100.0) if shares_hand else 0.0
+        bars.append({"d": d, "o": float(o), "c": float(c), "h": float(h),
+                     "l": float(l), "v": v_hand, "amt": 0.0, "turnover": turn})
+    return bars
+
+
 # ─────────────────────────── 主流程 ───────────────────────────
-def analyze(code, n=120, decay_k=None, half_life=CHIP_HALF_LIFE, us_mode=False):
-    bars, name, main_rho_now, _meta = fetch_all_meta(code, n=n, us_mode=us_mode)
-    if len(bars) < MIN_BARS:
-        raise RuntimeError(f"{code} 只有 {len(bars)} 根日线（< {MIN_BARS}），不足以判读筹码，不出结论")
+def analyze(code, n=120, decay_k=None, half_life=CHIP_HALF_LIFE, us_mode=False,
+            bars=None, name=None):
+    """主分析流程。
+
+    bars/name 为可选参数（2026-10-19 加）：批量体检场景（scr_sweep）先把日线从本地
+    data/screener.db 读出传入 ⇒ 不再重复打网络行情源（腾讯 fqkline 易限流/被封），
+    只有「资金流」仍走东财（http 稳定、失败退低位带均价、不致命）。bars 为 None 时
+    走原网络路径（东财优先→腾讯兜底），保持单只调用兼容。
+    """
+    if bars is None:
+        bars, name, main_rho_now, _meta = fetch_all_meta(code, n=n, us_mode=us_mode)
+        if len(bars) < MIN_BARS:
+            raise RuntimeError(f"{code} 只有 {len(bars)} 根日线（< {MIN_BARS}），不足以判读筹码，不出结论")
+    else:
+        if len(bars) < MIN_BARS:
+            raise RuntimeError(f"{code} 本地 db 仅 {len(bars)} 根日线（< {MIN_BARS}），不出结论")
+        # 日线来自本地 db：仅资金流仍走网络；东财失败则 main_rho 为空（主力成本退低位带）
+        main_rho_now = fetch_fflow(code) if not us_mode else {}
+        _meta = {"kline": "db", "fflow": "em" if main_rho_now else "none",
+                 "note": "日线取自本地 data/screener.db（不命中网络行情源，规避限流）"}
+        if name is None:
+            name = str(code).zfill(6)
 
     # 模型只正向跑一遍，末端保留 KEEP 份快照：既得今日分布，也得近 12 日 SCR 趋势 + 近 5 日锁仓
     KEEP = 15
