@@ -86,8 +86,10 @@ def test_all_sites_agree():
     from gates.stock_character import prefix_of
     from gates.pre_runup import prefix_of as pre_prefix
     from scr_chip import secid_of as scr_secid, tx_symbol
+    import probe_intraday as PI
+    from research.research_ma_ride import pfx
 
-    for code in ("920522", "688152", "600882", "002317", "300785"):
+    for code in ("920522", "688152", "600882", "002317", "300785", "900901"):
         eq(secid_of(code), M.em_secid(code), "tape_review.secid_of %s" % code)
         eq(scr_secid(code), M.em_secid(code), "scr_chip.secid_of %s" % code)
         eq(board_limit_ratio(code), M.board_limit_ratio(code), "session_decide %s" % code)
@@ -95,6 +97,8 @@ def test_all_sites_agree():
         eq(limit_pct(code), M.board_limit_ratio(code), "first_board %s" % code)
         eq(prefix_of(code), M.market_prefix(code), "stock_character.prefix_of %s" % code)
         eq(pre_prefix(code), M.market_prefix(code), "pre_runup.prefix_of %s" % code)
+        eq(PI.prefix_of(code), M.market_prefix(code), "probe_intraday.prefix_of %s" % code)
+        eq(pfx(code), M.market_prefix(code), "research_ma_ride.pfx %s" % code)
         eq(_tencent_prefix(code), M.tx_prefix(code) + code, "quick_strength %s" % code)
         eq(tx_symbol(code), M.tx_prefix(code) + code, "scr_chip.tx_symbol %s" % code)
         eq(is_sh(code), M.is_sh(code), "first_board.is_sh %s" % code)

@@ -49,7 +49,9 @@ NAMES = {"601208": "东材科技", "688432": "有研硅", "603067": "振华股�
 
 # ── 工具 ──────────────────────────────────────────────────────────────
 def pfx(code):
-    return "sh" if code[0] in "6" else "sz"
+    """行情前缀。⚠ 统一走 ash_market（920 = 北交所；9 开头不等于沪市）。"""
+    import ash_market
+    return ash_market.market_prefix(code)
 
 
 def sma_series(closes, n):

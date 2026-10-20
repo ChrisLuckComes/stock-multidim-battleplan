@@ -156,7 +156,13 @@ def _ash_snap_from_daily(code, market_data):
 
 
 def prefix_of(code):
-    return "sh" if code[0] in "69" else "sz"
+    """行情前缀。⚠ 统一走 ash_market（920 = 北交所；9 开头不等于沪市）。
+
+    2026-10-20 老罗实证：旧口径 ``code[0] in "69"`` 把纳科诺尔 920522 判成 sh920522
+    ⇒ 新浪取不到日线 ⇒ battle_analyze 报「日线不足（拿到 0 根）」。
+    """
+    import ash_market
+    return ash_market.market_prefix(code)
 
 
 def kline(sym, scale=240, n=140):

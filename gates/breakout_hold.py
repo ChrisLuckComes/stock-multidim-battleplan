@@ -65,6 +65,8 @@ try:
 except Exception:
     pass
 
+import ash_market  # noqa: E402  A股代码→市场判定唯一真源（920=北交所 bj）
+
 # ── 阈值 ────────────────────────────────────────────────────────────────
 UNDERCUT_ATR_ALERT = 1.0      # 刺破 ≥1.0×ATR ⇒ 黄牌（洗盘嫌疑）
 UNDERCUT_ATR_BAD = 1.5        # 刺破 ≥1.5×ATR ⇒ 红牌（回吐嫌疑，突破质量差）
@@ -443,7 +445,7 @@ def main():
     if a.us:
         from bars_source import us_quote as _q
         raise SystemExit("美股暂不支持本闸门（无平台沿口径）")
-    prefix = "sh" if code[0] in "56" else "sz"
+    prefix = ash_market.market_prefix(code)   # 920=北交所 bj（勿再用 code[0] 启发式）
     bars, src, notes = ash_bars(prefix, code, n=a.n)
     if not bars:
         print(f"[{code}] 取数失败")
