@@ -29,7 +29,9 @@ import sys
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 HERE = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-LIB = r"D:/workbuddy/resources/app.asar.unpacked/resources/plugins/workbuddy-builtin/skills/library"
+LIB = os.environ.get(
+    "LIBRARY_SKILL_DIR",
+    r"D:/workbuddy/resources/app.asar.unpacked/resources/plugins/workbuddy-builtin/skills/library")
 TOKEN = os.environ.get("LIBRARY_TOKEN", "")
 
 MARKETS = {
@@ -252,13 +254,23 @@ def do_push(market):
                            ["--token-stdin", "--database-id", cfg["dbid"],
                             "--record-ids", json.dumps(old_ids)])
         print(f"[{market}] delete rc {rc} removed {len(old_ids)}")
-    rc, out, err = run("database/batch_add_database_records.py",
-                       ["--token-stdin", "--database-id", cfg["dbid"],
-                        "--records", json.dumps(records, ensure_ascii=False)])
-    ok = out.count('"success": true')
-    print(f"[{market}] add rc {rc}  写入 {len(records)} 条，成功 {ok} 条")
-    if rc != 0:
-        print(out[:400], err[:400])
+    # ★ 分批 add：Windows CreateProcess 对超长命令行（--records 整池 JSON）会报
+    #   [WinError 206] 文件名或扩展名太长（池子大 + flag 长文本时必现）。
+    #   改每批 10 条循环提交，既绕开命令行长度上限，也不依赖单条 JSON 的大小。
+    BATCH = 10
+    total_ok = 0
+    for i in range(0, len(records), BATCH):
+        batch = records[i:i + BATCH]
+        rc, out, err = run("database/batch_add_database_records.py",
+                           ["--token-stdin", "--database-id", cfg["dbid"],
+                            "--records", json.dumps(batch, ensure_ascii=False)])
+        ok = out.count('"success": true')
+        total_ok += ok
+        print(f"[{market}] add batch {i // BATCH + 1} rc {rc} "
+              f"写入 {len(batch)} 条，成功 {ok} 条")
+        if rc != 0:
+            print(out[:400], err[:400])
+    print(f"[{market}] add 合计 写入 {len(records)} 条，成功 {total_ok} 条")
 
 
 def main():
