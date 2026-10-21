@@ -55,27 +55,60 @@ DEFAULT_TOP = 120
 
 # ────────────────────────── 宽基：落库 + 供 market_regime 复用 ──────────────────────────
 def ensure_broad(conn, verbose=True):
-    """保证 3 个宽基日线在库内；并把 market_regime 的取数 patch 成读库（不联网）。
+    """保证 3 个宽基日线在库内**且是最新交易日**；并把 market_regime 的取数 patch 成读库（不联网）。
 
     ⚠ 不 patch 的话，plan_entry 默认 market_regime_enabled=True 会给**每只票**都
     联网取一次宽基 —— 全市场 5000 次实时请求，既慢又必被限流。宽基只有 3 个，
     落库后全市场复用同一份，口径与真实一致且不发一个请求。
+
+    ⚑ 2026-10-21（老罗「彻底修复」· 漏洞 A）：原实现只在「根数 < 60」时才重新落库，
+    **完全不管新鲜度** ⇒ 宽基可停在 T-3（实测 sh000001 停在 2026-10-16）。
+    而扫描基准日 `index_last` 取自宽基末根 ⇒ 基准日陈旧 ⇒ 个股只要 ≥ 宽基末根
+    就放行 ⇒ 拿 T-1 数据判出「今日信号」（爱博医疗 688050 被误判 W底突破）。
+
+    ⇒ 宽基每次扫描都要补到最新交易日（新浪指数源，sina_symbol 已支持带前缀透传）。
     """
+    today = store._today_bj()
+    # ① 新鲜度：宽基末根 < 今日 → 单拉当日 bar
+    for c in BROAD_CODES:
+        md = store.max_date(conn, c)
+        if not md or md >= today:
+            continue
+        tb = store.synth_today_bar_tencent(c, target=today)
+        if tb and tb["d"] > md:
+            store.save_bars(conn, c, [tb])
+            conn.commit()
+            if verbose:
+                print("宽基补当日bar %s：%s O%.2f C%.2f v=%.0f"
+                      % (c, tb["d"], tb["o"], tb["c"], tb["v"]), flush=True)
+        elif verbose:
+            print("⚠ 宽基 %s 停在 %s（今日 %s 未取到）—— 今日可能非交易日，或单拉源不可用"
+                  % (c, md, today), flush=True)
+    # ② 根数不足 → 全量落库（原逻辑；baostock 不可用时降级为不阻断）
     need = []
     for c in BROAD_CODES:
         if len(store.load_bars(conn, c, n=BROAD_N)) < 60:
             need.append(c)
     if need:
-        import baostock as bs
-        store.bao_login()
-        end = store._today_bj()
-        for c in need:
-            bars = store.fetch_daily(bs, c, start=store.DEFAULT_START, end=end)
-            store.save_bars(conn, c, bars)
-            conn.commit()
+        try:
+            import baostock as bs
+            store.bao_login()
+            end = store._today_bj()
+            for c in need:
+                bars = store.fetch_daily(bs, c, start=store.DEFAULT_START, end=end)
+                store.save_bars(conn, c, bars)
+                conn.commit()
+                if verbose:
+                    print("宽基落库 %s：%d 根（末根 %s）"
+                          % (c, len(bars), bars[-1]["d"] if bars else "-"))
+            try:
+                bs.logout()
+            except Exception:  # noqa: BLE001
+                pass
+        except Exception as e:  # noqa: BLE001
             if verbose:
-                print("宽基落库 %s：%d 根（末根 %s）" % (c, len(bars), bars[-1]["d"] if bars else "-"))
-        bs.logout()
+                print("⚠ 宽基全量落库失败（%s: %s）—— 继续用库内现有数据"
+                      % (type(e).__name__, e), flush=True)
 
     cache = {c: store.load_bars(conn, c, n=BROAD_N) for c in BROAD_CODES}
 
@@ -95,6 +128,40 @@ def ensure_broad(conn, verbose=True):
     return cache
 
 
+def _session_target(conn, cache=None):
+    """本次扫描的**目标交易日**（= 最近一个已收盘交易日）+ 是否陈旧。
+
+    ⚑ 2026-10-21（老罗「彻底修复」· 漏洞 B）：扫描基准日必须等于「最近已收盘交易日」。
+    原实现基准日 = 宽基末根（`index_last`），而宽基可以停在 T-3 ⇒「个股末根 < 基准日」
+    这条陈旧闸就是 **fail-open** —— 停在同一天的旧数据照样出「今日信号」
+    （爱博医疗 688050 用 10-20 红收判出 W底突破，真实 10-21 收绿）。
+
+    规则（取较新者，天然覆盖周末/节假日）：
+      · 宽基末根：权威的最近交易日（指数在交易日必有当日 bar；ensure_broad 已补到最新）。
+      · 全库最新末根：个股侧最新可得日。
+      · target = 两者较新者；**stale = 已收盘且 target < 今日** ⇒ 今日数据没拿到，
+        此时不允许出信号（宁缺勿错），全部记 L0_基准日陈旧。
+    """
+    today = store._today_bj()
+    now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
+    after_close = now.hour > 15 or (now.hour == 15 and now.minute >= 5)
+    broad_last = ""
+    if cache:
+        broad_last = max((b[-1]["d"] for b in cache.values() if b), default="")
+    r = conn.execute("SELECT MAX(d) FROM bars").fetchone()
+    all_last = (r[0] if r and r[0] else "")
+    cands = [x for x in (broad_last, all_last) if x]
+    target = max(cands) if cands else today
+    if broad_last and all_last and broad_last != all_last:
+        print("⚠ 宽基末根 %s ≠ 全库最新 %s → 基准日取较新者 %s"
+              % (broad_last, all_last, target), flush=True)
+    stale = bool(after_close and target < today)
+    if stale:
+        print("⚠⚠ 基准日 %s < 今日 %s（已收盘但当日数据没拿到）→ 本次扫描**不出信号**"
+              % (target, today), flush=True)
+    return target, stale
+
+
 def broad_for(code, cache):
     """按板块选宽基（与 market_regime 分流一致）。"""
     board = store.board_of(code)
@@ -106,11 +173,17 @@ def broad_for(code, cache):
 
 
 # ────────────────────────── 单只判定 ──────────────────────────
-def judge(conn, code, name, cache, last_session):
-    """三级漏斗。返回 (row, stage) —— stage 说明它停在哪一层。"""
+def judge(conn, code, name, cache, last_session, stale=False):
+    """三级漏斗。返回 (row, stage) —— stage 说明它停在哪一层。
+
+    ⚑ 2026-10-21（老罗「彻底修复」· 漏洞 B）：`stale`=基准日陈旧（已收盘但当日数据没拿到）
+    ⇒ **一律不出信号**（宁缺勿错）：用 T-1 数据判出的「今日信号」必须被拦掉。
+    """
     bars = store.load_bars(conn, code, n=260)
     if len(bars) < 60:
         return None, "L0_数据不足"
+    if stale:
+        return None, "L0_基准日陈旧(当日数据未到)"
     if last_session and bars[-1]["d"] < last_session:
         return None, "L0_停牌/数据陈旧"
 
@@ -391,7 +464,13 @@ def main():
         #   （2026-10-19 实测：200 只 101s = 0.5s/只 ⇒ 5225 只 ≈ 44min）。
         store.refresh_bars(conn, full=args.full, limit=args.limit, workers=args.workers)
     cache = ensure_broad(conn)
-    index_last = max((b[-1]["d"] for b in cache.values() if b), default=None)
+    # ⚑ 2026-10-21（老罗「彻底修复」· 漏洞 B/C）：扫描前**必经**两步
+    #   ① 定「目标交易日」= 宽基末根与全库最新末根的较新者（= 最近已收盘交易日）
+    #   ② 把全库日线补到该日 —— 此前只有 tencent_light 的③步会补、baostock/mp 路径从不补
+    #      ⇒ 1989/5004 只停在 T-1 ⇒ 拿 T-1 判「今日信号」= 爱博医疗 W底误判的根因
+    target, stale = _session_target(conn, cache)
+    fill = store.ensure_today_bars(conn, target=target, verbose=True)
+    index_last = target
 
     codes = store.all_codes(conn)
     if args.limit:
@@ -413,7 +492,7 @@ def main():
         if code in ban or store.is_st(name):
             stages["L0_黑名单/ST"] += 1
             continue
-        row, stage = judge(conn, code, name, cache, index_last)
+        row, stage = judge(conn, code, name, cache, index_last, stale=stale)
         stages[stage] += 1
         if row is None:
             continue
@@ -438,7 +517,10 @@ def main():
             "stages": dict(stages),
             "last_bar": (conn.execute("SELECT MAX(d) FROM bars").fetchone()[0]
                          if hasattr(conn, "execute") else None),
-            "bars_source": store.meta_get(conn, "bars_source") or "baostock"}
+            "bars_source": store.meta_get(conn, "bars_source") or "baostock",
+            # ⚑ 2026-10-21：基准日 + 当日bar补齐统计（数据时效透明化）
+            "target": target, "stale": stale,
+            "today_bar": {k: v for k, v in (fill or {}).items() if k != "failed_codes"}}
 
     tag = "%s_%s" % (today, args.session)
     jp = os.path.join(args.out_dir, "screener_%s.jsonl" % tag)

@@ -36,9 +36,33 @@ for p in (ROOT, os.path.join(ROOT, "screener")):
 import scr_chip as SC  # noqa: E402
 
 
+#: 扫描 session 优先级（⚠ 2026-10-21 老罗「彻底修复」· 漏洞 F）
+#: 收盘口径优先于盘中 —— 原实现按**文件名字典序**取最后一个，而 'close'('c') 排在
+#: 'midday'('m') **之前** ⇒ 有 midday 时会误选盘中数据当收盘用（首跑就踩过：
+#: 筹码体检跑出 450 只 / 输出 scr_*_midday.jsonl，与收盘的 426 只对不上）。
+SESSION_RANK = {"close": 2, "midday": 1}
+
+
 def latest_jsonl(out_dir):
-    fs = sorted(glob.glob(os.path.join(out_dir, "screener_*_*.jsonl")))
-    return fs[-1] if fs else None
+    """最新一次扫描产物（screener_<date>_<session>.jsonl）。
+
+    ⚑ 2026-10-21：按「日期 → session 优先级」取，**close 优先于 midday**；
+    绝不按文件名字典序（'close' < 'midday' 会选错）。
+    """
+    fs = glob.glob(os.path.join(out_dir, "screener_*_*.jsonl"))
+    if not fs:
+        return None
+
+    def _key(p):
+        base = os.path.basename(p)
+        stem = base[len("screener_"):-len(".jsonl")]
+        parts = stem.split("_", 1)
+        date = parts[0]
+        sess = parts[1] if len(parts) > 1 else ""
+        return (date, SESSION_RANK.get(sess, 0))
+
+    fs.sort(key=_key)
+    return fs[-1]
 
 
 # ───────────────── 自动渲染：带结论列合并报告 ─────────────────

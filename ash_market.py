@@ -28,6 +28,35 @@ BJ_PREFIXES = ("43", "83", "87", "88", "92", "920", "4")
 _BJ_EXACT = ("4", "8")
 
 
+def split_code(code) -> tuple:
+    """任意写法 → (市场前缀, 6 位数字)。**优先识别已带的市场前缀**。
+
+    ⚑ 2026-10-21（老罗「彻底修复」）：原 `market_prefix` 只看代码段、忽略前缀，
+    导致宽基指数被误判 ⇒ 数据源拼错标的 ⇒ 指数当日 bar 永远补不上：
+
+      'sh000001'（上证指数）原逻辑 zfill 后 is_sh('sh000001')=False → 判成 **sz**
+        → 腾讯源拼 'sz000001'（**平安银行**）、新浪源拼 'szsh000001'（无效符号）
+        → 宽基停在 T-3 ⇒ 扫描基准日陈旧 ⇒ 拿 T-1 数据判出「今日信号」。
+
+    ⇒ 带前缀（'sh000001' / 'sz399001' / 'sh.600000'）一律按前缀走；
+    裸 6 位按代码段判（'000001' 仍是深市平安银行，只有带前缀才是上证指数）。
+    """
+    c = str(code).strip().lower()
+    for p in ("sh", "sz", "bj"):
+        if c.startswith(p + "."):
+            return p, c[len(p) + 1:].zfill(6)
+    if len(c) == 8 and c[:2] in ("sh", "sz", "bj") and c[2:].isdigit():
+        return c[:2], c[2:]
+    d = c.zfill(6)
+    if d.startswith(("920", "43", "83", "87", "88")):
+        return "bj", d
+    if d.startswith(("4", "8")) and not d.startswith("9"):
+        return "bj", d
+    if d.startswith(("60", "68", "689", "900")):
+        return "sh", d
+    return "sz", d
+
+
 def is_bj(code) -> bool:
     """是否北交所（含老三板 43/83/87/88 与新三板 4/8 开头）。"""
     c = str(code).strip().zfill(6)
@@ -44,17 +73,14 @@ def is_sh(code) -> bool:
 
 
 def market_prefix(code) -> str:
-    """返回 "sh" / "sz" / "bj"。"""
-    c = str(code).strip().zfill(6)
-    if is_bj(c):
-        return "bj"
-    return "sh" if is_sh(c) else "sz"
+    """返回 "sh" / "sz" / "bj"（带前缀代码按前缀判定，见 split_code）。"""
+    return split_code(code)[0]
 
 
 def em_secid(code) -> str:
     """东财 secid。⚠ 北交所一律 ``0.``（老代码给 920 拼 ``1.`` 导致东财返空）。"""
-    c = str(code).strip().zfill(6)
-    return ("1." if is_sh(c) else "0.") + c
+    m, d = split_code(code)
+    return ("1." if m == "sh" else "0.") + d
 
 
 def tx_prefix(code) -> str:

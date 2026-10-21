@@ -58,6 +58,8 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+import ash_market  # noqa: E402  A股代码→市场判定唯一真源（920=北交所 bj；指数按前缀）
+
 DB_PATH = os.path.join(_ROOT, "data", "screener.db")
 
 ADJUST = "2"            # 前复权（1=后复权 2=前复权 3=不复权）
@@ -82,32 +84,30 @@ TENCENT_THROTTLE = 0.12
 
 # ────────────────────────────── 代码工具 ──────────────────────────────
 def market_of(code):
-    """裸代码 → sh / sz / bj。"""
-    c = str(code).strip().lstrip("sh.").lstrip("sz.").lstrip("bj.")
-    if c[0] == "6":
-        return "sh"
-    if c[0] in ("0", "3"):
-        return "sz"
-    return "bj"
+    """裸代码 → sh / sz / bj。
+
+    ⚑ 2026-10-21（老罗「彻底修复」）：委托唯一真源 `ash_market.split_code`。
+    原实现用 `lstrip("sh.")` **字符集**剥离前缀 ⇒ 'sh000001'（上证指数）被剥成
+    '000001' → 判成 **sz** ⇒ 腾讯/新浪源都拼错标的 ⇒ 指数当日 bar 永远补不上 ⇒
+    宽基停在 T-3 ⇒ 扫描基准日陈旧 ⇒ 拿 T-1 数据判出「今日信号」（爱博医疗 W底误判）。
+    """
+    return ash_market.market_prefix(code)
 
 
 def bscode(code):
     """裸代码 → baostock 带前缀代码（sh.600585）。"""
-    return market_of(code) + "." + str(code).strip().lstrip("sh.").lstrip("sz.").lstrip("bj.")
+    m, d = ash_market.split_code(code)
+    return "%s.%s" % (m, d)
 
 
 def board_of(code):
     """裸代码 → 板块标签（与 gates/market_regime.BROAD_BY_BOARD 对齐）。"""
-    c = str(code).strip().lstrip("sh.").lstrip("sz.").lstrip("bj.")
-    if c.startswith("688") or c.startswith("689"):
-        return "cyb" if False else "star"
-    if c.startswith("300") or c.startswith("301") or c.startswith("302"):
+    m, d = ash_market.split_code(code)
+    if d.startswith(("688", "689")):
+        return "star"
+    if d.startswith(("300", "301", "302")):
         return "cyb"
-    if c[0] == "6":
-        return "sh"
-    if c[0] in ("8", "4"):
-        return "bj"
-    return "sz"
+    return m if m in ("sh", "sz") else "bj"
 
 
 def _today_bj():
@@ -241,7 +241,7 @@ def fetch_daily_tencent(code, start=DEFAULT_START, end=None, count=800):
     """
     end = end or _today_bj()
     mk = market_of(code)
-    tcode = mk + str(code).strip().lstrip("sh.").lstrip("sz.").lstrip("bj.")
+    tcode = "".join(ash_market.split_code(code))   # ⚑ 2026-10-21：带前缀代码按前缀（指数不误判）
     url = ("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=%s,day,%s,%s,%d,qfq"
            % (tcode, start, end, int(count)))
     bars = []
@@ -274,35 +274,55 @@ def fetch_daily_tencent(code, start=DEFAULT_START, end=None, count=800):
     return bars
 
 
-def synth_today_bar_tencent(code):
-    """用腾讯分钟线合成今日(收盘)日 K → {d,o,h,l,c,v} 或 None。
+def _resolve_intraday_volume(cum, ref_v=None, ref_max_v=None):
+    """腾讯分钟线累计量 → 「股」。
 
-    收盘扫描的「今日这根 K」靠它补齐：日线源（baostock/腾讯日线）滞后、未发布当日 bar
-    时，用分钟线(09:30-15:00)合成。首根→开、末根→收、极值→高/低；末根累计量(手)×100
-    →股，对齐 baostock 的 v 口径（2026-10-19 对拍 600000：合成 v=540775手×100=54077500股）。
+    ⚑ 腾讯分钟线 cum 的单位**因票而异**（实测 688050 已是「股」、600000 是「手」）。
+    固定 ×100 会把部分票放大 100 倍 → 直接毁掉 RVOL 闸门（老罗 2026-10-21 实证：
+    DB v=280599500 vs 真实 ~280 万）。故用库内参照量**自适应**，并加历史极值硬保护。
     """
-    mk = market_of(code)
-    tcode = mk + str(code).strip().lstrip("sh.").lstrip("sz.").lstrip("bj.")
-    url = "https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=%s" % tcode
-    # ① 优先新浪日K（可出网；volume 已是「股」，实拍量比=1.0 vs baostock，口径一致；
-    #   且是官方日K，比分钟线合成更准）。2026-10-21 老罗发现腾讯分钟线 ifzq.gtimg.cn
-    #   本地返回 501 致 synth 恒为 None，且即便通，腾讯分钟线 cum 对部分票(如688050)已是
-    #   「股」却被×100 放大 100 倍(实证 DB v=280599500 vs 真实~280万) → 故新浪作主源。
+    v = float(cum)
+    if ref_v and ref_v > 0:
+        r = v / ref_v
+        if 0.2 <= r <= 5.0:
+            return v                    # 与库内同量级 ⇒ 已是「股」
+        v = v * 100.0                    # 差约 100 倍 ⇒ cum 是「手」
+    else:
+        v = v * 100.0
+    if ref_max_v and ref_max_v > 0 and v > ref_max_v * 3.0:
+        return float(cum)               # 放大后超历史极值 ⇒ 原值才是「股」
+    return v
+
+
+def synth_today_bar_tencent(code, target=None, ref_v=None, ref_max_v=None):
+    """合成「今日(收盘)日 K」→ {d,o,h,l,c,v} 或 None。
+
+    ⚑ 2026-10-21（老罗「彻底修复」· 数据时效）源优先级 **新浪日K（主）→ 腾讯分钟线（兜底）**：
+      · 新浪 `fetch_ashare`：官方日K、volume 已是「股」（实拍量比=1.0 vs baostock），
+        且**宽基指数也支持**（sina_symbol 已支持带前缀透传 ⇒ 上证/深成/创业板指能取到数）。
+      · 腾讯分钟线 `web.ifzq.gtimg.cn`：本机常 501/被墙；即便通，cum 单位因票而异
+        ⇒ 必须量纲自适应（见 _resolve_intraday_volume），否则 RVOL 闸门被毁。
+
+    target: 目标交易日（默认今日）。传「宽基末根」可覆盖周末/节假日（新浪末根即最近交易日）。
+    """
+    target = target or _today_bj()
+    # ① 优先新浪日K（可出网；官方日K，比分钟线合成更准）
     try:
         from fetch import fetch_ashare as _fa
         arr = _fa.fetch_kline(code, n=3)
-        if arr and arr[-1].get("d") == _today_bj():
+        if arr and arr[-1].get("d") >= target:
             last = arr[-1]
             # 新浪 getKLineData 的 volume 已是「股」（实拍量比=1.0 vs baostock），
             # 与库内口径一致，直接采用、勿乘 100（×100 是腾讯分钟线手→股才需要）。
-            return {"d": _today_bj(), "o": last["o"], "c": last["c"],
+            return {"d": last["d"], "o": last["o"], "c": last["c"],
                     "h": last["h"], "l": last["l"], "v": float(last["v"])}
     except Exception:  # noqa: BLE001
         pass  # 新浪不可达 → 落到腾讯分钟线兜底
-    # ② 兜底：腾讯分钟线合成（累计量单位=手，×100 对齐 baostock 股口径）。
-    #   仅在①新浪不可达时启用；若腾讯也 501/被墙 → 返回 None（当日 bar 补不出）。
-    mk = market_of(code)
-    tcode = mk + str(code).strip().lstrip("sh.").lstrip("sz.").lstrip("bj.")
+    # ② 兜底：腾讯分钟线合成（只有「今天」的分钟线；target 非今日则无解）
+    if target != _today_bj():
+        return None
+    mk, digits = ash_market.split_code(code)
+    tcode = mk + digits
     url = "https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=%s" % tcode
     try:
         txt = _http_get(url, timeout=20, referer="https://gu.qq.com/")
@@ -326,19 +346,138 @@ def synth_today_bar_tencent(code):
         c = rows[-1][1]
         hi = max(r[1] for r in rows)
         lo = min(r[1] for r in rows)
-        cum = rows[-1][2]  # 手（累计）
-        return {"d": _today_bj(), "o": o, "c": c, "h": hi, "l": lo, "v": cum * 100.0}
+        cum = rows[-1][2]  # 累计量（单位因票而异 → 自适应换算）
+        v = _resolve_intraday_volume(cum, ref_v=ref_v, ref_max_v=ref_max_v)
+        return {"d": _today_bj(), "o": o, "c": c, "h": hi, "l": lo, "v": v}
     except Exception:  # noqa: BLE001
         return None
 
 
-def append_today_bar_if_missing(conn, code, bars):
-    """若 bars 末根早于今日，用分钟线合成今日 bar 落库（只写一根，不动历史）。"""
-    if not bars or bars[-1]["d"] >= _today_bj():
+def append_today_bar_if_missing(conn, code, bars, target=None):
+    """若 bars 末根早于 target，用单拉源补齐该 bar 落库（只写一根，不动历史）。"""
+    target = target or _today_bj()
+    if not bars or bars[-1]["d"] >= target:
         return
-    tb = synth_today_bar_tencent(code)
+    tb = synth_today_bar_tencent(code, target=target,
+                                  ref_v=bars[-1]["v"] if bars else None,
+                                  ref_max_v=max((b["v"] for b in bars[-60:]), default=None))
     if tb:
         save_bars(conn, code, [tb])
+
+
+def ensure_today_bars(conn, target=None, codes=None, workers=6, verbose=True,
+                       progress=200, sleep=0.0, retry=1):
+    """把库内日线补到 **target 日** —— 收盘扫描前的**必经步骤**。
+
+    ⚑ 2026-10-21（老罗「彻底修复」· 数据时效）：
+    本机 baostock 不通、腾讯 ifzq 501 ⇒ **日线源结构性给不出当日 bar**。
+    此前补齐只挂在 `tencent_light` 的第③步（且只覆盖「本次刷新过的 code」），
+    宽基指数在腾讯/新浪又都取错标的 ⇒ 1989/5004 只停在 T-1 ⇒
+    扫描拿 T-1 数据判出「今日信号」（爱博医疗 688050 被误判 W底突破）。
+
+    ⇒ 补齐必须是**独立、可复用、可被扫描流程直接调用**的一步：
+      ① target 默认今日；调用方一般传「宽基末根」（= 最近交易日，自动规避周末/假日）。
+      ② 只补「末根 < target」的票；源 新浪日K（主）→ 腾讯分钟线（兜底，量纲自适应）。
+      ③ 补不成的**明确报出**（返回清单 + 写 meta），绝不静默 —— 扫描层的
+         fail-closed 陈旧闸会把这批票拦下，不会用陈旧数据出信号。
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    target = target or _today_bj()
+    if codes is None:
+        todo = [r[0] for r in conn.execute(
+            "SELECT code FROM bars GROUP BY code HAVING MAX(d) < ?", (target,)).fetchall()]
+    else:
+        todo = [c for c in codes if (max_date(conn, c) or "") < target]
+    if not todo:
+        if verbose:
+            print("日线已全部到 %s，无需补齐" % target)
+        meta_set(conn, "today_bar_target", target)
+        meta_set(conn, "today_bar_filled", "0")
+        meta_set(conn, "today_bar_failed", "0")
+        return {"target": target, "checked": 0, "filled": 0, "failed": 0,
+                "failed_codes": []}
+
+    # 参照量（用于分钟线量纲自适应）必须在**主线程**取：sqlite 连接不可跨线程共享
+    refs = {}
+    for code in todo:
+        b = load_bars(conn, code, n=60)
+        refs[code] = (b[-1]["v"] if b else None,
+                      max((x["v"] for x in b), default=None))
+
+    def _fetch(code):
+        ref_v, ref_max = refs[code]
+        try:
+            return code, synth_today_bar_tencent(code, target=target,
+                                                  ref_v=ref_v, ref_max_v=ref_max)
+        except Exception:  # noqa: BLE001
+            return code, None
+
+    filled, failed = 0, []
+    t0 = time.time()
+    nw = max(1, int(workers or 1))
+    with ThreadPoolExecutor(max_workers=nw) as ex:
+        futs = [ex.submit(_fetch, c) for c in todo]
+        done = 0
+        for fut in as_completed(futs):
+            code, tb = fut.result()
+            done += 1
+            if tb and tb.get("d") == target:
+                save_bars(conn, code, [tb])
+                filled += 1
+            else:
+                failed.append(code)
+            if done % progress == 0:
+                conn.commit()
+                if verbose:
+                    print("  补齐当日bar %d/%d  已补%d 失败%d  用时%.0fs"
+                          % (done, len(todo), filled, len(failed), time.time() - t0),
+                          flush=True)
+            if sleep:
+                time.sleep(sleep)
+    conn.commit()
+
+    # 失败重试（串行，降级：源可能只是瞬时限流）
+    if failed and retry:
+        still = []
+        for code in failed:
+            ref_v, ref_max = refs.get(code, (None, None))
+            try:
+                tb = synth_today_bar_tencent(code, target=target,
+                                              ref_v=ref_v, ref_max_v=ref_max)
+            except Exception:  # noqa: BLE001
+                tb = None
+            if tb and tb.get("d") == target:
+                save_bars(conn, code, [tb])
+                filled += 1
+            else:
+                still.append(code)
+        failed = still
+        conn.commit()
+
+    meta_set(conn, "today_bar_target", target)
+    meta_set(conn, "today_bar_filled", str(filled))
+    meta_set(conn, "today_bar_failed", str(len(failed)))
+    if verbose:
+        print("当日bar补齐（目标 %s）：待补%d 已补%d 仍缺%d  用时%.0fs"
+              % (target, len(todo), filled, len(failed), time.time() - t0), flush=True)
+        if failed:
+            print("  ⚠ 补不到当日bar（将被扫描层 fail-closed 拦下，不出信号）：%d 只，例：%s"
+                  % (len(failed), ", ".join(failed[:10])), flush=True)
+    return {"target": target, "checked": len(todo), "filled": filled,
+            "failed": len(failed), "failed_codes": failed}
+
+
+def _finalize_today_bars(conn, result, verbose=True):
+    """刷新收尾：**补齐当日 bar**（所有源路径统一走这里）。
+
+    ⚑ 2026-10-21（老罗「彻底修复」· 漏洞 C）：此前只有 `tencent_light` 的第③步
+    会补，且只覆盖「本次刷新过的 code」；baostock / mp 路径**从不补** ⇒
+    库里停在 T-1，扫描便拿 T-1 数据判出「今日信号」（爱博医疗 W底误判的根因之一）。
+    """
+    fill = ensure_today_bars(conn, target=_today_bj(), verbose=verbose)
+    if isinstance(result, dict):
+        result["today_bar"] = fill
+    return result
 
 
 def save_bars(conn, code, bars):
@@ -582,12 +721,16 @@ def refresh_bars(conn, codes=None, full=False, limit=None, start=DEFAULT_START,
         print("刷新源：%s" % source)
 
     if source == "tencent":
-        return _refresh_bars_tencent(conn, codes, full=full, start=start, end=end,
-                                     verbose=verbose, progress=progress, workers=workers)
+        return _finalize_today_bars(
+            conn, _refresh_bars_tencent(conn, codes, full=full, start=start, end=end,
+                                        verbose=verbose, progress=progress, workers=workers),
+            verbose=verbose)
 
     if workers > 1 and len(codes) > workers:
-        return _refresh_bars_mp(conn, codes, full=full, start=start,
-                                workers=workers, verbose=verbose)
+        return _finalize_today_bars(
+            conn, _refresh_bars_mp(conn, codes, full=full, start=start,
+                                   workers=workers, verbose=verbose),
+            verbose=verbose)
 
     bs = bs_module or bao_login()
     ok = skip = refetch = 0
@@ -648,7 +791,8 @@ def refresh_bars(conn, codes=None, full=False, limit=None, start=DEFAULT_START,
     if verbose:
         print("日线刷新完成：写入%d 跳过%d 全量重拉%d  用时%.0fs"
               % (ok, skip, refetch, time.time() - t0), flush=True)
-    return {"ok": ok, "skip": skip, "refetch": refetch}
+    return _finalize_today_bars(conn, {"ok": ok, "skip": skip, "refetch": refetch},
+                                verbose=verbose)
 
 
 def _refresh_bars_mp(conn, codes, full=False, start=DEFAULT_START, workers=6,
