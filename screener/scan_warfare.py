@@ -180,8 +180,12 @@ def midday_recap(rows, top, today, verbose=True):
     store_conn = None
     for r in picks:
         try:
-            live = PI.ash_live_bar(r["code"], today)
+            # ★ 修复（2026-10-21）：ash_live_bar 需要带前缀代码（sh/sz/bj），
+            #   原裸传 6 位码 → sina 取不到 → 整列失效。先拼前缀再传。
+            sym = PI.prefix_of(r["code"]) + r["code"]
+            live = PI.ash_live_bar(sym, today)
             if not live:
+                r["live_err"] = "no_live_bar"
                 continue
             conn = store.connect()
             bars = store.load_bars(conn, r["code"], n=260)
@@ -197,12 +201,15 @@ def midday_recap(rows, top, today, verbose=True):
                 "elapsed_min": live.get("elapsed_min"),
                 "o": live.get("o"), "h": live.get("h"), "l": live.get("l"), "c": live.get("c"),
                 "v": live.get("v"),
+                "src": live.get("src"),
             }
+            r["live_src"] = live.get("src")
             r["live_mode"] = plan2.get("mode")
             r["live_recommend"] = bool(plan2.get("recommend"))
             r["changed"] = (plan2.get("mode") != r.get("mode"))
         except Exception as e:
             r["live_err"] = repr(e)[:80]
+        time.sleep(0.05)  # 降速，避免触发 sina 限流（复评只覆盖候选，不值得为速度冒险）
     return rows
 
 
@@ -299,15 +306,20 @@ def render_html(rows, session, today, stat):
     cand = [r for r in rows if r.get("mode") not in (None, "wait")]
     cand.sort(key=_sort_key)
     sess_cn = "盘中 (11:30)" if session == "midday" else "收盘 (15:00 后)"
+    # 盘中实时源统计（kline 正常 vs 快照兜底 vs 取不到）
+    src_kline = sum(1 for r in cand if (r.get("live") or {}).get("src") is None and r.get("live"))
+    src_snap = sum(1 for r in cand if (r.get("live") or {}).get("src") == "snapshot")
+    src_fail = sum(1 for r in cand if not r.get("live"))
     tr = []
     for r in cand[:200]:
         live = r.get("live") or {}
         live_cell = ""
         if live:
-            live_cell = ("<span class='mut'>半根@%s C%.2f → %s%s</span>" % (
+            src_tag = " <span class='src'>快照兜底</span>" if live.get("src") == "snapshot" else ""
+            live_cell = ("<span class='mut'>半根@%s C%.2f → %s%s%s</span>" % (
                 live.get("asof") or "-", live.get("c") or 0,
                 MODE_CN.get(r.get("live_mode"), r.get("live_mode")),
-                " ⚠变档" if r.get("changed") else ""))
+                " ⚠变档" if r.get("changed") else "", src_tag))
         tr.append(
             "<tr><td class='code'>%s</td><td>%s</td><td><span class='v %s'>%s</span></td>"
             "<td><b>%s</b></td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
@@ -321,6 +333,11 @@ def render_html(rows, session, today, stat):
                 r.get("t1") if r.get("t1") is not None else "-",
                 r.get("rr1") if r.get("rr1") is not None else "-",
                 "★" if r.get("recommend") else "", live_cell))
+    if session == "midday":
+        live_stat_line = ("盘中半根复评：sina 5分钟 kline 正常 <b>%d</b> 只 ｜ 快照兜底 <b>%d</b> 只 ｜ 取不到 <b>%d</b> 只"
+                          % (src_kline, src_snap, src_fail))
+    else:
+        live_stat_line = ""
     return """<!doctype html><meta charset="utf-8"><title>全市场战法选股 %s</title>
 <style>
 body{font-family:-apple-system,"Segoe UI",Microsoft YaHei,sans-serif;margin:24px;background:#fff;color:#1a1a1a}
@@ -334,19 +351,21 @@ td:nth-child(2),td:nth-child(4){text-align:left}
 .v{display:inline-block;padding:1px 6px;border-radius:4px;font-size:12px}
 .v.strong{background:#fde8e8;color:#c0392b}.v.neutral{background:#fff4e0;color:#a06800}
 .v.weak{background:#e6f4ea;color:#1e7e34}
+.src{background:#e8f0fe;color:#1a56c4;padding:1px 5px;border-radius:4px;font-size:11px;margin-left:3px}
 </style>
 <h1>全市场战法选股 · %s · %s</h1>
 <div class="mut">数据源：baostock/腾讯 前复权 + SQLite ｜ 判定：rule123 各战法 mode ｜ 生成 %s</div>
 <div class="kv">
 扫描 <b>%d</b> 只 → 过强度闸 <b>%d</b> → 有战法信号 <b>%d</b> 只<br>
 L1 强度闸刷掉 <b>%d</b> 只（WEAK 直接出局，未跑后续判定）；L0 数据/停牌刷掉 <b>%d</b> 只
+%s
 </div>
 <table><tr><th>代码</th><th>名称</th><th>强度</th><th>战法</th><th>现价</th><th>买区下沿</th>
 <th>买区上沿</th><th>止损</th><th>t1</th><th>R→t1</th><th>推荐</th><th>盘中复评</th></tr>
 %s
 </table>""" % (today, today, sess_cn, datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
                stat["scanned"], stat["passed_l1"], len(cand), stat["weak"], stat["l0"],
-               "\n".join(tr))
+               live_stat_line, "\n".join(tr))
 
 
 # ────────────────────────── main ──────────────────────────

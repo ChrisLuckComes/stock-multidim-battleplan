@@ -168,7 +168,21 @@ def prefix_of(code):
 def kline(sym, scale=240, n=140):
     url = (f"https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
            f"CN_MarketData.getKLineData?symbol={sym}&scale={scale}&ma=no&datalen={n}")
-    arr = json.loads(_get(url))
+    try:
+        raw = _get(url)
+    except Exception:
+        return []
+    # ⚠ sina 5分钟接口被高频请求时会返回字面量 "null"（限流），json.loads("null")=None
+    # 会触发 "NoneType object is not iterable"。此处防护：限流/空响应返回 []，
+    # 交由 ash_live_bar 走快照兜底，而不是崩溃整列。
+    if not raw or "null" in raw:
+        return []
+    try:
+        arr = json.loads(raw)
+    except Exception:
+        return []
+    if not isinstance(arr, list) or not arr:
+        return []
     return [{"d": b["day"], "o": float(b["open"]), "c": float(b["close"]),
              "h": float(b["high"]), "l": float(b["low"]), "v": float(b["volume"])}
             for b in arr]
@@ -182,6 +196,28 @@ def snapshot(sym):
         "h": float(p[4]), "l": float(p[5]), "v": float(p[8]), "amt": float(p[9]),
         "date": p[30], "time": p[31],
     }
+
+
+def _live_bar_from_snapshot(sym, today):
+    """ash_live_bar 的兜底：sina 5分钟 kline 被限流/无今日数据时，用实时快照合成今日半根。
+
+    快照源 hq.sinajs.cn 与 kline 接口不同限流，限流窗口仍可用。返回今日 O/H/L/C/时间合成的
+    半根（与 ash_live_bar 同结构，带 src="snapshot" 标记）。若快照日期 ≠ today（非交易日 /
+    无实时数据）则回 None —— 绝不拿旧数据冒充今日半根。
+    """
+    try:
+        s = snapshot(sym)
+    except Exception:
+        return None
+    if not s or s.get("date") != today:
+        return None
+    t = (s.get("time") or "")[:5]
+    elapsed = _ash_elapsed_min(t) if t else 0
+    v_acc = float(s.get("v") or 0) * 100.0  # 手→股，对齐 kline 的 v 口径
+    v_full = v_acc * 240.0 / elapsed if elapsed > 0 else v_acc
+    return {"d": today, "o": s["o"], "h": s["h"], "l": s["l"], "c": s["spot"],
+            "v": v_full, "v_raw": v_acc, "live": True,
+            "elapsed_min": elapsed, "asof_min": t, "src": "snapshot"}
 
 
 def vol_bursts(mins, drop_tail=0):
@@ -845,12 +881,16 @@ def ash_live_bar(sym, today, until=None, min_scale=5, mins=None):
     `mins`：调用方预取的分钟线（回测缓存/测试注入用）；None = 现取。
     """
     if mins is None:
-        mins = kline(sym, min_scale, 240)
+        try:
+            mins = kline(sym, min_scale, 240)
+        except Exception:
+            mins = []
     mins = [b for b in mins if b["d"].startswith(today)]
     if until:
         mins = [b for b in mins if b["d"][11:16] <= until]
     if not mins:
-        return None
+        # ★ sina 5分钟 kline 被限流/无今日数据 → 退回快照源合成半根（hq.sinajs.cn 限流窗口仍可用）
+        return _live_bar_from_snapshot(sym, today)
     last_hm = mins[-1]["d"][11:16]
     elapsed = _ash_elapsed_min(last_hm)
     v_acc = sum(b["v"] for b in mins)

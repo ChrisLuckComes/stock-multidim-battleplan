@@ -4482,7 +4482,10 @@ def meteor_pit(bars, ev, atr_v, last_c):
         f"今日收 {last_c:.2f} 站上5日线 {ma5_now:.2f}"
         + ("（强确认：已过天量日5日线高点 %.2f）" % ma5_at_vol if strong_confirm
            else f"（弱确认：天量日5日线高点 {ma5_at_vol:.2f} 在上方，进一步空间锚）")
-        + f"。硬止损=坑底 {hard}（收盘破），风险 {risk_pct:.2f}%（{risk_atr}×ATR）；"
+        + f"。硬止损=坑底 {hard}（收盘破），风险 "
+        + (f"{risk_pct:.2f}%（{risk_atr:.2f}×ATR）" if risk_pct is not None
+           else "—%（—×ATR，末价缺失无法计量）")
+        + "；"
         f"主卖=收盘跌回5日线下方。很容易抓到主升浪，盈亏比高（老罗 2026-10-16 定）。"
     )
     return {
