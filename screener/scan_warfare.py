@@ -343,6 +343,14 @@ def render_md(rows, session, today, stat):
     L.append("数据源：%s 前复权 + SQLite（`screener/bao_store.py`）｜判定：rule123 各 mode ｜ 数据截止 %s"
              % (src_label, stat.get("last_bar") or "-"))
     L.append("")
+    # ⚑ 2026-10-21：数据时效自证 —— 报告必须自己说清「判的是哪一天」
+    _tb = stat.get("today_bar") or {}
+    L.append("- **基准日（判的是哪一天）**：**%s**%s"
+             % (stat.get("target") or "-",
+                "　⚠⚠ **基准日陈旧 → 本次不出信号**" if stat.get("stale") else ""))
+    L.append("- 当日bar补齐：待补 %s 只 / 已补 %s 只 / 仍缺 %s 只"
+             % (_tb.get("checked", "-"), _tb.get("filled", "-"), _tb.get("failed", "-")))
+    L.append("")
     L.append("- 扫描 %d 只 → 过强度闸 %d 只 → 有战法信号 **%d 只**" % (stat["scanned"], stat["passed_l1"], len(cand)))
     L.append("- L1 强度闸刷掉 **%d 只**（WEAK，未跑后续判定）" % stat["weak"])
     L.append("")
@@ -429,6 +437,7 @@ td:nth-child(2),td:nth-child(4){text-align:left}
 <h1>全市场战法选股 · %s · %s</h1>
 <div class="mut">数据源：baostock/腾讯 前复权 + SQLite ｜ 判定：rule123 各战法 mode ｜ 生成 %s</div>
 <div class="kv">
+基准日（判的是哪一天）<b>%s</b>%s ｜ 当日bar补齐：待补 %s / 已补 %s / 仍缺 %s<br>
 扫描 <b>%d</b> 只 → 过强度闸 <b>%d</b> → 有战法信号 <b>%d</b> 只<br>
 L1 强度闸刷掉 <b>%d</b> 只（WEAK 直接出局，未跑后续判定）；L0 数据/停牌刷掉 <b>%d</b> 只
 %s
@@ -437,6 +446,11 @@ L1 强度闸刷掉 <b>%d</b> 只（WEAK 直接出局，未跑后续判定）；L
 <th>买区上沿</th><th>止损</th><th>t1</th><th>R→t1</th><th>推荐</th><th>盘中复评</th></tr>
 %s
 </table>""" % (today, today, sess_cn, datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+               stat.get("target") or "-",
+               "　⚠⚠ <b>基准日陈旧 → 本次不出信号</b>" if stat.get("stale") else "",
+               (stat.get("today_bar") or {}).get("checked", "-"),
+               (stat.get("today_bar") or {}).get("filled", "-"),
+               (stat.get("today_bar") or {}).get("failed", "-"),
                stat["scanned"], stat["passed_l1"], len(cand), stat["weak"], stat["l0"],
                live_stat_line, "\n".join(tr))
 
