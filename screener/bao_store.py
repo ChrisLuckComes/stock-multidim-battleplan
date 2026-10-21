@@ -309,7 +309,22 @@ def synth_today_bar_tencent(code):
         cum = rows[-1][2]  # 手（累计）
         return {"d": _today_bj(), "o": o, "c": c, "h": hi, "l": lo, "v": cum * 100.0}
     except Exception:  # noqa: BLE001
+        pass  # 腾讯分钟线失败（如 501）→ 落到下方新浪兜底
+    # 兜底：腾讯分钟线不可用时（本地 ifzq.gtimg.cn 返回 501/被墙），改走新浪日K末根取当日 bar。
+    # 2026-10-21 老罗发现腾讯分钟线 501 致 synth 恒为 None，收盘扫描因此用 T-1 数据判信号
+    # （爱博医疗被误判 W底突破）。新浪源可出网，是老罗加的「单拉今日行情」路径。
+    try:
+        from fetch import fetch_ashare as _fa
+        arr = _fa.fetch_kline(code, n=3)
+        if arr and arr[-1].get("d") == _today_bj():
+            last = arr[-1]
+            # 新浪 getKLineData 的 volume 已是「股」(实拍量比=1.0 vs baostock)，
+            # 与库内口径一致，直接采用、勿乘 100（×100 是腾讯分钟线手→股才需要）。
+            return {"d": _today_bj(), "o": last["o"], "c": last["c"],
+                    "h": last["h"], "l": last["l"], "v": float(last["v"])}
+    except Exception:  # noqa: BLE001
         return None
+    return None
 
 
 def append_today_bar_if_missing(conn, code, bars):
