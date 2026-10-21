@@ -284,6 +284,26 @@ def synth_today_bar_tencent(code):
     mk = market_of(code)
     tcode = mk + str(code).strip().lstrip("sh.").lstrip("sz.").lstrip("bj.")
     url = "https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=%s" % tcode
+    # ① 优先新浪日K（可出网；volume 已是「股」，实拍量比=1.0 vs baostock，口径一致；
+    #   且是官方日K，比分钟线合成更准）。2026-10-21 老罗发现腾讯分钟线 ifzq.gtimg.cn
+    #   本地返回 501 致 synth 恒为 None，且即便通，腾讯分钟线 cum 对部分票(如688050)已是
+    #   「股」却被×100 放大 100 倍(实证 DB v=280599500 vs 真实~280万) → 故新浪作主源。
+    try:
+        from fetch import fetch_ashare as _fa
+        arr = _fa.fetch_kline(code, n=3)
+        if arr and arr[-1].get("d") == _today_bj():
+            last = arr[-1]
+            # 新浪 getKLineData 的 volume 已是「股」（实拍量比=1.0 vs baostock），
+            # 与库内口径一致，直接采用、勿乘 100（×100 是腾讯分钟线手→股才需要）。
+            return {"d": _today_bj(), "o": last["o"], "c": last["c"],
+                    "h": last["h"], "l": last["l"], "v": float(last["v"])}
+    except Exception:  # noqa: BLE001
+        pass  # 新浪不可达 → 落到腾讯分钟线兜底
+    # ② 兜底：腾讯分钟线合成（累计量单位=手，×100 对齐 baostock 股口径）。
+    #   仅在①新浪不可达时启用；若腾讯也 501/被墙 → 返回 None（当日 bar 补不出）。
+    mk = market_of(code)
+    tcode = mk + str(code).strip().lstrip("sh.").lstrip("sz.").lstrip("bj.")
+    url = "https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=%s" % tcode
     try:
         txt = _http_get(url, timeout=20, referer="https://gu.qq.com/")
         js = json.loads(txt)
@@ -309,22 +329,7 @@ def synth_today_bar_tencent(code):
         cum = rows[-1][2]  # 手（累计）
         return {"d": _today_bj(), "o": o, "c": c, "h": hi, "l": lo, "v": cum * 100.0}
     except Exception:  # noqa: BLE001
-        pass  # 腾讯分钟线失败（如 501）→ 落到下方新浪兜底
-    # 兜底：腾讯分钟线不可用时（本地 ifzq.gtimg.cn 返回 501/被墙），改走新浪日K末根取当日 bar。
-    # 2026-10-21 老罗发现腾讯分钟线 501 致 synth 恒为 None，收盘扫描因此用 T-1 数据判信号
-    # （爱博医疗被误判 W底突破）。新浪源可出网，是老罗加的「单拉今日行情」路径。
-    try:
-        from fetch import fetch_ashare as _fa
-        arr = _fa.fetch_kline(code, n=3)
-        if arr and arr[-1].get("d") == _today_bj():
-            last = arr[-1]
-            # 新浪 getKLineData 的 volume 已是「股」(实拍量比=1.0 vs baostock)，
-            # 与库内口径一致，直接采用、勿乘 100（×100 是腾讯分钟线手→股才需要）。
-            return {"d": _today_bj(), "o": last["o"], "c": last["c"],
-                    "h": last["h"], "l": last["l"], "v": float(last["v"])}
-    except Exception:  # noqa: BLE001
         return None
-    return None
 
 
 def append_today_bar_if_missing(conn, code, bars):
