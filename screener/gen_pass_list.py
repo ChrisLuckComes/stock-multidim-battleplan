@@ -31,6 +31,9 @@ SCR_CN = {
 }
 # 强度档层级（与 gates.quick_strength 判定一致）：STRONG > NEUTRAL > WEAK
 VERDICT_TIER = {"STRONG": 2, "NEUTRAL": 1, "WEAK": 0}
+# 筹码档层级（老罗 2026-10-21 定）：吸筹/锁仓 = 最佳，拉升 = 其次，其他(发散/破位/派发)不进双通过
+CHIP_TIER = {"吸筹中": 3, "集中锁仓中": 3, "拉升脱离成本区中": 2}
+CHIP_BIN = {3: "吸筹/锁仓", 2: "拉升", 1: "其他"}
 
 
 def _pct_map(vals):
@@ -186,6 +189,140 @@ tr:hover td{background:#f7faff}
     return md, hp
 
 
+def gen_best_view(allow, rows, rej):
+    """「强度×筹码」最佳排序：筹码档(吸筹/锁仓 > 拉升) → 强度档 → 强度分。
+
+    老罗 2026-10-21 定：最佳排序 = 强度高 + 吸筹或锁仓，其次是拉升。
+    双通过名单筹码只有三种健康态（发散/破位/派发已被筹码闸否），故档位只有两级：
+      吸筹/锁仓(3) = 吸筹中 + 集中锁仓中；拉升(2) = 拉升脱离成本区中。
+    档内按 strength_score() 从高到低。产物：screener_<tag>_pass_best.{md,html}
+    """
+    pm = {
+        "rs_slope": _pct_map([r.get("rs_slope") for r in allow]),
+        "ma20_slope": _pct_map([r.get("ma20_slope") for r in allow]),
+        "ret20": _pct_map([r.get("ret20") for r in allow]),
+    }
+
+    def key(r):
+        tier = VERDICT_TIER.get(r.get("verdict"), 0)
+        sc = strength_score(r, pm)
+        cb = CHIP_TIER.get((r.get("scr") or {}).get("state"), 1)
+        return (-cb, -tier, -sc)
+
+    ranked = sorted(allow, key=key)
+    n_absorb = sum(1 for r in ranked if CHIP_TIER.get((r.get("scr") or {}).get("state"), 1) == 3)
+    n_pull = sum(1 for r in ranked if CHIP_TIER.get((r.get("scr") or {}).get("state"), 1) == 2)
+    n_star = sum(1 for r in ranked if r.get("recommend"))
+
+    # 分组（按筹码档）
+    bins = defaultdict(list)
+    for r in ranked:
+        cb = CHIP_TIER.get((r.get("scr") or {}).get("state"), 1)
+        bins[cb].append(r)
+
+    # ── MD ──
+    L = []
+    L.append("# 双通过名单 · 强度×筹码 最佳排序 · %s 收盘\n" % TAG.split("_")[0])
+    L.append("> 基准日 **%s**（当日已收盘）｜ 双通过 **%d** 只 → 吸筹/锁仓 **%d** ＋ 拉升 **%d**｜ "
+             "★推荐 %d ｜ 被筹码否 %d 只\n" % (TAG.split("_")[0], len(allow), n_absorb, n_pull, n_star, len(rej)))
+    L.append("> **排序**：筹码档（吸筹/锁仓 > 拉升）→ 强度档（STRONG>NEUTRAL）→ 强度分降序。"
+             "强度分 = RS斜率/MA20斜率/20日涨幅 三维度分位均值 + 领头羊 +6。\n")
+    L.append("| 排名 | 强度分 | 强度档 | 筹码档 | 代码 | 名称 | 战法 | 现价 | 买区 | 止损 | R→t1 | 领头羊 | RS斜率 | MA20斜率 | 20日涨 | 筹码状态 | 推 | 区 |")
+    L.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    for i, r in enumerate(ranked, 1):
+        s = r.get("scr") or {}
+        vt = "强" if r.get("verdict") == "STRONG" else ("中" if r.get("verdict") == "NEUTRAL" else "弱")
+        cb = CHIP_TIER.get(s.get("state"), 1)
+        st = strength_score(r, pm)
+        L.append("| %d | %.1f | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |"
+                 % (i, st, vt, CHIP_BIN.get(cb, "其他"), r.get("code"), r.get("name"),
+                    MODE_CN.get(r.get("mode"), r.get("mode")), num(r.get("spot")),
+                    zone(r), num(r.get("stop")), num(r.get("rr1"), "%.2f"),
+                    "★" if r.get("leader") else "",
+                    num(r.get("rs_slope"), "%.2f"), num(r.get("ma20_slope"), "%.2f"),
+                    num(r.get("ret20"), "%.2f"),
+                    SCR_CN.get(s.get("state"), s.get("state") or "-"),
+                    "★" if r.get("recommend") else "",
+                    ("区内" if r.get("in_zone") else "区外")))
+    L.append("")
+    md = os.path.join(OUT, "screener_%s_pass_best.md" % TAG)
+    open(md, "w", encoding="utf-8").write("\n".join(L))
+
+    # ── HTML ──
+    CSS = """
+body{font-family:-apple-system,"Segoe UI",Microsoft YaHei,sans-serif;margin:0;background:#f5f6f8;color:#1a1a1a;line-height:1.5}
+.wrap{max-width:1540px;margin:0 auto;padding:22px}
+h1{font-size:22px;margin:0 0 4px}
+h2{font-size:16px;margin:26px 0 8px;padding:7px 11px;background:#fff;border-left:4px solid #2f6fed;border-radius:0 8px 8px 0}
+.mut{color:#8a9099;font-size:12.5px}
+.kv{background:#fff;border:1px solid #e6e9ed;border-radius:10px;padding:13px 18px;margin:14px 0;font-size:13.5px;line-height:1.9}
+table{width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;font-size:12.5px}
+th{background:#eef2f8;text-align:left;padding:7px 8px;position:sticky;top:0;font-weight:600;white-space:nowrap}
+td{padding:6px 8px;border-top:1px solid #eef0f3;white-space:nowrap}
+tr:hover td{background:#f7faff}
+.rank{font-weight:700;color:#2f6fed}
+.v-strong{color:#d4380d;font-weight:700}
+.v-neutral{color:#8a9099}
+.chip-3{color:#237804;font-weight:700}
+.chip-2{color:#2f6fed;font-weight:600}
+.lead{color:#fa8c16;font-weight:700}
+.star{color:#d4380d;font-weight:700}
+.zone-in{color:#237804;font-weight:600}
+.zone-out{color:#8c8c8c}
+.scr-吸筹中,.scr-集中锁仓{color:#237804;font-weight:600}
+.scr-拉升中{color:#2f6fed}
+.foot{color:#8a9099;font-size:12px;margin:22px 0 8px}
+"""
+    H = []
+    H.append("<!doctype html><meta charset='utf-8'><title>双通过名单 · 强度×筹码 最佳排序 · %s 收盘</title>" % TAG.split("_")[0])
+    H.append("<style>%s</style><div class='wrap'>" % CSS)
+    H.append("<h1>双通过名单 · 强度×筹码 最佳排序 · %s 收盘</h1>" % TAG.split("_")[0])
+    H.append("<div class='mut'>基准日 <b>%s</b>（当日已收盘）｜ 排序：筹码档（吸筹/锁仓 &gt; 拉升）→ 强度档 → 强度分降序</div>"
+             % TAG.split("_")[0])
+    H.append("<div class='kv'>双通过 <b>%d</b> 只 → 吸筹/锁仓 <b>%d</b> ＋ 拉升 <b>%d</b>"
+             "｜ ★推荐 <b>%d</b> ｜ 被筹码否 <b>%d</b> 只<br>"
+             "筹码档：<span class='chip-3'>吸筹/锁仓</span>（吸筹中+集中锁仓中，最佳）→ "
+             "<span class='chip-2'>拉升</span>（拉升脱离成本区中，其次）。档内按强度分排序。"
+             % (len(allow), n_absorb, n_pull, n_star, len(rej)))
+    for cb in (3, 2, 1):
+        grp = bins.get(cb)
+        if not grp:
+            continue
+        H.append("<h2>%s（%d 只）</h2>" % (CHIP_BIN.get(cb, "其他"), len(grp)))
+        H.append("<table><tr><th>排名</th><th>强度分</th><th>强度档</th><th>代码</th><th>名称</th>"
+                 "<th>战法</th><th>现价</th><th>买区</th><th>止损</th><th>R→t1</th><th>领头羊</th>"
+                 "<th>RS斜率</th><th>MA20斜率</th><th>20日涨</th><th>筹码状态</th><th>推</th><th>区</th></tr>")
+        for i, r in enumerate(ranked, 1):
+            if CHIP_TIER.get((r.get("scr") or {}).get("state"), 1) != cb:
+                continue
+            s = r.get("scr") or {}
+            vt = "强" if r.get("verdict") == "STRONG" else ("中" if r.get("verdict") == "NEUTRAL" else "弱")
+            vcls = "v-strong" if r.get("verdict") == "STRONG" else "v-neutral"
+            zc = "zone-in" if r.get("in_zone") else "zone-out"
+            st = strength_score(r, pm)
+            sc_state = SCR_CN.get(s.get("state"), s.get("state") or "-")
+            H.append("<tr><td class='rank'>%d</td><td><b>%.1f</b></td><td class='%s'>%s</td>"
+                     "<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td class='%s'>%s</td><td>%s</td>"
+                     "<td>%s</td><td class='lead'>%s</td><td>%s</td><td>%s</td><td>%s</td>"
+                     "<td class='scr-%s'>%s</td><td class='%s'>%s</td><td class='%s'>%s</td></tr>" % (
+                         i, st, vcls, vt, r.get("code"), r.get("name"),
+                         MODE_CN.get(r.get("mode"), r.get("mode")), num(r.get("spot")),
+                         zc, zone(r), num(r.get("stop")), num(r.get("rr1"), "%.2f"),
+                         "★" if r.get("leader") else "",
+                         num(r.get("rs_slope"), "%.2f"), num(r.get("ma20_slope"), "%.2f"),
+                         num(r.get("ret20"), "%.2f"),
+                         sc_state, sc_state, "star" if r.get("recommend") else "",
+                         "★" if r.get("recommend") else "", zc,
+                         ("区内" if r.get("in_zone") else "区外")))
+        H.append("</table>")
+    H.append("<div class='foot'>强度分(0~100) = RS斜率/MA20斜率/20日涨幅 三维度分位均值 + 领头羊 +6；"
+             "分位法对 RS 极端哨兵值（≈-99.7，RS 失效）稳健。强度分仅对双通过样本横向比较，不跨日可比。</div>")
+    H.append("</div>")
+    hp = os.path.join(OUT, "screener_%s_pass_best.html" % TAG)
+    open(hp, "w", encoding="utf-8").write("\n".join(H))
+    return md, hp
+
+
 def main():
     src = os.path.join(OUT, "scr_%s.jsonl" % TAG)
     rows = [json.loads(l) for l in open(src, encoding="utf-8") if l.strip()]
@@ -302,6 +439,15 @@ tr:hover td{background:#f7faff}
     print("强度排序 MD :", smd)
     print("强度排序 HTML:", shp)
     print("强度档 STRONG %d / NEUTRAL %d" % (n_strong, n_neutral))
+
+    # ── 强度×筹码 最佳排序视角 ──
+    bmd, bhp = gen_best_view(allow, rows, rej)
+    n_abs = sum(1 for r in allow if CHIP_TIER.get((r.get("scr") or {}).get("state"), 1) == 3)
+    n_pull = sum(1 for r in allow if CHIP_TIER.get((r.get("scr") or {}).get("state"), 1) == 2)
+    print("---")
+    print("强度×筹码 MD :", bmd)
+    print("强度×筹码 HTML:", bhp)
+    print("筹码档 吸筹/锁仓 %d / 拉升 %d" % (n_abs, n_pull))
 
 
 if __name__ == "__main__":
