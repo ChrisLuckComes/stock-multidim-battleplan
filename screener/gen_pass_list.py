@@ -5,6 +5,7 @@
 """
 import json
 import os
+from bisect import bisect_right
 from collections import defaultdict
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -28,6 +29,35 @@ SCR_CN = {
     "吸筹中": "吸筹中", "集中锁仓中": "集中锁仓", "拉升脱离成本区中": "拉升中",
     "筹码发散": "筹码发散", "破位下行中": "破位下行", "派发出货中": "派发出货",
 }
+# 强度档层级（与 gates.quick_strength 判定一致）：STRONG > NEUTRAL > WEAK
+VERDICT_TIER = {"STRONG": 2, "NEUTRAL": 1, "WEAK": 0}
+
+
+def _pct_map(vals):
+    """构造 值→分位(0~100) 的映射；分位 = (≤该值的样本数)/总数*100，对极端值稳健。"""
+    s = sorted(v for v in vals if v is not None)
+    n = len(s)
+    def p(v):
+        if v is None or n == 0:
+            return 0.0
+        return bisect_right(s, v) / n * 100.0
+    return p
+
+
+def strength_score(r, pm):
+    """综合强度分（0~100）：三维度分位均值 + 领头羊加分。
+
+    维度（引擎强度判定的核心驱动，见 gates.quick_strength）：
+      · rs_slope   RS相对强度斜率（相对宽基；STRONG 要求 ≥0）
+      · ma20_slope MA20 斜率（中期趋势；STRONG 要求 >0）
+      · ret20      20日涨幅（中期绝对动量）
+    leader（板块领头羊）给 +6 分位加分。分位法避免 RS 极端哨兵值（≈-99.7）主导排序。
+    """
+    comp = (pm["rs_slope"](r.get("rs_slope"))
+            + pm["ma20_slope"](r.get("ma20_slope"))
+            + pm["ret20"](r.get("ret20"))) / 3.0
+    bonus = 6.0 if r.get("leader") else 0.0
+    return round(min(100.0, comp + bonus), 1)
 
 
 def zone(r):
@@ -40,6 +70,120 @@ def zone(r):
 
 def num(v, fmt="%.2f", dash="-"):
     return dash if v is None else (fmt % v)
+
+
+def gen_strength_view(allow, rows, rej):
+    """按「强度」排序的双通过名单（独立于按战法分组的视角）。
+
+    排序：强度档层级(STRONG>NEUTRAL) → 综合强度分(降序) → R(降序) 兜底。
+    强度分见 strength_score()。产物：screener_<tag>_pass_strength.{md,html}
+    """
+    pm = {
+        "rs_slope": _pct_map([r.get("rs_slope") for r in allow]),
+        "ma20_slope": _pct_map([r.get("ma20_slope") for r in allow]),
+        "ret20": _pct_map([r.get("ret20") for r in allow]),
+    }
+    scored = []
+    for r in allow:
+        tier = VERDICT_TIER.get(r.get("verdict"), 0)
+        sc = strength_score(r, pm)
+        scored.append((r, tier, sc))
+    scored.sort(key=lambda x: (-x[1], -x[2], -(x[0].get("rr1") or 0)))
+
+    n_strong = sum(1 for _, t, _ in scored if t == 2)
+    n_neutral = sum(1 for _, t, _ in scored if t == 1)
+    n_star = sum(1 for r, _, _ in scored if r.get("recommend"))
+
+    # ── MD ──
+    L = []
+    L.append("# 双通过名单 · 按强度排序 · %s 收盘\n" % TAG.split("_")[0])
+    L.append("> 基准日 **%s**（当日已收盘）｜ 双通过 **%d** 只 → 强度档 STRONG **%d** / "
+             "NEUTRAL **%d**｜ ★引擎推荐 %d ｜ 被筹码否 %d 只\n"
+             % (TAG.split("_")[0], len(allow), n_strong, n_neutral, n_star, len(rej)))
+    L.append("> **强度分**（0~100）= RS斜率 / MA20斜率 / 20日涨幅 三维度分位均值 + 领头羊 +6；"
+             "分位法对 RS 极端哨兵值（≈-99.7，RS 失效）稳健。排序：强度档 → 强度分降序。\n")
+    L.append("| # | 强度分 | 档 | 领头羊 | RS斜率 | MA20斜率 | 20日涨 | 代码 | 名称 | 战法 | "
+             "现价 | 买区 | 止损 | R→t1 | 筹码 | 推 | 区 |")
+    L.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    for i, (r, tier, sc) in enumerate(scored, 1):
+        s = r.get("scr") or {}
+        vt = "强" if tier == 2 else ("中" if tier == 1 else "弱")
+        ld = "★" if r.get("leader") else ""
+        L.append("| %d | %.1f | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |"
+                 % (i, sc, vt, ld, num(r.get("rs_slope"), "%.2f"), num(r.get("ma20_slope"), "%.2f"),
+                    num(r.get("ret20"), "%.2f"), r.get("code"), r.get("name"),
+                    MODE_CN.get(r.get("mode"), r.get("mode")), num(r.get("spot")),
+                    zone(r), num(r.get("stop")), num(r.get("rr1"), "%.2f"),
+                    SCR_CN.get(s.get("state"), s.get("state") or "-"),
+                    "★" if r.get("recommend") else "",
+                    ("区内" if r.get("in_zone") else "区外")))
+    L.append("")
+    md = os.path.join(OUT, "screener_%s_pass_strength.md" % TAG)
+    open(md, "w", encoding="utf-8").write("\n".join(L))
+
+    # ── HTML ──
+    CSS = """
+body{font-family:-apple-system,"Segoe UI",Microsoft YaHei,sans-serif;margin:0;background:#f5f6f8;color:#1a1a1a;line-height:1.5}
+.wrap{max-width:1500px;margin:0 auto;padding:22px}
+h1{font-size:22px;margin:0 0 4px}
+h2{font-size:16px;margin:26px 0 8px;padding:7px 11px;background:#fff;border-left:4px solid #2f6fed;border-radius:0 8px 8px 0}
+.mut{color:#8a9099;font-size:12.5px}
+.kv{background:#fff;border:1px solid #e6e9ed;border-radius:10px;padding:13px 18px;margin:14px 0;font-size:13.5px;line-height:1.9}
+table{width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;font-size:12.5px}
+th{background:#eef2f8;text-align:left;padding:7px 8px;position:sticky;top:0;font-weight:600;white-space:nowrap}
+td{padding:6px 8px;border-top:1px solid #eef0f3;white-space:nowrap}
+tr:hover td{background:#f7faff}
+.rank{font-weight:700;color:#2f6fed}
+.v-strong{color:#d4380d;font-weight:700}
+.v-neutral{color:#8a9099}
+.lead{color:#fa8c16;font-weight:700}
+.star{color:#d4380d;font-weight:700}
+.zone-in{color:#237804;font-weight:600}
+.zone-out{color:#8c8c8c}
+.scr-吸筹中,.scr-集中锁仓{color:#237804;font-weight:600}
+.scr-拉升中{color:#2f6fed}
+.scr-筹码发散,.scr-破位下行,.scr-派发出货{color:#d4380d;font-weight:600}
+.foot{color:#8a9099;font-size:12px;margin:22px 0 8px}
+"""
+    H = []
+    H.append("<!doctype html><meta charset='utf-8'><title>双通过名单 · 按强度排序 · %s 收盘</title>" % TAG.split("_")[0])
+    H.append("<style>%s</style><div class='wrap'>" % CSS)
+    H.append("<h1>双通过名单 · 按强度排序 · %s 收盘</h1>" % TAG.split("_")[0])
+    H.append("<div class='mut'>基准日 <b>%s</b>（当日已收盘）｜ 排序：强度档（STRONG&gt;NEUTRAL）→ 强度分降序</div>"
+             % TAG.split("_")[0])
+    H.append("<div class='kv'>双通过 <b>%d</b> 只 → 强度档 STRONG <b>%d</b> / NEUTRAL <b>%d</b>"
+             "｜ ★引擎推荐 <b>%d</b> ｜ 被筹码否 <b>%d</b> 只<br>"
+             "<b>强度分</b>(0~100) = RS斜率 / MA20斜率 / 20日涨幅 三维度分位均值 + 领头羊 +6；"
+             "分位法对 RS 极端哨兵值（≈-99.7，RS 失效）稳健。「区内/区外」= 现价相对买区位置。"
+             % (len(allow), n_strong, n_neutral, n_star, len(rej)))
+    H.append("<table><tr><th>#</th><th>强度分</th><th>档</th><th>领头羊</th><th>RS斜率</th>"
+             "<th>MA20斜率</th><th>20日涨</th><th>代码</th><th>名称</th><th>战法</th><th>现价</th>"
+             "<th>买区</th><th>止损</th><th>R→t1</th><th>筹码</th><th>推</th><th>区</th></tr>")
+    for i, (r, tier, sc) in enumerate(scored, 1):
+        s = r.get("scr") or {}
+        vt = "强" if tier == 2 else ("中" if tier == 1 else "弱")
+        vcls = "v-strong" if tier == 2 else "v-neutral"
+        zc = "zone-in" if r.get("in_zone") else "zone-out"
+        sc_state = SCR_CN.get(s.get("state"), s.get("state") or "-")
+        H.append("<tr><td class='rank'>%d</td><td><b>%.1f</b></td><td class='%s'>%s</td>"
+                 "<td class='lead'>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
+                 "<td>%s</td><td>%s</td><td class='%s'>%s</td><td>%s</td><td>%s</td><td class='scr-%s'>%s</td>"
+                 "<td class='%s'>%s</td><td class='%s'>%s</td></tr>" % (
+                     i, sc, vcls, vt, "★" if r.get("leader") else "",
+                     num(r.get("rs_slope"), "%.2f"), num(r.get("ma20_slope"), "%.2f"),
+                     num(r.get("ret20"), "%.2f"), r.get("code"), r.get("name"),
+                     MODE_CN.get(r.get("mode"), r.get("mode")), num(r.get("spot")),
+                     zc, zone(r), num(r.get("stop")), num(r.get("rr1"), "%.2f"),
+                     sc_state, sc_state, "star" if r.get("recommend") else "",
+                     "★" if r.get("recommend") else "", zc,
+                     ("区内" if r.get("in_zone") else "区外")))
+    H.append("</table>")
+    H.append("<div class='foot'>强度分仅对双通过样本做横向分位比较，不跨日可比；"
+             "RS 斜率撞下限（≈-99.7）表示 RS 相对宽基失效/极弱，已按分位最低处理。</div>")
+    H.append("</div>")
+    hp = os.path.join(OUT, "screener_%s_pass_strength.html" % TAG)
+    open(hp, "w", encoding="utf-8").write("\n".join(H))
+    return md, hp
 
 
 def main():
@@ -149,6 +293,15 @@ tr:hover td{background:#f7faff}
         g = by[m]
         print("  %-12s %3d 只  ★%d" % (MODE_CN.get(m, m), len(g),
                                        sum(1 for r in g if r.get("recommend"))))
+
+    # ── 按强度排序视角 ──
+    smd, shp = gen_strength_view(allow, rows, rej)
+    n_strong = sum(1 for r in allow if r.get("verdict") == "STRONG")
+    n_neutral = sum(1 for r in allow if r.get("verdict") == "NEUTRAL")
+    print("---")
+    print("强度排序 MD :", smd)
+    print("强度排序 HTML:", shp)
+    print("强度档 STRONG %d / NEUTRAL %d" % (n_strong, n_neutral))
 
 
 if __name__ == "__main__":
