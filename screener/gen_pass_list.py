@@ -190,12 +190,14 @@ tr:hover td{background:#f7faff}
 
 
 def gen_best_view(allow, rows, rej):
-    """「强度×筹码」最佳排序：筹码档(吸筹/锁仓 > 拉升) → 强度档 → 强度分。
+    """「强度×筹码」最佳排序：强度档(STRONG>NEUTRAL) → 筹码档(吸筹/锁仓 > 拉升) → 强度分。
 
-    老罗 2026-10-21 定：最佳排序 = 强度高 + 吸筹或锁仓，其次是拉升。
-    双通过名单筹码只有三种健康态（发散/破位/派发已被筹码闸否），故档位只有两级：
+    老罗 2026-10-21 定（口径演进）：19:14「强度高 + 吸筹/锁仓，其次拉升」→
+    20:2x「bestview 也是要按先强度档」（对齐 elastic_dual 交集主表，Grok 意见2）。
+    先看强度档——否则 NEUTRAL 吸筹弱票会压过 STRONG 拉升票（错排）。
+    双通过名单筹码只有三种健康态（发散/破位/派发已被筹码闸否），故筹码档只有两级：
       吸筹/锁仓(3) = 吸筹中 + 集中锁仓中；拉升(2) = 拉升脱离成本区中。
-    档内按 strength_score() 从高到低。产物：screener_<tag>_pass_best.{md,html}
+    同强度档内按筹码档 → strength_score() 从高到低。产物：screener_<tag>_pass_best.{md,html}
     """
     pm = {
         "rs_slope": _pct_map([r.get("rs_slope") for r in allow]),
@@ -207,25 +209,24 @@ def gen_best_view(allow, rows, rej):
         tier = VERDICT_TIER.get(r.get("verdict"), 0)
         sc = strength_score(r, pm)
         cb = CHIP_TIER.get((r.get("scr") or {}).get("state"), 1)
-        return (-cb, -tier, -sc)
+        return (-tier, -cb, -sc)
 
     ranked = sorted(allow, key=key)
     n_absorb = sum(1 for r in ranked if CHIP_TIER.get((r.get("scr") or {}).get("state"), 1) == 3)
     n_pull = sum(1 for r in ranked if CHIP_TIER.get((r.get("scr") or {}).get("state"), 1) == 2)
     n_star = sum(1 for r in ranked if r.get("recommend"))
 
-    # 分组（按筹码档）
+    # 分组（按强度档：先强度后筹码；小节内顺序即全局 ranked 顺序）
     bins = defaultdict(list)
     for r in ranked:
-        cb = CHIP_TIER.get((r.get("scr") or {}).get("state"), 1)
-        bins[cb].append(r)
+        bins[VERDICT_TIER.get(r.get("verdict"), 0)].append(r)
 
     # ── MD ──
     L = []
     L.append("# 双通过名单 · 强度×筹码 最佳排序 · %s 收盘\n" % TAG.split("_")[0])
     L.append("> 基准日 **%s**（当日已收盘）｜ 双通过 **%d** 只 → 吸筹/锁仓 **%d** ＋ 拉升 **%d**｜ "
              "★推荐 %d ｜ 被筹码否 %d 只\n" % (TAG.split("_")[0], len(allow), n_absorb, n_pull, n_star, len(rej)))
-    L.append("> **排序**：筹码档（吸筹/锁仓 > 拉升）→ 强度档（STRONG>NEUTRAL）→ 强度分降序。"
+    L.append("> **排序**：强度档（STRONG>NEUTRAL）→ 筹码档（吸筹/锁仓 > 拉升）→ 强度分降序。"
              "强度分 = RS斜率/MA20斜率/20日涨幅 三维度分位均值 + 领头羊 +6。\n")
     L.append("| 排名 | 强度分 | 强度档 | 筹码档 | 代码 | 名称 | 战法 | 现价 | 买区 | 止损 | R→t1 | 领头羊 | RS斜率 | MA20斜率 | 20日涨 | 筹码状态 | 推 | 区 |")
     L.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
@@ -277,23 +278,24 @@ tr:hover td{background:#f7faff}
     H.append("<!doctype html><meta charset='utf-8'><title>双通过名单 · 强度×筹码 最佳排序 · %s 收盘</title>" % TAG.split("_")[0])
     H.append("<style>%s</style><div class='wrap'>" % CSS)
     H.append("<h1>双通过名单 · 强度×筹码 最佳排序 · %s 收盘</h1>" % TAG.split("_")[0])
-    H.append("<div class='mut'>基准日 <b>%s</b>（当日已收盘）｜ 排序：筹码档（吸筹/锁仓 &gt; 拉升）→ 强度档 → 强度分降序</div>"
+    H.append("<div class='mut'>基准日 <b>%s</b>（当日已收盘）｜ 排序：强度档（STRONG &gt; NEUTRAL）→ 筹码档（吸筹/锁仓 &gt; 拉升）→ 强度分降序</div>"
              % TAG.split("_")[0])
     H.append("<div class='kv'>双通过 <b>%d</b> 只 → 吸筹/锁仓 <b>%d</b> ＋ 拉升 <b>%d</b>"
              "｜ ★推荐 <b>%d</b> ｜ 被筹码否 <b>%d</b> 只<br>"
-             "筹码档：<span class='chip-3'>吸筹/锁仓</span>（吸筹中+集中锁仓中，最佳）→ "
-             "<span class='chip-2'>拉升</span>（拉升脱离成本区中，其次）。档内按强度分排序。"
+             "先强度档（<span class='v-strong'>STRONG</span> &gt; <span class='v-neutral'>NEUTRAL</span>），"
+             "同档内再看筹码：<span class='chip-3'>吸筹/锁仓</span>（最佳）→ "
+             "<span class='chip-2'>拉升</span>（其次）。档内按强度分排序。"
              % (len(allow), n_absorb, n_pull, n_star, len(rej)))
-    for cb in (3, 2, 1):
-        grp = bins.get(cb)
+    for vt, vlabel in ((2, "STRONG · 强"), (1, "NEUTRAL · 中"), (0, "WEAK · 弱")):
+        grp = bins.get(vt)
         if not grp:
             continue
-        H.append("<h2>%s（%d 只）</h2>" % (CHIP_BIN.get(cb, "其他"), len(grp)))
+        H.append("<h2>%s（%d 只）</h2>" % (vlabel, len(grp)))
         H.append("<table><tr><th>排名</th><th>强度分</th><th>强度档</th><th>代码</th><th>名称</th>"
                  "<th>战法</th><th>现价</th><th>买区</th><th>止损</th><th>R→t1</th><th>领头羊</th>"
                  "<th>RS斜率</th><th>MA20斜率</th><th>20日涨</th><th>筹码状态</th><th>推</th><th>区</th></tr>")
         for i, r in enumerate(ranked, 1):
-            if CHIP_TIER.get((r.get("scr") or {}).get("state"), 1) != cb:
+            if VERDICT_TIER.get(r.get("verdict"), 0) != vt:
                 continue
             s = r.get("scr") or {}
             vt = "强" if r.get("verdict") == "STRONG" else ("中" if r.get("verdict") == "NEUTRAL" else "弱")
