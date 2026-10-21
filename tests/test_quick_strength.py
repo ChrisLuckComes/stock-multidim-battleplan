@@ -6,6 +6,7 @@ STRONG（上行+RS正）。RS 维度用显式 broad_bars 控制，保证确定�
 """
 import os
 import sys
+import json
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -85,6 +86,27 @@ def main():
     r5 = quick_strength("002317", _mk(_neutral_stock()), broad_bars=broad5)
     check("WEAK(short weak + RS<0): verdict", r5["verdict"] == "WEAK")
     check("WEAK(short weak + RS<0): RS斜率<0", r5["metrics"]["rs_slope"] < 0)
+
+    # 6) fresh_reclaim 豁免（老罗 2026-10-21 方案A 回归）：鼎捷数智 2026-10-20 真实形态
+    #    收盘 +10.23% 站上 MA5/MA10/MA20，但 MA20 斜率仍 -1.33%（滞后朝下）、MA10>MA5
+    #    （短期均线尚未多头排列）→ 恰是巨阳刚收复中期线的 fresh_reclaim 瞬间。
+    #    旧逻辑会因 MA20 斜率<=0 一刀切判 WEAK 误杀；方案A豁免后应放行（NEUTRAL，非 STRONG）。
+    fx = json.load(open(os.path.join(_ROOT, "tests", "entry", "fixtures",
+                                     "300378_bars_20261020.json"), encoding="utf-8"))
+    fx_bars = fx["bars"]
+    fx_broad = [{"d": b["d"], "c": 1000 + 5 * i} for i, b in enumerate(fx_bars)]  # 慢涨→RS正
+    r6 = quick_strength("300378", fx_bars, broad_bars=fx_broad, name="鼎捷数智")
+    check("fresh_reclaim: verdict != WEAK", r6["verdict"] != "WEAK")
+    check("fresh_reclaim: verdict == NEUTRAL", r6["verdict"] == "NEUTRAL")
+    check("fresh_reclaim: MA20斜率仍<=0(朝下)", r6["metrics"]["ma20_slope"] <= 0)
+    check("fresh_reclaim: 收盘>MA20(已收复)", r6["metrics"]["above_ma20"] is True)
+    check("fresh_reclaim: MA10>MA5(短期未多头排列)",
+          r6["metrics"]["ma10"] is not None and r6["metrics"]["ma5"] <= r6["metrics"]["ma10"])
+
+    # 7) 对照：持续空头（长期下行）不满足豁免 → 仍 WEAK（豁免不漏放）
+    s7 = _rising(40, 30, -0.5)                       # 30 → 持续下行，MA20 向下、收盘<MA20
+    r7 = quick_strength("002317", _mk(s7), broad_bars=_broad(_rising(40, 1000, 1)))
+    check("对照 持续空头 仍 WEAK（豁免不漏放）", r7["verdict"] == "WEAK")
 
     print("\n%d/%d 通过" % (sum(PASS), len(PASS)))
     return 0 if all(PASS) else 1

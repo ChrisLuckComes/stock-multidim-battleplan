@@ -13,6 +13,9 @@
 - WEAK（不跑报告）：收盘 < MA20 或 MA20 斜率 <= 0 或 (MA10 <= MA20 且 RS 斜率 < 0)
 - STRONG（放行）：收盘 > MA20 且 MA20 斜率 > 0 且 MA10 > MA20 且 (RS 斜率 >= 0 或 RS 未知)
 - NEUTRAL（放行但标注）：其余
+- fresh_reclaim 豁免（老罗 2026-10-21 方案A）：当收盘站上 MA5/MA10/MA20 且 MA10>MA5
+  （巨阳刚收复中期线、短期均线尚未多头排列）时，不因 MA20 斜率<=0（及下第三条）前置硬拒，
+  放行到 rule123 的 fresh_reclaim/line_ride 判定反转质量；持续空头（收盘<MA20）不满足豁免仍判弱。
 
 RS 取数走 market_regime 的腾讯免费接口；取不到（离线/限流）时 RS 标 unknown，
 不因此判弱（避免误杀），仅在「MA10<=MA20 且 RS 明确负」时才用 RS 参与判弱。
@@ -96,11 +99,22 @@ def quick_strength(code, bars, broad_bars=None, name=None):
 
     closes = [float(b["c"]) for b in bars]
     last = closes[-1]
+    ma5 = sma(closes, 5)
     ma10 = sma(closes, 10)
     ma20 = sma(closes, 20)
     ma50 = sma(closes, 50)
     s20 = _slope_of(closes, 20)
     ma10_vs_ma20 = (ma10 > ma20) if (ma10 and ma20) else None
+
+    # 反转启动豁免（老罗 2026-10-21 方案A）：巨阳刚收复中期线、但 MA20 斜率仍滞后朝下的
+    # fresh_reclaim 场景。特征 = 收盘站上 MA5/MA10/MA20 且 MA10>MA5（短期均线尚未多头排列、
+    # 恰好是反抽启动位）。满足时不因 MA20 斜率<=0 前置硬拒，放行到 rule123 的
+    # fresh_reclaim/line_ride 判定反转质量；持续空头（收盘<MA20）不满足豁免 → 仍判弱。
+    fresh_reclaim_exempt = (
+        bool(ma5 and ma10 and ma20)
+        and last > ma5 and last > ma10 and last > ma20
+        and ma10 > ma5
+    )
 
     # 收益 / 回撤
     ret20 = (closes[-1] / closes[-21] - 1) * 100 if len(closes) > 20 else None
@@ -109,6 +123,7 @@ def quick_strength(code, bars, broad_bars=None, name=None):
 
     m.update({
         "last_close": round(last, 2),
+        "ma5": round(ma5, 2) if ma5 else None,
         "ma10": round(ma10, 2) if ma10 else None,
         "ma20": round(ma20, 2) if ma20 else None,
         "ma50": round(ma50, 2) if ma50 else None,
@@ -141,7 +156,13 @@ def quick_strength(code, bars, broad_bars=None, name=None):
 
     # ── 收集理由 ──
     if ma20 and s20 is not None and s20 <= 0:
-        reasons.append(f"MA20 斜率 {s20:.2f}% ≤ 0（中期趋势向下）")
+        if fresh_reclaim_exempt:
+            reasons.append(
+                f"MA20 斜率 {s20:.2f}% ≤ 0（中期趋势向下）但 fresh_reclaim 豁免："
+                f"收盘已站上 MA5/MA10/MA20 且 MA10>MA5（巨阳刚收复中期线），"
+                f"放行到 rule123 判定反转质量")
+        else:
+            reasons.append(f"MA20 斜率 {s20:.2f}% ≤ 0（中期趋势向下）")
     if ma20 and last < ma20:
         reasons.append(f"收盘 {last:.2f} < MA20 {ma20:.2f}（价格在中期线下方）")
     if ma10_vs_ma20 is False:
@@ -157,6 +178,9 @@ def quick_strength(code, bars, broad_bars=None, name=None):
         weak = True
     if ma10_vs_ma20 is False and rs_slope is not None and rs_slope < 0:
         weak = True
+    # fresh_reclaim 豁免：巨阳刚收复中期线 → 兜底不判弱，放行到 rule123 判定反转质量
+    if fresh_reclaim_exempt:
+        weak = False
 
     if weak:
         out["verdict"] = "WEAK"
