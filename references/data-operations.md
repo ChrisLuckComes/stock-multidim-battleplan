@@ -105,6 +105,51 @@ ATR：Wilder ATR14。
 
 ---
 
+## 收盘扫描数据时效（2026-10-21 固化 · 老罗「彻底修复代码问题」）
+
+**铁律：收盘扫描只能用「当日已收盘」的数据判信号；当日 bar 补不齐 ⇒ 一律不出信号。**
+
+### 事故（爱博医疗 688050 被误判 W底突破）
+2026-10-21 收盘扫描把 688050 标成 `w_bottom_break`+recommend，**实际当日收绿**。
+真因是**数据时效**，不是形态：库内末根停在 10-20（红 C41.92），真实 10-21 是绿 C40.90<昨收 41.92。
+当天全库 **1989/5004 只（≈40%）缺当日 bar** ⇒ 那版收盘扫描整体不可信。
+
+### 本机网络现实（决定了架构）
+`baostock` 登录失败是常态；腾讯 `web.ifzq.gtimg.cn`（日线 `fqkline` 与分钟线 `minute`）**本机一律 501**
+⇒ **日线源结构性地给不出当日 bar**，当日 bar 只能靠「单拉」拿：**新浪 / 东财可出网**。
+⇒ 所以补齐必须是**扫描流程的必经步骤**，不是刷新流程的附属。
+
+### 六处根因与修法（commit `f455ca1`）
+| # | 位置 | 根因 | 修法 |
+|---|---|---|---|
+| ① | `ash_market` / `bao_store` | 市场判定忽略**已带市场前缀**的代码 ⇒ 宽基 `sh000001` 被判 sz ⇒ 腾讯拼 `sz000001`(平安银行)、新浪拼 `szsh000001`(无效符号) ⇒ 指数当日 bar 永远补不上 | 新增 `ash_market.split_code()` 作唯一真源（带前缀按前缀；裸 `000001` 仍是平安银行）；`market_of/board_of/bscode` 全部委托 |
+| ② | `scan_warfare.ensure_broad` | 只看「根数<60」，不管新鲜度 ⇒ 宽基停在 T-3 | 每次扫描都补宽基当日 bar；baostock 不可用时降级不阻断 |
+| ③ | `scan_warfare.judge` | 陈旧闸 **fail-open**：基准日陈旧时 T-1 数据照样出「今日信号」 | 新增 `stale`：已收盘但基准日 < 今日 ⇒ **一律不出信号** |
+| ④ | `bao_store.refresh_bars` | baostock / mp 路径**从不**补当日 bar | 新增 `_finalize_today_bars()`，所有源路径收尾统一补 |
+| ⑤ | `bao_store.synth_today_bar_tencent` | 腾讯分钟线 cum 单位**因票而异**（688050 已是股 / 600000 是手）⇒ 固定 ×100 放大 100 倍 → 毁掉 RVOL 闸门 | 新增 `_resolve_intraday_volume()`：量纲自适应 + 历史极值保护；新浪作主源、腾讯仅兜底 |
+| ⑥ | `scr_sweep.latest_jsonl` | 按**文件名字典序**取最后一个 ⇒ `'close' < 'midday'` 选错盘中数据 | 按「日期 → session 优先级」取，close 优先 |
+
+### 量纲（踩过两次，必须记住）
+- **新浪日K `volume` 已是「股」**（实拍量比=1.0 vs baostock）⇒ **直接采用、勿 ×100**。
+- **腾讯分钟线 cum 单位因票而异** ⇒ 固定 ×100 会把部分票放大 100 倍（事故：DB v=280599500 vs 真实 ~280 万）。
+
+### 新增 API（用法）
+- `bao_store.ensure_today_bars(conn, target, workers=6, retry=1)`：只补「末根 < target」的票，并发取数，
+  **补不成的必须报出**（返回 `failed_codes` + 写 meta `today_bar_*`），绝不静默。
+- `scan_warfare._session_target(conn, cache)` → `(target, stale)`：target = **宽基末根与全库最新末根的较新者**
+  （天然覆盖周末/节假日）。
+- 调用顺序：`ensure_broad` → `_session_target` → `ensure_today_bars` → 扫描（judge 按 target fail-closed 校验）。
+- ⚑ **别再手写一次性补数脚本**（`scratch/fill_*.py`）：能力已内置，用完即删。
+- ⚑ `scr_sweep.py` 跑筹码体检时**用 `--src` 显式指向** `screener_<date>_close.jsonl`。
+
+### 实证
+- 修复后重跑：**5026 扫描 / 834 过强度闸 / 370 战法信号**；爱博医疗 688050 → `mode=wait`（误判消失）。
+- 端到端：人为删掉 600000 的当日 bar → 跑扫描 → 日志「当日bar补齐（目标 2026-10-21）：待补1 已补1」→ 末根自动恢复。
+- 回归：`tests/test_data_freshness.py`（13 项，每条修复带反例）；全量 **897 passed, 3 skipped**。
+- 报告头会写明「基准日（判的是哪一天）」与当日 bar 补齐统计 —— **看报告先看基准日**。
+
+---
+
 ## 运行加速（2026-09-21）
 
 1. **TDX 连接器（备选，非首选）**：通达信连接器需授权且有额度积分限制（老罗 2026-10-15 确认额度已耗尽），**默认不主动调用**；仅当免费公开源（新浪/东财/腾讯）取数失败、或明确需要盘中实时快照 / F10 财务深度时才走 `tdx_lookup` / `tdx_quotes` / `tdx_kline`。拿到返回后**必须**用 `snapshot_from_tdx.py` 落成统一快照（禁止手工拼 `bars`——字段名 `Data/Open/Close`、日期 `20260921`、量纲「手」任一处错都会静默算错或直接取不到 K 线），再喂 `rule123.py --data` 与 `probe_intraday.py --data` 共用。`tdx_lookup`、全部标的 `tdx_quotes`、已知代码的 `tdx_kline` 相互独立时必须在同一条消息并行发出；只有确实依赖 lookup 返回的 code / setcode 时才串行。
