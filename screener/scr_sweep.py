@@ -100,11 +100,13 @@ def _chip(r):
     return "%s·scr90=%s%%" % (s.get("state"), s.get("scr90"))
 
 
-def render_chip_report(rows, out_md):
+def render_chip_report(rows, out_md, label=None):
     """把筹码体检结果渲染成「带结论列」合并 MD（按战法分组）。
 
     每行直接给 verdict：允许 / 否·筹码发散 / 否·派发出货中，
     被否票就在各分组内（带「否」字），不再分两张表让人找不到。
+    ⚑ label = 「数据日期 · 口径」（如 "2026-10-21 · 收盘"）：报告必须自证是哪天的数据、
+       是收盘还是盘中口径（老罗 2026-10-21 吃过「盘中数据冒充收盘」的亏）。
     """
     now = datetime.datetime.now(
         datetime.timezone(datetime.timedelta(hours=8))).strftime("%Y-%m-%d %H:%M")
@@ -114,8 +116,10 @@ def render_chip_report(rows, out_md):
     star = sum(1 for r in rows
                if (r.get("scr") or {}).get("allow_new") and r.get("recommend"))
     L = []
-    L.append("# 收盘扫描 + 筹码体检 合并报告（带结论列）\n")
-    L.append(f"> 生成时间 {now} ｜ 全量评估 {total} 只 ｜ 允许 {allow} / 否 {reject} / ★推荐 {star}\n")
+    L.append("# 收盘扫描 + 筹码体检 合并报告（带结论列）%s\n"
+             % (("　·　" + label) if label else ""))
+    L.append(f"> 数据日期/口径 **{label or '（见上游 scan_warfare 报告）'}** ｜ 生成时间 {now}"
+             f" ｜ 全量评估 {total} 只 ｜ 允许 {allow} / 否 {reject} / ★推荐 {star}\n")
     L.append("## 漏斗\n")
     L.append("- 战法信号：**%d 只** → 允许新开仓：**%d** → 引擎★推荐：**%d**\n" % (total, allow, star))
     L.append("## 读表说明\n")
@@ -288,7 +292,7 @@ def render_chip_report_html(rows, out_html, date=None):
 
     dstr = date or "（见上游 scan_warfare 报告）"
     header = ("<header><h1>收盘扫描 + 筹码体检 · 合并报告（带结论）</h1>"
-              "<div class='mut'>生成 %s ｜ 数据日期 <b>%s</b> ｜ 全量评估 %d 只 · 0 异常<br>"
+              "<div class='mut'>生成 %s ｜ 数据日期/口径 <b>%s</b> ｜ 全量评估 %d 只 · 0 异常<br>"
               "日线：腾讯前复权 + 分钟线合成当日K（baostock 本机 DNS 不可达，已自动降级）｜ "
               "筹码：scr_chip 走本地库（K线零网络，仅资金流走东财）</div></header>"
               % (now, dstr, total))
@@ -300,7 +304,7 @@ def render_chip_report_html(rows, out_html, date=None):
             "买区（区内/区外）仅示现价相对买区的位置，与是否通过无关。</div>")
 
     html = "\n".join([
-        "<!doctype html><meta charset='utf-8'><title>收盘扫描+筹码体检 合并报告</title>",
+        "<!doctype html><meta charset='utf-8'><title>收盘扫描+筹码体检 合并报告 · %s</title>" % dstr,
         CHIP_CSS,
         "<div class='wrap'>", header, kv,
         "<div style='font-size:14px;font-weight:600;margin:2px 0 4px'>筛选漏斗</div>",
@@ -370,11 +374,16 @@ def main():
     # 全量跑完自动渲染「带结论列」合并报告（试跑/过滤/显式关闭时跳过）
     if not args.limit and not args.only_recommend and not args.no_report:
         tag = os.path.basename(src)[len("screener_"):-len(".jsonl")]
-        date_str = tag.split("_")[0] if "_" in tag else None
+        parts = tag.split("_", 1)
+        date_str = parts[0] if parts else None
+        sess = parts[1] if len(parts) > 1 else ""
+        # ⚑ 数据日期 + 口径都要写进报告（老罗 2026-10-21 吃过「盘中冒充收盘」的亏）
+        label = ("%s · %s" % (date_str, {"close": "收盘", "midday": "盘中"}.get(sess, sess))
+                 if date_str else None)
         md = os.path.join(args.out_dir, "screener_%s_chip.md" % tag)
-        render_chip_report(rows, md)
+        render_chip_report(rows, md, label=label)
         hp = os.path.join(args.out_dir, "screener_%s_chip.html" % tag)
-        render_chip_report_html(rows, hp, date=date_str)
+        render_chip_report_html(rows, hp, date=label)
     return 0
 
 
