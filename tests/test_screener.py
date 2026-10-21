@@ -29,8 +29,12 @@ from screener import bao_store as S      # noqa: E402
 import screener.scan_warfare as SW       # noqa: E402
 
 
-def _bars(n, start=10.0, step=0.10, vol=1e6, first_date="2025-01-02"):
-    """合成日线：默认**单调上行**（MA20 斜率 > 0）。"""
+def _bars(n, start=10.0, step=0.10, vol=1e6, first_date="2025-01-02", zt_at=None):
+    """合成日线：默认**单调上行**（MA20 斜率 > 0）。
+
+    zt_at：在第几个交易日注入一个 +10% 涨停（收盘=前收×1.10），用于让合成股
+    通过弹性闸（老罗 2026-10-21：主板零涨停=僵尸，会被 L0.5 硬拒）。
+    """
     import datetime
     d0 = datetime.date.fromisoformat(first_date)
     out, i = [], 0
@@ -42,11 +46,18 @@ def _bars(n, start=10.0, step=0.10, vol=1e6, first_date="2025-01-02"):
         c = start + step * len(out)
         out.append({"d": d.isoformat(), "o": c - 0.05, "h": c + 0.06,
                     "l": c - 0.08, "c": c, "v": vol})
+    if zt_at is not None and 1 <= zt_at < len(out):
+        prev = out[zt_at - 1]["c"]
+        out[zt_at]["c"] = round(prev * 1.10, 4)
+        out[zt_at]["o"] = round(prev * 1.095, 4)
+        out[zt_at]["h"] = round(prev * 1.10, 4)
+        out[zt_at]["l"] = round(prev * 1.09, 4)
+        out[zt_at]["v"] = vol * 3
     return out
 
 
-def _bars_down(n, start=20.0, step=-0.10, vol=1e6, first_date="2025-01-02"):
-    return _bars(n, start=start, step=step, vol=vol, first_date=first_date)
+def _bars_down(n, start=20.0, step=-0.10, vol=1e6, first_date="2025-01-02", zt_at=None):
+    return _bars(n, start=start, step=step, vol=vol, first_date=first_date, zt_at=zt_at)
 
 
 # ------------------------------------------------------------------
@@ -125,10 +136,14 @@ class TestStore:
 # ------------------------------------------------------------------
 class TestFunnel:
     def test_weak_skips_downstream(self, tmp_path, monkeypatch):
-        """MA20 向下的票：L1 直接出局，build_ev / plan_entry **一次都不调**。"""
+        """MA20 向下的票：L1 直接出局，build_ev / plan_entry **一次都不调**。
+
+        ⚑ 合成股注入一个涨停（zt_at）以通过其 L0.5 弹性闸 —— 否则零涨停会被当成
+        僵尸在 L0.5 拒掉，到不了 L1，测不到「WEAK 不跑后续」。
+        """
         conn = S.connect(str(tmp_path / "t.db"))
         S.init_db(conn)
-        S.save_bars(conn, "600585", _bars_down(90, start=20.0, step=-0.05))
+        S.save_bars(conn, "600585", _bars_down(90, start=20.0, step=-0.05, zt_at=45))
         conn.commit()
 
         calls = {"ev": 0, "pe": 0}
@@ -143,10 +158,13 @@ class TestFunnel:
         conn.close()
 
     def test_strong_runs_downstream(self, tmp_path, monkeypatch):
-        """MA20 上行的票：过 L1，必须真的走到 L2（build_ev + plan_entry 被调用）。"""
+        """MA20 上行的票：过 L1，必须真的走到 L2（build_ev + plan_entry 被调用）。
+
+        ⚑ 合成股注入一个涨停（zt_at）以通过 L0.5 弹性闸。
+        """
         conn = S.connect(str(tmp_path / "t.db"))
         S.init_db(conn)
-        S.save_bars(conn, "600585", _bars(120, start=10.0, step=0.08))
+        S.save_bars(conn, "600585", _bars(120, start=10.0, step=0.08, zt_at=60))
         conn.commit()
 
         calls = {"ev": 0, "pe": 0}
@@ -171,6 +189,25 @@ class TestFunnel:
         assert calls["ev"] == 1
         assert not stage.startswith("L1_")
         assert row is None or row.get("verdict") != "WEAK"
+        conn.close()
+
+    def test_zombie_rejected_at_l0_5(self, tmp_path, monkeypatch):
+        """★ 弹性闸（老罗 2026-10-21）：主板一年零涨停 ⇒ L0.5 直接硬拒，
+        build_ev / plan_entry 一次都不调，且 stage 以 L0_5 开头（计入 L0 统计）。"""
+        conn = S.connect(str(tmp_path / "t.db"))
+        S.init_db(conn)
+        # 单调上行但**无涨停**（每日 +~1%）⇒ 主板零涨停 = 僵尸
+        S.save_bars(conn, "600585", _bars(120, start=10.0, step=0.10))
+        conn.commit()
+
+        calls = {"ev": 0, "pe": 0}
+        monkeypatch.setattr(SW, "build_ev", lambda *a, **k: (calls.__setitem__("ev", calls["ev"] + 1), None, {})[1])
+        monkeypatch.setattr(SW, "plan_entry", lambda *a, **k: calls.__setitem__("pe", calls["pe"] + 1))
+
+        cache = {"sh000001": _bars(120), "sz399001": _bars(120), "sz399006": _bars(120)}
+        row, stage = SW.judge(conn, "600585", "海螺水泥", cache, None)
+        assert row is None and stage == "L0_5_弹性闸(僵尸)"
+        assert calls["ev"] == 0 and calls["pe"] == 0     # 僵尸不进强度/战法
         conn.close()
 
     def test_short_history_blocked_at_l0(self, tmp_path):

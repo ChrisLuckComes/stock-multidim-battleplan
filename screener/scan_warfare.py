@@ -42,6 +42,7 @@ if _ROOT not in sys.path:
 import rule123                                    # noqa: E402
 from rule123 import build_ev, plan_entry          # noqa: E402
 from gates import quick_strength as QS            # noqa: E402
+from gates import elasticity as EL                 # noqa: E402  (股性·弹性维度)
 from screener import bao_store as store           # noqa: E402
 
 OUT_DIR = os.path.join(_ROOT, "out_cn")
@@ -187,6 +188,16 @@ def judge(conn, code, name, cache, last_session, stale=False):
     if last_session and bars[-1]["d"] < last_session:
         return None, "L0_停牌/数据陈旧"
 
+    # ── L0.5 弹性闸（老罗 2026-10-21）：僵尸股直接出局，不跑后续 ──
+    #   主板一年零涨停 / 双创很少 ≥10cm ⇒ 弹性差，选出飙股没意义。
+    #   放在 L1 之前：弹性是「股性」预筛，比强度/战法更便宜，先刷能省大量计算。
+    try:
+        el = EL.elasticity_check(code, bars, name=name)
+    except Exception as e:                               # 弹性判定异常不阻断漏斗
+        el = None
+    if el is not None and el.get("pass") is False:
+        return None, "L0_5_弹性闸(僵尸)"
+
     # ── L1 强度闸：WEAK 直接出局，不跑后续 ──
     try:
         qs = QS.quick_strength(code, bars, broad_bars=broad_for(code, cache), name=name)
@@ -235,6 +246,8 @@ def judge(conn, code, name, cache, last_session, stale=False):
         "ret20": m.get("ret20"),
         "rvol": (meta or {}).get("rvol20"),
         "regime": (meta or {}).get("regime"),
+        # ⚑ 2026-10-21 股性·弹性维度（gates.elasticity）：僵尸闸已过，带原始指标供下游展示
+        "elasticity": el,
         "reasons": qs.get("reasons", [])[:3],
     }, "PASS"
 
@@ -353,6 +366,7 @@ def render_md(rows, session, today, stat):
     L.append("")
     L.append("- 扫描 %d 只 → 过强度闸 %d 只 → 有战法信号 **%d 只**" % (stat["scanned"], stat["passed_l1"], len(cand)))
     L.append("- L1 强度闸刷掉 **%d 只**（WEAK，未跑后续判定）" % stat["weak"])
+    L.append("- L0.5 弹性闸刷掉 **%d 只**僵尸（主板零涨停 / 双创很少 ≥10cm，老罗 2026-10-21）" % stat["elastic_reject"])
     L.append("")
     L.append("## 按战法分组")
     L.append("")
@@ -439,7 +453,8 @@ td:nth-child(2),td:nth-child(4){text-align:left}
 <div class="kv">
 基准日（判的是哪一天）<b>%s</b>%s ｜ 当日bar补齐：待补 %s / 已补 %s / 仍缺 %s<br>
 扫描 <b>%d</b> 只 → 过强度闸 <b>%d</b> → 有战法信号 <b>%d</b> 只<br>
-L1 强度闸刷掉 <b>%d</b> 只（WEAK 直接出局，未跑后续判定）；L0 数据/停牌刷掉 <b>%d</b> 只
+L1 强度闸刷掉 <b>%d</b> 只（WEAK 直接出局，未跑后续判定）；L0 数据/停牌刷掉 <b>%d</b> 只<br>
+L0.5 弹性闸刷掉 <b>%d</b> 只僵尸（主板零涨停 / 双创很少 ≥10cm）
 %s
 </div>
 <table><tr><th>代码</th><th>名称</th><th>强度</th><th>战法</th><th>现价</th><th>买区下沿</th>
@@ -452,6 +467,7 @@ L1 强度闸刷掉 <b>%d</b> 只（WEAK 直接出局，未跑后续判定）；L
                (stat.get("today_bar") or {}).get("filled", "-"),
                (stat.get("today_bar") or {}).get("failed", "-"),
                stat["scanned"], stat["passed_l1"], len(cand), stat["weak"], stat["l0"],
+               stat["elastic_reject"],
                live_stat_line, "\n".join(tr))
 
 
@@ -506,7 +522,11 @@ def main():
         if code in ban or store.is_st(name):
             stages["L0_黑名单/ST"] += 1
             continue
-        row, stage = judge(conn, code, name, cache, index_last, stale=stale)
+        try:
+            row, stage = judge(conn, code, name, cache, index_last, stale=stale)
+        except Exception as e:                       # 单只异常不中断全市场扫描
+            row, stage = None, "LX_异常:%s" % type(e).__name__
+            print("  ⚠ %s 判定异常 %r" % (code, e), flush=True)
         stages[stage] += 1
         if row is None:
             continue
@@ -528,6 +548,7 @@ def main():
     rows.sort(key=_sort_key)   # 全输出（含 jsonl）统一按 战法优先级→强度→R→t1 排序
     stat = {"scanned": len(codes), "passed_l1": l1, "weak": weak,
             "l0": sum(v for k, v in stages.items() if k.startswith("L0")),
+            "elastic_reject": stages.get("L0_5_弹性闸(僵尸)", 0),
             "stages": dict(stages),
             "last_bar": (conn.execute("SELECT MAX(d) FROM bars").fetchone()[0]
                          if hasattr(conn, "execute") else None),
