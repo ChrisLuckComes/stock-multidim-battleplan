@@ -5,12 +5,14 @@
 """
 import json
 import os
+import argparse
 from bisect import bisect_right
 from collections import defaultdict
+from datetime import date
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "out_cn")
-TAG = "2026-10-21_close"
+TAG = "0000-00-00_close"  # 由 main() 按 --date 覆盖，避免硬编码日期读错 jsonl
 
 MODE_CN = {
     "ma_reclaim_break": "出水芙蓉(T0)", "line_pullback": "回踩均线",
@@ -326,6 +328,12 @@ tr:hover td{background:#f7faff}
 
 
 def main():
+    global TAG
+    ap = argparse.ArgumentParser(description="生成双通过名单（战法闸+筹码闸）")
+    ap.add_argument("--date", default=date.today().strftime("%Y-%m-%d"),
+                    help="扫描日期 YYYY-MM-DD（默认今天）；决定读 scr_<date>_close.jsonl")
+    args = ap.parse_args()
+    TAG = "%s_close" % args.date
     src = os.path.join(OUT, "scr_%s.jsonl" % TAG)
     rows = [json.loads(l) for l in open(src, encoding="utf-8") if l.strip()]
     allow = [r for r in rows if (r.get("scr") or {}).get("allow_new")]

@@ -62,8 +62,16 @@ def test_fixture_core_recommends():
 
 
 def test_signal_day_does_not_veto():
-    """默认口径：形态当日不否决（回测不支持当日否决）。"""
-    core, g = gated([GRAVE])
+    """默认口径：形态当日不否决（回测不支持当日否决）。
+
+    ⚠ 2026-10-22 新规（出水芙蓉长上影不算数）后：GRAVE 是墓碑线（无实体+长上影 doji），
+    本就是长上影形态，新规下不再被 T0 引擎当成买入信号 —— 这是正确的。
+    故本测试把「顶部信号(GRAVE)」与「T0 的 D0」解耦：用中性次日 NEUT 作 D0
+    （NEUT 非长上影，T0 引擎照常推荐），GRAVE 提供顶部信号；
+    默认 veto='confirmed' 下顶部形态处于 pending（次日中性、未走弱）→ 不否决，recommend 保持 True。
+    （同 `test_pending_with_t0_still_allowed` 的 fixture 组合，已验证可用。）
+    """
+    core, g = gated([GRAVE, NEUT])
     assert core["recommend"] is True and g["recommend"] is True
     assert not g.get("top_signal_veto")
     assert g["top_signal"]["state"] == "pending"

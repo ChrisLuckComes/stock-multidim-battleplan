@@ -3582,6 +3582,29 @@ def ma_ride_state(bars, atr_v=None, frame="day"):
     }
 
 
+def long_upper_shadow(bar):
+    """★ 长上影判定（2026-10-22 老罗定）：出水芙蓉(T0) 的 D0 若冲高后被砸回、留长上影，
+    说明上方抛压重、突破未遂，**不算数**。
+
+    蜡烛图标准「长上影线」定义（实体为参照，避免被绝对价位/振幅误导）：
+      upper = high - max(open, close)   # 上影线长度（收盘上方到最高）
+      body  = |close - open|
+    长上影 ⟺ upper >= 2 × body        （上影至少是实体两倍长）
+      · 十字星特例（body≈0）：上影 >= 0.5 × 振幅 即判（无实体也要拦）
+    ⚠ 与「昨高 = 最高价（含上影）」不冲突：那条定的是**次日触发价**，本谓词定的是
+      「D0 本身够不够干净」——两件事。
+    """
+    o, h, l, c = bar.get("o"), bar.get("h"), bar.get("l"), bar.get("c")
+    if h is None or o is None or c is None:
+        return False
+    body = abs(c - o)
+    rng = (h - l) if (l is not None and h > l) else 0.0
+    up = h - max(o, c)
+    if body > 1e-9:
+        return up >= 2.0 * body
+    return rng > 0 and up >= 0.5 * rng
+
+
 def ma_reclaim_break(bars, ev, atr_v, last_c, res_win=25):
     """★ T0 买法：均线收复后「过昨高」买（2026-09-20 用户定稿，优先级高于 T1 买突破）。
 
@@ -3793,6 +3816,13 @@ def ma_reclaim_break(bars, ev, atr_v, last_c, res_win=25):
     #     是**幅度**，本条定的是**方向**（当日必须往上），二者不同维度。
     #   ⇒ C 口径实测：34 只 → 保留 24 只（10 只下跌票全剔除），且误杀数 0。
     if len(bars) >= 2 and bars[-1]["c"] <= bars[-2]["c"]:
+        return None
+
+    # ①-C ★ 长上影剔除（2026-10-22 老罗定）：出水芙蓉本义是「收盘贴在平台沿、没有上影抛压」，
+    #   D0 冲高后被砸回留长上影 = 突破未遂，不算数。判定见 long_upper_shadow()。
+    #   ⚠ 守护：中科飞测 688361 2026-06-15（D0 close_pos 0.94、up/body 0.10）仍保留，
+    #     只剔真正长上影的 D0。
+    if long_upper_shadow(bars[-1]):
         return None
 
     # ② 阻力位 ★ 2026-09-20 双锚并列，**取更高者**（用户定）：

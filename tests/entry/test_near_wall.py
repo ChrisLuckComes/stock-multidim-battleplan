@@ -24,9 +24,12 @@ def _mk_bars(d0_high, hist_wall=True):
     """构造 61 根：历史(30) → 平台(26) → 冲高 85.5(1) → 回踩(3) → D0(1)。
 
     - `hist_wall=True` 时在更早历史第 8 根埋一个 92.70 的枢轴高（左右各 2 根都更低）；
-    - D0 收盘固定 84.5（< 窗口最高 85.5 ⇒ 能过 `resistance < last_c` 那道闸门），
+    - D0 收盘贴着 high 收（无长上影，符合 2026-10-22 新规），且 < 窗口最高 85.5
+      ⇒ 既能过 `resistance < last_c` 闸门，又不触发长上影剔除；
       high 由参数控制 —— 传 86.0 即「D0 创窗口新高」，传 85.0 即「未创」。
     """
+    # D0 收盘：贴 high 收但留给「收盘 < 阻力 85.5」的冗余；d0_high 越大收盘越贴高。
+    d0_close = min(85.4, d0_high - 0.6)
     bars = []
     for i in range(30):
         h = 92.70 if (hist_wall and i == 8) else 80.5
@@ -36,7 +39,7 @@ def _mk_bars(d0_high, hist_wall=True):
     bars.append({"d": "W000", "o": 80.5, "h": 85.5, "l": 80.0, "c": 84.0, "v": 2e6})
     for i in range(3):
         bars.append({"d": f"R{i:03d}", "o": 82.5, "h": 83.0, "l": 81.5, "c": 82.0, "v": 1e6})
-    bars.append({"d": "D000", "o": 84.0, "h": d0_high, "l": 83.5, "c": 84.5, "v": 1.5e6})
+    bars.append({"d": "D000", "o": 84.0, "h": d0_high, "l": 83.5, "c": round(d0_close, 2), "v": 1.5e6})
     return bars
 
 

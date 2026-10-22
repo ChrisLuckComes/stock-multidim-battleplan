@@ -82,7 +82,7 @@ def t0_series_kback2(d0=None):
     d = datetime.date.fromisoformat(bars[-1]["d"])
     bars.append({"d": (d + datetime.timedelta(days=1)).isoformat(),
                  "o": 10.95, "h": 11.20, "l": 10.90, "c": 11.15, "v": 1.2e6})
-    d0 = d0 or {"o": 11.15, "h": 11.45, "l": 11.05, "c": 11.20, "v": 1.1e6}
+    d0 = d0 or {"o": 11.05, "h": 11.45, "l": 11.00, "c": 11.40, "v": 1.1e6}  # 干净 D0：收盘贴高点、无长上影
     bars.append(dict(d0, d=(d + datetime.timedelta(days=2)).isoformat()))
     return bars
 
