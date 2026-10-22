@@ -120,9 +120,23 @@ def fetch_index_bars(index_code, n=65):
     url = ("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
            "?param=%s,day,,,%d,qfq" % (index_code, n))
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, context=_CACHE, timeout=15) as r:
-            data = json.loads(r.read().decode("utf-8", "ignore"))
+        # 2026-10-22 加 2 次重试：本机实测连续请求 ifzq 偶发空响应/超时（同进程第 2、3 次
+        # 命中概率高），单次失败会让 broad_state=unknown ⇒ 宽基 gate 静默失效、
+        # 把「大势向下」当「无约束」放行突破单。宁可多花 0.3s 也不能静默降级。
+        data = None
+        for _attempt in range(3):
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    data = json.loads(r.read().decode("utf-8", "ignore"))
+                if data:
+                    break
+            except Exception:
+                data = None
+            if _attempt < 2:
+                time.sleep(0.15)
+        if not data:
+            return None
         node = (data.get("data", {}) or {}).get(index_code)
         if not node:
             return None
@@ -132,10 +146,14 @@ def fetch_index_bars(index_code, n=65):
             return None
         out = []
         for d in bars[-n:]:
+            # 腾讯 fqkline 日线字段顺序 = [日期, 开, 收, 高, 低, 量]（与 quick_strength 一致）。
+            # 2026-10-22 修正：此处曾写成 h=d[2]/l=d[3]/c=d[4]，把「低点」当收盘喂给
+            # index_regime 的 MA10/MA20 与 stock_rs ⇒ 宽基趋势系统性偏空（上证 10-22
+            # 真实收 3658.03，旧代码读到 3649.86＝当日最低）。
             out.append({
                 "d": d[0],
-                "o": float(d[1]), "h": float(d[2]),
-                "l": float(d[3]), "c": float(d[4]), "v": float(d[5]),
+                "o": float(d[1]), "c": float(d[2]),
+                "h": float(d[3]), "l": float(d[4]), "v": float(d[5]),
             })
         _CACHE[index_code] = (now, out)
         return out
