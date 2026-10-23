@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from rule123 import (  # noqa: E402
     build_ev, plan_entry, atr14, is_live_bar, in_ash_session,
     bars_from_us, bars_from_em_us, bars_from_yahoo_min, stop_plan, pivots,
-    key_break_level, merge_intraday_bar, nasdaq_info, STOP_HUG_ATR,
+    key_break_level, merge_intraday_bar, nasdaq_info, STOP_HUG_ATR, targets,
 )
 import account_config as _AC  # noqa: E402
 import bars_source as _BS  # noqa: E402
@@ -2088,6 +2088,38 @@ def _us_daily_live(sym):
     return bars, spot, meta, src, notes
 
 
+def _us_trend_hang(plan, bars, ev, z, lo, hi, hard, cap, t1, atr_v, spot, prev_close):
+    """趋势/突破才改挂单价。震荡返回 None，预案单维持盈亏比深挂原文。
+
+    浅挂规则在 gates/us_hang。这里只给它一个更远的真目标（targets），
+    近端墙仍作为 near_cap，不够 R 时不编造。
+    """
+    from gates.us_hang import choose_us_long_hang, hang_style
+    if hang_style(plan.get("mode"), plan.get("ma_ride")) != "shallow":
+        return None
+    real_target = t1
+    z_for = dict(z or {})
+    if hard is not None:
+        z_for["hard"] = hard
+    tg = None
+    try:
+        Hs, _ = pivots(bars, 3)
+        tg = targets(bars, plan.get("mode"), z_for, atr_v, hi, Hs, ev)
+    except Exception:
+        tg = None
+    if tg and tg.get("target1"):
+        real_target = tg["target1"]
+    pick = choose_us_long_hang(
+        plan.get("mode"), lo, hi, hard, real_target,
+        near_cap=cap, spot=spot, atr=atr_v, vwap=None, early_low=None,
+        prev_close=prev_close, ma_ride=plan.get("ma_ride"),
+        channel_expired=False)
+    if pick.get("style") != "shallow":
+        return None
+    pick["real_target"] = real_target
+    return pick
+
+
 def probe_us(sym, account=None, min_scale=5, until=None, date=None,
              data_file=None, market_data=None):
     """美股版：收盘后预案 + 盘前通道 + 盘中量能突变（T+0 口径）。"""
@@ -2250,38 +2282,90 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None,
                             "qty": None, "stop_struct": defend, "stop_hard": hard,
                             "target1": t1, "reason": plan.get("note")}
     elif has_zone and not invalid:
-        n = us_lots(account, limit, hard)
+        # 趋势/突破走浅挂（gates/us_hang）。震荡 pick 为 None，下面深挂原文不动。
+        pick = _us_trend_hang(plan, bars, ev, z, lo, hi, hard, cap, t1,
+                              atr_v, spot, prev_close)
+        from gates.us_hang import uses_shallow_price
+        hard_exec = hard
+        t1_show = t1
+        cap_show = cap
+        hang_line = None
+        extra_line = None
         kind = "突破跟单"
-        print(f"  类型    : {kind}     模式 {plan['mode']}")
-        print(f"  挂单    : 限价买 {limit:.2f}（买区 {lo}-{hi} 上沿）"
-              f"{'  ⚠ 已被盈亏比闸门下压' if capped else ''}")
-        if hard is not None:
-            print(f"  有效买入区间: {hard} < 买入价 ≤ {limit:.2f} —— "
-                  f"低于硬止损 {hard} 买入 = 开仓即止损，再便宜也不要")
-        if cap is not None:
-            print(f"  买入上限: {cap:.2f}   ← 高于此价，盈亏比跌破 {rc['rr']:.1f}:1，不挂")
-        if n:
+        shallow_order = False
+        if pick and uses_shallow_price(pick) and pick["qualified"]:
+            limit = pick["hang"]
+            capped = False
+            hard_exec = pick["stop"]
+            t1_show = pick.get("real_target") or t1
+            if pick.get("rr_cap") is not None:
+                cap_show = pick["rr_cap"]
+            shallow_order = True
+            if pick["no_chase"]:
+                hang_line = "不追现价，浅挂仍挂在 %.2f（等它回来，不上移）" % limit
+            elif (pick.get("shallow_label") or "") == "买区上沿":
+                hang_line = "限价买 %.2f（买区 %s-%s 上沿 · 趋势浅挂）" % (limit, lo, hi)
+            else:
+                hang_line = "限价买 %.2f（趋势浅挂 · %s；买区 %s-%s）" % (
+                    limit, pick.get("shallow_label") or "", lo, hi)
+        elif pick and (not pick["qualified"]) and pick["deep_unrealistic"]:
+            limit = None
+            kind = "rr_fail"
+            hang_line = "不挂合格单。%s" % pick["reason"]
+        elif pick and not uses_shallow_price(pick):
+            extra_line = pick["reason"]
+        n = None
+        if limit is not None:
+            n = us_lots(account, limit, hard_exec)
+        print_kind = "突破跟单" if kind == "rr_fail" else kind
+        print(f"  类型    : {print_kind}     模式 {plan['mode']}")
+        if hang_line:
+            print(f"  挂单    : {hang_line}")
+        else:
+            print(f"  挂单    : 限价买 {limit:.2f}（买区 {lo}-{hi} 上沿）"
+                  f"{'  ⚠ 已被盈亏比闸门下压' if capped else ''}")
+        if extra_line:
+            print(f"  浅挂    : {extra_line}")
+        if limit is not None and hard_exec is not None:
+            print(f"  有效买入区间: {hard_exec} < 买入价 ≤ {limit:.2f} —— "
+                  f"低于硬止损 {hard_exec} 买入 = 开仓即止损，再便宜也不要")
+        if cap_show is not None and limit is not None:
+            print(f"  买入上限: {cap_show:.2f}   ← 高于此价，盈亏比跌破 {rc['rr']:.1f}:1，不挂")
+        if n and limit is not None:
             print(f"  数量    : {n} 股 = ${n * limit:,.0f}"
                   f"（账户 ${account:,} 的 {n * limit / account * 100:.1f}%，"
                   f"上限=账户全额）")
-            if hard is not None:
-                print(f"  最大亏损: ${n * (limit - hard):,.0f}"
-                      f"（账户 {n * (limit - hard) / account * 100:.2f}%，"
+            if hard_exec is not None:
+                print(f"  最大亏损: ${n * (limit - hard_exec):,.0f}"
+                      f"（账户 {n * (limit - hard_exec) / account * 100:.2f}%，"
                       f"预算 {us_risk_pct() * 100:.1f}%）")
-        print(f"  止损    : 结构={defend}（收盘破 · 不用盯盘） / 硬={hard}（盘中触价 · 需盯盘或券商条件单）")
-        if z.get("hard_note"):
+        print(f"  止损    : 结构={defend}（收盘破 · 不用盯盘） / 硬={hard_exec}（盘中触价 · 需盯盘或券商条件单）")
+        if pick and pick.get("stop_note"):
+            print(f"  止损锚  : {pick['stop_note']}")
+        elif z.get("hard_note"):
             print(f"  止损锚  : {z['hard_note']}")
         elif z.get("hard_noise"):
             print(f"  止损锚  : ⚠ 硬止损距买区下沿仅 {z.get('hard_dist_atr')}×ATR（噪声带内）—— 名义上有止损、等于没有，改用更低限价")
         if z.get("struct_exec") or z.get("hard_exec"):
             print(f"  离场纪律: {z.get('struct_exec')} ｜ {z.get('hard_exec')}")
-        if t1 and hard is not None:
-            risk, rew = limit - hard, t1 - limit
+        if limit is not None and t1_show and hard_exec is not None:
+            risk, rew = limit - hard_exec, t1_show - limit
             rr_txt = f"{rew / risk:.2f}:1" if risk > 0 else "N/A"
-            print(f"  目标    : {t1}（收盘上方 {rc['room_pct']}%）"
-                  f"  → 挂 {limit:.2f}：风险 {risk:.2f} / 收益 {rew:.2f} = {rr_txt}")
-        out["pre_order"] = {"kind": kind, "limit": limit, "cap": cap, "qty": n,
-                            "stop_struct": defend, "stop_hard": hard, "target1": t1}
+            if shallow_order and t1_show != t1:
+                print(f"  目标    : {t1_show}"
+                      f"  → 挂 {limit:.2f}：风险 {risk:.2f} / 收益 {rew:.2f} = {rr_txt}")
+            else:
+                print(f"  目标    : {t1_show}（收盘上方 {rc['room_pct']}%）"
+                      f"  → 挂 {limit:.2f}：风险 {risk:.2f} / 收益 {rew:.2f} = {rr_txt}")
+        pre = {"kind": kind, "limit": limit, "cap": cap_show, "qty": n,
+               "stop_struct": defend, "stop_hard": hard_exec, "target1": t1_show}
+        if pick:
+            pre["hang_style"] = pick["style"]
+            pre["shallow_px"] = pick["shallow_px"]
+            pre["deep_px"] = pick["deep_px"]
+            pre["rr"] = pick["rr"]
+            pre["reason"] = pick["reason"]
+        out["pre_order"] = pre
     elif invalid:
         print(f"  无预案单：买区已作废 —— {plan.get('note')}")
     else:

@@ -15,6 +15,8 @@ from gates.us_session_decide import (decide_us, size_for_us, resolve_cap_us,
                                      summarize, trend_shape, DEFAULT_ACCOUNT,
                                      auto_plan_us, plan_from_us,
                                      fetch_intraday_nasdaq, _parse_et)
+from gates.us_hang import (choose_us_long_hang, hang_style, session_early_low,
+                           uses_shallow_price)
 from open_playbook import long_rr
 
 FAILS = []
@@ -280,6 +282,232 @@ def test_fetch_intraday_nasdaq_monkeypatch():
         R.fetch_json_nasdaq = orig
 
 
+def _fills(hang, day_low):
+    return hang is not None and day_low <= hang + 1e-9
+
+
+def _bar(t, px, low=None):
+    lo = px if low is None else low
+    return {"t": t, "o": px, "h": px, "l": lo, "c": px, "v": 1000.0, "avg": px}
+
+
+def test_hang_style_split():
+    """趋势/突破浅挂；wait 与未知维持深挂。ma_ride 的沿线即使 mode=wait 也浅挂。"""
+    assert hang_style(None) == "deep"
+    assert hang_style("wait") == "deep"
+    assert hang_style("platform_break") == "shallow"
+    assert hang_style("meteor_pit") == "shallow"
+    assert hang_style("wait", {"state": "line_ride"}) == "shallow"
+    assert hang_style("wait", {"state": "new_high"}) == "shallow"
+
+
+def test_session_early_low_ignores_premarket_wick():
+    """正规时段一开始，早盘低点只用 09:30–10:00，不吃凌晨影线。"""
+    mins = [
+        _bar("04:01", 40.0, low=10.0),
+        _bar("09:31", 50.80, low=50.66),
+        _bar("09:45", 51.00, low=50.90),
+        _bar("10:30", 52.00, low=49.00),
+    ]
+    assert session_early_low(mins) == 50.66
+    numbered = mkx([21.90, 21.83, 22.10])
+    assert session_early_low(numbered) == 21.83
+
+
+def test_ntsk_shallow_fills_deep_misses():
+    """买区 21.30–22.46，盈亏比闸压到 21.41；日低 21.83。浅挂上沿能成交，深挂不能。"""
+    common = dict(mode="platform_break", zone_lo=21.30, zone_hi=22.46,
+                  stop=20.50, target=26.50, near_cap=21.41, atr=1.0)
+    overnight = choose_us_long_hang(spot=None, early_low=None, **common)
+    assert overnight["style"] == "shallow"
+    assert overnight["qualified"] is True
+    assert abs(overnight["hang"] - 22.46) < 0.02, overnight
+    assert _fills(overnight["hang"], 21.83)
+    assert not _fills(21.41, 21.83)
+    live = choose_us_long_hang(spot=22.10, early_low=21.83, **common)
+    assert live["qualified"] is True
+    assert live["hang"] + 1e-9 >= 21.83
+    assert live["hang"] > 21.41
+    assert _fills(live["hang"], 21.83)
+
+
+def test_appn_early_dip_fills_zone_top_does_not():
+    """开盘=日低 50.66，买区上沿 50.53，深挂 46.69。早盘低点/贴带能成交；隔夜只挂上沿仍差一截。"""
+    common = dict(mode="platform_break", zone_lo=46.0, zone_hi=50.53,
+                  stop=45.0, target=62.0, near_cap=46.69, atr=2.0, prev_close=49.0)
+    live = choose_us_long_hang(spot=51.0, early_low=50.66, **common)
+    assert live["no_chase"] is False, live
+    assert live["qualified"] is True, live
+    assert live["hang"] + 1e-9 >= 50.66, live
+    assert _fills(live["hang"], 50.66)
+    assert not _fills(46.69, 50.66)
+    overnight = choose_us_long_hang(spot=None, early_low=None, **common)
+    assert abs(overnight["hang"] - 50.53) < 0.02, overnight
+    assert not _fills(overnight["hang"], 50.66)
+
+
+def test_tenb_shallow_fills_deep_misses():
+    """深挂 40.64，日低 41.66。浅挂能成交。"""
+    pick = choose_us_long_hang(
+        "platform_break", zone_lo=40.0, zone_hi=42.20, stop=39.20, target=48.0,
+        near_cap=40.64, spot=None, atr=1.2, early_low=41.66)
+    assert pick["qualified"] is True, pick
+    assert _fills(pick["hang"], 41.66)
+    assert not _fills(40.64, 41.66)
+    assert pick["hang"] > 40.64
+
+
+def test_zs_shallow_preferred_range_keeps_deep():
+    """深挂 235.07 当天确实打到（日低 234.19）。趋势改浅挂；震荡仍深挂，两边都能成交。"""
+    common = dict(zone_lo=230.0, zone_hi=238.0, stop=228.0, target=260.0,
+                  near_cap=235.07, spot=236.0, atr=6.0, early_low=234.19)
+    trend = choose_us_long_hang("platform_break", **common)
+    assert trend["style"] == "shallow"
+    assert trend["qualified"] is True, trend
+    assert trend["hang"] > 235.07
+    assert _fills(trend["hang"], 234.19)
+    assert _fills(235.07, 234.19)
+    assert trend["deep_unrealistic"] is False
+    chop = choose_us_long_hang("wait", **common)
+    assert chop["style"] == "deep"
+    assert abs(chop["hang"] - 235.07) < 0.02, chop
+    assert _fills(chop["hang"], 234.19)
+
+
+def test_range_keeps_crushed_hang_when_it_misses():
+    """震荡不因日低够不着深挂就改浅挂。"""
+    pick = choose_us_long_hang(
+        "wait", zone_lo=21.30, zone_hi=22.46, stop=20.50, target=26.50,
+        near_cap=21.41, spot=22.10, atr=1.0, early_low=21.83)
+    assert pick["style"] == "deep"
+    assert abs(pick["hang"] - 21.41) < 0.02, pick
+    assert not _fills(pick["hang"], 21.83)
+
+
+def test_shallow_rr_fail_does_not_invent_target():
+    """近端目标不够 R，止损要上移超过 0.5×ATR 才够。两档都写明，不挂够不着的深挂。"""
+    pick = choose_us_long_hang(
+        "platform_break", zone_lo=21.30, zone_hi=22.46, stop=20.50, target=22.90,
+        near_cap=21.46, spot=None, atr=0.8, early_low=None)
+    assert pick["qualified"] is False, pick
+    assert pick["hang"] is None, pick
+    assert pick["deep_unrealistic"] is True
+    assert "浅挂" in pick["reason"] and "深挂" in pick["reason"]
+    assert "不编造目标" in pick["reason"]
+    assert pick["stop"] == 20.50
+
+
+def test_shallow_rr_fail_keeps_nearby_deep():
+    """浅挂 R 不够、深挂仍在 0.75×ATR 内：维持深挂，两档都写明，不编造目标。"""
+    pick = choose_us_long_hang(
+        "line_pullback", zone_lo=21.30, zone_hi=22.46, stop=20.50, target=23.20,
+        spot=None, atr=2.0)
+    assert pick["qualified"] is True, pick
+    assert pick["deep_unrealistic"] is False
+    assert uses_shallow_price(pick) is False
+    assert pick["hang"] is not None and pick["hang"] < 22.46
+    assert "不编造目标" in pick["reason"]
+    assert "维持深挂" in pick["reason"]
+
+
+def test_careful_stop_tighten_qualifies_shallow():
+    """差一截时只上移止损 ≤0.5×ATR，且留在噪声带外。"""
+    pick = choose_us_long_hang(
+        "platform_break", zone_lo=48.0, zone_hi=50.0, stop=46.0, target=55.0,
+        spot=None, atr=4.0)
+    assert pick["qualified"] is True, pick
+    assert abs(pick["hang"] - 50.0) < 0.02, pick
+    assert pick["stop"] > 46.0
+    assert pick["stop"] < 47.0
+    assert pick["rr"] + 1e-9 >= 1.5
+    assert pick["stop_note"]
+
+
+def test_no_chase_outside_shallow_ceiling():
+    """现价离开浅挂区不追。通道过期即使价还在买区里也不追。贴着上沿的大阳日仍可浅挂。"""
+    far = choose_us_long_hang(
+        "platform_break", zone_lo=46.0, zone_hi=50.53, stop=45.0, target=62.0,
+        near_cap=46.69, spot=55.0, atr=2.0, early_low=50.66, prev_close=49.0)
+    assert far["no_chase"] is True, far
+    assert far["hang"] != 55.0
+    assert far["hang"] is None or far["hang"] < 52.0
+    expired = choose_us_long_hang(
+        "platform_break", zone_lo=21.30, zone_hi=22.46, stop=20.50, target=26.50,
+        near_cap=21.41, spot=22.10, atr=1.0, early_low=21.83, channel_expired=True)
+    assert expired["no_chase"] is True
+    assert "过期" in expired["reason"]
+    gap_inside = choose_us_long_hang(
+        "platform_break", zone_lo=46.0, zone_hi=50.53, stop=45.0, target=62.0,
+        near_cap=46.69, spot=51.0, atr=2.0, early_low=50.66, prev_close=49.0)
+    assert gap_inside["no_chase"] is False, gap_inside
+
+
+def test_no_crush_when_zone_top_already_clears_rr():
+    """买区上沿自己的 R 已经 ≥1.5 时，不另压一个更深的价。"""
+    pick = choose_us_long_hang(
+        "platform_break", zone_lo=20.0, zone_hi=22.00, stop=20.50, target=26.50,
+        near_cap=23.00, spot=None, atr=1.0)
+    assert abs(pick["hang"] - 22.00) < 0.02, pick
+    assert pick["hang"] <= 22.00 + 1e-9
+
+
+def test_decide_us_lifts_trend_hang_not_near_wall():
+    """计划挂单是深挂，但目标够远：盘中把挂单价抬到浅挂，日低能成交。近端目标则不买。"""
+    mins = [_bar("09:%02d" % (30 + i), 22.10, low=21.83) for i in range(5)]
+    day = {"code": "NTSK", "name": "NTSK", "date": "2026-10-23",
+           "pre": 21.5, "minutes": mins}
+    summary = {"last": mins[-1]}
+    ctx = {"mode": "platform_break", "zone_lo": 21.30, "zone_hi": 22.46,
+           "near_cap": 21.41, "early_low": 21.83, "atr": 1.0}
+    d = decide_us(day, summary, entry=21.41, stop=20.50, target=26.50,
+                  atr=1.0, account=DEFAULT_ACCOUNT, hang_ctx=ctx)
+    assert d["action"] == "能买", d
+    assert d["hang_pick"]["hang"] + 1e-9 >= 21.83
+    assert d["entry"] > 21.41
+    bare = decide_us(day, summary, entry=21.41, stop=20.50, target=26.50,
+                     atr=1.0, account=DEFAULT_ACCOUNT)
+    assert bare["entry"] == 21.41
+    assert bare.get("hang_pick") is None
+    near = decide_us(day, summary, entry=21.41, stop=20.50, target=22.90,
+                     atr=0.8, account=DEFAULT_ACCOUNT,
+                     hang_ctx=dict(ctx, atr=0.8))
+    assert near["action"] == "不买", near
+    assert "浅挂" in near["reason"]
+    assert "R" in near["reason"] or "不够" in near["reason"]
+
+
+def test_decide_us_appn_session_dip():
+    """现价 51、早盘低点 50.66、深挂 46.69。浅挂后能买，挂单价不低于日低。"""
+    mins = [
+        _bar("09:30", 50.66, low=50.66),
+        _bar("09:45", 51.00, low=50.66),
+    ]
+    day = {"code": "APPN", "name": "APPN", "date": "2026-10-23",
+           "pre": 49.0, "minutes": mins}
+    d = decide_us(day, {"last": mins[-1]}, entry=46.69, stop=45.0, target=62.0,
+                  atr=2.0, account=DEFAULT_ACCOUNT,
+                  hang_ctx={"mode": "platform_break", "zone_hi": 50.53,
+                            "near_cap": 46.69, "atr": 2.0})
+    assert d["action"] == "能买", d
+    assert d["hang_pick"]["hang"] + 1e-9 >= 50.66
+    assert _fills(d["entry"], 50.66)
+
+
+def test_plan_from_us_reads_shallow_context():
+    """计划里的 mode 与买区上沿要能被读出来，供浅挂使用。"""
+    import json as _json, tempfile
+    p = os.path.join(tempfile.gettempdir(), "plan_us_shallow.json")
+    with open(p, "w", encoding="utf-8") as f:
+        _json.dump({"code": "NTSK", "mode": "platform_break",
+                    "open_playbook": {"entry": 21.41, "stop": 20.50,
+                                      "target": 26.50, "upper_entry": 22.46}}, f)
+    pl = plan_from_us(p)
+    assert pl["entry"] == 21.41
+    assert pl["mode"] == "platform_break"
+    assert pl["zone_hi"] == 22.46
+    os.remove(p)
+
+
 if __name__ == "__main__":
     test_pullback_buy()
     test_chase_reject()
@@ -297,5 +525,20 @@ if __name__ == "__main__":
     test_plan_from_us_open_playbook()
     test_parse_et()
     test_fetch_intraday_nasdaq_monkeypatch()
+    test_hang_style_split()
+    test_session_early_low_ignores_premarket_wick()
+    test_ntsk_shallow_fills_deep_misses()
+    test_appn_early_dip_fills_zone_top_does_not()
+    test_tenb_shallow_fills_deep_misses()
+    test_zs_shallow_preferred_range_keeps_deep()
+    test_range_keeps_crushed_hang_when_it_misses()
+    test_shallow_rr_fail_does_not_invent_target()
+    test_shallow_rr_fail_keeps_nearby_deep()
+    test_careful_stop_tighten_qualifies_shallow()
+    test_no_chase_outside_shallow_ceiling()
+    test_no_crush_when_zone_top_already_clears_rr()
+    test_decide_us_lifts_trend_hang_not_near_wall()
+    test_decide_us_appn_session_dip()
+    test_plan_from_us_reads_shallow_context()
     print("\n%d failed" % len(FAILS))
     sys.exit(1 if FAILS else 0)

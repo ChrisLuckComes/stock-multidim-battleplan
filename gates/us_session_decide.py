@@ -22,6 +22,8 @@
          老罗 2026-10-13 纠偏：美股拉升是直线，pre+2ATR 会把刚起涨也挡掉，等于禁了追高
          让人买不进；风险交给硬止损(T+0)兜底，不在买入侧预设「涨多了不让买」。
       ④ 仓位：1 股起（无整手），单笔预算 = 账户 ×1.5%。
+      ⑤ 趋势/突破不沿用近端墙压出来的深挂，改走 gates/us_hang（浅挂自己的
+         R≥1.5 才上移；震荡维持深挂）。显式 --entry 不改。详见 AGENTS.md §1c.7。
 
   ⏰ 美股交易时段（致富证券 · 2026-10-10 老罗确认 · 已固化）：
       支持 **24 小时交易**，含 夜盘 / 盘前 (04:00 ET 起) / 盘后。
@@ -71,6 +73,8 @@ if _HERE not in sys.path:
 
 from gates.session_decide import (rally_state, trend_structure, trend_shape,
                                   volume_burst, chase_risk, round_px)
+from gates.us_hang import (choose_us_long_hang, session_early_low,
+                           uses_shallow_price)
 from open_playbook import long_rr, RR_QUALIFIED, max_entry_for_rr
 
 UA = {"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"}
@@ -263,21 +267,73 @@ def auto_plan_us(minutes, atr, pre):
             "target": round_px(target), "cap": None}
 
 
+def _zone_above_entry(up, ent):
+    if up is None:
+        return None
+    if ent is None:
+        return up
+    try:
+        if float(up) > float(ent):
+            return up
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def _zone_pair(obj):
+    """买区上沿：zone_hi / buy_zone.primary_hi / 高于挂单价的 upper_entry。"""
+    if not isinstance(obj, dict):
+        return None, None
+    zlo = obj.get("zone_lo")
+    zhi = obj.get("zone_hi")
+    bz = obj.get("buy_zone") if isinstance(obj.get("buy_zone"), dict) else {}
+    if zlo is None:
+        zlo = bz.get("primary_lo")
+    if zhi is None:
+        zhi = bz.get("primary_hi")
+    if zhi is None:
+        zhi = _zone_above_entry(obj.get("upper_entry"), obj.get("entry"))
+    return zlo, zhi
+
+
 def plan_from_us(plan_path):
     """读美股计划 JSON（与 A股 notes.open_playbook 同构）：顶层 entry/stop/target/cap，
-    或嵌套 open_playbook.{entry,stop,target}。返回 dict。"""
+    或嵌套 open_playbook.{entry,stop,target}。返回 dict。
+
+    另读 mode / 买区上沿 / ma_ride，供趋势浅挂使用。没有这些字段时行为与以前相同。
+    """
     with open(plan_path, encoding="utf-8") as f:
         p = json.load(f)
-    if isinstance(p, dict) and "open_playbook" in p and isinstance(p["open_playbook"], dict):
+    ob = None
+    if isinstance(p, dict) and isinstance(p.get("open_playbook"), dict):
         ob = p["open_playbook"]
         entry, stop = ob.get("entry"), ob.get("stop")
         target, cap = ob.get("target"), ob.get("cap")
     else:
         entry, stop = p.get("entry"), p.get("stop")
         target, cap = p.get("target"), p.get("cap")
+    nested = p.get("plan") if isinstance(p.get("plan"), dict) else {}
     name = p.get("name") or p.get("code") or p.get("symbol")
+    mode = p.get("mode") or nested.get("mode")
+    if mode is None and ob is not None:
+        mode = ob.get("mode")
+    zlo, zhi = _zone_pair(p)
+    if zhi is None:
+        zlo2, zhi2 = _zone_pair(nested)
+        if zlo is None:
+            zlo = zlo2
+        zhi = zhi2
+    if zhi is None and ob is not None:
+        zlo3, zhi3 = _zone_pair(ob)
+        if zlo is None:
+            zlo = zlo3
+        zhi = zhi3
+    ma_ride = p.get("ma_ride")
+    if ma_ride is None:
+        ma_ride = nested.get("ma_ride")
     return {"entry": entry, "stop": stop, "target": target,
-            "cap": cap, "name": name}
+            "cap": cap, "name": name, "mode": mode,
+            "zone_lo": zlo, "zone_hi": zhi, "ma_ride": ma_ride}
 
 
 # ───────────────────────── 规则层（美股适配） ─────────────────────────
@@ -316,9 +372,34 @@ def resolve_cap_us(entry, stop, target, cap, pre, atr):
     return min(cands) if cands else None
 
 
+def _drop_crush_cap(cap, plan_entry, pick, entry):
+    """近端闸压出来的 cap 低于新的浅挂时，不再拿它把挂单价打回去。
+
+    与深挂或原挂单价对得上的才丢掉。另外写的显式上限仍取严。
+    """
+    if cap is None:
+        return None
+    c = float(cap)
+    if c + 1e-9 >= float(entry):
+        return cap
+    deep = pick.get("deep_px") if pick else None
+    crush = False
+    if deep is not None and abs(c - float(deep)) < 0.02:
+        crush = True
+    if abs(c - float(plan_entry)) < 0.02:
+        crush = True
+    if crush:
+        return None
+    return cap
+
+
 def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
-              account=None, risk_scale=1.0):
-    """美股核心判定。结构对齐 A股 decide()，去掉涨跌停/主力资金流/整手/昨收+2% 闸。"""
+              account=None, risk_scale=1.0, hang_ctx=None):
+    """美股核心判定。结构对齐 A股 decide()，去掉涨跌停/主力资金流/整手/昨收+2% 闸。
+
+    hang_ctx 仅在计划自带形态/买区、且调用方没有显式 --entry 时传入。
+    不传则挂单价逻辑与以前完全一致。
+    """
     entry, stop = float(entry), float(stop)
     target = float(target) if target is not None else None
     last = summary["last"]
@@ -326,7 +407,45 @@ def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
     vwap = float(last.get("avg", last["c"]))
     pre = day.get("pre")
 
-    buy_cap = resolve_cap_us(entry, stop, target, cap, pre, atr)
+    pick = None
+    plan_entry = entry
+    lifted_buy = False
+    if hang_ctx:
+        early = hang_ctx.get("early_low")
+        if early is None:
+            early = session_early_low(day.get("minutes") or [])
+        ctx_vwap = hang_ctx.get("vwap")
+        if ctx_vwap is None:
+            ctx_vwap = vwap
+        ctx_stop = hang_ctx.get("stop")
+        if ctx_stop is None:
+            ctx_stop = stop
+        ctx_target = hang_ctx.get("target")
+        if ctx_target is None:
+            ctx_target = target
+        ctx_atr = hang_ctx.get("atr")
+        if ctx_atr is None:
+            ctx_atr = atr
+        near = hang_ctx.get("near_cap")
+        if near is None:
+            near = plan_entry
+        pick = choose_us_long_hang(
+            hang_ctx.get("mode"), hang_ctx.get("zone_lo"), hang_ctx.get("zone_hi"),
+            ctx_stop, ctx_target, near_cap=near, spot=price, atr=ctx_atr,
+            vwap=ctx_vwap, early_low=early, prev_close=pre,
+            ma_ride=hang_ctx.get("ma_ride"),
+            channel_expired=bool(hang_ctx.get("channel_expired")),
+            rr_floor=hang_ctx.get("rr_floor"))
+        if uses_shallow_price(pick) and pick["qualified"]:
+            entry = float(pick["hang"])
+            stop = float(pick["stop"])
+            if not pick["no_chase"]:
+                lifted_buy = True
+
+    eff_cap = cap
+    if pick and uses_shallow_price(pick) and pick["qualified"]:
+        eff_cap = _drop_crush_cap(cap, plan_entry, pick, entry)
+    buy_cap = resolve_cap_us(entry, stop, target, eff_cap, pre, atr)
     rr = long_rr(price, target, stop) if target is not None else None
     rr_at_entry = long_rr(entry, target, stop) if target is not None else None
 
@@ -347,7 +466,11 @@ def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
         "rally": rally, "structure": struct, "shape": shape,
         "burst": burst, "chase": chase,
         "tape": {"label": "美股无主力资金流", "text": "仅看量价，不读主力净买卖。"},
+        "hang_pick": pick,
     }
+    if pick and pick["style"] == "shallow" and not uses_shallow_price(pick):
+        if not pick["no_chase"] and not pick["deep_unrealistic"]:
+            out["caution"] = pick["reason"]
 
     def _reject(reason):
         out["reason"] = reason
@@ -359,6 +482,15 @@ def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
         out["arm_price"] = entry
         out["arm_note"] = "回到 %.2f 以下再判（结构止损下方不接飞刀）" % entry
         return _reject("现价 %.2f 已在止损 %.2f 下方，不接飞刀。" % (price, stop))
+    if pick and pick["no_chase"]:
+        if pick["hang"] is not None and price > float(pick["hang"]) and float(pick["hang"]) > stop:
+            out["arm_price"] = float(pick["hang"])
+            out["arm_note"] = "不追现价，回到 %.2f 再判" % pick["hang"]
+        return _reject(pick["reason"])
+    if pick and pick["style"] == "shallow" and not pick["qualified"] and pick["deep_unrealistic"]:
+        out["arm_price"] = None
+        out["arm_note"] = ""
+        return _reject(pick["reason"])
     if buy_cap is not None and price > buy_cap + 1e-9:
         return _reject("现价 %.2f 高于买入上限 %.2f（R 不足或超计划上限）。" % (price, buy_cap))
     if target is None:
@@ -394,6 +526,8 @@ def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
                      % (tag, limit_buy, stop,
                         ("%.2f" % target) if target is not None else "—",
                         ("%.2f" % rr) if rr is not None else "—"))
+    if lifted_buy and pick and pick.get("reason"):
+        out["reason"] = pick["reason"] + "。" + out["reason"]
     return out
 
 
@@ -441,6 +575,8 @@ def render_us(d):
         lines.append("%s 盘中拉升：%s（缺口 %+.2f%% 10分 %+.2f%% 20分 %+.2f%% 近20分收均价上 %.0f%%）"
                      % ("★" if r.get("ok") else "·", r["tier"], r.get("gap", 0),
                         r.get("rise10", 0), r.get("rise20", 0), r.get("above", 0)))
+    if d.get("caution"):
+        lines.append("提示  %s" % d["caution"])
     lines.append("结论  %s。%s" % (d["action"], d["reason"]))
     if d["action"] != "能买" and d.get("arm_price") is not None:
         lines.append("盯价  %.2f  %s" % (d["arm_price"], d.get("arm_note") or ""))
@@ -535,10 +671,25 @@ def main(argv=None):
         print("挂单价必须高于止损")
         return 3
 
+    hang_ctx = None
+    if plan and args.entry is None and (plan.get("mode") or plan.get("zone_hi") is not None):
+        hang_ctx = {
+            "mode": plan.get("mode"),
+            "zone_lo": plan.get("zone_lo"),
+            "zone_hi": plan.get("zone_hi"),
+            "ma_ride": plan.get("ma_ride"),
+            "near_cap": float(entry),
+            "early_low": session_early_low(day["minutes"]),
+            "channel_expired": False,
+            "atr": atr,
+            "stop": float(stop),
+            "target": float(target) if target is not None else None,
+        }
+
     t1 = time.perf_counter()
     d = decide_us(day, summary, entry, stop, target,
                   cap=cap, atr=atr, account=args.account,
-                  risk_scale=args.risk_scale)
+                  risk_scale=args.risk_scale, hang_ctx=hang_ctx)
     d["plan_src"] = plan_src
     d["intraday_source"] = args.source
     decide_ms = (time.perf_counter() - t1) * 1000.0
