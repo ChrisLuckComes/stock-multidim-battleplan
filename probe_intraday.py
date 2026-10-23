@@ -2233,10 +2233,12 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None,
         lo, hi = z["primary_lo"], z["primary_hi"]
         defend = z.get("invalidation")
         rc = rc_us
-        hard, cap, t1 = rc["hard"], rc["cap"], rc["target1"]
-        capped = cap is not None and hi > cap
-        limit = round(cap, 2) if capped else hi
-        hard = round(hard, 2) if hard is not None else None
+        near_cap, near_t = rc.get("cap"), rc.get("target1")
+        hard = rc.get("hard")
+        from gates.us_session_decide import select_us_hang, us_exec_target
+        t1, cap = us_exec_target(plan.get("targets"), hard, near_t, near_cap)
+        if hard is not None:
+            hard = round(hard, 2)
         print(f"  价位关系: {zone_position_txt(last['c'], lo, hi)}")
     if has_zone and not invalid and not plan["recommend"]:
         print("  类型    : ❌ 不建议执行（recommend=False）—— 不给挂单价 / 数量 / 金额")
@@ -2250,38 +2252,81 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None,
                             "qty": None, "stop_struct": defend, "stop_hard": hard,
                             "target1": t1, "reason": plan.get("note")}
     elif has_zone and not invalid:
-        n = us_lots(account, limit, hard)
+        day_open = None
+        day_low = None
+        if live_bar is not None:
+            day_open = live_bar.get("o")
+            day_low = live_bar.get("l")
+        chg = None
+        if spot is not None and prev_close:
+            chg = (float(spot) - float(prev_close)) / float(prev_close)
+        hist = bars[:-1] if live_bar is not None else bars
+        ride = None
+        ma_ride = plan.get("ma_ride") or {}
+        if isinstance(ma_ride, dict):
+            ride = ma_ride.get("state")
+        px_now = last["c"] if live_bar is not None else None
+        sel = select_us_hang(
+            px_now, hard, t1, vwap=None, pre=prev_close, day_open=day_open,
+            zone_lo=lo, zone_hi=hi, cap=cap, mode=plan.get("mode"),
+            ride_state=ride, bars=hist, day_low=day_low, day_low_final=False,
+            day_chg_pct=chg, channel_expired=False)
         kind = "突破跟单"
-        print(f"  类型    : {kind}     模式 {plan['mode']}")
-        print(f"  挂单    : 限价买 {limit:.2f}（买区 {lo}-{hi} 上沿）"
-              f"{'  ⚠ 已被盈亏比闸门下压' if capped else ''}")
-        if hard is not None:
-            print(f"  有效买入区间: {hard} < 买入价 ≤ {limit:.2f} —— "
-                  f"低于硬止损 {hard} 买入 = 开仓即止损，再便宜也不要")
-        if cap is not None:
-            print(f"  买入上限: {cap:.2f}   ← 高于此价，盈亏比跌破 {rc['rr']:.1f}:1，不挂")
-        if n:
-            print(f"  数量    : {n} 股 = ${n * limit:,.0f}"
-                  f"（账户 ${account:,} 的 {n * limit / account * 100:.1f}%，"
-                  f"上限=账户全额）")
+        hang = sel["hang"]
+        tier = sel["tier"]
+        anchor = sel["anchor"]
+        if tier == "不追" or hang is None:
+            print(f"  类型    : 不追     模式 {plan['mode']}")
+            print(f"  原因    : {sel['why']}")
+            print(f"  参考位  : 买区 {lo}-{hi} ｜ 硬止损 {hard}")
+            if cap is not None:
+                print(f"  买入上限: {cap:.2f}   ← 高于此价，盈亏比跌破 {rc['rr']:.1f}:1，不挂")
+            out["pre_order"] = {
+                "kind": "no_chase", "limit": None, "cap": cap, "qty": None,
+                "stop_struct": defend, "stop_hard": hard, "target1": t1,
+                "hang_tier": tier, "hang_anchor": anchor, "hang_why": sel["why"],
+                "reason": sel["why"]}
+        else:
+            limit = float(hang)
+            n = us_lots(account, limit, hard)
+            print(f"  类型    : {kind}     模式 {plan['mode']}")
+            print(f"  挂单    : {tier} 限价买 {limit:.2f}（{anchor}）")
+            if sel.get("chase_now"):
+                print(f"  现价    : 不追。{sel['why']}")
+            if tier == "深档" and limit < float(hi) - 0.01:
+                print("  说明    : 浅档盈亏比不足，挂深档")
+            if (near_cap is not None and float(near_cap) < float(lo) - 0.01
+                    and (cap is None or float(near_cap) < float(cap) - 0.01)):
+                print(f"  近端压力: {float(near_cap):.2f} 在买区下沿之下，不拿它压挂单")
             if hard is not None:
-                print(f"  最大亏损: ${n * (limit - hard):,.0f}"
-                      f"（账户 {n * (limit - hard) / account * 100:.2f}%，"
-                      f"预算 {us_risk_pct() * 100:.1f}%）")
-        print(f"  止损    : 结构={defend}（收盘破 · 不用盯盘） / 硬={hard}（盘中触价 · 需盯盘或券商条件单）")
-        if z.get("hard_note"):
-            print(f"  止损锚  : {z['hard_note']}")
-        elif z.get("hard_noise"):
-            print(f"  止损锚  : ⚠ 硬止损距买区下沿仅 {z.get('hard_dist_atr')}×ATR（噪声带内）—— 名义上有止损、等于没有，改用更低限价")
-        if z.get("struct_exec") or z.get("hard_exec"):
-            print(f"  离场纪律: {z.get('struct_exec')} ｜ {z.get('hard_exec')}")
-        if t1 and hard is not None:
-            risk, rew = limit - hard, t1 - limit
-            rr_txt = f"{rew / risk:.2f}:1" if risk > 0 else "N/A"
-            print(f"  目标    : {t1}（收盘上方 {rc['room_pct']}%）"
-                  f"  → 挂 {limit:.2f}：风险 {risk:.2f} / 收益 {rew:.2f} = {rr_txt}")
-        out["pre_order"] = {"kind": kind, "limit": limit, "cap": cap, "qty": n,
-                            "stop_struct": defend, "stop_hard": hard, "target1": t1}
+                print(f"  有效买入区间: {hard} < 买入价 ≤ {limit:.2f} —— "
+                      f"低于硬止损 {hard} 买入 = 开仓即止损，再便宜也不要")
+            if cap is not None:
+                print(f"  买入上限: {cap:.2f}   ← 高于此价，盈亏比跌破 {rc['rr']:.1f}:1，不挂")
+            if n:
+                print(f"  数量    : {n} 股 = ${n * limit:,.0f}"
+                      f"（账户 ${account:,} 的 {n * limit / account * 100:.1f}%，"
+                      f"上限=账户全额）")
+                if hard is not None:
+                    print(f"  最大亏损: ${n * (limit - hard):,.0f}"
+                          f"（账户 {n * (limit - hard) / account * 100:.2f}%，"
+                          f"预算 {us_risk_pct() * 100:.1f}%）")
+            print(f"  止损    : 结构={defend}（收盘破 · 不用盯盘） / 硬={hard}（盘中触价 · 需盯盘或券商条件单）")
+            if z.get("hard_note"):
+                print(f"  止损锚  : {z['hard_note']}")
+            elif z.get("hard_noise"):
+                print(f"  止损锚  : ⚠ 硬止损距买区下沿仅 {z.get('hard_dist_atr')}×ATR（噪声带内）—— 名义上有止损、等于没有，改用更低限价")
+            if z.get("struct_exec") or z.get("hard_exec"):
+                print(f"  离场纪律: {z.get('struct_exec')} ｜ {z.get('hard_exec')}")
+            if t1 and hard is not None:
+                risk, rew = limit - hard, t1 - limit
+                rr_txt = f"{rew / risk:.2f}:1" if risk > 0 else "N/A"
+                print(f"  目标    : {t1}"
+                      f"  → 挂 {limit:.2f}：风险 {risk:.2f} / 收益 {rew:.2f} = {rr_txt}")
+            out["pre_order"] = {
+                "kind": kind, "limit": limit, "cap": cap, "qty": n,
+                "stop_struct": defend, "stop_hard": hard, "target1": t1,
+                "hang_tier": tier, "hang_anchor": anchor, "hang_why": sel["why"]}
     elif invalid:
         print(f"  无预案单：买区已作废 —— {plan.get('note')}")
     else:
@@ -2347,20 +2392,31 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None,
               f"{'  ← 暂无盘前成交，按「无信号」处理，不要当利好' if flat else ''}")
         if has_zone:
             lo, hi = z["primary_lo"], z["primary_hi"]
+            po = out.get("pre_order") or {}
+            hang_px = po.get("limit")
+            hang_tier = po.get("hang_tier") or ""
             if spot < lo:
                 print(f"  → 低于买区下沿 {lo}：仍在调整区下方，按回踩单等（勿因盘前弱就抢）")
             elif spot <= hi:
-                _how = (f"挂 {hi} 限价即可，不必市价追"
-                        if live_bar is not None
-                        else f"开盘前挂 {hi} 即可吃到，不必市价追盘前")
+                show = hi if hang_px is None else hang_px
+                tier_bit = ("（%s）" % hang_tier) if hang_tier else ""
+                if live_bar is not None:
+                    _how = "挂 %s%s限价即可，不必市价追" % (show, tier_bit)
+                else:
+                    _how = "开盘前挂 %s%s即可吃到，不必市价追盘前" % (show, tier_bit)
                 print(f"  → ✅ 落在买区 {lo}-{hi} 内：{_how}")
             else:
                 if cap is not None and spot > cap:
                     # 此处显示的是「高于买入上限」的距离，必须用 cap 而非买区上沿 hi 计算，
                     # 否则标签写 cap、数字却按 hi 算（曾把 0.72×ATR 印成 0.21×ATR）。
-                    print(f"  → ❌ 已高于买入上限 {cap}"
-                          f"（+{(spot - cap) / atr_v:.2f}×ATR）："
-                          f"回踩单作废，只留盘中量能突变")
+                    if hang_px is not None and hang_px <= cap:
+                        print(f"  → ❌ 现价高于买入上限 {cap}"
+                              f"（+{(spot - cap) / atr_v:.2f}×ATR），不追。"
+                              f"回踩单仍挂 {hang_px}（{hang_tier}）")
+                    else:
+                        print(f"  → ❌ 已高于买入上限 {cap}"
+                              f"（+{(spot - cap) / atr_v:.2f}×ATR）："
+                              f"回踩单作废，只留盘中量能突变")
                 else:
                     d_atr = (spot - hi) / atr_v
                     print(f"  → ⚠ 高于买区上沿 {hi} {d_atr:.2f}×ATR 但仍在闸门内："

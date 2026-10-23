@@ -14,8 +14,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 from gates.us_session_decide import (decide_us, size_for_us, resolve_cap_us,
                                      summarize, trend_shape, DEFAULT_ACCOUNT,
                                      auto_plan_us, plan_from_us,
-                                     fetch_intraday_nasdaq, _parse_et)
-from open_playbook import long_rr
+                                     fetch_intraday_nasdaq, _parse_et,
+                                     select_us_hang, us_exec_target,
+                                     lows_often_reach_depth, render_us)
+from open_playbook import long_rr, max_entry_for_rr
 
 FAILS = []
 
@@ -280,6 +282,132 @@ def test_fetch_intraday_nasdaq_monkeypatch():
         R.fetch_json_nasdaq = orig
 
 
+def test_trend_names_hang_shallow():
+    """APPN/NTSK/TENB 同一结构：近端墙深档挂在日低之下，买区上沿当日摸得到。
+
+    三只没有分开的行情快照，几何只造一份，名字写进断言。
+    近端目标 41.20 的 RR 闸 = 39.76，低于日低 40.42。计划目标 45 下买区上沿 R 仍 ≥1.5。
+    """
+    crushed = max_entry_for_rr(1.5, 41.20, 38.80)
+    assert crushed < 40.42, crushed
+    for name in ("APPN", "NTSK", "TENB"):
+        sel = select_us_hang(
+            41.10, 38.80, 45.00, vwap=40.45, pre=40.60, day_open=40.50,
+            zone_lo=39.20, zone_hi=40.80, mode="platform_break",
+            reaches_deep=False, day_low=40.42)
+        chk("%s 浅档" % name, sel["tier"] == "浅档", sel)
+        chk("%s 买区上沿" % name, sel["anchor"] == "买区上沿", sel)
+        chk("%s 挂在深档之上且日低摸得到" % name,
+            sel["hang"] is not None and sel["hang"] > crushed and 40.42 <= sel["hang"] + 1e-9,
+            sel)
+        chk("%s 挂在买区上沿" % name, abs(sel["hang"] - 40.80) < 0.001, sel)
+
+
+def test_zs_deep_hang_fills():
+    """ZS：浅档 R<1.5，深档 RR 闸 235.07，日低 234.19 摸得到。平台下沿 230 摸不到。"""
+    sel = select_us_hang(
+        240.0, 228.0, 245.68, vwap=241.0, pre=242.0, day_open=241.5,
+        zone_lo=230.0, zone_hi=243.0, mode="wait", reaches_deep=True,
+        day_low=234.19, day_low_final=True)
+    chk("ZS 深档", sel["tier"] == "深档", sel)
+    chk("ZS 锚是 RR闸", sel["anchor"] == "RR闸", sel)
+    chk("ZS 挂 235.07", sel["hang"] is not None and abs(sel["hang"] - 235.07) < 0.001, sel)
+    chk("ZS 日低摸到深档", sel["hang"] is not None and 234.19 <= sel["hang"] + 1e-9, sel)
+    chk("ZS 结构是震荡", sel["structure"] == "range", sel)
+
+
+def test_trend_does_not_hard_wait_deep():
+    """趋势、浅档 R<1.5、现价还在深档之上：不追，不硬等深档。"""
+    sel = select_us_hang(
+        50.0, 40.0, 52.0, day_open=49.5, zone_lo=44.0, zone_hi=50.0,
+        mode="platform_break", reaches_deep=False, day_low=44.0)
+    chk("趋势不硬等深档", sel["tier"] == "不追", sel)
+    chk("不给深档挂价", sel["hang"] is None, sel)
+
+
+def test_trend_premarket_does_not_become_range():
+    """开盘未知的趋势模式，不许因为日低常摸到就改判深档。"""
+    sel = select_us_hang(
+        50.0, 40.0, 52.0, pre=50.0, zone_lo=44.0, zone_hi=50.0,
+        mode="platform_break", reaches_deep=True)
+    chk("开盘未知维持不追", sel["tier"] == "不追", sel)
+    chk("开盘未知不挂深档", sel["hang"] is None, sel)
+    chk("开盘未知不是震荡", sel["structure"] != "range", sel)
+
+
+def test_no_chase_extended_day():
+    sel = select_us_hang(
+        106.0, 93.0, 120.0, pre=100.0, day_chg_pct=0.056,
+        zone_lo=95.0, zone_hi=100.0, day_open=100.0,
+        mode="platform_break", reaches_deep=False)
+    chk("涨超 5% 不追", sel["tier"] == "不追" and sel["hang"] is None, sel)
+    chk("涨超 5% 标记不追", sel["chase_now"] is True, sel)
+
+
+def test_no_chase_above_cap():
+    sel = select_us_hang(
+        41.10, 38.80, 45.0, vwap=40.45, pre=40.60, day_open=40.50,
+        zone_lo=39.20, zone_hi=40.80, cap=40.90, mode="platform_break",
+        reaches_deep=False)
+    chk("高于上限仍标不追", sel["chase_now"] is True and "上限" in sel["why"], sel)
+    chk("上限下方的浅档还在", sel["tier"] == "浅档" and abs(sel["hang"] - 40.80) < 0.001, sel)
+
+
+def test_no_chase_channel_expired():
+    sel = select_us_hang(40.0, 38.0, 50.0, channel_expired=True)
+    chk("通道过期不追", sel["tier"] == "不追" and sel["hang"] is None, sel)
+    chk("通道过期原因", "过期" in sel["why"], sel)
+
+
+def test_lows_often_reach_depth():
+    bars = [{"o": 100.0, "l": 99.0} for _ in range(10)]
+    chk("回撤 0.5% 常摸到", lows_often_reach_depth(bars, 0.005) is True)
+    chk("回撤 2% 不常摸到", lows_often_reach_depth(bars, 0.02) is False)
+    chk("样本不足是未知", lows_often_reach_depth(bars[:3], 0.005) is None)
+
+
+def test_us_exec_target_prefers_plan():
+    """计划目标 45 的买入上限必须高于近端墙闸 39.76，否则浅档又被压没。"""
+    target, cap = us_exec_target({"target1": 45.0}, 38.80, 41.20, 39.76)
+    chk("用计划目标", target == 45.0, target)
+    chk("上限高于近端墙", cap is not None and cap > 40.80, cap)
+    missing, cap2 = us_exec_target(None, None, None, None)
+    chk("没有目标不编造", missing is None and cap2 is None, (missing, cap2))
+
+
+def test_decide_us_labels_shallow():
+    """现价高于浅档：不买，盯买区上沿，输出写明浅档。"""
+    mins = mkx([40.50] * 8 + [41.10], avg_off=0.65)
+    day = {"code": "APPN", "name": "Appian", "date": "2026-10-23",
+           "pre": 40.60, "minutes": mins}
+    d = decide_us(day, {"last": mins[-1]}, entry=40.80, stop=38.80, target=45.0,
+                  zone_lo=39.20, zone_hi=40.80, mode="platform_break",
+                  reaches_deep=False, account=DEFAULT_ACCOUNT)
+    chk("高于浅档不买", d["action"] == "不买", d)
+    chk("档位是浅档", d["hang_tier"] == "浅档", d)
+    chk("浅档价 40.80", d["hang_px"] is not None and abs(d["hang_px"] - 40.80) < 0.001, d)
+    chk("原因写不追", "不追" in d["reason"], d["reason"])
+    chk("盯浅档", d["arm_price"] is not None and abs(d["arm_price"] - 40.80) < 0.001, d)
+    txt = render_us(d)
+    chk("输出标浅档", "浅档" in txt, txt)
+
+
+def test_decide_us_zs_deep_rests():
+    """现价高于 RR 闸：不追现价，深档挂单仍留着。"""
+    mins = mkx([241.5, 240.0])
+    day = {"code": "ZS", "name": "Zscaler", "date": "2026-10-23",
+           "pre": 242.0, "minutes": mins}
+    d = decide_us(day, {"last": mins[-1]}, entry=243.0, stop=228.0, target=245.68,
+                  zone_lo=230.0, zone_hi=243.0, mode="wait", reaches_deep=True,
+                  account=DEFAULT_ACCOUNT)
+    chk("ZS 现价不买", d["action"] == "不买", d)
+    chk("ZS 原因含上限", "上限" in d["reason"], d["reason"])
+    chk("ZS 档位深档", d["hang_tier"] == "深档", d)
+    chk("ZS 挂 235.07", d["hang_px"] is not None and abs(d["hang_px"] - 235.07) < 0.001, d)
+    txt = render_us(d)
+    chk("输出标深档", "深档" in txt, txt)
+
+
 if __name__ == "__main__":
     test_pullback_buy()
     test_chase_reject()
@@ -297,5 +425,16 @@ if __name__ == "__main__":
     test_plan_from_us_open_playbook()
     test_parse_et()
     test_fetch_intraday_nasdaq_monkeypatch()
+    test_trend_names_hang_shallow()
+    test_zs_deep_hang_fills()
+    test_trend_does_not_hard_wait_deep()
+    test_trend_premarket_does_not_become_range()
+    test_no_chase_extended_day()
+    test_no_chase_above_cap()
+    test_no_chase_channel_expired()
+    test_lows_often_reach_depth()
+    test_us_exec_target_prefers_plan()
+    test_decide_us_labels_shallow()
+    test_decide_us_zs_deep_rests()
     print("\n%d failed" % len(FAILS))
     sys.exit(1 if FAILS else 0)
