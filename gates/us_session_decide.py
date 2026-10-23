@@ -22,6 +22,9 @@
          老罗 2026-10-13 纠偏：美股拉升是直线，pre+2ATR 会把刚起涨也挡掉，等于禁了追高
          让人买不进；风险交给硬止损(T+0)兜底，不在买入侧预设「涨多了不让买」。
       ④ 仓位：1 股起（无整手），单笔预算 = 账户 ×1.5%。
+      ⑤ 挂单分浅档 / 深档（2026-10-23）：趋势回踩挂买区上沿、VWAP 或 −1%；
+         震荡且浅档 R<1.5、日低常摸到，才挂 RR 闸或平台下沿。输出写明档位。
+         近端墙不拿来把挂单压到买区下沿之下。当日涨幅 ≥5%、通道过期、现价高于上限，不追。
 
   ⏰ 美股交易时段（致富证券 · 2026-10-10 老罗确认 · 已固化）：
       支持 **24 小时交易**，含 夜盘 / 盘前 (04:00 ET 起) / 盘后。
@@ -316,9 +319,421 @@ def resolve_cap_us(entry, stop, target, cap, pre, atr):
     return min(cands) if cands else None
 
 
+# ───────────────────────── 挂单深浅（2026-10-23） ─────────────────────────
+# 趋势票浅挂；震荡票才等深挂。近端墙不许把挂单压到买区下沿之下。
+HANG_SHALLOW = "浅档"
+HANG_DEEP = "深档"
+HANG_PASS = "不追"
+CHASE_RALLY_PCT = 0.05       # 当日涨幅达到 5% 不追（例 +5%～6%）
+SHALLOW_DIP_PCT = 0.01       # 浅档之一：开盘或昨收 −1%
+REACH_LOOKBACK = 20
+REACH_MIN_DAYS = 5
+REACH_MIN_FRAC = 0.50
+# 主升 / 刚突破后的回踩。impulse_pause 还没过沿，不算。
+TREND_MODES = (
+    "platform_break", "w_bottom_break", "flag_tl_break", "downtrend_tl_break",
+    "line_pullback", "ma_reclaim_break",
+)
+TREND_RIDE = ("line_ride", "new_high")
+_SHALLOW_PREF = {"买区上沿": 0, "VWAP": 1, "−1%": 2, "计划挂单": 3}
+
+
+def _num(v):
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return float(v)
+
+
+def _rr_at(px, target, stop):
+    return long_rr(px, target, stop)
+
+
+def _rr_ok(rr, rr_min):
+    return rr is not None and rr + 1e-9 >= rr_min
+
+
+def _floor_cent(raw):
+    return int(float(raw) * 100 + 1e-6) / 100.0
+
+
+def _px_keep_rr(raw, target, stop, rr_min):
+    """报价到分。四舍五入若把盈亏比打到门槛下，改向下取整。"""
+    px = round_px(raw)
+    if _rr_ok(_rr_at(px, target, stop), rr_min):
+        return px
+    px = _floor_cent(raw)
+    if _rr_ok(_rr_at(px, target, stop), rr_min):
+        return px
+    return None
+
+
+def gate_px(target, stop, rr_min=None):
+    """R=rr_min 的最高买价。目标或止损缺失 → None，不另造目标。"""
+    if rr_min is None:
+        rr_min = RR_QUALIFIED
+    target = _num(target)
+    stop = _num(stop)
+    if target is None or stop is None or not (stop < target):
+        return None
+    return _px_keep_rr(max_entry_for_rr(rr_min, target, stop), target, stop, rr_min)
+
+
+def us_exec_target(plan_targets, hard, near_target, near_cap, rr_min=None):
+    """挂单用的目标与买入上限。
+
+    计划目标优先。没有计划目标时，才用 room_and_cap 看到的近端阻力
+    （那是观测到的墙，不是编出来的目标）。两边都没有 → (None, near_cap)。
+    """
+    if rr_min is None:
+        rr_min = RR_QUALIFIED
+    target = None
+    if isinstance(plan_targets, dict):
+        target = _num(plan_targets.get("target1"))
+    if target is None:
+        target = _num(near_target)
+    hard_n = _num(hard)
+    cap = None
+    if target is not None and hard_n is not None:
+        cap = gate_px(target, hard_n, rr_min)
+    if cap is None:
+        cap = _num(near_cap)
+    return target, cap
+
+
+def lows_often_reach_depth(bars, depth_pct, n=REACH_LOOKBACK,
+                           min_days=REACH_MIN_DAYS, min_frac=REACH_MIN_FRAC):
+    """近 n 日「开盘→最低」回撤达到 depth_pct 的占比是否 ≥ min_frac。
+
+    样本不足 → None（分不清，不许当成摸得到）。
+    depth_pct ≤ 0 → False（这个价不在开盘下方，没有深坑）。
+    """
+    if depth_pct is None:
+        return None
+    if depth_pct <= 0:
+        return False
+    dips = []
+    for b in (bars or [])[-n:]:
+        o = _num(b.get("o") if isinstance(b, dict) else None)
+        low = _num(b.get("l") if isinstance(b, dict) else None)
+        if o is None or low is None or o <= 0:
+            continue
+        dips.append(max(0.0, (o - low) / o))
+    if len(dips) < min_days:
+        return None
+    hit = 0
+    for d in dips:
+        if d + 1e-12 >= depth_pct:
+            hit += 1
+    return (hit / float(len(dips))) >= min_frac
+
+
+def _hist_reach(bars, day_open, px):
+    day_open = _num(day_open)
+    px = _num(px)
+    if day_open is None or px is None or day_open <= 0:
+        return None
+    return lows_often_reach_depth(bars, (day_open - px) / day_open)
+
+
+def hang_structure(mode, ride_state, open_in_zone, reaches_deep, open_known=True):
+    """trend / range / unknown。分不清就 unknown，不靠感觉硬分。
+
+    开盘还未知时，趋势模式不改判成震荡去等深档。
+    """
+    trendish = mode in TREND_MODES or ride_state in TREND_RIDE
+    if trendish and open_in_zone and reaches_deep is False:
+        return "trend"
+    ranged = reaches_deep is True and not (trendish and open_in_zone)
+    if ranged and trendish and not open_known:
+        return "unknown"
+    if ranged:
+        return "range"
+    return "unknown"
+
+
+def _open_in_zone(day_open, zone_lo, zone_hi):
+    day_open = _num(day_open)
+    zone_lo = _num(zone_lo)
+    zone_hi = _num(zone_hi)
+    if day_open is None or zone_lo is None or zone_hi is None:
+        return False
+    if zone_hi < zone_lo:
+        return False
+    return zone_lo - 0.01 <= day_open <= zone_hi + 0.01
+
+
+def _day_change(day_chg_pct, price, pre):
+    if day_chg_pct is not None:
+        return _num(day_chg_pct)
+    price = _num(price)
+    pre = _num(pre)
+    if price is None or pre is None or pre <= 0:
+        return None
+    return price / pre - 1.0
+
+
+def _collect_shallow(price, stop, target, vwap, pre, day_open, zone_lo, zone_hi,
+                     entry_plan, cap, rr_px, rr_min):
+    """浅档报价：买区上沿 / VWAP / −1% / 计划挂单。只留 R≥门槛、且不是 RR 闸本身的价。"""
+    raw = []
+    zone_hi_n = _num(zone_hi)
+    if zone_hi_n is not None:
+        raw.append(("买区上沿", zone_hi_n))
+    vwap_n = _num(vwap)
+    if vwap_n is not None:
+        raw.append(("VWAP", vwap_n))
+    ref = _num(day_open)
+    if ref is None:
+        ref = _num(pre)
+    if ref is not None and ref > 0:
+        raw.append(("−1%", ref * (1.0 - SHALLOW_DIP_PCT)))
+    entry_n = _num(entry_plan)
+    if entry_n is not None:
+        same_gate = rr_px is not None and abs(entry_n - rr_px) <= 0.02
+        below_zone = _num(zone_lo) is not None and entry_n < _num(zone_lo) - 0.01
+        if not same_gate and not below_zone:
+            raw.append(("计划挂单", entry_n))
+
+    out = []
+    seen = []
+    for name, px0 in raw:
+        if px0 is None or stop is None or not (stop < px0):
+            continue
+        px = round_px(px0)
+        if not (stop < px):
+            continue
+        if rr_px is not None and abs(px - rr_px) <= 0.02:
+            continue
+        rr = _rr_at(px, target, stop)
+        if not _rr_ok(rr, rr_min):
+            continue
+        if cap is not None and px > cap + 0.01:
+            continue
+        if not _shallow_visible(px, price, zone_lo, zone_hi_n):
+            continue
+        key = (name, px)
+        if key in seen:
+            continue
+        seen.append(key)
+        out.append({"name": name, "px": px, "rr": rr})
+    out.sort(key=lambda a: (-a["px"], _SHALLOW_PREF.get(a["name"], 9)))
+    return out
+
+
+def _shallow_visible(px, price, zone_lo, zone_hi):
+    """限价可以挂在现价上（买区里会按现价或更好价成交）。现价在买区外，不挂更高的价。"""
+    price = _num(price)
+    if price is None:
+        return True
+    if px <= price + 0.01:
+        return True
+    if zone_lo is None or zone_hi is None:
+        return False
+    if zone_lo - 0.01 <= price <= zone_hi + 0.01 and px <= zone_hi + 0.01:
+        return True
+    return False
+
+
+def _raw_shallow_rr(stop, target, vwap, pre, day_open, zone_hi, rr_min):
+    """浅档里最高那个价的盈亏比，含未过门槛的。没有浅档报价 → (False, None)。"""
+    cands = []
+    for px in (_num(zone_hi), _num(vwap)):
+        if px is not None:
+            cands.append(px)
+    ref = _num(day_open)
+    if ref is None:
+        ref = _num(pre)
+    if ref is not None and ref > 0:
+        cands.append(ref * (1.0 - SHALLOW_DIP_PCT))
+    best_px = None
+    for px in cands:
+        if stop is None or not (stop < px):
+            continue
+        if target is None or not (px < target):
+            continue
+        if best_px is None or px > best_px:
+            best_px = px
+    if best_px is None:
+        return False, None
+    return True, _rr_at(round_px(best_px), target, stop)
+
+
+def _deep_choice(price, stop, target, zone_lo, rr_px, bars, day_open, day_low,
+                 day_low_final, reaches_deep, rr_min):
+    """深档：RR 闸优先于平台下沿。平台下沿更低，日低常常摸不到。"""
+    cands = []
+    if rr_px is not None and stop is not None and rr_px > stop:
+        if price is None or rr_px < price - 0.01:
+            rr = _rr_at(rr_px, target, stop)
+            if _rr_ok(rr, rr_min):
+                cands.append({"name": "RR闸", "px": rr_px, "rr": rr})
+    lo = _num(zone_lo)
+    if lo is not None and stop is not None and lo > stop:
+        lo_px = round_px(lo)
+        if rr_px is None or lo_px < rr_px - 0.02:
+            if price is None or lo_px < price - 0.01:
+                rr = _rr_at(lo_px, target, stop)
+                if _rr_ok(rr, rr_min):
+                    cands.append({"name": "平台下沿", "px": lo_px, "rr": rr})
+    picked = None
+    for c in cands:
+        if _deep_reachable(c["px"], bars, day_open, day_low, day_low_final, reaches_deep):
+            if picked is None or c["px"] > picked["px"]:
+                picked = c
+    return picked
+
+
+def _deep_reachable(px, bars, day_open, day_low, day_low_final, reaches_deep):
+    if day_low_final and day_low is not None and day_low > px + 1e-6:
+        return False
+    if reaches_deep is True:
+        return True
+    if reaches_deep is False:
+        return day_low is not None and day_low <= px + 1e-6
+    hist = _hist_reach(bars, day_open, px)
+    if hist is True:
+        return True
+    return day_low is not None and day_low <= px + 1e-6
+
+
+def _hang_out(tier, hang, anchor, why, structure, chase_now, shallow_rr, deep_px):
+    return {
+        "tier": tier,
+        "hang": hang,
+        "anchor": anchor,
+        "why": why,
+        "structure": structure,
+        "chase_now": chase_now,
+        "shallow_rr": shallow_rr,
+        "deep_px": deep_px,
+    }
+
+
+def select_us_hang(price, stop, target,
+                   vwap=None, pre=None, day_open=None,
+                   zone_lo=None, zone_hi=None, entry_plan=None,
+                   cap=None, mode=None, ride_state=None,
+                   bars=None, day_low=None, day_low_final=False,
+                   day_chg_pct=None, channel_expired=False, reaches_deep=None,
+                   rr_min=None):
+    """选美股回踩挂单：浅档或深档。输出 tier 必是 浅档 / 深档 / 不追。
+
+    浅档 = 买区上沿、VWAP、开盘或昨收 −1%。主升或刚突破后的回踩、开盘在买区内、
+    日低不给深坑 → 浅档。硬等 RR 深档 = 踏空。
+    深档 = RR 闸或平台下沿。震荡、浅档 R<1.5、日低常摸到 → 深档。
+    不追：现价高于买入上限、突破通道过期、当日涨幅 ≥5%。
+    盈亏比只对传入的 target 算。target 缺失不编造，浅档不放行。
+    """
+    if rr_min is None:
+        rr_min = RR_QUALIFIED
+    price_n = _num(price)
+    stop_n = _num(stop)
+    target_n = _num(target)
+    cap_n = _num(cap)
+    day_low_n = _num(day_low)
+    chg = _day_change(day_chg_pct, price_n, pre)
+
+    if channel_expired:
+        return _hang_out(HANG_PASS, None, None, "不追。突破通道过期。",
+                         "unknown", True, None, None)
+    if chg is not None and chg + 1e-12 >= CHASE_RALLY_PCT:
+        return _hang_out(
+            HANG_PASS, None, None,
+            "不追。当日已涨 %+.1f%%。" % (chg * 100.0),
+            "unknown", True, None, None)
+    if target_n is None or stop_n is None or not (stop_n < target_n):
+        return _hang_out(HANG_PASS, None, None, "不追。没有计划目标或止损，盈亏比算不出。",
+                         "unknown", True, None, None)
+
+    rr_px = gate_px(target_n, stop_n, rr_min)
+    shallow = _collect_shallow(
+        price_n, stop_n, target_n, vwap, pre, day_open, zone_lo, zone_hi,
+        entry_plan, cap_n, rr_px, rr_min)
+    has_quote, raw_rr = _raw_shallow_rr(
+        stop_n, target_n, vwap, pre, day_open, zone_hi, rr_min)
+    deep = _deep_choice(
+        price_n, stop_n, target_n, zone_lo, rr_px, bars, day_open, day_low_n,
+        day_low_final, reaches_deep, rr_min)
+    deep_px = deep["px"] if deep else rr_px
+
+    open_known = _num(day_open) is not None
+    if reaches_deep is None and rr_px is not None:
+        ref_open = _num(day_open)
+        if ref_open is None:
+            ref_open = _num(pre)
+        reaches_deep = _hist_reach(bars, ref_open, rr_px)
+    structure = hang_structure(
+        mode, ride_state, _open_in_zone(day_open, zone_lo, zone_hi),
+        reaches_deep, open_known)
+
+    chosen = _pick_tier(structure, shallow, has_quote, raw_rr, deep, price_n, rr_min)
+    chase_now = False
+    chase_txt = ""
+    if cap_n is not None and price_n is not None and price_n > cap_n + 1e-9:
+        chase_now = True
+        chase_txt = "现价 %.2f 高于买入上限 %.2f，不追。" % (price_n, cap_n)
+        if chosen["hang"] is not None and chosen["hang"] > cap_n + 0.01:
+            chosen = _hang_out(HANG_PASS, None, None, chosen["why"], structure,
+                               True, raw_rr, deep_px)
+    why = chosen["why"]
+    if chase_txt:
+        why = chase_txt + why
+    return _hang_out(chosen["tier"], chosen["hang"], chosen["anchor"], why,
+                     structure, chase_now or chosen["chase_now"], raw_rr, deep_px)
+
+
+def _pick_tier(structure, shallow, has_quote, raw_rr, deep, price, rr_min):
+    shallow_bad = has_quote and not _rr_ok(raw_rr, rr_min)
+    if structure == "trend":
+        if shallow:
+            top = shallow[0]
+            return _hang_out(
+                HANG_SHALLOW, top["px"], top["name"],
+                "浅档·%s %.2f。趋势回踩，开盘在买区内，日低不给深坑。"
+                % (top["name"], top["px"]),
+                structure, False, raw_rr, deep["px"] if deep else None)
+        if deep and price is not None and price <= deep["px"] + 0.01:
+            return _hang_out(
+                HANG_DEEP, deep["px"], deep["name"],
+                "深档·%s %.2f。趋势票浅档盈亏比不足，现价已经到深档。"
+                % (deep["name"], deep["px"]),
+                structure, False, raw_rr, deep["px"])
+        return _hang_out(
+            HANG_PASS, None, None,
+            "不追。趋势结构浅档盈亏比不足，不硬等深档。",
+            structure, True, raw_rr, deep["px"] if deep else None)
+    if structure == "range" and shallow_bad and deep:
+        return _hang_out(
+            HANG_DEEP, deep["px"], deep["name"],
+            "深档·%s %.2f。震荡回踩，浅档盈亏比不足，该档摸得到。"
+            % (deep["name"], deep["px"]),
+            structure, False, raw_rr, deep["px"])
+    if shallow:
+        top = shallow[0]
+        why = "浅档·%s %.2f。浅档盈亏比已过 %.1f，不改挂深档。" % (
+            top["name"], top["px"], rr_min)
+        return _hang_out(HANG_SHALLOW, top["px"], top["name"], why,
+                         structure, False, raw_rr, deep["px"] if deep else None)
+    if structure == "range":
+        return _hang_out(
+            HANG_PASS, None, None,
+            "不追。震荡但深档摸不到，或浅档没有报价。",
+            structure, True, raw_rr, deep["px"] if deep else None)
+    return _hang_out(
+        HANG_PASS, None, None,
+        "不追。结构分不清且浅档盈亏比不足，不靠感觉压深档。",
+        structure, True, raw_rr, deep["px"] if deep else None)
+
+
 def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
-              account=None, risk_scale=1.0):
-    """美股核心判定。结构对齐 A股 decide()，去掉涨跌停/主力资金流/整手/昨收+2% 闸。"""
+              account=None, risk_scale=1.0,
+              zone_lo=None, zone_hi=None, mode=None, ride_state=None,
+              daily_bars=None, channel_expired=False, reaches_deep=None,
+              day_low_final=False):
+    """美股核心判定。结构对齐 A股 decide()，去掉涨跌停/主力资金流/整手/昨收+2% 闸。
+
+    挂单由 select_us_hang 分浅档 / 深档。现价高于选出的档，不追，盯那一档。
+    """
     entry, stop = float(entry), float(stop)
     target = float(target) if target is not None else None
     last = summary["last"]
@@ -346,6 +761,8 @@ def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
         "size": None, "caution": "", "arm_price": None, "arm_note": "",
         "rally": rally, "structure": struct, "shape": shape,
         "burst": burst, "chase": chase,
+        "hang_tier": None, "hang_px": None, "hang_anchor": None,
+        "hang_why": "", "hang_structure": None,
         "tape": {"label": "美股无主力资金流", "text": "仅看量价，不读主力净买卖。"},
     }
 
@@ -359,25 +776,62 @@ def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
         out["arm_price"] = entry
         out["arm_note"] = "回到 %.2f 以下再判（结构止损下方不接飞刀）" % entry
         return _reject("现价 %.2f 已在止损 %.2f 下方，不接飞刀。" % (price, stop))
-    if buy_cap is not None and price > buy_cap + 1e-9:
-        return _reject("现价 %.2f 高于买入上限 %.2f（R 不足或超计划上限）。" % (price, buy_cap))
     if target is None:
         out["arm_price"] = None
         out["arm_note"] = ""
         return _reject("计划无目标价，赔率算不出（不是买点）。先补 target 再判。")
+
+    day_open = None
+    day_low = None
+    if minutes:
+        day_open = _num(minutes[0].get("o"))
+        lows = []
+        for m in minutes:
+            lv = _num(m.get("l"))
+            if lv is not None:
+                lows.append(lv)
+        if lows:
+            day_low = min(lows)
+    sel = select_us_hang(
+        price, stop, target, vwap=vwap, pre=pre, day_open=day_open,
+        zone_lo=zone_lo, zone_hi=zone_hi, entry_plan=entry, cap=buy_cap,
+        mode=mode, ride_state=ride_state, bars=daily_bars, day_low=day_low,
+        day_low_final=day_low_final, channel_expired=channel_expired,
+        reaches_deep=reaches_deep)
+    out["hang_tier"] = sel["tier"]
+    out["hang_px"] = sel["hang"]
+    out["hang_anchor"] = sel["anchor"]
+    out["hang_why"] = sel["why"]
+    out["hang_structure"] = sel["structure"]
+
+    if buy_cap is not None and price > buy_cap + 1e-9:
+        reason = "现价 %.2f 高于买入上限 %.2f（R 不足或超计划上限）。" % (price, buy_cap)
+        if sel["hang"] is not None and sel["hang"] <= buy_cap + 0.01:
+            out["arm_price"] = sel["hang"]
+            out["arm_note"] = "%s %s" % (sel["tier"], sel["anchor"] or "")
+            reason += "%s挂 %.2f 仍有效，不追现价。" % (sel["tier"], sel["hang"])
+        return _reject(reason)
     if rr is None or rr < RR_QUALIFIED:
         return _reject("现价盈亏比 %s，低于 %.1f。" % (
             ("%.2f" % rr) if rr is not None else "—", RR_QUALIFIED))
+    if sel["tier"] == HANG_PASS or sel["hang"] is None:
+        return _reject(sel["why"])
+    if price > sel["hang"] + 0.01:
+        out["arm_price"] = sel["hang"]
+        out["arm_note"] = "%s %s" % (sel["tier"], sel["anchor"] or "")
+        return _reject("%s挂 %.2f（%s）。现价 %.2f 高于该档，不追。" % (
+            sel["tier"], sel["hang"], sel["anchor"] or "—", price))
 
     if price <= entry:
-        limit_buy = round_px(price)
         tag = "按计划回踩（贴近 MA）"
     elif rally.get("ok"):
-        limit_buy = round_px(price)
         tag = "拉升中，只买刚起涨那一下"
     else:
-        limit_buy = round_px(price)
         tag = "计划上限内"
+    limit_buy = round_px(price)
+    tier_txt = ""
+    if sel["tier"] in (HANG_SHALLOW, HANG_DEEP):
+        tier_txt = "%s·%s。" % (sel["tier"], sel["anchor"] or "")
 
     size = size_for_us(limit_buy, stop, account=account, risk_scale=risk_scale)
     if not size["qty"]:
@@ -390,8 +844,8 @@ def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
     out["size"] = size
     out["arm_price"] = None
     out["arm_note"] = ""
-    out["reason"] = ("%s。限价 %.2f，止损 %.2f，目标 %s，现价 R %s。"
-                     % (tag, limit_buy, stop,
+    out["reason"] = ("%s。%s限价 %.2f，止损 %.2f，目标 %s，现价 R %s。"
+                     % (tag, tier_txt, limit_buy, stop,
                         ("%.2f" % target) if target is not None else "—",
                         ("%.2f" % rr) if rr is not None else "—"))
     return out
@@ -441,6 +895,12 @@ def render_us(d):
         lines.append("%s 盘中拉升：%s（缺口 %+.2f%% 10分 %+.2f%% 20分 %+.2f%% 近20分收均价上 %.0f%%）"
                      % ("★" if r.get("ok") else "·", r["tier"], r.get("gap", 0),
                         r.get("rise10", 0), r.get("rise20", 0), r.get("above", 0)))
+    if d.get("hang_tier"):
+        hp = d.get("hang_px")
+        hp_txt = ("%.2f" % hp) if isinstance(hp, (int, float)) else "—"
+        lines.append("档位  %s  %s  %s" % (d["hang_tier"], hp_txt, d.get("hang_anchor") or "—"))
+        if d.get("hang_why"):
+            lines.append("  %s" % d["hang_why"])
     lines.append("结论  %s。%s" % (d["action"], d["reason"]))
     if d["action"] != "能买" and d.get("arm_price") is not None:
         lines.append("盯价  %.2f  %s" % (d["arm_price"], d.get("arm_note") or ""))
