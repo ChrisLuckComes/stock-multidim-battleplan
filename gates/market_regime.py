@@ -347,6 +347,7 @@ def apply_market_regime_gate(result, mkt, enabled=True):
     blocked = _block_set_for(bstate)
     mode = result.get("mode")
     if mode in blocked:
+        result["mode_before_regime"] = mode
         result["recommend"] = False
         result["mode"] = "wait"
         result["market_regime_veto"] = True

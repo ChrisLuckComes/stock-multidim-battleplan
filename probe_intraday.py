@@ -2227,20 +2227,70 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None,
     print()
     print("── 一、预案单（最近收盘结构 → 开盘前挂） ──" if live_bar is None else
           "── 一、盘中口径（今日未收盘 K 线已并入 → 当前买区） ──")
+    from gates.us_session_decide import (apply_us_hang, us_exec_target,
+                                         partial_session_tape, RERUN_NOTE,
+                                         us_session_is_live)
+    session_live = us_session_is_live(sess or phase) or live_bar is not None
+    if session_live:
+        print("  再跑    : " + RERUN_NOTE)
+        out["rerun_note"] = RERUN_NOTE
+        out["session_live"] = True
     invalid = bool(z.get("invalid"))
-    has_zone = z.get("primary_lo") is not None and z.get("primary_hi") is not None
+    lo = z.get("primary_lo")
+    hi = z.get("primary_hi")
+    has_zone = lo is not None and hi is not None
+    defend = z.get("invalidation")
+    hard = cap = t1 = None
+    rc = rc_us
+    near_cap = rc_us.get("cap") if isinstance(rc_us, dict) else None
     if has_zone and not invalid:
-        lo, hi = z["primary_lo"], z["primary_hi"]
-        defend = z.get("invalidation")
         rc = rc_us
         near_cap, near_t = rc.get("cap"), rc.get("target1")
         hard = rc.get("hard")
-        from gates.us_session_decide import select_us_hang, us_exec_target
         t1, cap = us_exec_target(plan.get("targets"), hard, near_t, near_cap)
         if hard is not None:
             hard = round(hard, 2)
         print(f"  价位关系: {zone_position_txt(last['c'], lo, hi)}")
-    if has_zone and not invalid and not plan["recommend"]:
+    elif not invalid:
+        hard = rc_us.get("hard")
+        t1, cap = us_exec_target(
+            plan.get("targets"), hard, rc_us.get("target1"), rc_us.get("cap"))
+        if hard is not None:
+            hard = round(hard, 2)
+    live_mins = minute_cache.get("bars") or []
+    tape = None
+    if live_mins:
+        tape = partial_session_tape(live_mins, pre=prev_close)
+    elif live_bar is not None:
+        tape = partial_session_tape([live_bar], pre=prev_close)
+    chg = None
+    day_open = None
+    day_low = None
+    vwap_hang = None
+    px_now = last["c"] if live_bar is not None else None
+    if tape:
+        day_open = tape.get("day_open")
+        day_low = tape.get("day_low")
+        vwap_hang = tape.get("vwap")
+        if tape.get("price") is not None:
+            px_now = tape["price"]
+        chg = tape.get("day_chg")
+    if chg is None and spot is not None and prev_close:
+        chg = (float(spot) - float(prev_close)) / float(prev_close)
+    hist = bars[:-1] if live_bar is not None else bars
+    ride = None
+    ma_ride = plan.get("ma_ride") or {}
+    if isinstance(ma_ride, dict):
+        ride = ma_ride.get("state")
+    sel = None
+    if not invalid and (has_zone or not plan["recommend"]):
+        sel = apply_us_hang(
+            px_now, hard, t1, plan=plan, vwap=vwap_hang, pre=prev_close,
+            day_open=day_open, zone_lo=lo, zone_hi=hi, cap=cap,
+            mode=plan.get("mode"), ride_state=ride, bars=hist,
+            day_low=day_low, day_low_final=False, day_chg_pct=chg,
+            channel_expired=False, atr=atr_v)
+    if has_zone and not invalid and not plan["recommend"] and not (sel and sel.get("emit")):
         print("  类型    : ❌ 不建议执行（recommend=False）—— 不给挂单价 / 数量 / 金额")
         print(f"  原因    : {plan.get('note') or '未标注'}")
         print(f"  参考位  : 买区 {lo}-{hi} ｜ 结构止损 {defend}（收盘破）"
@@ -2251,35 +2301,20 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None,
         out["pre_order"] = {"kind": "not_recommended", "limit": None, "cap": cap,
                             "qty": None, "stop_struct": defend, "stop_hard": hard,
                             "target1": t1, "reason": plan.get("note")}
-    elif has_zone and not invalid:
-        day_open = None
-        day_low = None
-        if live_bar is not None:
-            day_open = live_bar.get("o")
-            day_low = live_bar.get("l")
-        chg = None
-        if spot is not None and prev_close:
-            chg = (float(spot) - float(prev_close)) / float(prev_close)
-        hist = bars[:-1] if live_bar is not None else bars
-        ride = None
-        ma_ride = plan.get("ma_ride") or {}
-        if isinstance(ma_ride, dict):
-            ride = ma_ride.get("state")
-        px_now = last["c"] if live_bar is not None else None
-        sel = select_us_hang(
-            px_now, hard, t1, vwap=None, pre=prev_close, day_open=day_open,
-            zone_lo=lo, zone_hi=hi, cap=cap, mode=plan.get("mode"),
-            ride_state=ride, bars=hist, day_low=day_low, day_low_final=False,
-            day_chg_pct=chg, channel_expired=False)
+    elif sel and sel.get("emit") and (has_zone or sel.get("softened")) and not invalid:
         kind = "突破跟单"
         hang = sel["hang"]
         tier = sel["tier"]
         anchor = sel["anchor"]
         if tier == "不追" or hang is None:
-            print(f"  类型    : 不追     模式 {plan['mode']}")
+            mode_txt = plan.get("mode")
+            if sel.get("structure_mode") and sel.get("structure_mode") != mode_txt:
+                mode_txt = "%s（结构 %s）" % (mode_txt, sel["structure_mode"])
+            print(f"  类型    : 不追     模式 {mode_txt}")
             print(f"  原因    : {sel['why']}")
-            print(f"  参考位  : 买区 {lo}-{hi} ｜ 硬止损 {hard}")
-            if cap is not None:
+            zone_bits = "%s-%s" % (lo, hi) if has_zone else "缺失"
+            print(f"  参考位  : 买区 {zone_bits} ｜ 硬止损 {hard}")
+            if cap is not None and isinstance(rc, dict) and rc.get("rr") is not None:
                 print(f"  买入上限: {cap:.2f}   ← 高于此价，盈亏比跌破 {rc['rr']:.1f}:1，不挂")
             out["pre_order"] = {
                 "kind": "no_chase", "limit": None, "cap": cap, "qty": None,
@@ -2289,19 +2324,23 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None,
         else:
             limit = float(hang)
             n = us_lots(account, limit, hard)
-            print(f"  类型    : {kind}     模式 {plan['mode']}")
+            mode_txt = plan.get("mode")
+            if sel.get("structure_mode") and sel.get("structure_mode") != mode_txt:
+                mode_txt = "%s（结构 %s）" % (mode_txt, sel["structure_mode"])
+            print(f"  类型    : {kind}     模式 {mode_txt}")
             print(f"  挂单    : {tier} 限价买 {limit:.2f}（{anchor}）")
             if sel.get("chase_now"):
                 print(f"  现价    : 不追。{sel['why']}")
-            if tier == "深档" and limit < float(hi) - 0.01:
+            if tier == "深档" and hi is not None and limit < float(hi) - 0.01:
                 print("  说明    : 浅档盈亏比不足，挂深档")
-            if (near_cap is not None and float(near_cap) < float(lo) - 0.01
+            if (lo is not None and near_cap is not None
+                    and float(near_cap) < float(lo) - 0.01
                     and (cap is None or float(near_cap) < float(cap) - 0.01)):
                 print(f"  近端压力: {float(near_cap):.2f} 在买区下沿之下，不拿它压挂单")
             if hard is not None:
                 print(f"  有效买入区间: {hard} < 买入价 ≤ {limit:.2f} —— "
                       f"低于硬止损 {hard} 买入 = 开仓即止损，再便宜也不要")
-            if cap is not None:
+            if cap is not None and isinstance(rc, dict) and rc.get("rr") is not None:
                 print(f"  买入上限: {cap:.2f}   ← 高于此价，盈亏比跌破 {rc['rr']:.1f}:1，不挂")
             if n:
                 print(f"  数量    : {n} 股 = ${n * limit:,.0f}"

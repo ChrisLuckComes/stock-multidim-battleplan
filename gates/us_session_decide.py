@@ -25,6 +25,9 @@
       ⑤ 挂单分浅档 / 深档（2026-10-23）：趋势回踩挂买区上沿、VWAP 或 −1%；
          震荡且浅档 R<1.5、日低常摸到，才挂 RR 闸或平台下沿。输出写明档位。
          近端墙不拿来把挂单压到买区下沿之下。当日涨幅 ≥5%、通道过期、现价高于上限，不追。
+         常规盘进行中用当前分时重算浅档（见 RERUN_NOTE）。平台突破 / 突破后回踩
+         在现价仍靠近买区、VWAP 或 −1% 时，recommend=False 也要写出浅档或不追，
+         不许静默吞单。顶部确认和黑名单仍静默。R≥1.5，仓位函数不动。
 
   ⏰ 美股交易时段（致富证券 · 2026-10-10 老罗确认 · 已固化）：
       支持 **24 小时交易**，含 夜盘 / 盘前 (04:00 ET 起) / 盘后。
@@ -279,8 +282,18 @@ def plan_from_us(plan_path):
         entry, stop = p.get("entry"), p.get("stop")
         target, cap = p.get("target"), p.get("cap")
     name = p.get("name") or p.get("code") or p.get("symbol")
+    zone = p.get("buy_zone") if isinstance(p.get("buy_zone"), dict) else {}
+    ride = None
+    if isinstance(p.get("ma_ride"), dict):
+        ride = p["ma_ride"].get("state")
     return {"entry": entry, "stop": stop, "target": target,
-            "cap": cap, "name": name}
+            "cap": cap, "name": name,
+            "mode": p.get("mode") or zone.get("mode"),
+            "zone_lo": zone.get("primary_lo"),
+            "zone_hi": zone.get("primary_hi"),
+            "ride_state": ride,
+            "recommend": p.get("recommend"),
+            "raw": p}
 
 
 # ───────────────────────── 规则层（美股适配） ─────────────────────────
@@ -336,6 +349,19 @@ TREND_MODES = (
 )
 TREND_RIDE = ("line_ride", "new_high")
 _SHALLOW_PREF = {"买区上沿": 0, "VWAP": 1, "−1%": 2, "计划挂单": 3}
+# 与 rule123 突破新鲜窗口同一口径：站上超过 3 根，通道过期。
+_CHANNEL_MODES = (
+    "platform_break", "w_bottom_break", "flag_tl_break", "downtrend_tl_break",
+)
+CHANNEL_FRESH_MAX = 3
+NEAR_PCT = 0.01
+NEAR_ATR = 0.50
+# 盘中再跑。昨收单不知道今日开盘；收盘全日低点不能回头改早盘挂单。
+RERUN_NOTE = (
+    "盘中再跑：常规盘开盘后用当前分时或半根刷新浅档；"
+    "现价靠近买区、VWAP 或 −1% 时再跑一次。"
+    "昨收预案不是成交结论。不要用收盘后的全日低点回头改早盘挂单。"
+)
 
 
 def _num(v):
@@ -609,6 +635,231 @@ def _hang_out(tier, hang, anchor, why, structure, chase_now, shallow_rr, deep_px
     }
 
 
+def us_session_is_live(session):
+    """Nasdaq marketStatus 含 open 才算常规盘进行中。盘前不并日 K。"""
+    return "open" in str(session or "").strip().lower()
+
+
+def partial_session_tape(minutes, pre=None):
+    """已走出的分时或半根 → 开盘、至今低点、VWAP。
+
+    只看传入的 bar，后面的低点进不来。day_low_final 恒为 False：
+    这段低点不是收盘低点，不能用来取消一张还没碰到的浅档。
+    没有成交量时，VWAP 用各根均价（没有均价就用收盘）的简单平均。
+    """
+    rows = []
+    for m in minutes or []:
+        if not isinstance(m, dict):
+            continue
+        if _num(m.get("c")) is None:
+            continue
+        rows.append(m)
+    if not rows:
+        return None
+    day_open = _num(rows[0].get("o"))
+    if day_open is None:
+        day_open = _num(rows[0].get("c"))
+    lows = []
+    weighted = 0.0
+    weight = 0.0
+    plain = []
+    for m in rows:
+        lv = _num(m.get("l"))
+        if lv is None:
+            lv = _num(m.get("c"))
+        if lv is not None:
+            lows.append(lv)
+        px = _num(m.get("avg"))
+        if px is None:
+            px = _num(m.get("c"))
+        if px is None:
+            continue
+        plain.append(px)
+        vol = _num(m.get("v")) or 0.0
+        if vol > 0:
+            weighted += px * vol
+            weight += vol
+    vwap = None
+    if weight > 0:
+        vwap = weighted / weight
+    elif plain:
+        vwap = sum(plain) / float(len(plain))
+    price = _num(rows[-1].get("c"))
+    day_low = min(lows) if lows else None
+    return {
+        "day_open": day_open,
+        "day_low": day_low,
+        "price": price,
+        "vwap": vwap,
+        "day_chg": _day_change(None, price, pre),
+        "day_low_final": False,
+        "n": len(rows),
+    }
+
+
+def structural_mode(plan):
+    """regime 把 mode 改成 wait 之后，仍能找回突破/回踩。"""
+    if not isinstance(plan, dict):
+        return None
+    saved = plan.get("mode_before_regime")
+    if saved not in (None, "", "wait", "none"):
+        return saved
+    mode = plan.get("mode")
+    z = plan.get("buy_zone")
+    zmode = z.get("mode") if isinstance(z, dict) else None
+    if mode in (None, "", "wait", "none") and zmode not in (None, "", "wait", "none"):
+        return zmode
+    return mode
+
+
+def breakout_like(mode, ride_state=None):
+    """平台突破，或突破之后的回踩 / 沿线。不是个股名单。"""
+    return mode in TREND_MODES or ride_state in TREND_RIDE
+
+
+def _days_above_channel(plan, mode):
+    sources = []
+    if isinstance(plan, dict):
+        sources.append(plan)
+        z = plan.get("buy_zone")
+        if isinstance(z, dict):
+            sources.append(z)
+    keys = ("days_above_platform",)
+    if mode == "flag_tl_break":
+        keys = ("days_above_tl", "days_above_platform")
+    for src in sources:
+        for key in keys:
+            v = src.get(key)
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                continue
+            return float(v)
+    return None
+
+
+def channel_expired_of(plan, explicit=False):
+    if explicit:
+        return True
+    if not isinstance(plan, dict) or not plan.get("channel_expired"):
+        mode = structural_mode(plan)
+        if mode not in _CHANNEL_MODES:
+            return False
+        days = _days_above_channel(plan, mode)
+        if days is None:
+            return False
+        return days > CHANNEL_FRESH_MAX
+    return True
+
+
+def _dip_px(day_open, pre):
+    ref = _num(day_open)
+    if ref is None:
+        ref = _num(pre)
+    if ref is None or ref <= 0:
+        return None
+    return ref * (1.0 - SHALLOW_DIP_PCT)
+
+
+def _near_band(spot, atr):
+    pct = abs(spot) * NEAR_PCT
+    atr_band = 0.0
+    if atr:
+        atr_band = abs(float(atr)) * NEAR_ATR
+    if pct >= atr_band and pct >= 0.01:
+        return pct
+    if atr_band >= 0.01:
+        return atr_band
+    return 0.01
+
+
+def spot_near_shallow(spot, zone_lo, zone_hi, vwap, dip, atr):
+    """现价还在浅档附近：买区内，或距买区 / VWAP / −1% 不超过带宽。
+
+    已经高于买区上沿 → 不算附近（那是不追）。
+    """
+    spot = _num(spot)
+    if spot is None:
+        return False
+    zhi = _num(zone_hi)
+    if zhi is not None and spot > zhi + 0.01:
+        return False
+    zlo = _num(zone_lo)
+    if zlo is not None and zhi is not None and zlo - 0.01 <= spot <= zhi + 0.01:
+        return True
+    anchors = []
+    for px in (zlo, zhi, _num(vwap), _num(dip)):
+        if px is not None:
+            anchors.append(px)
+    if not anchors:
+        return False
+    band = _near_band(spot, atr)
+    for px in anchors:
+        if abs(spot - px) <= band + 1e-9:
+            return True
+    return False
+
+
+def _keep_silent(plan):
+    """顶部确认、黑名单仍然不给单。regime / 买区缺失不在这里。"""
+    if not isinstance(plan, dict):
+        return False
+    if plan.get("top_signal_veto"):
+        return True
+    if plan.get("blacklist"):
+        return True
+    return False
+
+
+def veto_hang_policy(plan, spot, pre, vwap, day_open, day_chg, atr,
+                     zone_lo, zone_hi, channel_expired=False, ride_state=None):
+    """recommend=False 时怎么处理挂单。shallow / no_chase / silent。"""
+    mode = structural_mode(plan)
+    if _keep_silent(plan):
+        return {"policy": "silent", "why": "", "mode": mode}
+    if not breakout_like(mode, ride_state):
+        return {"policy": "silent", "why": "", "mode": mode}
+    if channel_expired_of(plan, channel_expired):
+        return {"policy": "no_chase", "why": "不追。突破通道过期。", "mode": mode}
+    chg = _day_change(day_chg, spot, pre)
+    if chg is not None and chg + 1e-12 >= CHASE_RALLY_PCT:
+        return {
+            "policy": "no_chase",
+            "why": "不追。当日已涨 %+.1f%%。" % (chg * 100.0),
+            "mode": mode,
+        }
+    zhi = _num(zone_hi)
+    spot_n = _num(spot)
+    if zhi is not None and spot_n is not None and spot_n > zhi + 0.01:
+        return {
+            "policy": "no_chase",
+            "why": "不追。现价已在买区上沿之上。",
+            "mode": mode,
+        }
+    dip = _dip_px(day_open, pre)
+    if spot_near_shallow(spot_n, zone_lo, zone_hi, vwap, dip, atr):
+        kind = "预案未推荐"
+        if isinstance(plan, dict) and plan.get("market_regime_veto"):
+            kind = "市场regime"
+        return {
+            "policy": "shallow",
+            "why": ("浅档仍挂。%s，结构是突破或突破后回踩，"
+                    "现价还在买区、VWAP 或 −1%% 附近。" % kind),
+            "mode": mode,
+        }
+    return {
+        "policy": "no_chase",
+        "why": "不追。现价不在买区、VWAP 或 −1% 附近。",
+        "mode": mode,
+    }
+
+
+def _with_emit(sel, emit, extra=None):
+    out = dict(sel)
+    out["emit"] = bool(emit)
+    if extra:
+        out.update(extra)
+    return out
+
+
 def select_us_hang(price, stop, target,
                    vwap=None, pre=None, day_open=None,
                    zone_lo=None, zone_hi=None, entry_plan=None,
@@ -725,14 +976,74 @@ def _pick_tier(structure, shallow, has_quote, raw_rr, deep, price, rr_min):
         structure, True, raw_rr, deep["px"] if deep else None)
 
 
+def apply_us_hang(price, stop, target, plan=None, **kwargs):
+    """挂单出口。recommend=False 的突破/回踩不静默吞掉。
+
+    顶部确认和黑名单仍不给单。软放开的路径不改挂深档。
+    盈亏比仍走 select_us_hang，达不到 1.5 就是不追。
+    """
+    plan = plan if isinstance(plan, dict) else {}
+    zone_invalid = bool(kwargs.pop("zone_invalid", False))
+    atr = kwargs.pop("atr", None)
+    recommend = kwargs.pop("recommend", plan.get("recommend", True))
+    if zone_invalid:
+        blank = _hang_out(HANG_PASS, None, None, "买区已作废。", "unknown", True, None, None)
+        return _with_emit(blank, False)
+    mode = kwargs.get("mode")
+    recovered = structural_mode(plan)
+    if mode in (None, "", "wait", "none") and recovered:
+        kwargs["mode"] = recovered
+        mode = recovered
+    ride = kwargs.get("ride_state")
+    if ride is None:
+        ma = plan.get("ma_ride")
+        if isinstance(ma, dict):
+            ride = ma.get("state")
+            kwargs["ride_state"] = ride
+    if recommend is False:
+        policy = veto_hang_policy(
+            plan, price, kwargs.get("pre"), kwargs.get("vwap"), kwargs.get("day_open"),
+            kwargs.get("day_chg_pct"), atr, kwargs.get("zone_lo"), kwargs.get("zone_hi"),
+            channel_expired=bool(kwargs.get("channel_expired")),
+            ride_state=ride)
+        if policy["policy"] == "silent":
+            note = plan.get("note") or ""
+            blank = _hang_out(HANG_PASS, None, None, note, "unknown", True, None, None)
+            return _with_emit(blank, False, {"structure_mode": policy["mode"]})
+        if policy["policy"] == "no_chase":
+            blank = _hang_out(
+                HANG_PASS, None, None, policy["why"], "trend", True, None, None)
+            return _with_emit(blank, True, {
+                "softened": True, "structure_mode": policy["mode"]})
+        kwargs["mode"] = policy["mode"]
+        sel = select_us_hang(price, stop, target, **kwargs)
+        if sel["tier"] == HANG_DEEP:
+            sel = _hang_out(
+                HANG_PASS, None, None,
+                "不追。突破或回踩不改挂深档。",
+                sel.get("structure") or "trend", True,
+                sel.get("shallow_rr"), sel.get("deep_px"))
+        why = policy["why"]
+        if sel.get("why"):
+            why = policy["why"] + sel["why"]
+        sel = dict(sel)
+        sel["why"] = why
+        return _with_emit(sel, True, {
+            "softened": True, "structure_mode": policy["mode"]})
+    sel = select_us_hang(price, stop, target, **kwargs)
+    return _with_emit(sel, True)
+
+
 def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
               account=None, risk_scale=1.0,
               zone_lo=None, zone_hi=None, mode=None, ride_state=None,
               daily_bars=None, channel_expired=False, reaches_deep=None,
-              day_low_final=False):
+              day_low_final=False, structure_plan=None):
     """美股核心判定。结构对齐 A股 decide()，去掉涨跌停/主力资金流/整手/昨收+2% 闸。
 
     挂单由 select_us_hang 分浅档 / 深档。现价高于选出的档，不追，盯那一档。
+    分钟线是当前分时，不是收盘全日低点。structure_plan.recommend 为 False 时，
+    突破/回踩走 apply_us_hang，不静默吞单。
     """
     entry, stop = float(entry), float(stop)
     target = float(target) if target is not None else None
@@ -763,6 +1074,7 @@ def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
         "burst": burst, "chase": chase,
         "hang_tier": None, "hang_px": None, "hang_anchor": None,
         "hang_why": "", "hang_structure": None,
+        "rerun_note": RERUN_NOTE,
         "tape": {"label": "美股无主力资金流", "text": "仅看量价，不读主力净买卖。"},
     }
 
@@ -781,23 +1093,35 @@ def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
         out["arm_note"] = ""
         return _reject("计划无目标价，赔率算不出（不是买点）。先补 target 再判。")
 
+    tape = partial_session_tape(minutes, pre=pre)
     day_open = None
     day_low = None
-    if minutes:
-        day_open = _num(minutes[0].get("o"))
-        lows = []
-        for m in minutes:
-            lv = _num(m.get("l"))
-            if lv is not None:
-                lows.append(lv)
-        if lows:
-            day_low = min(lows)
-    sel = select_us_hang(
-        price, stop, target, vwap=vwap, pre=pre, day_open=day_open,
+    vwap_hang = vwap
+    day_chg = None
+    if tape:
+        day_open = tape.get("day_open")
+        day_low = tape.get("day_low")
+        day_chg = tape.get("day_chg")
+        if tape.get("vwap") is not None:
+            vwap_hang = tape["vwap"]
+    # 盘中刷新只用这段分时的低点，不把调用方的「全日已走完」盖上去。
+    low_final = False if tape else day_low_final
+    hang_kw = dict(
+        vwap=vwap_hang, pre=pre, day_open=day_open,
         zone_lo=zone_lo, zone_hi=zone_hi, entry_plan=entry, cap=buy_cap,
         mode=mode, ride_state=ride_state, bars=daily_bars, day_low=day_low,
-        day_low_final=day_low_final, channel_expired=channel_expired,
-        reaches_deep=reaches_deep)
+        day_low_final=low_final, day_chg_pct=day_chg,
+        channel_expired=channel_expired, reaches_deep=reaches_deep, atr=atr)
+    use_veto = (isinstance(structure_plan, dict)
+                and structure_plan.get("recommend") is False)
+    if use_veto:
+        sel = apply_us_hang(price, stop, target, plan=structure_plan, **hang_kw)
+        if not sel.get("emit"):
+            note = structure_plan.get("note") or "预案未推荐，结构不是突破或回踩。"
+            return _reject(note)
+    else:
+        hang_kw.pop("atr", None)
+        sel = select_us_hang(price, stop, target, **hang_kw)
     out["hang_tier"] = sel["tier"]
     out["hang_px"] = sel["hang"]
     out["hang_anchor"] = sel["anchor"]
@@ -901,6 +1225,8 @@ def render_us(d):
         lines.append("档位  %s  %s  %s" % (d["hang_tier"], hp_txt, d.get("hang_anchor") or "—"))
         if d.get("hang_why"):
             lines.append("  %s" % d["hang_why"])
+    if d.get("rerun_note"):
+        lines.append("再跑  %s" % d["rerun_note"])
     lines.append("结论  %s。%s" % (d["action"], d["reason"]))
     if d["action"] != "能买" and d.get("arm_price") is not None:
         lines.append("盯价  %.2f  %s" % (d["arm_price"], d.get("arm_note") or ""))
@@ -996,9 +1322,19 @@ def main(argv=None):
         return 3
 
     t1 = time.perf_counter()
+    zone_lo = zone_hi = mode = ride = None
+    structure_plan = None
+    if plan:
+        zone_lo = plan.get("zone_lo")
+        zone_hi = plan.get("zone_hi")
+        mode = plan.get("mode")
+        ride = plan.get("ride_state")
+        structure_plan = plan.get("raw")
     d = decide_us(day, summary, entry, stop, target,
                   cap=cap, atr=atr, account=args.account,
-                  risk_scale=args.risk_scale)
+                  risk_scale=args.risk_scale,
+                  zone_lo=zone_lo, zone_hi=zone_hi, mode=mode,
+                  ride_state=ride, structure_plan=structure_plan)
     d["plan_src"] = plan_src
     d["intraday_source"] = args.source
     decide_ms = (time.perf_counter() - t1) * 1000.0
