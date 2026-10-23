@@ -16,7 +16,8 @@ from gates.us_session_decide import (decide_us, size_for_us, resolve_cap_us,
                                      auto_plan_us, plan_from_us,
                                      fetch_intraday_nasdaq, _parse_et,
                                      select_us_hang, us_exec_target,
-                                     lows_often_reach_depth, render_us)
+                                     lows_often_reach_depth, render_us,
+                                     apply_us_hang, partial_session_tape)
 from open_playbook import long_rr, max_entry_for_rr
 
 FAILS = []
@@ -408,6 +409,142 @@ def test_decide_us_zs_deep_rests():
     chk("输出标深档", "深档" in txt, txt)
 
 
+def _breakout_plan():
+    """合成结构：regime 把 mode 改成 wait，突破形态留在 mode_before_regime。"""
+    return {
+        "recommend": False,
+        "mode": "wait",
+        "mode_before_regime": "platform_break",
+        "market_regime_veto": True,
+        "buy_zone": {
+            "mode": "platform_break",
+            "primary_lo": 100.0,
+            "primary_hi": 104.0,
+        },
+    }
+
+
+def test_rerun_tape_updates_shallow_without_full_day():
+    """早盘还在买区上沿之上 → 不追。稍后分时回到买区 → 浅档，这段低点够得着。
+
+    早盘切片看不到后一段的低点。不靠全日最低价（前瞻）来决定早盘挂不挂。
+    """
+    early = [
+        {"o": 110.0, "h": 110.2, "l": 109.4, "c": 109.8, "v": 1000, "avg": 109.9},
+        {"o": 109.8, "h": 110.0, "l": 109.2, "c": 109.6, "v": 1000, "avg": 109.7},
+    ]
+    later = early + [
+        {"o": 109.6, "h": 109.6, "l": 103.0, "c": 103.4, "v": 2000, "avg": 104.0},
+    ]
+    tape_e = partial_session_tape(early, pre=108.0)
+    tape_l = partial_session_tape(later, pre=108.0)
+    chk("早盘低点看不到后段", tape_e["day_low"] > 109.0, tape_e)
+    chk("后段低点是 103", abs(tape_l["day_low"] - 103.0) < 1e-9, tape_l)
+    chk("半根不是收盘低点", tape_l["day_low_final"] is False, tape_l)
+    plan = _breakout_plan()
+    early_sel = apply_us_hang(
+        tape_e["price"], 96.0, 120.0, plan=plan,
+        vwap=tape_e["vwap"], pre=108.0, day_open=tape_e["day_open"],
+        zone_lo=100.0, zone_hi=104.0, day_low=tape_e["day_low"],
+        day_low_final=tape_e["day_low_final"], day_chg_pct=tape_e["day_chg"],
+        mode="wait", atr=2.0)
+    chk("早盘在上沿之上不追", early_sel["emit"] and early_sel["tier"] == "不追", early_sel)
+    chk("早盘不给挂价", early_sel["hang"] is None, early_sel)
+    chk("早盘写明上沿", "上沿" in early_sel["why"], early_sel.get("why"))
+    late_sel = apply_us_hang(
+        tape_l["price"], 96.0, 120.0, plan=plan,
+        vwap=tape_l["vwap"], pre=108.0, day_open=tape_l["day_open"],
+        zone_lo=100.0, zone_hi=104.0, day_low=tape_l["day_low"],
+        day_low_final=False, day_chg_pct=tape_l["day_chg"],
+        mode="wait", atr=2.0)
+    chk("回踩后打出浅档", late_sel["emit"] and late_sel["tier"] == "浅档", late_sel)
+    chk("浅档价能被这段低点摸到",
+        late_sel["hang"] is not None and tape_l["day_low"] <= late_sel["hang"] + 1e-9,
+        late_sel)
+    chk("理由写浅档仍挂", "浅档仍挂" in late_sel["why"], late_sel.get("why"))
+    rr = long_rr(late_sel["hang"], 120.0, 96.0)
+    chk("浅档 R≥1.5", rr is not None and rr + 1e-9 >= 1.5, rr)
+
+
+def test_no_zone_near_vwap_still_shallow():
+    """买区缺失，但结构仍是平台突破，现价贴着 VWAP，且 R≥1.5 → 浅档，不静默。"""
+    plan = {"recommend": False, "mode": "platform_break", "buy_zone": {}}
+    sel = apply_us_hang(
+        100.2, 94.0, 112.0, plan=plan, vwap=100.2, pre=101.0, day_open=101.0,
+        atr=1.5)
+    chk("无买区仍给出挂单", sel["emit"] is True, sel)
+    chk("无买区是浅档", sel["tier"] == "浅档" and sel["hang"] is not None, sel)
+    chk("锚在 VWAP 或 −1%", sel["anchor"] in ("VWAP", "−1%"), sel)
+    rr = long_rr(sel["hang"], 112.0, 94.0)
+    chk("无买区浅档 R≥1.5", rr is not None and rr + 1e-9 >= 1.5, rr)
+
+
+def test_veto_keeps_no_chase_gates():
+    """上沿之上、当日 +5%、通道过期，仍然不追，不因为放松否决就挂出去。"""
+    plan = {
+        "recommend": False,
+        "mode": "platform_break",
+        "buy_zone": {"mode": "platform_break", "primary_lo": 100.0, "primary_hi": 110.0},
+    }
+    above = apply_us_hang(
+        112.0, 96.0, 130.0, plan=plan, zone_lo=100.0, zone_hi=110.0,
+        pre=108.0, day_open=108.0, atr=2.0)
+    chk("上沿之上不追", above["tier"] == "不追" and above["hang"] is None, above)
+    chk("上沿之上写明原因", "上沿" in above["why"], above.get("why"))
+    rally = apply_us_hang(
+        106.0, 96.0, 130.0, plan=plan, zone_lo=100.0, zone_hi=110.0,
+        pre=100.0, day_chg_pct=0.06, atr=2.0)
+    chk("涨超 5% 不追", rally["tier"] == "不追" and "已涨" in rally["why"], rally)
+    stale = dict(plan)
+    stale["days_above_platform"] = 5
+    expired = apply_us_hang(
+        105.0, 96.0, 130.0, plan=stale, zone_lo=100.0, zone_hi=110.0,
+        pre=104.0, day_open=104.0, atr=2.0)
+    chk("通道过期不追", expired["tier"] == "不追" and "过期" in expired["why"], expired)
+
+
+def test_soft_veto_keeps_rr_floor():
+    """现价在买区内，但浅档 R<1.5：不追，不把门槛降到 1.5 以下。"""
+    plan = {
+        "recommend": False,
+        "mode": "line_pullback",
+        "buy_zone": {"mode": "line_pullback", "primary_lo": 100.0, "primary_hi": 104.0},
+    }
+    sel = apply_us_hang(
+        103.5, 96.0, 106.0, plan=plan, vwap=103.0, pre=104.0, day_open=104.0,
+        zone_lo=100.0, zone_hi=104.0, atr=2.0)
+    chk("R 不够仍不追", sel["emit"] and sel["tier"] == "不追" and sel["hang"] is None, sel)
+    chk("仓位函数未改口径", size_for_us(95.0, 93.0, account=DEFAULT_ACCOUNT)["qty"] == 35)
+
+
+def test_non_breakout_and_top_stay_silent():
+    """没有突破/回踩结构，或顶部已确认：仍然不给单。"""
+    wait = {"recommend": False, "mode": "wait", "note": "没有结构"}
+    sel = apply_us_hang(100.0, 90.0, 120.0, plan=wait, vwap=100.0, pre=100.0)
+    chk("非突破静默", sel["emit"] is False, sel)
+    top = {
+        "recommend": False,
+        "mode": "platform_break",
+        "top_signal_veto": True,
+        "buy_zone": {"primary_lo": 99.0, "primary_hi": 101.0, "mode": "platform_break"},
+    }
+    sel2 = apply_us_hang(
+        100.0, 90.0, 120.0, plan=top, zone_lo=99.0, zone_hi=101.0, pre=100.0)
+    chk("顶部确认仍静默", sel2["emit"] is False, sel2)
+
+
+def test_decide_prints_rerun_note():
+    """盘中决策输出写明何时再跑，不靠全日低点。"""
+    mins = mkx([100.0, 100.0, 99.0])
+    day = {"code": "SYN", "name": "Syn", "date": "2026-10-23",
+           "pre": 100.0, "minutes": mins}
+    d = decide_us(day, {"last": mins[-1]}, entry=99.0, stop=94.0, target=110.0,
+                  zone_lo=97.0, zone_hi=99.5, mode="platform_break",
+                  reaches_deep=False)
+    txt = render_us(d)
+    chk("输出写再跑", "再跑" in txt and "全日低点" in txt, txt)
+
+
 if __name__ == "__main__":
     test_pullback_buy()
     test_chase_reject()
@@ -436,5 +573,11 @@ if __name__ == "__main__":
     test_us_exec_target_prefers_plan()
     test_decide_us_labels_shallow()
     test_decide_us_zs_deep_rests()
+    test_rerun_tape_updates_shallow_without_full_day()
+    test_no_zone_near_vwap_still_shallow()
+    test_veto_keeps_no_chase_gates()
+    test_soft_veto_keeps_rr_floor()
+    test_non_breakout_and_top_stay_silent()
+    test_decide_prints_rerun_note()
     print("\n%d failed" % len(FAILS))
     sys.exit(1 if FAILS else 0)

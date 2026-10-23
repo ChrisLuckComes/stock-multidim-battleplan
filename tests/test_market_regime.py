@@ -145,6 +145,7 @@ def test_gate_down_weak_blocks_all():
     out = MR.apply_market_regime_gate(res, _mkt("down", False))
     assert out["recommend"] is False
     assert out["mode"] == "wait"
+    assert out["mode_before_regime"] == "line_pullback"
 
 
 def test_gate_leader_exempt_even_in_down():
