@@ -1566,7 +1566,7 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
         if _nm and (not out["meta"].get("name") or out["meta"]["name"] == code):
             out["meta"]["name"] = _nm
     # ★ 股性活跃度（A 股软约束）。换手走筹码缓存里的东财流通换手，价用战术日线。
-    #   僵尸 / 价升活降只提示，不改 recommend，也不进战法扫描。
+    #   僵尸 / 高价压制 / 价升活降只提示，不改 recommend，也不进战法扫描。
     if not is_us:
         out["activity"] = _cn_activity(code, bars, out.get("scr"))
     # ★ 2026-10-14 突破有效性闸门（gates/breakout_hold.py）：老罗三条铁律。
