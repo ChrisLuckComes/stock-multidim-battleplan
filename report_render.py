@@ -239,6 +239,21 @@ def build_kpis(a, n):
     if _veto_bad:
         badges.append('<span class="badge b-no">总否决 %d 项：%s</span>'
                       % (len(_veto_bad), esc("、".join(_veto_bad))))
+    # 股性活跃度是软标签。僵尸和价升活降都不进「总否决」。
+    _act = a.get("activity") or {}
+    if (a.get("meta") or {}).get("market") != "US" and _act.get("activity") is not None:
+        _lab = _act.get("activity_label") or "中性"
+        if _lab == "活跃":
+            _cls = "b-ok"
+        elif _lab == "僵尸":
+            _cls = "b-warn"
+        else:
+            _cls = "b-t1"
+        _div = ""
+        if _act.get("activity_divergent"):
+            _div = " · 价升活降，仓位软提示 7成→3成"
+        badges.append('<span class="badge %s">股性活跃度 %s（%s）软约束%s</span>'
+                      % (_cls, num(_act.get("activity"), 4), esc(_lab), esc(_div)))
     return html, " ".join(badges)
 
 
@@ -1200,6 +1215,50 @@ def build_scr_gate(a, n):
             "<br>%s" % (esc(st), note))
 
 
+def build_activity(a, n):
+    """股性活跃度卡片。只展示，不参与筹码一致性闸门，也不改 recommend。"""
+    m = a.get("meta") or {}
+    head = "<h3>股性活跃度（<code>gates/activity.py</code>）</h3>"
+    if m.get("market") == "US":
+        return ("<div class='card'>" + head +
+                "<p class='note'>美股不适用：公式用 A 股流通换手率，本项只覆盖 A 股。</p></div>")
+    r = a.get("activity") if isinstance(a.get("activity"), dict) else None
+    if not r:
+        return ("<div class='card'>" + head +
+                "<p class='note'>本次未算股性活跃度。不因此否决，也不编造 0。</p></div>")
+    if r.get("activity") is None:
+        return ("<div class='card'>" + head +
+                "<p class='note'>%s 不因此否决，也不编造 0。</p></div>"
+                % esc(r.get("reason") or "未知。"))
+    lab = r.get("activity_label") or "中性"
+    if lab == "活跃":
+        cls = "b-ok"
+    elif lab == "僵尸":
+        cls = "b-warn"
+    else:
+        cls = "b-t1"
+    div = ""
+    if r.get("activity_divergent"):
+        div = ("<p class='note'><b>%s</b></p>" % esc(r.get("size_hint") or ""))
+    return (
+        "<div class='card'>%s"
+        "<p><span class='badge %s'>%s %s</span> 软约束，不否决买点。</p>"
+        "<div class='kpis'>"
+        "<div class='kpi'>活跃度 <b>%s</b></div>"
+        "<div class='kpi'>近5日振幅 <b>%s%%</b></div>"
+        "<div class='kpi'>换手 <b>%s%%</b></div>"
+        "<div class='kpi'>股价 <b>%s</b></div>"
+        "</div>"
+        "%s"
+        "<p class='note'>公式：%s。&gt;0.8 活跃（资金真干），&lt;0.3 僵尸，中间中性。"
+        "除以股价是故意的，低价股分更高。不进战法扫描，不改 recommend。</p>"
+        "</div>"
+        % (head, cls, esc(lab), num(r.get("activity"), 4),
+           num(r.get("activity"), 4), num(r.get("amp_avg_5"), 2),
+           num(r.get("turnover"), 2), num(r.get("price"), 2),
+           div, esc(r.get("formula") or "")))
+
+
 def build_scr(a, n):
     """筹码面区块（2026-10-14 老罗改：**大幅简化**、**不再放最高盈亏比之前**）。
 
@@ -1501,7 +1560,7 @@ def render(a, n, tmpl_path=DEFAULT_TMPL, vp_from=None, vp_to=None):
         "PLAN_ROWS": build_plan_rows(a),
         "PLAN_NOTE": note(n.get("plan_note"), ""),
         "CALIBER_NOTES": "".join("<p>%s</p>" % _caliber_html(x) for x in caliber),
-        "SCR_BLOCK": build_scr(a, n),
+        "SCR_BLOCK": build_scr(a, n) + build_activity(a, n),
         "TOP_SIGNAL_BLOCK": build_top_signal(a, n),
         "CONFLUENCE_BLOCK": build_confluence(a, n),
         "OPEN_PLAYBOOK_BLOCK": build_open_playbook(a, n),
