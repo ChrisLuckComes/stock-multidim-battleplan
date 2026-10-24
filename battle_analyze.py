@@ -1070,6 +1070,50 @@ def _print_strength_abort(res):
     print("\n".join(L))
 
 
+def _cn_activity(code, bars, scr):
+    """A 股股性活跃度。软约束；失败只记未知，不打断分析。
+
+    价用战术日线（不复权）。换手优先读筹码同日缓存（scr.analyze 刚写过盘），
+    缓存没有就只用 scr 结果里的当日换手，不算背离。不在这里新开一轮全市场请求。
+    """
+    try:
+        from gates.activity import assess, turnovers_of
+    except Exception as e:
+        return {"activity": None, "activity_label": None,
+                "activity_divergent": False, "hard_gate": False,
+                "reason": "模块不可用：%s" % e, "formula": ""}
+    extra = None
+    scr_ok = isinstance(scr, dict) and not scr.get("error")
+    if scr_ok:
+        # 只读筹码刚写下的同日缓存。缓存没有就不补拉，避免 --no-scr 之外再打一枪东财。
+        try:
+            import scr_chip as _SC
+            path = _SC._cache_path(code)
+            if os.path.isfile(path):
+                with open(path, encoding="utf-8") as f:
+                    payload = json.load(f)
+                if _SC._cache_valid(payload, dt.datetime.now()):
+                    extra = turnovers_of(payload.get("bars"))
+        except Exception:
+            extra = None
+        if not extra and bars and scr.get("turnover"):
+            extra = turnovers_of([{"d": bars[-1].get("d"), "turnover": scr.get("turnover")}])
+    try:
+        return assess(bars, turnovers=extra)
+    except Exception as e:
+        return {"activity": None, "activity_label": None,
+                "activity_divergent": False, "hard_gate": False,
+                "reason": "计算失败：%s" % e}
+
+
+def _activity_line(block):
+    try:
+        from gates.activity import format_line
+        return format_line(block)
+    except Exception:
+        return "股性活跃度：未知"
+
+
 def analyze(code, account=None, peers=None, data_file=None, n=330,
             intraday=True, min_scale=5, name=None, theme=None,
             peer_names=None, no_cache=False, cash=None,
@@ -1521,6 +1565,10 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
         _nm = out["scr"].get("name")
         if _nm and (not out["meta"].get("name") or out["meta"]["name"] == code):
             out["meta"]["name"] = _nm
+    # ★ 股性活跃度（A 股软约束）。换手走筹码缓存里的东财流通换手，价用战术日线。
+    #   僵尸 / 价升活降只提示，不改 recommend，也不进战法扫描。
+    if not is_us:
+        out["activity"] = _cn_activity(code, bars, out.get("scr"))
     # ★ 2026-10-14 突破有效性闸门（gates/breakout_hold.py）：老罗三条铁律。
     #   ⚑⚑ **突破买法复核的参照物只能是突破位，不许换成均线**（301087 可孚医疗教训）。
     #   ⚑ **突破位守住 ≠ 突破有效**：还要查突破阳/涨停实体有没有被吃完（600882 妙可蓝多教训）。
@@ -1672,6 +1720,8 @@ def summarize(r):
     L.append("=" * 72)
     L.append(" 模式 %s（%s）recommend=%s  regime=%s" % (
         p.get("mode"), p.get("verdict"), p.get("recommend"), p.get("regime")))
+    if m.get("market") != "US":
+        L.append(" " + _activity_line(r.get("activity")))
     for _fk, _fcn in (("ma_ride_week", "周线"), ("ma_ride_month", "月线")):
         _fr = p.get(_fk) or {}
         if _fr.get("state") in ("line_ride", "new_high"):
