@@ -24,6 +24,7 @@ from gates.activity import (  # noqa: E402
     assess,
     cn_code,
     day_amplitude_pct,
+    format_line,
     main,
 )
 
@@ -274,8 +275,18 @@ def test_kpis_without_activity_unchanged():
     assert "recommend" in badges
 
 
+def _block_fetch(monkeypatch, SC):
+    def _no(*_a, **_k):
+        raise AssertionError("should not fetch")
+
+    monkeypatch.setattr(SC, "fetch_all_meta", _no)
+    monkeypatch.setattr(SC, "fetch_bars", _no)
+    monkeypatch.setattr(SC, "fetch_bars_tx", _no)
+    monkeypatch.setattr(SC, "tx_float_shares", _no)
+
+
 def test_battle_reads_scr_cache_and_does_not_fetch(tmp_path, monkeypatch):
-    """战术日线无换手；换手只从筹码缓存读，不许再打东财。"""
+    """战术日线无换手时，同日筹码缓存够用就不再打网络。"""
     import datetime as dt
     import battle_analyze as BA
     import scr_chip as SC
@@ -288,23 +299,97 @@ def test_battle_reads_scr_cache_and_does_not_fetch(tmp_path, monkeypatch):
         "bars": cache_bars,
     }), encoding="utf-8")
 
-    def _no(*_a, **_k):
-        raise AssertionError("should not fetch")
-
     monkeypatch.setattr(SC, "_cache_path", lambda code, us_mode=False: str(path))
-    monkeypatch.setattr(SC, "fetch_all_meta", _no)
-    monkeypatch.setattr(SC, "fetch_bars", _no)
+    _block_fetch(monkeypatch, SC)
     r = BA._cn_activity("600000", price, {"turnover": 1.0})
     assert r["activity"] == pytest_approx(1.56)
+    assert r["activity_label"] == "活跃"
     assert r["turnover"] == pytest_approx(5.2)
+    assert r["turnover_src"] == "cache"
     assert r["hard_gate"] is False
 
     bare = _const(6, 12, 3.6, 5.2)
     for b in bare:
         del b["turnover"]
-    skipped = BA._cn_activity("600000", bare, None)
-    assert skipped["activity"] is None
-    assert skipped["hard_gate"] is False
+    again = BA._cn_activity("600000", bare, None)
+    assert again["activity_label"] == "活跃"
+    assert again["turnover"] == pytest_approx(5.2)
+    assert again["hard_gate"] is False
+
+
+def test_bar_turnover_skips_network(monkeypatch):
+    import battle_analyze as BA
+    import scr_chip as SC
+
+    _block_fetch(monkeypatch, SC)
+    r = BA._cn_activity("600000", _const(6, 12, 3.6, 5.2), None)
+    assert r["activity_label"] == "活跃"
+    assert r["turnover_src"] == "bar"
+    assert r["hard_gate"] is False
+
+
+def test_scr_series_fills_without_fetch(monkeypatch):
+    import battle_analyze as BA
+    import scr_chip as SC
+
+    price = _const(6, 12, 3.6, 5.2)
+    series = [{"d": b["d"], "turnover": b.pop("turnover")} for b in price]
+    _block_fetch(monkeypatch, SC)
+    monkeypatch.setattr(SC, "_cache_path", lambda code, us_mode=False: "/no/such/scr.json")
+    r = BA._cn_activity("600000", price, {"series": series, "turnover": 1.0})
+    assert r["activity_label"] == "活跃"
+    assert r["turnover"] == pytest_approx(5.2)
+    assert r["turnover_src"] == "scr"
+    assert r["hard_gate"] is False
+
+
+def test_tx_fallback_when_turnover_missing(monkeypatch):
+    """日线和缓存都没有换手时，走腾讯流通股本反算，不留空。"""
+    import battle_analyze as BA
+    import scr_chip as SC
+
+    price = _const(6, 12, 3.6, 5.2)
+    for b in price:
+        del b["turnover"]
+    tx_bars = _const(6, 12, 3.6, 5.2)
+
+    def _em_down(*_a, **_k):
+        raise RuntimeError("eastmoney down")
+
+    monkeypatch.setattr(SC, "_cache_path", lambda code, us_mode=False: "/no/such/scr.json")
+    monkeypatch.setattr(SC, "fetch_all_meta", _em_down)
+    monkeypatch.setattr(SC, "fetch_bars_tx", lambda code, n=120: (tx_bars, "测试"))
+    r = BA._cn_activity("600000", price, None)
+    assert r["activity"] == pytest_approx(1.56)
+    assert r["activity_label"] == "活跃"
+    assert r["turnover"] == pytest_approx(5.2)
+    assert r["turnover_src"] == "tx"
+    assert "腾讯备用源" in r["reason"]
+    assert r["hard_gate"] is False
+
+
+def test_unknown_when_turnover_impossible(monkeypatch):
+    import battle_analyze as BA
+    import scr_chip as SC
+
+    bare = _const(6, 12, 3.6, 5.2)
+    for b in bare:
+        del b["turnover"]
+
+    def _down(*_a, **_k):
+        raise RuntimeError("no data")
+
+    monkeypatch.setattr(SC, "_cache_path", lambda code, us_mode=False: "/no/such/scr.json")
+    monkeypatch.setattr(SC, "fetch_all_meta", _down)
+    monkeypatch.setattr(SC, "fetch_bars_tx", _down)
+    monkeypatch.setattr(SC, "tx_float_shares", lambda sym: (None, None))
+    r = BA._cn_activity("600000", bare, None)
+    assert r["activity"] is None
+    assert r["activity_label"] is None
+    assert "换手" in r["reason"]
+    assert r["hard_gate"] is False
+    assert format_line(r) == "活跃度：未知（缺换手）"
+    assert r["turnover"] is None
 
 
 def test_report_card_and_badge_are_soft():
@@ -318,10 +403,54 @@ def test_report_card_and_badge_are_soft():
     us = RR.build_activity({"meta": {"market": "US", "code": "CIEN"}}, {})
     assert "不适用" in us
 
+    missing_block = assess(_const(6, 12, 3.6, 0))
     missing = RR.build_activity(
-        {"meta": {"market": "CN"}, "activity": assess(_const(6, 12, 3.6, 0))}, {})
+        {"meta": {"market": "CN"}, "activity": missing_block}, {})
+    assert "活跃度：未知（缺换手）" in missing
     assert "缺换手" in missing
     assert "不编造" in missing
+    assert "不因此否决" in missing
+
+    _items, miss_badges = RR.build_kpis({
+        "meta": {"basis_close": 12, "prev_close": 11, "market": "CN"},
+        "struct": {"atr14": 0.4, "atr_pct": 3},
+        "plan": {"buy_zone": {}, "mode": "wait", "verdict": "等待", "recommend": False},
+        "activity": missing_block,
+    }, {})
+    assert "活跃度：未知（缺换手）" in miss_badges
+    assert "总否决" not in miss_badges
+
+    summary = RR.build_summary({
+        "meta": {"market": "CN"},
+        "plan": {"buy_zone": {}, "mode": "wait", "verdict": "等待", "recommend": False},
+        "struct": {"percentile": {}},
+        "targets": {},
+        "activity": missing_block,
+    }, {})
+    assert "活跃度：未知（缺换手）" in summary
+    labeled = RR.build_summary({
+        "meta": {"market": "CN"},
+        "plan": {"buy_zone": {}, "mode": "wait", "verdict": "等待", "recommend": False},
+        "struct": {"percentile": {}},
+        "targets": {},
+        "activity": r,
+    }, {})
+    assert "股性活跃度" in labeled
+    assert "活跃" in labeled
+    us_sum = RR.build_summary({
+        "meta": {"market": "US"},
+        "plan": {"buy_zone": {}, "mode": "wait", "verdict": "等待", "recommend": False},
+        "struct": {"percentile": {}},
+        "targets": {},
+    }, {})
+    assert "不适用" in us_sum
+
+    _us_items, us_badges = RR.build_kpis({
+        "meta": {"basis_close": 12, "prev_close": 11, "market": "US"},
+        "struct": {"atr14": 0.4, "atr_pct": 3},
+        "plan": {"buy_zone": {}, "mode": "wait", "verdict": "等待", "recommend": False},
+    }, {})
+    assert "股性活跃度 不适用" in us_badges
 
     crush = assess(_const(8, 214, 5.3, 6.13))
     crush_html = RR.build_activity(

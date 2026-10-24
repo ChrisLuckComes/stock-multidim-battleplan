@@ -10,8 +10,9 @@
 换手率用日线上已有的 turnover / turnover_rate / hs（单位已经是 %，不再除 100），
 或调用方按日期传入的东财流通换手（scr_chip 日线第 11 列）。缺则返回 None，
 不把 0 当成真实换手。
-CLI 用 scr_chip 前复权日线（末根收盘即现价）。battle_analyze 用战术不复权
-收盘，换手从筹码同日缓存按日期对齐，缓存没有不补拉。
+CLI 用 scr_chip 前复权日线（末根收盘即现价）。完整引擎价用战术不复权收盘：
+换手先读日线字段，没有再对齐筹码序列或同日缓存，仍缺才走筹码取数
+（东财失败则腾讯流通股本反算）。仍然算不出就明示缺换手。
 
 阈值是软提示，不是硬闸。分数公式不改（仍除以股价，低价股分更高）：
     > 0.8                         活跃（资金真干）
@@ -48,6 +49,8 @@ FALL_REL = 0.15
 FALL_SLOPE_REL = 0.10
 FORMULA = "(近5日日均振幅% × 当日换手率%) ÷ 收盘价(元)"
 SIZE_HINT = "出货形态（价升、活跃度降）：软提示仓位从 7 成收到 3 成。不单独否决买点。"
+UNKNOWN_TURN = "活跃度：未知（缺换手）"
+NA_LINE = "股性活跃度：不适用"
 
 _TURN_KEYS = ("turnover", "turnover_rate", "hs")
 
@@ -353,6 +356,10 @@ def format_line(r):
     """给人读的一行。未知就写未知，不补 0。"""
     if not r or r.get("activity") is None:
         why = (r or {}).get("reason") or "无数据"
+        if "不适用" in str(why):
+            return NA_LINE
+        if "换手" in str(why):
+            return UNKNOWN_TURN
         return "股性活跃度：未知（%s）" % why
     div = ""
     if r.get("activity_divergent"):

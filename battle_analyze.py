@@ -1070,40 +1070,155 @@ def _print_strength_abort(res):
     print("\n".join(L))
 
 
+def _activity_fail(reason):
+    return {"activity": None, "activity_label": None,
+            "activity_divergent": False, "hard_gate": False,
+            "reason": reason, "formula": ""}
+
+
+def _merge_turns(base, extra):
+    out = dict(base or {})
+    for k, v in (extra or {}).items():
+        if k not in out and v is not None:
+            out[k] = v
+    return out
+
+
+def _last_turn_missing(bars, turns, bar_turnover):
+    if not bars:
+        return True
+    return bar_turnover(bars[-1], turns) is None
+
+
+def _scr_series_turns(scr, turnovers_of):
+    if not isinstance(scr, dict) or scr.get("error"):
+        return {}
+    return turnovers_of(scr.get("series"))
+
+
+def _scr_last_turn(bars, scr, turnovers_of, day_key):
+    """筹码结果里的当日换手，只贴到同一天。没有 as_of 时沿用末根日期。"""
+    if not bars or not isinstance(scr, dict) or scr.get("error"):
+        return {}
+    as_of = scr.get("as_of")
+    last_d = bars[-1].get("d")
+    if as_of and day_key(as_of) != day_key(last_d):
+        return {}
+    return turnovers_of([{"d": last_d, "turnover": scr.get("turnover")}])
+
+
+def _cache_turns(code, turnovers_of):
+    """同日筹码缓存里的换手。TTL 外的不算，避免拿过期盘中换手。"""
+    try:
+        import scr_chip as _SC
+        path = _SC._cache_path(code)
+        if not os.path.isfile(path):
+            return {}, ""
+        with open(path, encoding="utf-8") as f:
+            payload = json.load(f)
+        if not _SC._cache_valid(payload, dt.datetime.now()):
+            return {}, ""
+        meta = payload.get("meta") or {}
+        src = "tx" if meta.get("kline") == "tx" else "cache"
+        return turnovers_of(payload.get("bars")), src
+    except Exception:
+        return {}, ""
+
+
+def _pull_chip_turns(code, n, turnovers_of):
+    """筹码取数：东财日线，失败再腾讯流通股本反算。不把 0 收进表。"""
+    try:
+        import scr_chip as _SC
+    except Exception:
+        return {}, ""
+    try:
+        bars, _name, _ff, meta = _SC.fetch_all_meta(
+            code, n=n, use_cache=False, allow_fallback=True)
+        src = "tx" if (meta or {}).get("kline") == "tx" else "chip"
+        got = turnovers_of(bars)
+        if got:
+            return got, src
+    except Exception:
+        pass
+    try:
+        bars, _name = _SC.fetch_bars_tx(code, n=n)
+        return turnovers_of(bars), "tx"
+    except Exception:
+        return {}, ""
+
+
+def _tx_today_turn(code, bars, turnovers_of, day_key):
+    """末根就是今天、日线仍缺换手时，用腾讯报价里的当日换手。不回填历史。"""
+    if not bars:
+        return {}
+    if day_key(bars[-1].get("d")) != dt.date.today().isoformat():
+        return {}
+    try:
+        import scr_chip as _SC
+        _shares, turn = _SC.tx_float_shares(_SC.tx_symbol(code))
+    except Exception:
+        return {}
+    return turnovers_of([{"d": bars[-1].get("d"), "turnover": turn}])
+
+
+def _collect_turnovers(code, bars, scr):
+    """换手优先级：日线字段 → 筹码序列 → 同日缓存 → 当日换手 → 筹码取数 → 今日报价。"""
+    from gates.activity import bar_turnover, day_key, turnovers_of
+
+    turns = turnovers_of(bars)
+    src = "bar" if not _last_turn_missing(bars, turns, bar_turnover) else ""
+    if src:
+        return turns, src
+    turns = _merge_turns(turns, _scr_series_turns(scr, turnovers_of))
+    if not _last_turn_missing(bars, turns, bar_turnover):
+        return turns, "scr"
+    cached, cache_src = _cache_turns(code, turnovers_of)
+    turns = _merge_turns(turns, cached)
+    if not _last_turn_missing(bars, turns, bar_turnover):
+        return turns, cache_src or "cache"
+    turns = _merge_turns(turns, _scr_last_turn(bars, scr, turnovers_of, day_key))
+    if not _last_turn_missing(bars, turns, bar_turnover):
+        return turns, "scr"
+    n = 120
+    if bars:
+        n = min(max(len(bars), 40), 160)
+    pulled, pull_src = _pull_chip_turns(code, n, turnovers_of)
+    turns = _merge_turns(turns, pulled)
+    if not _last_turn_missing(bars, turns, bar_turnover):
+        return turns, pull_src or "chip"
+    turns = _merge_turns(turns, _tx_today_turn(code, bars, turnovers_of, day_key))
+    if not _last_turn_missing(bars, turns, bar_turnover):
+        return turns, "tx_quote"
+    return turns, ""
+
+
 def _cn_activity(code, bars, scr):
     """A 股股性活跃度。软约束；失败只记未知，不打断分析。
 
-    价用战术日线（不复权）。换手优先读筹码同日缓存（scr.analyze 刚写过盘），
-    缓存没有就只用 scr 结果里的当日换手，不算背离。不在这里新开一轮全市场请求。
+    价用战术日线（不复权）。换手先用日线上的换手字段；没有则用筹码序列、
+    同日缓存、筹码取数（东财，失败走腾讯流通股本反算）。仍没有就明示缺换手，
+    不把 0 当成换手。不改 recommend。
     """
     try:
-        from gates.activity import assess, turnovers_of
+        from gates.activity import assess
     except Exception as e:
-        return {"activity": None, "activity_label": None,
-                "activity_divergent": False, "hard_gate": False,
-                "reason": "模块不可用：%s" % e, "formula": ""}
-    extra = None
-    scr_ok = isinstance(scr, dict) and not scr.get("error")
-    if scr_ok:
-        # 只读筹码刚写下的同日缓存。缓存没有就不补拉，避免 --no-scr 之外再打一枪东财。
-        try:
-            import scr_chip as _SC
-            path = _SC._cache_path(code)
-            if os.path.isfile(path):
-                with open(path, encoding="utf-8") as f:
-                    payload = json.load(f)
-                if _SC._cache_valid(payload, dt.datetime.now()):
-                    extra = turnovers_of(payload.get("bars"))
-        except Exception:
-            extra = None
-        if not extra and bars and scr.get("turnover"):
-            extra = turnovers_of([{"d": bars[-1].get("d"), "turnover": scr.get("turnover")}])
+        return _activity_fail("模块不可用：%s" % e)
     try:
-        return assess(bars, turnovers=extra)
+        turns, src = _collect_turnovers(code, bars, scr)
+        r = assess(bars, turnovers=turns or None)
     except Exception as e:
-        return {"activity": None, "activity_label": None,
-                "activity_divergent": False, "hard_gate": False,
-                "reason": "计算失败：%s" % e}
+        return _activity_fail("计算失败：%s" % e)
+    if r.get("activity") is not None and src == "tx":
+        note = "换手来自腾讯备用源（成交量/当前流通股本反算）。"
+        if note not in (r.get("reason") or ""):
+            r["reason"] = (r.get("reason") or "") + note
+    elif r.get("activity") is not None and src == "tx_quote":
+        note = "换手来自腾讯报价当日换手。"
+        if note not in (r.get("reason") or ""):
+            r["reason"] = (r.get("reason") or "") + note
+    r["turnover_src"] = src or None
+    r["hard_gate"] = False
+    return r
 
 
 def _activity_line(block):
@@ -1567,7 +1682,13 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
             out["meta"]["name"] = _nm
     # ★ 股性活跃度（A 股软约束）。换手走筹码缓存里的东财流通换手，价用战术日线。
     #   僵尸 / 高价压制 / 价升活降只提示，不改 recommend，也不进战法扫描。
-    if not is_us:
+    if is_us:
+        out["activity"] = {
+            "activity": None, "activity_label": None,
+            "activity_divergent": False, "hard_gate": False,
+            "reason": "美股不适用", "formula": "",
+        }
+    else:
         out["activity"] = _cn_activity(code, bars, out.get("scr"))
     # ★ 2026-10-14 突破有效性闸门（gates/breakout_hold.py）：老罗三条铁律。
     #   ⚑⚑ **突破买法复核的参照物只能是突破位，不许换成均线**（301087 可孚医疗教训）。
@@ -1720,8 +1841,7 @@ def summarize(r):
     L.append("=" * 72)
     L.append(" 模式 %s（%s）recommend=%s  regime=%s" % (
         p.get("mode"), p.get("verdict"), p.get("recommend"), p.get("regime")))
-    if m.get("market") != "US":
-        L.append(" " + _activity_line(r.get("activity")))
+    L.append(" " + _activity_line(r.get("activity")))
     for _fk, _fcn in (("ma_ride_week", "周线"), ("ma_ride_month", "月线")):
         _fr = p.get(_fk) or {}
         if _fr.get("state") in ("line_ride", "new_high"):
