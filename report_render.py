@@ -118,6 +118,31 @@ def card_list(items, empty="<li>—</li>"):
 
 # ───────────────────────── 各段渲染 ─────────────────────────
 
+def _activity_badge_class(lab):
+    """僵尸用预警色。高价压制与中性同色：低分但盘面不空。"""
+    if lab == "活跃":
+        return "b-ok"
+    if lab == "僵尸":
+        return "b-warn"
+    return "b-t1"
+
+
+def _activity_rule_note(formula):
+    from gates.activity import ACTIVE_GT, LABEL_PRICE_CRUSH, TURN_ZOMBIE_LT, ZOMBIE_LT
+    return (
+        "公式：%s。&gt;%g 活跃（资金真干）。"
+        "&lt;%g 且换手&lt;%g%% 才标僵尸；"
+        "&lt;%g 但换手达到 %g%% 标%s"
+        "（分数被股价除低，盘面不空，不是僵尸）。"
+        "中间中性。"
+        "价无关对照 = 振幅×换手，只供跨价比较，不是主门槛。"
+        "除以股价保留。不进战法扫描，不改 recommend。"
+        % (esc(formula or ""),
+           ACTIVE_GT, ZOMBIE_LT, TURN_ZOMBIE_LT,
+           ZOMBIE_LT, TURN_ZOMBIE_LT, esc(LABEL_PRICE_CRUSH))
+    )
+
+
 def build_kpis(a, n):
     m, s, p = a["meta"], a["struct"], a["plan"]
     z = p.get("buy_zone") or {}
@@ -239,16 +264,11 @@ def build_kpis(a, n):
     if _veto_bad:
         badges.append('<span class="badge b-no">总否决 %d 项：%s</span>'
                       % (len(_veto_bad), esc("、".join(_veto_bad))))
-    # 股性活跃度是软标签。僵尸和价升活降都不进「总否决」。
+    # 股性活跃度是软标签。僵尸、高价压制和价升活降都不进「总否决」。
     _act = a.get("activity") or {}
     if (a.get("meta") or {}).get("market") != "US" and _act.get("activity") is not None:
         _lab = _act.get("activity_label") or "中性"
-        if _lab == "活跃":
-            _cls = "b-ok"
-        elif _lab == "僵尸":
-            _cls = "b-warn"
-        else:
-            _cls = "b-t1"
+        _cls = _activity_badge_class(_lab)
         _div = ""
         if _act.get("activity_divergent"):
             _div = " · 价升活降，仓位软提示 7成→3成"
@@ -1222,6 +1242,7 @@ def build_activity(a, n):
     if m.get("market") == "US":
         return ("<div class='card'>" + head +
                 "<p class='note'>美股不适用：公式用 A 股流通换手率，本项只覆盖 A 股。</p></div>")
+    from gates.activity import LABEL_PRICE_CRUSH
     r = a.get("activity") if isinstance(a.get("activity"), dict) else None
     if not r:
         return ("<div class='card'>" + head +
@@ -1231,15 +1252,18 @@ def build_activity(a, n):
                 "<p class='note'>%s 不因此否决，也不编造 0。</p></div>"
                 % esc(r.get("reason") or "未知。"))
     lab = r.get("activity_label") or "中性"
-    if lab == "活跃":
-        cls = "b-ok"
-    elif lab == "僵尸":
-        cls = "b-warn"
-    else:
-        cls = "b-t1"
+    cls = _activity_badge_class(lab)
     div = ""
     if r.get("activity_divergent"):
         div = ("<p class='note'><b>%s</b></p>" % esc(r.get("size_hint") or ""))
+    crush = ""
+    if lab == LABEL_PRICE_CRUSH:
+        crush = ("<p class='note'>换手不低，活跃度被股价除法压到阈值下。"
+                 "这是高价压制，不是僵尸。</p>")
+    raw_cell = ""
+    if r.get("activity_raw") is not None:
+        raw_cell = ("<div class='kpi'>价无关对照 <b>%s</b></div>"
+                    % num(r.get("activity_raw"), 2))
     return (
         "<div class='card'>%s"
         "<p><span class='badge %s'>%s %s</span> 软约束，不否决买点。</p>"
@@ -1248,15 +1272,15 @@ def build_activity(a, n):
         "<div class='kpi'>近5日振幅 <b>%s%%</b></div>"
         "<div class='kpi'>换手 <b>%s%%</b></div>"
         "<div class='kpi'>股价 <b>%s</b></div>"
-        "</div>"
         "%s"
-        "<p class='note'>公式：%s。&gt;0.8 活跃（资金真干），&lt;0.3 僵尸，中间中性。"
-        "除以股价是故意的，低价股分更高。不进战法扫描，不改 recommend。</p>"
+        "</div>"
+        "%s%s"
+        "<p class='note'>%s</p>"
         "</div>"
         % (head, cls, esc(lab), num(r.get("activity"), 4),
            num(r.get("activity"), 4), num(r.get("amp_avg_5"), 2),
            num(r.get("turnover"), 2), num(r.get("price"), 2),
-           div, esc(r.get("formula") or "")))
+           raw_cell, crush, div, _activity_rule_note(r.get("formula") or "")))
 
 
 def build_scr(a, n):

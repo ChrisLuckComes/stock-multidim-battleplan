@@ -13,10 +13,13 @@
 CLI 用 scr_chip 前复权日线（末根收盘即现价）。battle_analyze 用战术不复权
 收盘，换手从筹码同日缓存按日期对齐，缓存没有不补拉。
 
-阈值是软提示，不是硬闸：
-    > 0.8  活跃（资金真干）
-    < 0.3  僵尸
-    其余   中性
+阈值是软提示，不是硬闸。分数公式不改（仍除以股价，低价股分更高）：
+    > 0.8                         活跃（资金真干）
+    < 0.3 且当日换手 < 2%         僵尸（盘面死。换手约 1% 的低活票）
+    < 0.3 但当日换手 ≥ 2%         高价压制（换手还在，分数被÷股价压低）
+    其余                          中性
+高价压制不是第二套分数，也不按股价或代码名切。低分档只看换手有没有低于 2%。
+activity_raw = 近5日日均振幅% × 当日换手%，不除价，只供跨价比较，不是主门槛。
 最危险的背离是「价升、活跃度降」（出货形态）：只提示仓位从 7 成收到 3 成。
 不得单独把 recommend 打成 False，也不进战法扫描 / 弹性闸。
 
@@ -35,7 +38,9 @@ import sys
 AMP_WINDOW = 5
 DIV_N = 5
 ACTIVE_GT = 0.8          # 严格大于才算活跃
-ZOMBIE_LT = 0.3          # 严格小于才算僵尸
+ZOMBIE_LT = 0.3          # 严格小于才进入低分档
+TURN_ZOMBIE_LT = 2.0     # 低分档里，换手严格小于此才叫僵尸
+LABEL_PRICE_CRUSH = "高价压制"
 # 活跃度序列「实质下降」看相对降幅。
 # 不拿绝对 0.05 当门槛：活跃（低价）票每天涨几个点，公式里的除法就会把活跃度
 # 压下 0.05，那是价格项，不是出货。
@@ -89,24 +94,41 @@ def day_amplitude_pct(bar, prev_close=None):
     return (h - l) / base * 100.0
 
 
-def activity_score(amp_avg_pct, turnover_pct, price):
-    """纯公式。任一缺失、换手≤0、股价≤0 → None。"""
+def activity_raw_score(amp_avg_pct, turnover_pct):
+    """价无关对照：振幅% × 换手%。不除股价，不替代 activity。"""
     amp = _num(amp_avg_pct)
     turn = _positive(turnover_pct)
-    px = _positive(price)
-    if amp is None or turn is None or px is None or amp < 0:
+    if amp is None or turn is None or amp < 0:
         return None
-    return amp * turn / px
+    return amp * turn
 
 
-def activity_label(score):
+def activity_score(amp_avg_pct, turnover_pct, price):
+    """纯公式。任一缺失、换手≤0、股价≤0 → None。仍是 raw ÷ 股价。"""
+    raw = activity_raw_score(amp_avg_pct, turnover_pct)
+    px = _positive(price)
+    if raw is None or px is None:
+        return None
+    return raw / px
+
+
+def activity_label(score, turnover=None):
+    """软标签。>0.8 活跃，0.3~0.8 中性。
+
+    低分档（<0.3）再看换手：低于 TURN_ZOMBIE_LT 才是僵尸。
+    换手达到门槛标高价压制——分数被÷股价压低，盘面不空。
+    没给换手时不升格：没有「换手还在」的证据，低分仍是僵尸。
+    """
     if score is None:
         return None
     if score > ACTIVE_GT:
         return "活跃"
-    if score < ZOMBIE_LT:
-        return "僵尸"
-    return "中性"
+    if score >= ZOMBIE_LT:
+        return "中性"
+    turn = _num(turnover)
+    if turn is not None and turn >= TURN_ZOMBIE_LT:
+        return LABEL_PRICE_CRUSH
+    return "僵尸"
 
 
 def _field_turnover(bar):
@@ -242,6 +264,7 @@ def divergence_of(bars, turnovers=None, n=DIV_N, window=AMP_WINDOW):
 def blank(reason, **kw):
     d = {
         "activity": None,
+        "activity_raw": None,
         "activity_label": None,
         "activity_divergent": False,
         "hard_gate": False,
@@ -290,17 +313,20 @@ def assess(bars, turnovers=None, window=AMP_WINDOW):
     score = activity_score(avg, turn, price)
     if score is None:
         return blank("缺有效股价，不标注", amp_avg_5=_r4(avg), turnover=_r4(turn), price=_r4(price))
-    label = activity_label(score)
+    label = activity_label(score, turn)
     divergent, known = divergence_of(bars, turnovers, window=window)
     rounded = _r4(score)
+    raw = _r4(activity_raw_score(avg, turn))
     if label == "活跃":
-        reason = "活跃（资金真干）"
+        head = "活跃（资金真干）"
     elif label == "僵尸":
-        reason = "僵尸"
+        head = "僵尸"
+    elif label == LABEL_PRICE_CRUSH:
+        head = "高价压制（换手不低，分数被除以股价压低，不是僵尸）"
     else:
-        reason = "中性"
+        head = "中性"
     reason = "%s：%s = %s%% × %s%% ÷ %s。软约束，不否决买点。" % (
-        reason, rounded, _r4(avg), _r4(turn), _r4(price))
+        head, rounded, _r4(avg), _r4(turn), _r4(price))
     hint = None
     if divergent:
         hint = SIZE_HINT
@@ -309,6 +335,7 @@ def assess(bars, turnovers=None, window=AMP_WINDOW):
         reason = reason + "背离未判（近%d日换手或振幅不齐）。" % DIV_N
     return {
         "activity": rounded,
+        "activity_raw": raw,
         "activity_label": label,
         "activity_divergent": divergent,
         "hard_gate": False,
@@ -330,9 +357,13 @@ def format_line(r):
     div = ""
     if r.get("activity_divergent"):
         div = "；价升活降，仓位软提示 7成→3成"
-    return ("股性活跃度 %s（%s）= 近5日振幅 %s%% × 换手 %s%% ÷ 价 %s%s"
+    raw_bit = ""
+    if r.get("activity_raw") is not None:
+        raw_bit = "；价无关 %s" % r.get("activity_raw")
+    return ("股性活跃度 %s（%s）= 近5日振幅 %s%% × 换手 %s%% ÷ 价 %s%s%s"
             % (r.get("activity"), r.get("activity_label"),
-               r.get("amp_avg_5"), r.get("turnover"), r.get("price"), div))
+               r.get("amp_avg_5"), r.get("turnover"), r.get("price"),
+               raw_bit, div))
 
 
 def cn_code(code):
@@ -353,8 +384,9 @@ def _print_human(code, name, r):
     print(title)
     print(format_line(r))
     print("公式：%s" % r.get("formula"))
-    print("阈值（软）：> %s 活跃 / < %s 僵尸 / 中间中性。不进硬闸。"
-          % (ACTIVE_GT, ZOMBIE_LT))
+    print("阈值（软）：> %s 活跃；< %s 且换手 < %s%% 僵尸；"
+          "< %s 但换手 ≥ %s%% 高价压制；其余中性。不进硬闸。"
+          % (ACTIVE_GT, ZOMBIE_LT, TURN_ZOMBIE_LT, ZOMBIE_LT, TURN_ZOMBIE_LT))
     if r.get("activity_divergent"):
         print(SIZE_HINT)
     elif r.get("activity") is not None and not r.get("divergence_known"):

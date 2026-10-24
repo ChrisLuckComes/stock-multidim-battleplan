@@ -14,9 +14,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from gates.activity import (  # noqa: E402
     ACTIVE_GT,
+    LABEL_PRICE_CRUSH,
     SIZE_HINT,
+    TURN_ZOMBIE_LT,
     ZOMBIE_LT,
     activity_label,
+    activity_raw_score,
     activity_score,
     assess,
     cn_code,
@@ -74,6 +77,7 @@ def test_user_examples():
 
     a = assess(_const(6, 12, 3.6, 5.2))
     assert a["activity"] == pytest_approx(1.56)
+    assert a["activity_raw"] == pytest_approx(3.6 * 5.2)
     assert a["activity_label"] == "活跃"
     assert a["hard_gate"] is False
     assert a["activity_divergent"] is False
@@ -89,8 +93,64 @@ def test_thresholds_are_strict():
     assert activity_label(ACTIVE_GT) == "中性"
     assert activity_label(ACTIVE_GT + 0.0001) == "活跃"
     assert activity_label(ZOMBIE_LT) == "中性"
+    # 没给换手：没有「换手还在」的证据，低分不升成高价压制。
     assert activity_label(ZOMBIE_LT - 0.0001) == "僵尸"
+    assert activity_label(ZOMBIE_LT - 0.0001, TURN_ZOMBIE_LT - 0.01) == "僵尸"
+    assert activity_label(ZOMBIE_LT - 0.0001, TURN_ZOMBIE_LT) == LABEL_PRICE_CRUSH
     assert activity_label(None) is None
+    assert activity_label(None, 6.13) is None
+    # 活跃 / 中性不看换手拆档。
+    assert activity_label(1.56, 1.0) == "活跃"
+    assert activity_label(0.5, 1.0) == "中性"
+    assert activity_label(0.5, 6.13) == "中性"
+    assert activity_label(ZOMBIE_LT, 1.0) == "中性"
+    assert activity_label(ZOMBIE_LT, 6.0) == "中性"
+
+
+def test_calibration_splits_zombie_from_price_crush():
+    """2026-10-23 近似，钉标签，不拉行情。
+
+    四行 activity 都 < 0.3。换手 < 2% 才是僵尸；换手还在标高价压制。
+    低价且 activity > 0.8（鼎捷一类）仍是活跃，见 test_user_examples。
+    """
+    rows = (
+        ("688192", 6.3, 1.55, 63.0, "僵尸"),
+        ("603198", 5.1, 1.03, 41.0, "僵尸"),
+        ("300033", 5.3, 6.13, 214.0, LABEL_PRICE_CRUSH),
+        ("603893", 9.0, 5.21, 214.0, LABEL_PRICE_CRUSH),
+    )
+    for code, amp, turn, px, want in rows:
+        score = activity_score(amp, turn, px)
+        assert score == pytest_approx(amp * turn / px), code
+        assert score < ZOMBIE_LT, code
+        assert activity_label(score, turn) == want, code
+        assert activity_raw_score(amp, turn) == pytest_approx(amp * turn), code
+        r = assess(_const(8, px, amp, turn))
+        assert r["activity"] == pytest_approx(score, abs=5e-5), code
+        assert r["activity_raw"] == pytest_approx(amp * turn, abs=5e-5), code
+        assert r["activity"] == pytest_approx(r["activity_raw"] / px, abs=5e-5), code
+        assert r["activity_label"] == want, code
+        assert r["hard_gate"] is False, code
+        assert "÷" in r["formula"]
+        if want == "僵尸":
+            assert turn < TURN_ZOMBIE_LT
+            assert "不是僵尸" not in r["reason"]
+        else:
+            assert turn >= TURN_ZOMBIE_LT
+            assert "不是僵尸" in r["reason"]
+            assert r["activity_label"] != "僵尸"
+
+
+def test_split_uses_turnover_not_price_or_code():
+    """高价但换手死仍是僵尸。不按股价门槛、不按代码名改标签。"""
+    dead_high = assess(_const(6, 214, 6.3, 1.2))
+    assert dead_high["activity"] < ZOMBIE_LT
+    assert dead_high["activity_label"] == "僵尸"
+    assert dead_high["hard_gate"] is False
+    # 低价、换手达到 2%、分数仍 < 0.3：同一条换手规则，不另开股价特例。
+    alive_low = assess(_const(6, 10, 1.0, TURN_ZOMBIE_LT))
+    assert alive_low["activity"] < ZOMBIE_LT
+    assert alive_low["activity_label"] == LABEL_PRICE_CRUSH
 
 
 def test_missing_turnover_is_not_zero():
@@ -105,6 +165,7 @@ def test_missing_turnover_is_not_zero():
         b["turnover"] = 0
     r = assess(bars)
     assert r["activity"] is None
+    assert r["activity_raw"] is None
     assert r["activity_label"] is None
     assert r["activity_divergent"] is False
     assert r["hard_gate"] is False
@@ -261,6 +322,32 @@ def test_report_card_and_badge_are_soft():
         {"meta": {"market": "CN"}, "activity": assess(_const(6, 12, 3.6, 0))}, {})
     assert "缺换手" in missing
     assert "不编造" in missing
+
+    crush = assess(_const(8, 214, 5.3, 6.13))
+    crush_html = RR.build_activity(
+        {"meta": {"market": "CN", "code": "300033"}, "activity": crush}, {})
+    assert "badge b-t1'>高价压制 " in crush_html
+    assert "不是僵尸" in crush_html
+    assert "价无关对照" in crush_html
+    assert "b-warn" not in crush_html
+    assert "不否决" in crush_html
+    assert "不改 recommend" in crush_html
+
+    zombie = assess(_const(8, 63, 6.3, 1.55))
+    zombie_html = RR.build_activity(
+        {"meta": {"market": "CN", "code": "688192"}, "activity": zombie}, {})
+    assert "badge b-warn'>僵尸 " in zombie_html
+
+    _items, crush_badges = RR.build_kpis({
+        "meta": {"basis_close": 214, "prev_close": 210, "market": "CN"},
+        "struct": {"atr14": 4, "atr_pct": 2},
+        "plan": {"buy_zone": {}, "mode": "wait", "verdict": "等待", "recommend": False},
+        "activity": crush,
+    }, {})
+    assert "高价压制" in crush_badges
+    assert "软约束" in crush_badges
+    assert "b-warn" not in crush_badges
+    assert "否决买点" not in crush_badges
 
     div = assess(_path(12, 10.0, 0.01, 4.0, 10.0, -0.7))
     a = {
