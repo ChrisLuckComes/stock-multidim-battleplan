@@ -495,9 +495,16 @@ class TestAnalyzeOffline(unittest.TestCase):
             json.dump(snap_of(self.bars), f, ensure_ascii=False)
         self._orig_kline = P.kline
         P.kline = lambda *a, **k: []          # 断网
+        # 合成日线没有换手。活跃度允许未知，但不许为此再打行情。
+        self._orig_pull = BA._pull_chip_turns
+        self._orig_quote = BA._tx_today_turn
+        BA._pull_chip_turns = lambda *a, **k: ({}, "")
+        BA._tx_today_turn = lambda *a, **k: {}
 
     def tearDown(self):
         P.kline = self._orig_kline
+        BA._pull_chip_turns = self._orig_pull
+        BA._tx_today_turn = self._orig_quote
         try:
             os.remove(self.tmp)
         except OSError:
@@ -636,6 +643,9 @@ class TestAnalyzeOffline(unittest.TestCase):
         txt = "\n".join(BA.summarize(res))
         self.assertIn("全档赔率", txt)
         self.assertIn("模式", txt)
+        self.assertIn("activity", res)
+        self.assertFalse(res["activity"]["hard_gate"])
+        self.assertIn("活跃度", txt)
 
     def test_summarize_shows_fill_policy(self):
         """成交口径必须进人读摘要（2026-09-26 补）。
@@ -669,6 +679,16 @@ class TestTieLineAndCash(unittest.TestCase):
     """
 
     SNAP = os.path.join(ROOT, "data", "tdx", "601208.json")
+
+    def setUp(self):
+        self._orig_pull = BA._pull_chip_turns
+        self._orig_quote = BA._tx_today_turn
+        BA._pull_chip_turns = lambda *a, **k: ({}, "")
+        BA._tx_today_turn = lambda *a, **k: {}
+
+    def tearDown(self):
+        BA._pull_chip_turns = self._orig_pull
+        BA._tx_today_turn = self._orig_quote
 
     def test_tie_line_flags_falling_ma(self):
         """均线方向为负 ⇒ 必须判「存疑」。"""

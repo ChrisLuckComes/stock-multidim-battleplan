@@ -264,9 +264,12 @@ def build_kpis(a, n):
     if _veto_bad:
         badges.append('<span class="badge b-no">总否决 %d 项：%s</span>'
                       % (len(_veto_bad), esc("、".join(_veto_bad))))
-    # 股性活跃度是软标签。僵尸、高价压制和价升活降都不进「总否决」。
-    _act = a.get("activity") or {}
-    if (a.get("meta") or {}).get("market") != "US" and _act.get("activity") is not None:
+    # 股性活跃度是软标签。僵尸、高价压制、未知和价升活降都不进「总否决」。
+    _mkt = (a.get("meta") or {}).get("market")
+    _act = a.get("activity") if isinstance(a.get("activity"), dict) else None
+    if _mkt == "US":
+        badges.append('<span class="badge b-t1">股性活跃度 不适用</span>')
+    elif _act and _act.get("activity") is not None:
         _lab = _act.get("activity_label") or "中性"
         _cls = _activity_badge_class(_lab)
         _div = ""
@@ -274,6 +277,9 @@ def build_kpis(a, n):
             _div = " · 价升活降，仓位软提示 7成→3成"
         badges.append('<span class="badge %s">股性活跃度 %s（%s）软约束%s</span>'
                       % (_cls, num(_act.get("activity"), 4), esc(_lab), esc(_div)))
+    elif _act:
+        from gates.activity import format_line
+        badges.append('<span class="badge b-warn">%s</span>' % esc(format_line(_act)))
     return html, " ".join(badges)
 
 
@@ -882,6 +888,13 @@ def build_summary(a, n):
     ]
     if _fills:
         out.append(("成交口径", "；".join(_fills)))
+    _mkt = (a.get("meta") or {}).get("market")
+    _act = a.get("activity") if isinstance(a.get("activity"), dict) else None
+    if _mkt == "US":
+        out.append(("股性活跃度", "不适用"))
+    elif _act:
+        from gates.activity import format_line
+        out.append(("股性活跃度", esc(format_line(_act))))
     return rows(out)
 
 
@@ -1242,15 +1255,18 @@ def build_activity(a, n):
     if m.get("market") == "US":
         return ("<div class='card'>" + head +
                 "<p class='note'>美股不适用：公式用 A 股流通换手率，本项只覆盖 A 股。</p></div>")
-    from gates.activity import LABEL_PRICE_CRUSH
+    from gates.activity import LABEL_PRICE_CRUSH, format_line
     r = a.get("activity") if isinstance(a.get("activity"), dict) else None
     if not r:
         return ("<div class='card'>" + head +
-                "<p class='note'>本次未算股性活跃度。不因此否决，也不编造 0。</p></div>")
+                "<p><span class='badge b-warn'>股性活跃度：未知（本次未算）</span>"
+                " 不因此否决，也不编造 0。</p></div>")
     if r.get("activity") is None:
         return ("<div class='card'>" + head +
-                "<p class='note'>%s 不因此否决，也不编造 0。</p></div>"
-                % esc(r.get("reason") or "未知。"))
+                "<p><span class='badge b-warn'>%s</span>"
+                " 不因此否决，也不编造 0。</p>"
+                "<p class='note'>%s</p></div>"
+                % (esc(format_line(r)), esc(r.get("reason") or "")))
     lab = r.get("activity_label") or "中性"
     cls = _activity_badge_class(lab)
     div = ""
