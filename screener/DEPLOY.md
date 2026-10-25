@@ -128,6 +128,16 @@ cp .env.example .env     # 再按账户实际额度改：ASH_ACCOUNT / US_ACCOUN
 
 产出落在 `out_cn/`：`screener_<日期>_<midday|close>.{html,md,jsonl}`。
 
+跨日**战法延续**（默认开，`--no-continuity` 可关）：
+
+- 状态文件 `out_cn/screener_continuity_state.json`（不入库）。收盘和盘中各记各的。
+- 键 = **代码 + 战法 mode**。同一只票换成另一种战法，算新出现。
+- 第一次命中：**新出现**（第 1 天）。之后每个不同日期仍过同一闸（不是 wait）：**延续（第 N 天）**。同一天重跑不加天。天数是命中观察次数，不是自然日跨度。
+- 不再是这个 mode、变成 wait、或从命中里消失：从状态删除（断档），不留在主表。
+- 现价涨多了只要闸还过，仍算延续，不另设涨跌幅硬切。报告里的「较上次」只是对照。
+- `--limit` 试跑只结算扫到的代码，没扫到的旧记录保留。基准日陈旧（本次不出信号）时不改状态。
+- 该 session 还没有状态时，用同目录最近一份更早的 `screener_<日期>_<session>.jsonl` 当第 1 天种子。
+
 ⚑ **首次在新机器跑，L0 数量会偏低**（因为刚建的库只有 320 根，某些战法要看更长历史）。
 这不影响使用，跑一周后数据就厚了。
 
@@ -182,6 +192,7 @@ skill 目录若已是指向该根的联接，两个路径是同一个目录。
 - 三级漏斗：L1 强度闸（WEAK 直接出局、不跑后续）→ L2 战法闸（rule123 各 mode：出水芙蓉(T0)/平台突破/牛旗突破/W底突破/下降趋势线突破/回踩均线/流星砸坑/脉冲停顿）。
 
 产出文件（out_cn/ 下）：screener_<日期>_midday.{html,md,jsonl}
+跨日延续（与收盘分开记）：同一代码+战法仍过闸标「延续（第N天）」，首次命中标「新出现」；断档的从活跃表删除。状态在 out_cn/screener_continuity_state.json。
 
 交付要求：
 1. 用 present_files 打开 HTML 报告（绝对路径 D:/code/stock-multidim-battleplan/out_cn/screener_<日期>_midday.html）；
@@ -210,6 +221,7 @@ C:/Users/luoyunlai/.workbuddy/binaries/python/envs/default/Scripts/python.exe）
 - ⚠ 表里的 R 是**现价口径**的静态赔率：出水芙蓉(T0) 真触发价是「过昨高」（现价上方）、流星砸坑是「回踩 MA5 买、目标坑顶」，所以这两类 R 会系统性偏低，不代表机会差，别据此排序下结论。
 
 产出：out_cn/screener_<日期>_close.{html,md,jsonl} + out_cn/scr_<日期>_close.jsonl
+扫描报告按「延续（第N天）/ 新出现」分表，不是每天一张全新名单。断档的票从 out_cn/screener_continuity_state.json 的 close 桶删除，不留在主表。
 
 交付要求：
 1. 用 present_files 打开 HTML 报告；
