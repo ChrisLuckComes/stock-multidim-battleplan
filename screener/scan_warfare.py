@@ -26,6 +26,12 @@
   python screener/scan_warfare.py                            # 只扫描（用库内数据）
   python screener/scan_warfare.py --session midday --top 120 # 盘中口径
   python screener/scan_warfare.py --limit 300                # 试跑前 300 只
+  python screener/scan_warfare.py --no-continuity            # 不记跨日延续（对照）
+
+★ 跨日延续（默认开）
+  键 = 代码 + mode，收盘与盘中分开记在 out_cn/screener_continuity_state.json。
+  仍过同一战法 → 延续（第 N 天）；第一次命中 → 新出现；不再命中 → 从状态删除。
+  不改 judge。价格涨跌只作对照，不单独打断。
 """
 import os
 import sys
@@ -44,6 +50,7 @@ from rule123 import build_ev, plan_entry          # noqa: E402
 from gates import quick_strength as QS            # noqa: E402
 from gates import elasticity as EL                 # noqa: E402  (股性·弹性维度)
 from screener import bao_store as store           # noqa: E402
+from screener import continuity                    # noqa: E402
 
 OUT_DIR = os.path.join(_ROOT, "out_cn")
 
@@ -347,6 +354,60 @@ def _sort_key(r):
     )
 
 
+def _cont_key(r):
+    """延续天数优先，其余仍走战法优先级。没标注时天数当 0，次序与 _sort_key 相同。"""
+    return (-(r.get("days_alive") or 0),) + _sort_key(r)
+
+
+def _continuity_on(rows, stat):
+    if any(r.get("status") in ("延续", "新出现") for r in rows):
+        return True
+    return bool((stat or {}).get("continuity_dropped"))
+
+
+def _status_text(r):
+    if r.get("status") == "延续":
+        return "延续（第%d天）" % (r.get("days_alive") or 0)
+    if r.get("status") == "新出现":
+        return "新出现"
+    return ""
+
+
+def _brief_prefix(r):
+    if r.get("status") == "延续":
+        return "延续%d " % (r.get("days_alive") or 0)
+    if r.get("status") == "新出现":
+        return "新 "
+    return ""
+
+
+def _fmt_chg(v):
+    if v is None:
+        return "-"
+    return "%+.2f%%" % v
+
+
+def _dash(v):
+    return "-" if v is None else v
+
+
+def _md_hit_table(items):
+    lines = [
+        "| 代码 | 名称 | 状态 | 天数 | 首见 | 强度 | 战法 | 现价 | 较上次 | 买区下沿 | 买区上沿 | 止损 | t1 | R→t1 | 推荐 |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for r in items:
+        lines.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+            r["code"], r.get("name", ""), _status_text(r), _dash(r.get("days_alive")),
+            r.get("first_seen") or "-", r.get("verdict", ""),
+            MODE_CN.get(r["mode"], r["mode"]),
+            _dash(r.get("spot")), _fmt_chg(r.get("chg_pct")),
+            _dash(r.get("buy_lo")), _dash(r.get("buy_hi")),
+            _dash(r.get("stop")), _dash(r.get("t1")), _dash(r.get("rr1")),
+            "★" if r.get("recommend") else ""))
+    return lines
+
+
 def render_md(rows, session, today, stat):
     cand = [r for r in rows if r.get("mode") not in (None, "wait")]
     by = defaultdict(list)
@@ -370,15 +431,25 @@ def render_md(rows, session, today, stat):
     L.append("- 扫描 %d 只 → 过强度闸 %d 只 → 有战法信号 **%d 只**" % (stat["scanned"], stat["passed_l1"], len(cand)))
     L.append("- L1 强度闸刷掉 **%d 只**（WEAK，未跑后续判定）" % stat["weak"])
     L.append("- L0.5 弹性闸刷掉 **%d 只**僵尸（主板零涨停 / 双创很少 ≥10cm，老罗 2026-10-21）" % stat["elastic_reject"])
+    tracking = _continuity_on(rows, stat)
+    cont = [r for r in cand if r.get("status") == "延续"]
+    fresh = [r for r in cand if r.get("status") == "新出现"]
+    if tracking:
+        dropped = list(stat.get("continuity_dropped") or [])
+        longest = max([r.get("days_alive") or 0 for r in cont], default=0)
+        L.append("- 延续 **%d** 只（最长第 %d 天）｜ 新出现 **%d** 只｜ 本次断档 **%d** 只"
+                 % (len(cont), longest, len(fresh), len(dropped)))
+        L.append("- 延续键 = 代码 + 战法（收盘 / 盘中分开记）。断档只看这次还过不过同一 mode；涨跌幅不单独打断。")
     L.append("")
     L.append("## 按战法分组")
     L.append("")
     L.append("| 战法 | 只数 | 标的（强度/现价/买区/止损/t1） |")
     L.append("|---|---|---|")
     for mode, items in sorted(by.items(), key=lambda kv: (METHOD_PRIORITY.get(kv[0], _PRIORITY_UNKNOWN), kv[0])):
-        items.sort(key=_sort_key)
+        items.sort(key=_cont_key)
         brief = "；".join(
-            "%s %s %s | %.2f | %s~%s | %s | %s" % (
+            "%s%s %s %s | %.2f | %s~%s | %s | %s" % (
+                _brief_prefix(r),
                 r["code"], r["name"], r.get("verdict", "")[:1], r.get("spot") or 0,
                 r.get("buy_lo") if r.get("buy_lo") is not None else "-",
                 r.get("buy_hi") if r.get("buy_hi") is not None else "-",
@@ -388,19 +459,194 @@ def render_md(rows, session, today, stat):
         )
         L.append("| %s | %d | %s |" % (MODE_CN.get(mode, mode), len(items), brief))
     L.append("")
-    L.append("## 明细（有信号）")
-    L.append("")
-    L.append("| 代码 | 名称 | 强度 | 战法 | 现价 | 买区下沿 | 买区上沿 | 止损 | t1 | R→t1 | 推荐 |")
-    L.append("|---|---|---|---|---|---|---|---|---|---|---|")
-    for r in sorted(cand, key=_sort_key)[:120]:
-        L.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
-            r["code"], r.get("name", ""), r.get("verdict", ""), MODE_CN.get(r["mode"], r["mode"]),
-            r.get("spot"), r.get("buy_lo"), r.get("buy_hi"), r.get("stop"), r.get("t1"),
-            r.get("rr1"), "★" if r.get("recommend") else ""))
+    if tracking:
+        L.extend(_md_continuity_sections(cont, fresh, stat.get("continuity_dropped") or []))
+    else:
+        L.append("## 明细（有信号）")
+        L.append("")
+        L.append("| 代码 | 名称 | 强度 | 战法 | 现价 | 买区下沿 | 买区上沿 | 止损 | t1 | R→t1 | 推荐 |")
+        L.append("|---|---|---|---|---|---|---|---|---|---|---|")
+        for r in sorted(cand, key=_sort_key)[:120]:
+            L.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+                r["code"], r.get("name", ""), r.get("verdict", ""), MODE_CN.get(r["mode"], r["mode"]),
+                r.get("spot"), r.get("buy_lo"), r.get("buy_hi"), r.get("stop"), r.get("t1"),
+                r.get("rr1"), "★" if r.get("recommend") else ""))
     return "\n".join(L)
 
 
+def _md_continuity_sections(cont, fresh, dropped):
+    """延续 / 新出现分表。断档只作说明，不进上面的活跃表。"""
+    L = []
+    L.append("## 延续（仍成立）")
+    L.append("")
+    if cont:
+        L.append("共 %d 只。第 1 天是首次命中，下表从第 2 天起。" % len(cont))
+        L.append("")
+        L.extend(_md_hit_table(sorted(cont, key=_cont_key)))
+    else:
+        L.append("无。")
+    L.append("")
+    L.append("## 新出现")
+    L.append("")
+    if fresh:
+        shown = sorted(fresh, key=_sort_key)[:120]
+        L.append("共 %d 只，下表最多 120 只。" % len(fresh))
+        L.append("")
+        L.extend(_md_hit_table(shown))
+    else:
+        L.append("无。")
+    L.append("")
+    if dropped:
+        L.append("## 本次断档")
+        L.append("")
+        L.append("不再是同一战法的有效命中，已从状态删除，不留在主表。")
+        L.append("")
+        L.append("| 代码 | 名称 | 战法 | 曾延续天数 | 末次日期 | 末次现价 |")
+        L.append("|---|---|---|---|---|---|")
+        ordered = sorted(dropped, key=lambda r: (-(r.get("days_alive") or 0), r.get("code") or ""))
+        for r in ordered[:40]:
+            L.append("| %s | %s | %s | %s | %s | %s |" % (
+                r.get("code") or "-", r.get("name") or "",
+                MODE_CN.get(r.get("mode"), r.get("mode")),
+                _dash(r.get("days_alive")), r.get("last_date") or "-",
+                _dash(r.get("last_spot"))))
+        if len(ordered) > 40:
+            L.append("")
+            L.append("断档共 %d 只，上表只列前 40。" % len(ordered))
+        L.append("")
+    return L
+
+
 def render_html(rows, session, today, stat):
+    if _continuity_on(rows, stat):
+        return _render_html_cont(rows, session, today, stat)
+    return _render_html_plain(rows, session, today, stat)
+
+
+def _html_tr_cont(r):
+    live = r.get("live") or {}
+    live_cell = ""
+    if live:
+        src_tag = " <span class='src'>快照兜底</span>" if live.get("src") == "snapshot" else ""
+        live_cell = ("<span class='mut'>半根@%s C%.2f → %s%s%s</span>" % (
+            live.get("asof") or "-", live.get("c") or 0,
+            MODE_CN.get(r.get("live_mode"), r.get("live_mode")),
+            " ⚠变档" if r.get("changed") else "", src_tag))
+    cls = "tag-cont" if r.get("status") == "延续" else "tag-new"
+    return (
+        "<tr><td class='code'>%s</td><td>%s</td><td><span class='v %s'>%s</span></td>"
+        "<td><b>%s</b></td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
+        "<td>%s</td><td>%s</td><td><span class='tag %s'>%s</span></td>"
+        "<td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
+            r["code"], r.get("name", ""), (r.get("verdict") or "").lower(),
+            r.get("verdict", ""), MODE_CN.get(r["mode"], r["mode"]),
+            _dash(r.get("spot")), _dash(r.get("buy_lo")), _dash(r.get("buy_hi")),
+            _dash(r.get("stop")), _dash(r.get("t1")), _dash(r.get("rr1")),
+            "★" if r.get("recommend") else "",
+            cls, _status_text(r) or "-",
+            _dash(r.get("days_alive")), r.get("first_seen") or "-",
+            _fmt_chg(r.get("chg_pct")), live_cell))
+
+
+_CONT_HEAD = (
+    "<tr><th>代码</th><th>名称</th><th>强度</th><th>战法</th><th>现价</th><th>买区下沿</th>"
+    "<th>买区上沿</th><th>止损</th><th>t1</th><th>R→t1</th><th>推荐</th>"
+    "<th>状态</th><th>天数</th><th>首见</th><th>较上次</th><th>盘中复评</th></tr>"
+)
+
+
+def _render_html_cont(rows, session, today, stat):
+    cand = [r for r in rows if r.get("mode") not in (None, "wait")]
+    cont = sorted([r for r in cand if r.get("status") == "延续"], key=_cont_key)
+    fresh = sorted([r for r in cand if r.get("status") == "新出现"], key=_sort_key)
+    dropped = sorted(
+        list(stat.get("continuity_dropped") or []),
+        key=lambda r: (-(r.get("days_alive") or 0), r.get("code") or ""))
+    sess_cn = "盘中 (11:30)" if session == "midday" else "收盘 (15:00 后)"
+    src_kline = sum(1 for r in cand if (r.get("live") or {}).get("src") is None and r.get("live"))
+    src_snap = sum(1 for r in cand if (r.get("live") or {}).get("src") == "snapshot")
+    src_fail = sum(1 for r in cand if not r.get("live"))
+    if session == "midday":
+        live_stat = ("<br>盘中半根复评：sina 5分钟 kline 正常 <b>%d</b> 只 ｜ 快照兜底 <b>%d</b> 只 ｜ 取不到 <b>%d</b> 只"
+                     % (src_kline, src_snap, src_fail))
+    else:
+        live_stat = ""
+    longest = max([r.get("days_alive") or 0 for r in cont], default=0)
+    fresh_shown = fresh[:200]
+    cont_body = "\n".join(_html_tr_cont(r) for r in cont) or "<tr><td colspan='16'>无</td></tr>"
+    fresh_body = "\n".join(_html_tr_cont(r) for r in fresh_shown) or "<tr><td colspan='16'>无</td></tr>"
+    drop_rows = []
+    for r in dropped[:40]:
+        drop_rows.append("<tr><td class='code'>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
+            r.get("code") or "-", r.get("name") or "",
+            MODE_CN.get(r.get("mode"), r.get("mode")),
+            _dash(r.get("days_alive")), r.get("last_date") or "-",
+            _dash(r.get("last_spot"))))
+    if dropped:
+        drop_block = (
+            "<h2>本次断档</h2>"
+            "<div class='mut'>不再是同一战法的有效命中，已从状态删除，不留在主表。%s</div>"
+            "<table><tr><th>代码</th><th>名称</th><th>战法</th><th>曾延续天数</th>"
+            "<th>末次日期</th><th>末次现价</th></tr>%s</table>"
+            % (" 共 %d 只，下表最多 40。" % len(dropped) if len(dropped) > 40 else "",
+               "\n".join(drop_rows)))
+    else:
+        drop_block = ""
+    fresh_note = ""
+    if len(fresh) > len(fresh_shown):
+        fresh_note = "（下表最多 200，共 %d）" % len(fresh)
+    stale = "　⚠⚠ <b>基准日陈旧 → 本次不出信号</b>" if stat.get("stale") else ""
+    tb = stat.get("today_bar") or {}
+    return """<!doctype html><meta charset="utf-8"><title>全市场战法选股 %s</title>
+<style>
+body{font-family:-apple-system,"Segoe UI",Microsoft YaHei,sans-serif;margin:24px;background:#fff;color:#1a1a1a}
+h1{font-size:20px;margin:0 0 4px}h2{font-size:16px;margin:18px 0 4px}.mut{color:#888;font-size:12px}
+.kv{background:#f6f8fa;border-radius:8px;padding:12px 16px;margin:12px 0;font-size:13px;line-height:1.9}
+table{border-collapse:collapse;width:100%%;font-size:13px;margin-top:8px}
+th,td{border:1px solid #e3e6ea;padding:6px 8px;text-align:right;white-space:nowrap}
+th{background:#f0f3f6;text-align:right}
+td:nth-child(2),td:nth-child(4){text-align:left}
+.code{font-family:ui-monospace,Consolas,monospace}
+.v{display:inline-block;padding:1px 6px;border-radius:4px;font-size:12px}
+.v.strong{background:#fde8e8;color:#c0392b}.v.neutral{background:#fff4e0;color:#a06800}
+.v.weak{background:#e6f4ea;color:#1e7e34}
+.src{background:#e8f0fe;color:#1a56c4;padding:1px 5px;border-radius:4px;font-size:11px;margin-left:3px}
+.tag{display:inline-block;padding:1px 6px;border-radius:4px;font-size:12px}
+.tag-new{background:#e8f0fe;color:#1a56c4}.tag-cont{background:#fff4e0;color:#a06800}
+</style>
+<h1>全市场战法选股 · %s · %s</h1>
+<div class="mut">数据源：baostock/腾讯 前复权 + SQLite ｜ 判定：rule123 各战法 mode ｜ 生成 %s</div>
+<div class="kv">
+基准日（判的是哪一天）<b>%s</b>%s ｜ 当日bar补齐：待补 %s / 已补 %s / 仍缺 %s<br>
+扫描 <b>%d</b> 只 → 过强度闸 <b>%d</b> → 有战法信号 <b>%d</b> 只<br>
+L1 强度闸刷掉 <b>%d</b> 只（WEAK 直接出局，未跑后续判定）；L0 数据/停牌刷掉 <b>%d</b> 只<br>
+L0.5 弹性闸刷掉 <b>%d</b> 只僵尸（主板零涨停 / 双创很少 ≥10cm）%s<br>
+延续 <b>%d</b> 只（最长第 %d 天）｜ 新出现 <b>%d</b> 只｜ 本次断档 <b>%d</b> 只<br>
+延续键 = 代码 + 战法（收盘 / 盘中分开记）。断档只看这次还过不过同一 mode。
+</div>
+<h2>延续（仍成立）</h2>
+<div class="mut">共 %d 只。同一代码 + 战法仍过闸，从第 2 天起算延续。</div>
+<table>%s
+%s
+</table>
+<h2>新出现</h2>
+<div class="mut">共 %d 只%s。这个口径（收盘或盘中）里第一次出现的代码 + 战法。</div>
+<table>%s
+%s
+</table>
+%s
+""" % (today, today, sess_cn, datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+       stat.get("target") or "-", stale,
+       tb.get("checked", "-"), tb.get("filled", "-"), tb.get("failed", "-"),
+       stat["scanned"], stat["passed_l1"], len(cand), stat["weak"], stat["l0"],
+       stat["elastic_reject"], live_stat,
+       len(cont), longest, len(fresh), len(dropped),
+       len(cont), _CONT_HEAD, cont_body,
+       len(fresh), fresh_note, _CONT_HEAD, fresh_body,
+       drop_block)
+
+
+def _render_html_plain(rows, session, today, stat):
     cand = [r for r in rows if r.get("mode") not in (None, "wait")]
     cand.sort(key=_sort_key)
     sess_cn = "盘中 (11:30)" if session == "midday" else "收盘 (15:00 后)"
@@ -485,6 +731,10 @@ def main():
     ap.add_argument("--top", type=int, default=DEFAULT_TOP, help="盘中复评候选上限")
     ap.add_argument("--workers", type=int, default=6, help="刷新日线的并发进程数（默认 6）")
     ap.add_argument("--out-dir", default=OUT_DIR)
+    ap.add_argument("--no-continuity", action="store_true",
+                    help="不读写跨日延续状态（对照用；默认开启）")
+    ap.add_argument("--continuity-state", default=None,
+                    help="延续状态文件（默认 <out-dir>/screener_continuity_state.json）")
     args = ap.parse_args()
 
     conn = store.connect()
@@ -518,18 +768,23 @@ def main():
     today = store._today_bj()
     t0 = time.time()
     rows, stages = [], Counter()
+    judged, errors = set(), set()
     weak = l1 = 0
     for i, (code, name) in enumerate(codes, 1):
         # ST/退市：数据层已剔除（老罗 2026-10-19），这里是双保险 —— 名称在
         # 两次清单刷新之间可能变 ST，扫到也要跳过，绝不能进候选。
         if code in ban or store.is_st(name):
             stages["L0_黑名单/ST"] += 1
+            judged.add(code)  # 已判定不进候选；部分扫描也清掉它的延续
             continue
         try:
             row, stage = judge(conn, code, name, cache, index_last, stale=stale)
         except Exception as e:                       # 单只异常不中断全市场扫描
+            errors.add(code)
             row, stage = None, "LX_异常:%s" % type(e).__name__
             print("  ⚠ %s 判定异常 %r" % (code, e), flush=True)
+        else:
+            judged.add(code)
         stages[stage] += 1
         if row is None:
             continue
@@ -547,6 +802,29 @@ def main():
     if args.session == "midday":
         rows = midday_recap(rows, args.top, today)
 
+    dropped = []
+    continuity_ran = False
+    if args.no_continuity:
+        print("延续跟踪：关闭（--no-continuity）", flush=True)
+    elif stale:
+        # 基准日陈旧 = 这次不出信号。当成断档会把数据故障写成「战法失效」。
+        print("延续跟踪：基准日陈旧，本次不更新状态", flush=True)
+    else:
+        state_path = args.continuity_state or os.path.join(
+            args.out_dir, continuity.STATE_FILENAME)
+        if args.limit is not None:
+            print("延续跟踪：本次 --limit，只结算扫到的代码；没扫到的旧记录保留",
+                  flush=True)
+        try:
+            dropped = continuity.apply_file(
+                rows, args.session, today, state_path,
+                drop_codes=judged, preserve_codes=errors,
+                partial=args.limit is not None)
+            continuity_ran = True
+        except continuity.StateError as exc:
+            print("⚠ 延续状态文件损坏，本次不更新、不覆盖：%s" % exc, flush=True)
+            dropped = []
+
     cand = [r for r in rows if r.get("mode") not in (None, "wait")]
     rows.sort(key=_sort_key)   # 全输出（含 jsonl）统一按 战法优先级→强度→R→t1 排序
     stat = {"scanned": len(codes), "passed_l1": l1, "weak": weak,
@@ -558,7 +836,8 @@ def main():
             "bars_source": store.meta_get(conn, "bars_source") or "baostock",
             # ⚑ 2026-10-21：基准日 + 当日bar补齐统计（数据时效透明化）
             "target": target, "stale": stale,
-            "today_bar": {k: v for k, v in (fill or {}).items() if k != "failed_codes"}}
+            "today_bar": {k: v for k, v in (fill or {}).items() if k != "failed_codes"},
+            "continuity_dropped": dropped}
 
     tag = "%s_%s" % (today, args.session)
     jp = os.path.join(args.out_dir, "screener_%s.jsonl" % tag)
@@ -576,6 +855,10 @@ def main():
     print("扫描 %d 只 | 过强度闸 %d | 有战法信号 %d" % (stat["scanned"], l1, len(cand)))
     print("L1 WEAK 刷掉 %d 只（未跑后续）| L0 刷掉 %d 只" % (weak, stat["l0"]))
     print("战法分布:", dict(Counter(MODE_CN.get(r["mode"], r["mode"]) for r in cand).most_common()))
+    if continuity_ran:
+        n_cont = sum(1 for r in cand if r.get("status") == "延续")
+        n_new = sum(1 for r in cand if r.get("status") == "新出现")
+        print("延续 %d | 新出现 %d | 断档 %d" % (n_cont, n_new, len(dropped)))
     print("输出：\n  %s\n  %s\n  %s" % (jp, mp, hp))
     conn.close()
 

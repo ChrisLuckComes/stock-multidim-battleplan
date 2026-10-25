@@ -10,4 +10,6 @@ mode（流星砸坑 / 平台突破 / 牛旗 / 回踩 / ma_ride ...）。
   scan_warfare.py 选股层：强度闸前置（WEAK 直接跳过后续）→ rule123 判定 → 候选
 
 盘中（11:30）与收盘（15:00）两档口径见 scan_warfare.py 的 --session。
+跨日延续（代码 + mode，收盘 / 盘中分开）见 continuity.py，
+状态文件 out_cn/screener_continuity_state.json。
 """
