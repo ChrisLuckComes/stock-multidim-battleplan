@@ -257,3 +257,99 @@ class TestBroadPatch:
         assert len(got) == 65
         assert got[-1]["d"] == S.load_bars(conn, "sh000001")[-1]["d"]
         conn.close()
+
+
+# ------------------------------------------------------------------
+# 5. 北交所：清单不静默丢、日线不进 baostock、沪深腾讯 URL 不变
+# ------------------------------------------------------------------
+class TestBjexStore:
+    def test_accept_and_partition(self):
+        assert S.accept_universe_code("920522", "bj") is True
+        assert S.accept_universe_code("830799", "bj") is True
+        assert S.accept_universe_code("430047", "bj") is True
+        assert S.accept_universe_code("600000", "sh") is True
+        assert S.accept_universe_code("000001", "sz") is True
+        assert S.accept_universe_code("300498", "sz") is True
+        assert S.accept_universe_code("688111", "sh") is True
+        assert S.accept_universe_code("920522", "bj", include_bj=False) is False
+        assert S.accept_universe_code("123", "sz") is False
+        bj, rest = S._partition_bj([
+            ("600000", "a"), ("920522", "b"), ("830799", "c"), ("300750", "d"),
+        ])
+        assert [x[0] for x in bj] == ["920522", "830799"]
+        assert [x[0] for x in rest] == ["600000", "300750"]
+
+    def test_refresh_keeps_bj_off_baostock(self, tmp_path, monkeypatch):
+        conn = S.connect(str(tmp_path / "t.db"))
+        S.init_db(conn)
+        bao, tx = [], []
+        monkeypatch.setattr(S, "bao_login_safe", lambda timeout=8: object())
+
+        def fake_daily(bs, code, start=None, end=None):
+            bao.append(code)
+            return _bars(80)
+
+        def fake_tx(conn, codes, **k):
+            tx.extend(c[0] if isinstance(c, tuple) else c for c in codes)
+            return {"ok": len(list(codes)), "skip": 0, "refetch": 0}
+
+        monkeypatch.setattr(S, "fetch_daily", fake_daily)
+        monkeypatch.setattr(S, "_refresh_bars_tencent", fake_tx)
+        monkeypatch.setattr(S, "_finalize_today_bars", lambda conn, result, verbose=True: result)
+        S.refresh_bars(
+            conn, codes=[("600000", "浦发"), ("920522", "纳科")],
+            workers=1, source="auto", verbose=False,
+        )
+        assert bao == ["600000"]
+        assert tx == ["920522"]
+        conn.close()
+
+    def test_sh_tencent_does_not_hit_bj_endpoint(self, monkeypatch):
+        calls = []
+
+        def fake_get(url, timeout=20, referer=""):
+            calls.append(url)
+            return ('{"data":{"sh600000":{"qfqday":'
+                    '[["2026-10-23","10","10.1","10.2","9.9","100"]]}}}')
+
+        monkeypatch.setattr(S, "_http_get", fake_get)
+        bars = S.fetch_daily_tencent("600000", start="2026-10-01", end="2026-10-25", count=5)
+        assert len(bars) == 1
+        assert bars[0]["c"] == 10.1
+        assert bars[0]["v"] == 10000.0
+        assert len(calls) == 1
+        assert "web.ifzq.gtimg.cn/appstock/app/fqkline/get" in calls[0]
+        assert "newfqkline" not in calls[0]
+
+    def test_bj_tencent_uses_newfqkline_when_primary_is_short(self, monkeypatch):
+        import datetime
+        import json
+        calls = []
+
+        def fake_get(url, timeout=20, referer=""):
+            calls.append(url)
+            if "newfqkline" in url:
+                d0 = datetime.date(2025, 7, 1)
+                rows, i = [], 0
+                while len(rows) < 70:
+                    d = d0 + datetime.timedelta(days=i)
+                    i += 1
+                    if d.weekday() >= 5:
+                        continue
+                    rows.append([d.isoformat(), "1", "1.1", "1.2", "0.9", "10"])
+                return json.dumps({"data": {"bj920522": {"qfqday": rows}}})
+            return json.dumps({"data": {"bj920522": {
+                "day": [["2026-10-23", "17", "19", "19.3", "17", "10"]]}}})
+
+        monkeypatch.setattr(S, "_http_get", fake_get)
+        bars = S.fetch_daily_tencent("920522", start="2025-07-01", end="2026-10-25", count=800)
+        assert len(bars) >= 60
+        assert calls[0].startswith("https://web.ifzq.gtimg.cn/")
+        assert any("newfqkline" in u for u in calls)
+        assert bars[-1]["v"] == 1000.0
+
+    def test_bj_broad_falls_back_to_shanghai(self):
+        cache = {"sh000001": ["sh"], "sz399001": ["sz"]}
+        assert SW.broad_for("920522", cache) == ["sh"]
+        assert SW.broad_for("600000", cache) == ["sh"]
+        assert SW.broad_for("000001", cache) == ["sz"]

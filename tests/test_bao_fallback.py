@@ -161,6 +161,9 @@ def test_market_judgement():
     assert BF._market_of("", "600036") == "sh"      # 6 开头自动沪
     assert BF._market_of("", "300750") == "sz"
     assert BF._market_of("", "430047") == "bj"
+    assert BF._market_of("", "920522") == "bj"
+    assert BF._market_of("sz", "920522") == "bj"   # 误传深市前缀也不把北交所漏成 sz
+    assert BF._market_of("", "830799") == "bj"
     assert BF._market_of("", "000001") == "sz"
     assert BF._market_of("xx", "600036") == "sh"   # 前缀脏 → 按代码兜底（6 位无歧义）
     assert BF._market_of("xx", "abcdef") is None     # 真判不出 → 不猜，宁可失败

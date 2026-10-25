@@ -85,13 +85,17 @@ T1_NOTE = (
 # ---------------------------------------------------------------- 板块
 
 def board_of(code):
-    """按代码前缀判板块涨跌幅限制。返回 ('gem'|'star'|'bse'|'main', pct)。"""
+    """按代码前缀判板块涨跌幅限制。返回 ('gem'|'star'|'bse'|'main', pct)。
+
+    北交所（8xxxxx / 4xxxxx / 920）30%。``900`` 是沪 B，不是北交所，仍走主板 10%。
+    """
     c = str(code or "").strip()
     if c.startswith("688"):
         return "star", BOARD_LIMIT["star"]
     if c.startswith(("300", "301")):
         return "gem", BOARD_LIMIT["gem"]
-    if c.startswith(("8", "4", "9")):
+    import ash_market
+    if ash_market.is_bj(c):
         return "bse", BOARD_LIMIT["bse"]
     return "main", BOARD_LIMIT["main"]
 

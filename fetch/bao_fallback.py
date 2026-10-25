@@ -44,11 +44,23 @@ def enabled():
 
 
 def _market_of(prefix, code):
-    """sh/sz/bj → baostock 市场段。判定不了返回 None（不猜，宁可失败）。"""
+    """sh/sz/bj → baostock 市场段。判定不了返回 None（不猜，宁可失败）。
+
+    北交所（920 / 8xxxxx / 43 / 83）按代码优先，避免空前缀或误传 sz 把 920 漏掉。
+    非北交所仍是前缀优先，沪深兜底口径不动。
+    """
+    c = (code or "").strip()
+    if len(c) == 6 and c.isdigit():
+        try:
+            import ash_market
+            if ash_market.is_bj(c):
+                return "bj"
+        except Exception:
+            if c.startswith("92") or c[0] in ("4", "8"):
+                return "bj"
     p = (prefix or "").strip().lower()
     if p in ("sh", "sz", "bj"):
         return p
-    c = (code or "").strip()
     if len(c) == 6 and c.isdigit():
         if c[0] == "6":
             return "sh"

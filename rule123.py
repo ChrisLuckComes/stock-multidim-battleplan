@@ -60,6 +60,7 @@ if _HERE not in sys.path:
 # 顶部标志 K 线（墓碑/上吊/射击之星/十字星/大阴线 + 次日确认制）。
 # 只做**否决**：`apply_top_signal_gate` 挂在 plan_entry 出口，不回写任何买区/止损口径。
 import top_signals as TS_TOP  # noqa: E402
+import ash_market  # noqa: E402  涨跌幅唯一真源：北交所 30% / 双创 20% / 主板 10%
 
 
 def fetch_json_nasdaq(url, timeout=20, retries=2):
@@ -2344,7 +2345,28 @@ RR_GATE = 1.5
 #   根因是「创新高」被当成了「空间打开」，这两件事在高��停日被混为一谈。
 # 口径：单日涨幅越大（越接近涨停），可给的空间按比例衰减；真涨停 = 空间归零。
 LU_MAIN = 0.098      # 主板 60/00 涨停幅度（10%）
-LU_GEM = 0.198# 创业板 30 / 科创板 688 涨停幅度（20%）
+LU_GEM = 0.198       # 创业板 30 / 科创板 688 涨停幅度（20%）
+LU_BJ = 0.298        # 北交所 8xx/92x 涨停幅度（30%），容涨停价四舍五入
+
+
+def limit_up_frac(code):
+    """封板比较用的涨幅（略低于名义板幅，容 0.01 取整）。
+
+    名义板幅走 ash_market：北交所 30% / 双创 20% / 主板 10% / ST 5%。
+    """
+    ratio = ash_market.board_limit_ratio(code)
+    if ratio >= 0.30 - 1e-9:
+        return LU_BJ
+    if ratio >= 0.20 - 1e-9:
+        return LU_GEM
+    if ratio <= 0.05 + 1e-9:
+        return 0.048
+    return LU_MAIN
+
+
+def board_gap_cap_pct(code):
+    """T0 头上空间上限（百分点）。主板 10 / 双创 20 / 北交所 30。"""
+    return ash_market.board_limit_ratio(code) * 100.0
 # ── 测幅 / 海阔天空辅助（2026-10-10，老罗「涨停/创新高报高盈亏比是虚假」终极口径）──
 # 依据：Edwards & Magee《股市趋势技术分析》"MEASURING FORMULAE" 章 + Bulkowski
 #      《图表形态百科全书》统计 + O'Neil《笑傲股市》。
@@ -2365,7 +2387,7 @@ def _last_chg_pct(bars):
 
 
 def _sealed_limit_up(bars, atr_v, ticker=""):
-    """真涨停封死：收盘=最高=涨停价（主板 10% / 双创 20%）。
+    """真涨停封死：收盘=最高=涨停价（主板 10% / 双创 20% / 北交所 30%）。
 
     封死当天一根板把空间吃完、且当日不可追 ⇒ 如实标记「封死」，与「海阔天空」
     （创新高但上方无阻力、让利润奔跑）是两回事。仅用于把「封死」从「海阔天空」里
@@ -2386,7 +2408,7 @@ def _sealed_limit_up(bars, atr_v, ticker=""):
     pc = prev.get("c")
     if None in (c, h, o, pc) or pc <= 0 or c <= 0:
         return False
-    lim = LU_GEM if (code.startswith("30") or code.startswith("688")) else LU_MAIN
+    lim = limit_up_frac(code)
     up_limit = round(pc * (1 + lim), 2)
     # 主判据：收在涨停价且收=最高（一字/缩量封板，浮筹封死）。
     if abs(c - up_limit) <= max(0.02, up_limit * 0.005) and abs(h - c) <= 1e-6:
@@ -3897,7 +3919,7 @@ def ma_reclaim_break(bars, ev, atr_v, last_c, res_win=25):
         return None
 
     gap_pct = (resistance - last_c) / last_c * 100
-    # 板块涨跌幅上限：主板 10% / 创业板(30)、科创板(68) 20%。
+    # 板块涨跌幅上限：主板 10% / 创业板(30)、科创板(68) 20% / 北交所 30%。
     # 优先取 ev 里的 ticker（build_ev 调用方注入）；取不到再退回振幅推断。
     _tk = str(ev.get("ticker") or ev.get("symbol") or ev.get("code") or "")
     # ★ 市场判据（2026-09-20 新增，用于 note 的「尾盘」措辞分支）：
@@ -3908,7 +3930,7 @@ def ma_reclaim_break(bars, ev, atr_v, last_c, res_win=25):
     _is_cn = bool(re.fullmatch(r"\d{6}", _tk.strip())) if _tk.strip() else None
     if _tk:
         _c6 = _tk[-6:] if len(_tk) >= 6 else _tk
-        cap = 20.0 if _c6.startswith(("30", "68")) else 10.0
+        cap = board_gap_cap_pct(_c6)
         board_src = f"code:{_c6}"
     else:
         cap = 20.0 if _is_dual_crea(bars) else 10.0

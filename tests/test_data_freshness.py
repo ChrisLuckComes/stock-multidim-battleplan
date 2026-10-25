@@ -84,7 +84,9 @@ def test_sina_symbol_passthrough():
     assert FA.sina_symbol("sh.600000") == "sh600000"
     assert FA.sina_symbol("600000") == "sh600000"
     assert FA.sina_symbol("000001") == "sz000001"
-    assert FA.sina_symbol("920522") == "sz920522"
+    assert FA.sina_symbol("920522") == "bj920522"
+    assert FA.sina_symbol("830799") == "bj830799"
+    assert FA.sina_symbol("bj920522") == "bj920522"
     # 反例：旧实现拼出无效符号 "szsh000001" ⇒ 新浪返 null ⇒ 指数当日 bar 补不上
     assert FA.sina_symbol("sh000001") != "szsh000001"
 

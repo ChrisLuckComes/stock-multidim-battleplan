@@ -48,7 +48,8 @@ def split_code(code) -> tuple:
     if len(c) == 8 and c[:2] in ("sh", "sz", "bj") and c[2:].isdigit():
         return c[:2], c[2:]
     d = c.zfill(6)
-    if d.startswith(("920", "43", "83", "87", "88")):
+    # 92 必须先于任何「9 开头=沪市」的旧写法；920 是已切换的北交所代码，92 整段同市场
+    if d.startswith(("92", "43", "83", "87", "88")):
         return "bj", d
     if d.startswith(("4", "8")) and not d.startswith("9"):
         return "bj", d
@@ -58,12 +59,11 @@ def split_code(code) -> tuple:
 
 
 def is_bj(code) -> bool:
-    """是否北交所（含老三板 43/83/87/88 与新三板 4/8 开头）。"""
-    c = str(code).strip().zfill(6)
-    if c.startswith(("920", "43", "83", "87", "88")):
-        return True
-    # 新三板/老三板：4xxxxx、8xxxxx（但 900xxx 沪B 除外，见下）
-    return c.startswith(_BJ_EXACT) and not c.startswith("9")
+    """是否北交所（含老三板 43/83/87/88、8xxxxx / 4xxxxx，以及 920）。
+
+    带 ``bj`` 前缀（``bj920522``）同样算。``900xxx`` 是沪 B，不是北交所。
+    """
+    return split_code(code)[0] == "bj"
 
 
 def is_sh(code) -> bool:
@@ -91,13 +91,14 @@ def tx_prefix(code) -> str:
 def board_limit_ratio(code, name: str = "") -> float:
     """涨跌幅上限。
 
-    ⚠ 北交所 **30%**（老代码只认 8/4 开头，漏了 92 ⇒ 把 920 判成主板 10%）。
+    ⚠ 北交所 **30%**（8xxxxx / 43 / 83 / 87 / 88 / 920；带 ``bj`` 前缀同样）。
+    老代码只认 8/4 开头，漏了 92 ⇒ 把 920 判成主板 10%。
     ST/*ST 5%（须传 name 才会命中）。
     """
-    c = str(code).strip().zfill(6)
+    _m, c = split_code(code)
     if "ST" in (name or "").upper():
         return 0.05
-    if is_bj(c):
+    if _m == "bj":
         return 0.30
     if c.startswith(("300", "301", "688", "689")):
         return 0.20

@@ -122,9 +122,25 @@ def settled_dt(market, session_date):
 
 
 # ─────────────────────────── 原始取数 ───────────────────────────
+def ash_sina_symbol(prefix, code):
+    """新浪日 K 符号。北交所必须是 ``bj`` + 6 位。
+
+    ``sz920522`` / ``sh920522`` 实测返 null；``bj920522`` 有日 K。
+    沪深仍用调用方传入的前缀，不改 sh/sz。
+    """
+    try:
+        import ash_market
+        if ash_market.is_bj(code) or str(prefix or "").lower() == "bj":
+            _m, d = ash_market.split_code(code)
+            return "bj" + d
+    except Exception:
+        pass
+    return "%s%s" % (prefix, code)
+
+
 def sina_raw(prefix, code, n=140, tries=3):
     """新浪日 K（A 股，不复权）。返回 [{d,o,h,l,c,v}] 旧→新；失败返回 []。"""
-    sym = prefix + code
+    sym = ash_sina_symbol(prefix, code)
     url = ("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
            f"CN_MarketData.getKLineData?symbol={sym}&scale=240&ma=5&datalen={n}")
     for t in range(tries):

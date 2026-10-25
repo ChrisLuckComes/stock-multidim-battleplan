@@ -35,7 +35,9 @@ eq(OP.board_of("300850"), ("gem", 0.20), "创业板 300 判 20cm")
 eq(OP.board_of("301456"), ("gem", 0.20), "创业板 301 判 20cm")
 eq(OP.board_of("688660"), ("star", 0.20), "科创板 688 判 20cm")
 eq(OP.board_of("601218"), ("main", 0.10), "沪主板判 10cm")
-eq(OP.board_of("830799")[1], 0.30, "北交所 8xx 判 30cm")
+eq(OP.board_of("830799"), ("bse", 0.30), "北交所 8xx 判 30cm")
+eq(OP.board_of("920522"), ("bse", 0.30), "北交所 920 判 30cm")
+eq(OP.board_of("900901"), ("main", 0.10), "沪B 900 不是 30cm")
 
 pb = OP.build(last=47.00, entry=46.58, stop=45.36, target=48.99,
               atr=2.436, code="300904", name="威力传动", shares=100)
