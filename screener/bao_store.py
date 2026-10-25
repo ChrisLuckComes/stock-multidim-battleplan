@@ -43,6 +43,9 @@ Sequoia-X 默认用**后复权**，照抄会让历史价位整体漂移，结构
   python screener/bao_store.py --refresh --limit 300    # 只更新前 300 只（试跑）
   python screener/bao_store.py --refresh --source tencent   # 强制腾讯前复权源
   python screener/bao_store.py --stat                   # 库内统计
+
+北交所（8xxxxx / 920）：baostock 没有这个市场。清单不再因「30% 未覆盖」丢掉；
+日线走腾讯 newfqkline 前复权（web.ifzq 对 bj 只回当日 1 根）。沪深增量仍走 baostock。
 """
 import os
 import sys
@@ -230,6 +233,40 @@ def fetch_daily(bs, code, start=DEFAULT_START, end=None):
     return bars
 
 
+def _parse_tencent_rows(arr, start, end):
+    """腾讯 qfq 行 → bars。顺序 [date, open, close, high, low, vol(手)]。"""
+    bars = []
+    for row in arr or []:
+        try:
+            d = str(row[0])
+            if d < start or d > end:
+                continue
+            bars.append({
+                "d": d,
+                "o": float(row[1]),
+                "c": float(row[2]),
+                "h": float(row[3]),
+                "l": float(row[4]),
+                "v": float(row[5]) * 100.0,  # 手→股，对齐 baostock
+            })
+        except (TypeError, ValueError, IndexError):
+            continue
+    return bars
+
+
+def _tencent_kline_urls(tcode, start, end, count, bj):
+    """沪深只用 web.ifzq。北交所这条接口只回当日 1 根，历史前复权在 newfqkline。"""
+    primary = ("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=%s,day,%s,%s,%d,qfq"
+               % (tcode, start, end, int(count)))
+    urls = [primary]
+    if bj:
+        urls.append(
+            "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get"
+            "?param=%s,day,%s,%s,%d,qfq" % (tcode, start, end, int(count))
+        )
+    return urls
+
+
 def fetch_daily_tencent(code, start=DEFAULT_START, end=None, count=800):
     """腾讯前复权(qfq)日线兜底源 → [{d,o,h,l,c,v}](旧→新)，v 由「手」换算成「股」。
 
@@ -238,40 +275,30 @@ def fetch_daily_tencent(code, start=DEFAULT_START, end=None, count=800):
     ⚑ 解析路径 data[code].qfqday；腾讯数组顺序为 [date, open, **close**, high, low, vol]
       （close 在 high/low 之前，是腾讯的怪序，别照抄成 [o,h,l,c]）。
     ⚑ 用于本机 baostock 出网不通时的兜底（grok 那台盒子也是腾讯拉前复权日线）。
+    ⚑ 北交所：web.ifzq 只回 1 根，根数不足时改打 newfqkline（沪深不走这条）。
     """
     end = end or _today_bj()
-    mk = market_of(code)
+    bj = market_of(code) == "bj"
     tcode = "".join(ash_market.split_code(code))   # ⚑ 2026-10-21：带前缀代码按前缀（指数不误判）
-    url = ("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=%s,day,%s,%s,%d,qfq"
-           % (tcode, start, end, int(count)))
-    bars = []
-    for _ in range(2):
-        try:
-            txt = _http_get(url, timeout=20, referer="https://gu.qq.com/")
-            js = json.loads(txt)
-            node = (js.get("data") or {}).get(tcode)
-            if not node:
+    best = []
+    for url in _tencent_kline_urls(tcode, start, end, count, bj):
+        for _ in range(2):
+            try:
+                txt = _http_get(url, timeout=20, referer="https://gu.qq.com/")
+                js = json.loads(txt)
+                node = (js.get("data") or {}).get(tcode)
+                if not node:
+                    break
+                arr = node.get("qfqday") or node.get("day") or []
+                bars = _parse_tencent_rows(arr, start, end)
+                if len(bars) > len(best):
+                    best = bars
                 break
-            arr = node.get("qfqday") or node.get("day") or []
-            for row in arr:
-                try:
-                    d = str(row[0])
-                    if d < start or d > end:
-                        continue
-                    bars.append({
-                        "d": d,
-                        "o": float(row[1]),
-                        "c": float(row[2]),
-                        "h": float(row[3]),
-                        "l": float(row[4]),
-                        "v": float(row[5]) * 100.0,  # 手→股，对齐 baostock
-                    })
-                except (TypeError, ValueError, IndexError):
-                    continue
+            except Exception:  # noqa: BLE001
+                time.sleep(0.3)
+        if not bj or len(best) >= MIN_BARS:
             break
-        except Exception:  # noqa: BLE001
-            time.sleep(0.3)
-    return bars
+    return best
 
 
 def _resolve_intraday_volume(cum, ref_v=None, ref_max_v=None):
@@ -523,12 +550,26 @@ def _http_get(url, timeout=25, referer="https://finance.sina.com.cn/"):
         return r.read().decode("utf-8", errors="ignore")
 
 
-def fetch_universe_sina(max_pages=80, page_size=100, sleep=0.12, include_bj=False):
+def accept_universe_code(code, mk, include_bj=True):
+    """清单里这只留不留。
+
+    北交所默认留下（涨跌停 30% 已接入）。``include_bj=False`` 才是显式剔除，
+    不再因为「rule123 口径未覆盖」静默丢掉。沪深过滤口径不变。
+    """
+    if len(code) != 6 or not str(code).isdigit():
+        return False
+    if mk == "bj":
+        return bool(include_bj)
+    return code[0] in "03689"
+
+
+def fetch_universe_sina(max_pages=80, page_size=100, sleep=0.12, include_bj=True):
     """新浪 Market_Center 分页拉全 A 股清单 → [(code, name, market)]。
 
     ⚠ 实测：东财 clist 在本机被拒（RemoteDisconnected），新浪这个节点可用。
     ⚠ 每页**硬上限 100**（传 num=1000/5000 都只回 100），所以要翻 ~55 页；
       仍是「几十个请求」量级，不是「逐只抓 5000 次」，不会触发限流。
+    ⚠ ``node=hs_a`` 已含北交所（symbol 以 bj 开头，按代码排序时排在最前）。
     """
     base = ("http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
             "Market_Center.getHQNodeData?page=%d&num=%d&sort=symbol&asc=1&node=hs_a"
@@ -548,9 +589,7 @@ def fetch_universe_sina(max_pages=80, page_size=100, sleep=0.12, include_bj=Fals
             if len(code) != 6:
                 continue
             mk = sym[:2] if sym[:2] in ("sh", "sz", "bj") else market_of(code)
-            if mk == "bj" and not include_bj:
-                continue                      # 北交所：涨跌停 30%，rule123 口径未覆盖
-            if code[0] not in "03689":
+            if not accept_universe_code(code, mk, include_bj=include_bj):
                 continue
             out.append((code, name, mk))
         if len(data) < page_size:
@@ -581,12 +620,17 @@ def fetch_universe_em():
         code = str(it.get("f12", "")).strip()
         name = str(it.get("f14", "")).strip()
         mk = it.get("f13")
-        if len(code) == 6 and code[0] in "0368":
+        if len(code) != 6:
+            continue
+        if ash_market.is_bj(code):
+            out.append((code, name, "bj"))
+            continue
+        if code[0] in "0368":
             out.append((code, name, "sh" if mk == 1 else "sz"))
     return out
 
 
-def refresh_universe(conn, verbose=True, include_bj=False):
+def refresh_universe(conn, verbose=True, include_bj=True):
     """拉全市场清单并 upsert 进 stocks 表（新浪分页为主，东财为备用）。"""
     rows = fetch_universe_sina(include_bj=include_bj)
     src = "sina"
@@ -726,10 +770,36 @@ def refresh_bars(conn, codes=None, full=False, limit=None, start=DEFAULT_START,
                                         verbose=verbose, progress=progress, workers=workers),
             verbose=verbose)
 
+    # 北交所不进 baostock（该源无 bj）。沪深列表原样走下面的增量，不改登录/重叠校验。
+    bj_codes, codes = _partition_bj(codes)
+    bj_stat = {"ok": 0, "skip": 0, "refetch": 0}
+    if bj_codes:
+        if verbose:
+            print("北交所 %d 只：baostock 无该市场，改走腾讯前复权" % len(bj_codes),
+                  flush=True)
+        bj_stat = _refresh_bars_tencent(
+            conn, bj_codes, full=full, start=start, end=end,
+            verbose=verbose, progress=progress, workers=min(workers, 4),
+            mark_source=False)
+        bj_stat = dict(bj_stat, bj=len(bj_codes))
+    if not codes:
+        try:
+            import baostock as _bs
+            _bs.logout()
+        except Exception:
+            pass
+        meta_set(conn, "bars_updated", _today_bj())
+        if verbose:
+            print("日线刷新完成：仅北交所 写入%d 跳过%d"
+                  % (bj_stat.get("ok", 0), bj_stat.get("skip", 0)), flush=True)
+        return _finalize_today_bars(conn, bj_stat, verbose=verbose)
+
     if workers > 1 and len(codes) > workers:
         return _finalize_today_bars(
-            conn, _refresh_bars_mp(conn, codes, full=full, start=start,
-                                   workers=workers, verbose=verbose),
+            conn, _merge_refresh_stat(
+                _refresh_bars_mp(conn, codes, full=full, start=start,
+                                 workers=workers, verbose=verbose),
+                bj_stat),
             verbose=verbose)
 
     bs = bs_module or bao_login()
@@ -791,8 +861,9 @@ def refresh_bars(conn, codes=None, full=False, limit=None, start=DEFAULT_START,
     if verbose:
         print("日线刷新完成：写入%d 跳过%d 全量重拉%d  用时%.0fs"
               % (ok, skip, refetch, time.time() - t0), flush=True)
-    return _finalize_today_bars(conn, {"ok": ok, "skip": skip, "refetch": refetch},
-                                verbose=verbose)
+    return _finalize_today_bars(
+        conn, _merge_refresh_stat({"ok": ok, "skip": skip, "refetch": refetch}, bj_stat),
+        verbose=verbose)
 
 
 def _refresh_bars_mp(conn, codes, full=False, start=DEFAULT_START, workers=6,
@@ -935,8 +1006,31 @@ def _refresh_bars_mp(conn, codes, full=False, start=DEFAULT_START, workers=6,
     return {"ok": ok, "skip": skip, "refetch": refetch}
 
 
+def _partition_bj(codes):
+    """北交所与沪深分开。baostock 没有北交所，不能跟沪深增量混在同一条登录里拉。"""
+    bj, rest = [], []
+    for item in codes:
+        code = item[0] if isinstance(item, tuple) else item
+        if ash_market.is_bj(code):
+            bj.append(item)
+        else:
+            rest.append(item)
+    return bj, rest
+
+
+def _merge_refresh_stat(base, extra):
+    out = dict(base or {})
+    if not extra:
+        return out
+    for k in ("ok", "skip", "refetch"):
+        out[k] = out.get(k, 0) + extra.get(k, 0)
+    if extra.get("bj"):
+        out["bj"] = extra["bj"]
+    return out
+
+
 def _refresh_bars_tencent(conn, codes, full=False, start=DEFAULT_START, end=None,
-                          verbose=True, progress=200, workers=2):
+                          verbose=True, progress=200, workers=2, mark_source=True):
     """腾讯前复权源刷新（无 baostock 依赖，永远不会被单源卡死）。
 
     自动拆分轻量/全量（2026-10-19 老罗拍板「轻量版」）：
@@ -985,7 +1079,8 @@ def _refresh_bars_tencent(conn, codes, full=False, start=DEFAULT_START, end=None
         stats["skip"] += s.get("skip", 0)
         stats["refetch"] += s.get("refetch", 0)
     meta_set(conn, "bars_updated", _today_bj())
-    meta_set(conn, "bars_source", "tencent")
+    if mark_source:
+        meta_set(conn, "bars_source", "tencent")
     if verbose:
         print("日线刷新完成(腾讯前复权)：轻量%d只 全量%d只 跳过%d只"
               % (stats["light"], len(full_codes), stats["skip"]), flush=True)

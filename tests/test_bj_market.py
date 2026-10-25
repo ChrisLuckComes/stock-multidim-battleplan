@@ -104,6 +104,53 @@ def test_all_sites_agree():
         eq(is_sh(code), M.is_sh(code), "first_board.is_sh %s" % code)
 
 
+def test_board_8_and_92():
+    print("[7] 8xxxxx / 92xxxx 板块与 30% 涨跌停")
+    for code in ("830799", "873169", "430047", "920000", "920522", "921000"):
+        assert M.is_bj(code), code
+        eq(M.board_limit_ratio(code), 0.30, "%s → 30%%" % code)
+    assert not M.is_bj("900901")
+    assert not M.is_bj("600000")
+    assert not M.is_bj("688152")
+    eq(M.board_limit_ratio("bj920522"), 0.30, "带 bj 前缀仍是 30%")
+    eq(M.board_limit_ratio("600882"), 0.10, "沪主板仍 10%")
+    eq(M.board_limit_ratio("300785"), 0.20, "创业板仍 20%")
+    eq(M.board_limit_ratio("688152"), 0.20, "科创板仍 20%")
+
+
+def test_not_rejected_for_being_bj():
+    print("[8] 北交所代码按 A 股走，不因是北交所被拒")
+    from battle_analyze import is_us_code
+    from rule123 import limit_up_frac, _sealed_limit_up, LU_BJ, LU_GEM, LU_MAIN, board_gap_cap_pct
+    import bars_source as BS
+    for code in ("920522", "830799", "873169"):
+        assert is_us_code(code) is False
+    assert limit_up_frac("920522") == LU_BJ
+    assert limit_up_frac("830799") == LU_BJ
+    assert limit_up_frac("688152") == LU_GEM
+    assert limit_up_frac("600882") == LU_MAIN
+    assert board_gap_cap_pct("920522") == 30.0
+    assert board_gap_cap_pct("300785") == 20.0
+    assert board_gap_cap_pct("600882") == 10.0
+    prev = {"d": "a", "o": 10, "h": 10, "l": 9.5, "c": 10, "v": 1}
+
+    def seal(code, close):
+        bar = {"d": "b", "o": close, "h": close, "l": close, "c": close, "v": 1}
+        return _sealed_limit_up([prev, bar], 1.0, code)
+
+    assert seal("920522", 13.0) is True
+    assert seal("920522", 11.0) is False
+    assert seal("600882", 11.0) is True
+    assert seal("300785", 12.0) is True
+    assert BS.ash_sina_symbol("sz", "920522") == "bj920522"
+    assert BS.ash_sina_symbol("sh", "600882") == "sh600882"
+    assert BS.ash_sina_symbol("sz", "000001") == "sz000001"
+    from screener.bao_store import accept_universe_code
+    assert accept_universe_code("920522", "bj") is True
+    assert accept_universe_code("600000", "sh") is True
+    print("  ok   北交所不被当成美股 / 10% 板 / 新浪 sz 符号")
+
+
 def test_no_startwith9_trap():
     print("[6] 反例守卫：任何 startswith('9')→沪市 的写法都会在这里被抓住")
     for code, want_bj in (("920522", True), ("900901", False)):
@@ -115,7 +162,8 @@ def test_no_startwith9_trap():
 
 if __name__ == "__main__":
     for fn in (test_secid, test_limit, test_limit_price, test_prefix,
-               test_all_sites_agree, test_no_startwith9_trap):
+               test_all_sites_agree, test_board_8_and_92, test_not_rejected_for_being_bj,
+               test_no_startwith9_trap):
         fn()
     print("\n" + "=" * 62)
     if FAIL:

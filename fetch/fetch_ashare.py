@@ -11,8 +11,8 @@ import sys, json, urllib.request, urllib.parse, argparse
 def sina_symbol(code: str) -> str:
     """6 位 A 股代码 → 新浪符号。
 
-    ⚠ 2026-10-20：北交所 920 之前被 ``startswith(("6","9"))`` 判成 sh（新浪无 bj）
-    ⇒ 北交所票新浪取不到数。统一走 ash_market：920 归 sz 路（新浪北交所码同深市通道）。
+    ⚠ 北交所必须用 ``bj`` 前缀。``sz920522`` / ``sh920522`` 新浪返 null；
+    ``bj920522`` 才有日 K（2026-10-25 实测 400 根）。8xxxxx / 43 / 83 同理。
 
     ⚑ 2026-10-21：**已带市场前缀的代码必须原样透传**。
       宽基指数 sh000001 / sz399001 / sz399006 之前被当 6 位股票推导 ⇒
@@ -27,10 +27,12 @@ def sina_symbol(code: str) -> str:
         return low.replace(".", "")
     if low.startswith(("sh", "sz", "bj")) and len(low) == 8 and low[2:].isdigit():
         return low                                   # 已带前缀（如 sh000001）→ 透传
-    c = c.zfill(6)
-    if ash_market.is_sh(c):              # 上交所 600/601/603/688/689/900
-        return "sh" + c
-    return "sz" + c                       # 深交所 000/002/300/003 + 北交所 920
+    m, d = ash_market.split_code(c)
+    if m == "bj":
+        return "bj" + d                   # 北交所 920/8xx/43/83：新浪符号是 bj
+    if m == "sh":                         # 上交所 600/601/603/688/689/900
+        return "sh" + d
+    return "sz" + d                       # 深交所 000/002/300/003
 
 def fetch_kline(code, n=140):
     sym = sina_symbol(code)

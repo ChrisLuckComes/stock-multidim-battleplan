@@ -170,6 +170,9 @@ def broad_for(code, cache):
         return cache.get("sz399006") or cache.get("sz399001")
     if board == "sh":
         return cache.get("sh000001")
+    if board == "bj":
+        # 北证50 不在默认宽基清单里时退上证，不把北交所塞进深成指
+        return cache.get("bj899050") or cache.get("sh000001") or cache.get("sz399001")
     return cache.get("sz399001")
 
 
