@@ -94,6 +94,9 @@ SCR_JUMP_STEADY = 1.10    # ★ 2026-10-20 老罗定：低于此值＝SCR90 **�
                 #   校准依据：301119 主升全程 jump 0.97~1.11、从未触及派发阈值 1.25。
 SCR_SHIP = 25.0           # 出货确认：SCR90 连续 2 日 > 25% 且放量
 TURN_BIG = 8.0            # 爆量换手（%）
+# ★ 2026-10-26 加（视涯 688781 实证）：换手率的**自洽校验**阈值，用于备用源/本地库的单位反解。
+TURNOVER_PLAUSIBLE_MAX = 100.0   # 单日换手率上限（%）；超过即判「成交量单位 or 流通股本错位」
+TURNOVER_PAIR_TOL = 0.25         # 自算换手 vs 接口换手（腾讯 f[38]）对拍容差；偏差 >25% 判错位
 VOL_BIG = 1.8             # 量比≥该值 = 爆量
 VOL_CONFIRM = 1.5         # 启动量能确认（Excel：量比 > 1.5）
 NEAR_M = 0.03             # 贴峰区中位价 ±3%（Excel 峰区贴价）
@@ -435,13 +438,55 @@ def tx_float_shares(sym):
     return shares_hand, turn_pct
 
 
+def _resolve_vol_scale(last_v, shares_hand, turn_pct, known_scale=None):
+    """自洽反解「成交量 → 手」的换算系数（★ 不许假定单位，必须校验）。
+
+    ⚠⚑ **由来（2026-10-26 视涯 688781 实证，老罗截图打回）**：
+      腾讯 qfqday 的 v 与本地 db 一样是「**股**」，而 scr_chip 内部按「手」用
+      （chip_model 对 A 股做 `v * 100` 转股）。`fetch_bars_tx` 原样把 v 当手 ⇒
+      换手率算成 **1728.56%**（虚高 100 倍）⇒ 半衰期反解把衰减 k 压到 0.011
+      （标准口径 0.147）⇒ SCR90 / 主力成本 / 峰区下沿全线失真，且**静默输出**。
+      根因就一句：**单位是假定的，不是校验的**。
+
+    判据（任一不满足即 raise，让上层放弃备用源 —— 错数比没数危险得多）：
+      ① **对拍**：自算最后一根的换手率 vs 接口实时换手率 f[38]，偏差 ≤ TURNOVER_PAIR_TOL；
+      ② **绝对合理性**（接口没给换手率，或对拍失败但单位已知）：0 < 自算值 ≤ TURNOVER_PLAUSIBLE_MAX%。
+
+    `known_scale`：调用方已确定单位时锁定该口径（如本地 db 的 v 确定为「股」⇒ 0.01），
+    只校验不猜测；为 None 时按「手 / 股」两种口径择优。
+    """
+    cands = [(known_scale, "已知")] if known_scale else [(1.0, "手"), (0.01, "股")]
+    checked = []
+    for scale, tag in cands:
+        try:
+            turn = (float(last_v) * scale / shares_hand * 100.0) if (shares_hand and last_v) else 0.0
+        except (TypeError, ValueError):
+            turn = 0.0
+        checked.append((scale, tag, turn))
+        if turn <= 0:
+            continue
+        if turn_pct and turn_pct > 0 and abs(turn / turn_pct - 1.0) <= TURNOVER_PAIR_TOL:
+            return scale
+    # 对拍不可用或没通过 ⇒ 退回绝对合理性（防接口换手率缺失/日期错位时误杀）
+    for scale, tag, turn in checked:
+        if 0 < turn <= TURNOVER_PLAUSIBLE_MAX:
+            return scale
+    detail = "；".join(f"{tag}口径={turn:.2f}%" for _, tag, turn in checked)
+    raise RuntimeError(
+        f"备用源换手率自洽校验失败（接口换手 "
+        f"{'%.2f%%' % turn_pct if turn_pct else 'NA'}）：{detail} "
+        f"⇒ 成交量单位 / 流通股本疑似错位，放弃备用源")
+
+
 def fetch_bars_tx(code, n=120):
     """腾讯前复权日线 → (bars, name)；字段布局与 `_parse_kline` 对齐（d,o,c,h,l,v,amt,turnover）。
 
     ⚠⚠ **备用源是降精度替代，不是等价替代**（不许静默降级，调用方必须显示来源）：
       ① **换手率**：腾讯日线不给 ⇒ 自算 turnover = 当日成交量(手) / 流通股本(手)。
-         流通股本取**当前值钉死**（tx_float_shares 反解），窗口内若有增发/解禁会偏；
-         但对拍过：002317 自算 6.97% vs 接口 6.97%，量级可靠。
+         流通股本取**当前值钉死**（tx_float_shares 反解），窗口内若有增发/解禁会偏。
+      ★★ **成交量单位不许假定，必须反解**（2026-10-26 修）：qfqday 的 v 实测是「**股**」
+         （688781 当手用 ⇒ 换手 1728%，荒谬）⇒ 由 `_resolve_vol_scale` 用「接口实时换手率
+         对拍 + 绝对合理性」定夺，定不了就直接报错放弃备用源，绝不静默输出错数。
       ② **成交额 amt**：腾讯日线不给 ⇒ 填 0，chip_model 会退回 (l+h)/2 当三角峰值。
       ⇒ 衰减率与 VWAP 都比东财口径粗，**结论置信度要降一档**，报告必须标明。
     """
@@ -453,21 +498,41 @@ def fetch_bars_tx(code, n=120):
         raise RuntimeError(f"腾讯未返回 {code} 日线（代码错/停牌？）")
     name = node.get("qt") or {}
     name = (name.get(sym) or [None, None, None, None, None, None])[1] if isinstance(name, dict) else ""
-    shares_hand, _ = tx_float_shares(sym)
+    shares_hand, turn_pct = tx_float_shares(sym)
+    if not shares_hand:
+        raise RuntimeError(f"腾讯未取到 {code} 流通股本 ⇒ 换手率无法自算，放弃备用源")
+    # ★ 用最近一根有成交的 bar 反解成交量单位（手 / 股），并对拍接口实时换手率
+    probe = None
+    for r in reversed(rows):
+        if len(r) >= 6:
+            try:
+                if float(r[5]) > 0:
+                    probe = float(r[5])
+                    break
+            except (ValueError, TypeError):
+                continue
+    if probe is None:
+        raise RuntimeError(f"腾讯 {code} 日线无有效成交量 ⇒ 放弃备用源")
+    scale = _resolve_vol_scale(probe, shares_hand, turn_pct)
     bars = []
     for r in rows:
         if len(r) < 6:
             continue
         try:
-            v = float(r[5])                 # 成交量（手）
+            v = float(r[5]) * scale         # ★ 换算成「手」（与东财口径一致）
         except ValueError:
             continue
-        turn = (v / shares_hand * 100.0) if shares_hand else 0.0
+        turn = v / shares_hand * 100.0
         bars.append({"d": r[0], "o": float(r[1]), "c": float(r[2]),
                      "h": float(r[3]), "l": float(r[4]),
                      "v": v, "amt": 0.0, "turnover": turn})
     if not bars:
         raise RuntimeError(f"腾讯 {code} 日线解析为空")
+    mx = max((b.get("turnover") or 0.0) for b in bars)
+    if mx > TURNOVER_PLAUSIBLE_MAX:
+        raise RuntimeError(
+            f"腾讯 {code} 备用源换手率异常（窗口内最高 {mx:.1f}% > {TURNOVER_PLAUSIBLE_MAX:.0f}%）"
+            f" ⇒ 单位/股本仍错位，放弃备用源")
     return bars, (name or str(code))
 
 
@@ -523,6 +588,12 @@ def fetch_all_meta(code, n=120, use_cache=True, now=None, us_mode=False,
                 # ⚠ 缓存里不足 MIN_BARS 的一律视为坏缓存（历史遗留：降级腾讯只返 1 根时写过盘）
                 if len(payload["bars"]) < MIN_BARS:
                     raise ValueError("缓存不足 %d 根，视为坏缓存" % MIN_BARS)
+                # ⚠ 缓存里换手率离谱的一律视为坏缓存（2026-10-26：备用源单位错位曾把
+                #   688781 的换手写成 1728% 并存盘 ⇒ 不清理的话每次命中都是错数）
+                if (payload.get("meta") or {}).get("kline") == "tx":
+                    _mx = max((b.get("turnover") or 0.0) for b in payload["bars"])
+                    if _mx > TURNOVER_PLAUSIBLE_MAX:
+                        raise ValueError("缓存换手率异常 %.1f%%，视为坏缓存" % _mx)
                 return (payload["bars"], payload.get("name") or (
                     str(code).upper() if us_mode else str(code)),
                     payload.get("fflow") or {}, payload.get("meta") or {})
@@ -603,7 +674,14 @@ def _fetch_raw(code, n=120, us_mode=False, allow_fallback=True):
             meta["em_err"] = (meta.get("em_err", "") + f" | 二次尝试: {e}")[:200]
 
     if not bars and allow_fallback and not us_mode:
-        bars, name = fetch_bars_tx(code, n=n)     # ★ 备用源（腾讯）
+        try:
+            bars, name = fetch_bars_tx(code, n=n)     # ★ 备用源（腾讯）
+        except Exception as e:
+            # ★ 备用源自洽校验不过 ⇒ 明确抛错，绝不留着「东财失败+腾讯错数」的假数
+            meta["tx_err"] = f"{type(e).__name__}: {e}"
+            raise RuntimeError(
+                f"日线取数失败：东财未返回 {code}；腾讯备用源亦不可用（{e}）"
+                f" ⇒ 筹码面本次不可用，不要引用任何筹码数值")
         meta["kline"] = "tx"
         meta["note"] = (
             "东财日线不可用，已降级【腾讯备用源】：换手率由「成交量/流通股本」自算"
@@ -1108,7 +1186,19 @@ def bars_from_db(code, n=120, db_path=None):
         return None
     rows = rows[-max(n, MIN_BARS):]
     sym = tx_symbol(code)
-    shares_hand, _ = tx_float_shares(sym)            # 流通股本（手）
+    shares_hand, turn_pct = tx_float_shares(sym)     # 流通股本（手）
+    if shares_hand:
+        # ★ 同上：db 的 v 单位虽确定为「股」（known_scale=0.01），仍要过一遍自洽校验
+        #   ——股本反解错 / 字段错位会让换手率失真，进而污染整个 SCR。
+        #   校验不过就返回 None 让调用方走网络兜底，**不喂错数**。
+        try:
+            probe = float(rows[-1][5]) if rows[-1][5] else 0.0
+        except (TypeError, ValueError):
+            probe = 0.0
+        try:
+            _resolve_vol_scale(probe, shares_hand, turn_pct, known_scale=0.01)
+        except RuntimeError:
+            return None
     bars = []
     for d, o, h, l, c, v in rows:
         v_shares = float(v) if v is not None else 0.0
