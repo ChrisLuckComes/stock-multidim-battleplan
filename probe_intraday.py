@@ -912,6 +912,45 @@ def replay_drop_last(daily, asof, live):
     return bool(live and daily and daily[-1]["d"][:10] == asof)
 
 
+def _emit_hold_winners(out, close, zone, plan, target=None, prev_close=None,
+                       price=None, low=None, vwap=None, day_open=None,
+                       day_frac=None, top_block=False):
+    """赢家持有软标签。结构用收盘，浅档用现价。失败只写未知，不改买卖结论。"""
+    try:
+        from gates.hold_winners import assess, format_hold_line
+        z = zone or {}
+        mode = (plan or {}).get("mode")
+        er = z.get("exit_rule") or {}
+        align = None
+        if mode == "ma_bull_align" and er:
+            align = bool(er.get("triggered"))
+        facts = {
+            "close": close,
+            "price": price,
+            "low": low,
+            "support": z.get("struct_stop"),
+            "stop": z.get("struct_stop"),
+            "hard_stop": z.get("hard_stop"),
+            "mode": mode,
+            "t0": mode == "ma_reclaim_break",
+            "align_broken": align,
+            "top_block": bool(top_block),
+            "zone_hi": z.get("primary_hi"),
+            "zone_lo": z.get("primary_lo"),
+            "vwap": vwap,
+            "prev_close": prev_close,
+            "day_open": day_open,
+            "day_frac": day_frac,
+            "target": target,
+        }
+        block = assess(facts)
+    except Exception as exc:                    # noqa: BLE001
+        print("  赢家持有: 未知（%s）" % exc)
+        return
+    print("  赢家持有: %s" % format_hold_line(block))
+    out["hold_winners"] = block
+
+
 def probe(code, qty=None, account=None, asof=None, min_scale=5, replay=False,
           until=None, us_account=None, date=None, data_file=None, market_data=None,
           merge_live=False):
@@ -1162,6 +1201,20 @@ def probe(code, qty=None, account=None, asof=None, min_scale=5, replay=False,
         print(f"  无预案单：买区已作废 —— {note_txt}")
     else:
         print("  无预案单：昨日信号不是可买状态（wait / 突破未成立），走第二节与第五节。")
+
+    _live_px = snap.get("spot") if live else None
+    _live_lo = snap.get("l") if live else None
+    _emit_hold_winners(
+        out,
+        close=basis[-1]["c"],
+        price=_live_px,
+        low=_live_lo if _live_lo is not None else basis[-1].get("l"),
+        zone=z,
+        plan=plan,
+        target=(rc or {}).get("target1"),
+        prev_close=basis[-2]["c"] if len(basis) > 1 else snap.get("prev"),
+        top_block=bool((plan.get("top_signal") or {}).get("block")),
+    )
 
     # ---------- 1b) 突破预案单（setup 就绪 → 次日开盘挂条件单） ----------
     # A 股口径比美股严一档：T+1 当天纠不了错，只能小追（D_max 0.60×ATR）；
@@ -2370,6 +2423,22 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None,
         print(f"  无预案单：买区已作废 —— {plan.get('note')}")
     else:
         print("  无预案单：信号非可买状态（wait / 突破未成立），走第二、三节。")
+
+    _us_px = px_now if px_now is not None else last["c"]
+    _emit_hold_winners(
+        out,
+        close=last_closed["c"],
+        price=_us_px,
+        low=day_low if day_low is not None else last.get("l"),
+        zone=z,
+        plan=plan,
+        target=t1,
+        prev_close=prev_close,
+        vwap=vwap_hang,
+        day_open=day_open,
+        day_frac=chg,
+        top_block=bool((plan.get("top_signal") or {}).get("block")),
+    )
 
     # ---------- 1b) 突破预案单（setup 就绪 → 开盘挂条件买单） ----------
     # 上方「回踩单」只覆盖一种形态；强势票贴着前高收时它必然给不出可成交的价。

@@ -143,6 +143,10 @@ disable-model-invocation: true
 28. **AI 主动拦截**：出现「浮盈这么多了想锁但懒得改止损」/「等再涨涨再移」属纪律松懈 —— **AI 必须主动提示并给出具体上移价位**，不等用户问；纪律拦截器在此项上主动出击。
 
 - ⚑ 与规则 23 衔接：移动止盈的止损同样受 ≤5% 宽度上限（锁利线到当前价距离 ≤5% 时不再上移，防毛刺扫掉）；触发确认 A 股可给「盘中破+3分钟不收回」与「收盘破」双版本（用户自选），美股只认收盘价。
+29. **★★ 不要轻易卖赢家（`hold_winners`，2026-10-27）**：一腿还在工作（收盘仍在关键均线或结构止损上方、T0 的 MA5/MA10/MA20 仍站上、不是收盘确认的派发日），优先拿住，不要换票。换票跑输拿住这一腿。移动止盈（规则 24）只上移止损，不是把浮盈卖掉的理由。
+    - **卖出同步必须当场核对**：用户说已经卖了、清仓、或要改资料库把持仓打成 0，先跑 `python gates/hold_winners.py --sold <价>`（有 `analysis.json` 就加 `--analysis`）。结构未破、只是盘中刺破、或卖进仍有效的浅档（买区上沿 / VWAP / −1%，网安与软件偏好浅档，不把买单降到深档或平台下沿去凑成交）→ **纠正**，写明为什么错、接回限价、止损（收盘破，不许放宽）、目标、R≥1.5。现价已经拉开或当日涨幅 ≥5% → 写明 **不要追**，只留回到浅档再接的价。不许顺着安慰。
+    - **卖出成立就不拦**：收盘已破结构、收盘确认派发、短均线排列已打乱、顶部已确认 → 转入卖后观察，不发明接回。当日消息仍不是回补理由（[trade-lessons.md](references/trade-lessons.md) L001）。
+    - 作战计划里这是软标签（`hard_gate=false`，不改 `recommend`）。`hard_gate=true` 只出现在「这笔卖是错的」上。细则 [risk-exit.md](references/risk-exit.md)。
 
 ## 按需读取
 
@@ -153,7 +157,8 @@ disable-model-invocation: true
 - **判顶部 / 出现长上影·长下影·十字星·大阴线 K 线 / 持仓要不要走 / 跑个股要避雷**：读取 [top-signals.md](references/top-signals.md)（五形态 = 墓碑线 / 上吊线 / 射击之星 / 顶部十字星 / 大阴线 + 次日确认制；**形态当日只预警，次日走弱才否决；反包即推翻**；单票硬指标 `python gates/top_signal_check.py <code>`，退出码 0/1/2）。**跳空与「断头铡刀」两组提名 2026-09-25 已被大样本否定**（跳空是波动不是方向；断头铡刀中性偏正）⇒ **别把「跳空大阴」「两根铡刀破均线」当顶部依据**（§4.3）。
 - **问「有没有牛旗 / 过牛旗了没有 / 突破后整理算不算旗形 / 大阳后缩量该不该买 / 线已经贴到价上了算不算过线」**：规则 19 + [strategy-modes.md](references/strategy-modes.md) §3（牛旗）与 §5（大阳后缩量回踩）。**「缩量」不是买点，「过整理上沿」才是**；**「线自己贴上来」的过线（贴线档）必须先放量才买**；**上沿买 ≠ 等平台突破买**（老罗：在平台顶买「没有了成本优势，盈亏比变得差很多」—— 实测差 5~15%：ILMN 10.4%、赛分科技 15.0%）；**牛旗的正落点是下降趋势线**，旗形「标不标准」不否决买法。单票体检 `python gates/bull_flag_check.py <code> [--us]`（退出码 0=无 / 1=成型未过线·**贴线待突破**或过线已久 / 2=**已过牛旗·买点成立** / 4=**旗形无效**：跌破旗杆大阳最低点 或 整理超 20 根）。可选读 [entry-odds.md](references/entry-odds.md) 算赔率。
 - **完整单票报告**：读取 [research-report.md](references/research-report.md)、[strategy-modes.md](references/strategy-modes.md)、[entry-odds.md](references/entry-odds.md)、[risk-exit.md](references/risk-exit.md)、[data-operations.md](references/data-operations.md)、[output-pitfalls.md](references/output-pitfalls.md)、[report-generation.md](references/report-generation.md)。
-- **只问买点/止损/持仓处置**：读取 [strategy-modes.md](references/strategy-modes.md)、[entry-odds.md](references/entry-odds.md)、[risk-exit.md](references/risk-exit.md)。
+- **只问买点/止损/持仓处置**：读取 [strategy-modes.md](references/strategy-modes.md)、[entry-odds.md](references/entry-odds.md)、[risk-exit.md](references/risk-exit.md)。持仓还在、结构未破 → 不要轻易卖出赢家（`hold_winners`，2026-10-27）。
+- **用户同步卖出 / 说已经卖了 / 清仓回报**：先跑 `python gates/hold_winners.py --sold <价>`（能对上分析文件就加 `--analysis out_cn/analysis_<code>.json`）。退出码 2 = 卖错了，必须当场纠正并给出浅档接回或写明不要追。卖出成立才去改资料库。细则 [risk-exit.md](references/risk-exit.md)「不要轻易卖赢家」。
 - **盘中信号/分钟复盘 / 用户说「复盘」某天走势、逐笔、是拉升还是派发**：先跑 `python gates/tape_review.py <code>`。某一天到某一天用 `--from YYYY-MM-DD --to YYYY-MM-DD`，改走日线，读数口径不变（`--json` 给脚本）。脚本只出读数：高低点、区间位置、均价上下、高点前后成交占比、外盘内盘、对照指数、低点/高点/收盘三档资金（主力=超大单+大单，按单笔金额拆，不是席位）、≥100万的大单方向。读数后面给出结论，四选一：派发、高位消化、正常回调、趋势延续，并写能不能买。派发要同时满足已收盘、收在均价下、高点后成交过半、主力净卖；趋势延续是收在均价上、区间位置不低于 0.55、主力净买、这段在涨，买法只接回踩不追；**高位消化**是收在均价上、位置≥0.55、这段在涨，但主力净卖（价强资弱，冲高换手，不是回调也不是派发，先不追）。未收盘不下派发结论。分笔接口只取第一页（再请求会整页重复）。细则仍读 [intraday.md](references/intraday.md)。正式报告第 3 节的数据表和结论都由 `report_pack` 填，不再另写一套量价。**完整报告的结论区间默认近 20 个交易日，不传 start。** 只有用户明确说出起止日期，才把 `--vp-from` / `--vp-to` 传给 `report_render.py`（或写入 notes 的 `vp_from` / `vp_to`）。没指定就不要改区间。生成正式报告时再读 [research-report.md](references/research-report.md)。
 - **盘中口令「这个股票 [name] 现在能上吗？」**（同义：能不能买 / 可以买吗 / 能不能上 / 现在上车吗 等，意思对即可）：立刻跑 `python gates/session_decide.py <code> --entry … --stop … --target … [--cap …]`（或 `--plan analysis.json`），不要先开完整报告。对照昨晚计划，叠当前分时（有没有至今偏派发）、现价盈亏比、买入上限。**「能买」一定已先过「至今非偏派发」**；「不买」可能是派发，也可能是价位/R/上限/贴涨停。输出能不能买、推荐限价、仓位；**现价还不能买时给出盯价**。取数三路并行不拉逐笔。不打板；止损目标不改；T+1 当日无止损腿。回放 `--asof HH:MM`。细则见本仓库 `AGENTS.md` §1b。盘中问题同时要写分时量价（分钟涨量/跌量、均价上下成交比例、开盘/午后/尾盘各段价和量）和逐笔（买/卖手数、≥100万买对卖、最大几笔的时间/方向/价格/金额，分笔只取第一页并去重）；主力净买净卖只作旁证，不得单用它下结论。
 - **股池扫描/批量复盘**：读取 [strategy-modes.md](references/strategy-modes.md)、[risk-exit.md](references/risk-exit.md)、[data-operations.md](references/data-operations.md)。

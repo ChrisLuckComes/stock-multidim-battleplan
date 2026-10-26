@@ -646,6 +646,8 @@ class TestAnalyzeOffline(unittest.TestCase):
         self.assertIn("activity", res)
         self.assertFalse(res["activity"]["hard_gate"])
         self.assertIn("活跃度", txt)
+        self.assertIn("hold_winners", txt)
+        self.assertFalse(res["hold_winners"]["hard_gate"])
 
     def test_summarize_shows_fill_policy(self):
         """成交口径必须进人读摘要（2026-09-26 补）。

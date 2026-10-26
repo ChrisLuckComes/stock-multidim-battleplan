@@ -20,6 +20,7 @@
     python library_pos.py find --market cn --code 688758
 
     # 3) 改字段（可多个 --set；键=字段名，值按列类型自动包 oneof）
+    # 清仓前先跑 gates/hold_winners.py --sold <价>。退出码 2 = 卖错了，先纠正。
     python library_pos.py set --market cn --code 688758 --set 状态=空仓观察 --set 持仓数量=0
 
     # 4) 追加「操作记录」列（自动接在原文之后；两表同名）
