@@ -109,7 +109,7 @@ python library/library_pos.py add --market cn --code 002001 --name 新和成 \
 | 场景 | 做法 |
 |---|---|
 | 成交买入 | `add` 新行（或 `set` 状态=持仓 / 持仓数量 / 成本） |
-| 卖出/清仓 | `set --set 状态=空仓观察 --set 持仓数量=0`，再 `note` 记一笔成交价与盈亏 |
+| 卖出/清仓 | 先跑 `python gates/hold_winners.py --sold <价>`（有分析文件加 `--analysis`）。退出码 2 = 结构未破，先纠正再决定写不写。卖出成立才 `set --set 状态=空仓观察 --set 持仓数量=0`，再 `note` 记成交价与盈亏 |
 | 调整止损 | `set --set 止损价=... --set 止损执行=...` |
 | 复盘留痕 | `note --text "..."` 追加到操作记录 |
 | 挂报告链接 | `set --set "报告=报告标题\|https://..."` |

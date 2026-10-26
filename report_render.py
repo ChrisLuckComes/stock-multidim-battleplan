@@ -493,6 +493,7 @@ def build_plan_rows(a):
     #   已出现，要么只在对账时才有意义 —— 重复堆在表里就是噪音。
     out = [
         ("结构止损", "<b>%s</b>（%s · 收盘破）" % (num(z.get("struct_stop")), esc(z.get("struct_anchor")))),
+        ("赢家持有", esc(_hold_sentence(a))),
         ("硬止损", "<b>%s</b>（%s · 盘中触价）" % (num(z.get("hard_stop")), esc(z.get("hard_anchor")))),
         # ★ 2026-10-13 老罗定：T1 短均线多头排列的主卖点是「动态」的 —— 三短均线多头排列
         #   一打乱（MA5<MA7 或 MA7<MA10）即卖出，硬止损（MA20/MA60 托底位）仅作兜底层。
@@ -837,9 +838,26 @@ def build_oneline(a, n):
     _r1_is_t1 = not rec.get("r1_basis") or str(rec["r1_basis"]).startswith("t1")
     _rlbl = "R→t1" if _r1_is_t1 else "R（t1 缺失·按远端墙）"
     return ("结论：<b>%s 挂限价买</b>，止损 <b>%s</b>，%s <b>%s</b>；"
-            "收盘破止损即离场；<b>不追价</b> —— 等不到的价等于 0。%s"
+            "收盘破止损即离场；结构未破不要轻易卖出赢家（hold_winners）。"
+            "<b>不追价</b> —— 等不到的价等于 0。%s"
             % (num(rec.get("entry")), num(rec.get("stop")), _rlbl,
                num(rec.get("r1")), _src_txt))
+
+
+def _hold_sentence(a):
+    """赢家持有一行。旧 analysis 没有该键时按计划现算，不算不出就仍点名规则。"""
+    block = a.get("hold_winners") if isinstance(a.get("hold_winners"), dict) else None
+    if block and block.get("line"):
+        return block["line"]
+    try:
+        from gates.hold_winners import from_analysis
+        block = from_analysis(a)
+    except Exception:                           # noqa: BLE001
+        block = None
+    if isinstance(block, dict) and block.get("line"):
+        return block["line"]
+    return ("赢家持有（hold_winners · 2026-10-27）：结构未破不要轻易卖出这一腿。"
+            "收盘破才离场。")
 
 
 def build_summary(a, n):
@@ -877,6 +895,7 @@ def build_summary(a, n):
                         for o in (a.get("odds") or []) if o.get("weak")) or "—"),
         ("止损", "结构 %s（收盘破） / 硬 %s（盘中）"
          % (num(z.get("struct_stop")), num(z.get("hard_stop")))),
+        ("赢家持有", esc(_hold_sentence(a))),
         ("目标", "t1 %s / 远端 %s / ATH %s"
          % (num(a["targets"].get("t1")), num(a["targets"].get("wall_far")),
             num(a["targets"].get("ath")))),

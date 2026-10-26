@@ -1749,6 +1749,19 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
     except Exception as e:                      # noqa: BLE001
         out["confluence"] = None
         notes_all.append("叠加计数生成失败（不影响其余分析）：%s" % e)
+    # 赢家持有（hold_winners，2026-10-27）：软标签。不改 recommend。
+    # 卖出对错的硬纠正只在 review_sell（用户同步卖出）里。
+    try:
+        from gates.hold_winners import from_analysis as _hold_from
+        out["hold_winners"] = _hold_from(out)
+    except Exception as e:                      # noqa: BLE001
+        out["hold_winners"] = {
+            "rule": "hold_winners",
+            "date": "2026-10-27",
+            "label": "unknown",
+            "hard_gate": False,
+            "line": "赢家持有（hold_winners · 2026-10-27）：未知（%s）" % e,
+        }
     return out
 
 
@@ -1890,6 +1903,15 @@ def summarize(r):
         L.append(" ★ 现价 %s：%s —— 这才是「止损塞噪声带」要读的口径"
                  "（hard_dist_atr 是硬止损距结构线的余量，别混用）"
                  % (_last_px, " ／ ".join(_dist_txt)))
+    _hw = r.get("hold_winners")
+    if not isinstance(_hw, dict) or not _hw.get("line"):
+        try:
+            from gates.hold_winners import from_analysis as _hold_from
+            _hw = _hold_from(r)
+        except Exception:                       # noqa: BLE001
+            _hw = None
+    if isinstance(_hw, dict) and _hw.get("line"):
+        L.append(" " + _hw["line"])
     # ★ 2026-09-26：两条**成交口径**以前只活在引擎里、人读输出一行都不打 ——
     #   老罗读不到就等于没落地（回放实测这两条各多买中一笔：中科飞测 06-15 +83.0%、
     #   兆易创新 04-29 +74.1%，且无副作用）。这里与报告/探针保持同一份文案来源。
