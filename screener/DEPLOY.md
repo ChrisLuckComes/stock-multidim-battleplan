@@ -141,22 +141,38 @@ cp .env.example .env     # 再按账户实际额度改：ASH_ACCOUNT / US_ACCOUN
 ⚑ **首次在新机器跑，L0 数量会偏低**（因为刚建的库只有 320 根，某些战法要看更长历史）。
 这不影响使用，跑一周后数据就厚了。
 
-可选：筹码面体检（约 11 分钟 / 282 只量级）
+收盘/午盘交付前必跑（2026-10-26 硬规则）：筹码面体检（并行，约 1~3 分钟 / 180 只量级）+ 双通过∩飙股主表。禁止把引擎序前 20 或 scan 原表当交付。
 
 ```bash
-<PY> screener/scr_sweep.py       # → out_cn/scr_<日期>_close.jsonl
+<PY> screener/scr_sweep.py
+<PY> screener/deliver_dual_surge.py --date <日期> --session close
+# 午盘把 --session 换成 midday，且 scr_sweep --src 指向 screener_<日期>_midday.jsonl
 ```
 
 ---
 
 ## 5. 建两个定时任务
 
+### 5.0 交付硬规则（老罗 2026-10-26）
+
+午盘和收盘的交付主表一律是 **双通过 ∩ 飙股**。禁止只交引擎序前 20，也禁止把 `scan_warfare` 原表当交付。
+
+```
+scan_warfare → scr_sweep（筹码双通过）→ deliver_dual_surge（高弹性 ∩ allow_new）
+```
+
+- 集合 B = 战法闸 + 筹码闸 `allow_new`
+- 集合 A = 高弹性（板块内弹性日数分位 ≥ 75）
+- 主表 = A ∩ B，排序沿用 `elastic_dual`（强度档 → 筹码档 → 强度分）
+- 产物：`out_cn/dual_surge_list_<日期>_<midday|close>.{md,json}`，以及 `elasticity_<日期>_<session>_dual.{md,html}`
+- `--top 60` 只是盘中半根复评上限，不是交付截断
+
 ### 5.1 时间点与职责
 
 | 任务 | 时间 | 做什么 | 耗时 |
 |---|---|---|---|
-| **盘中 11:30** | 周一~周五 11:30 | **不刷新日线**（baostock 盘中不返回当日），只读本地库 + 抓实时半根行情，对前 60 只候选复评 | ~1 分钟 |
-| **收盘 15:20** | 周一~周五 15:20 | 增量刷新日线 → 全市场扫描 → 筹码面体检 | ~15 分钟 |
+| **盘中 11:30** | 周一~周五 11:30 | **不刷新日线**。扫描 → 筹码体检 → **双通过∩飙股**。半根复评仍只覆盖前 60 只候选 | ~3 分钟 |
+| **收盘 15:20** | 周一~周五 15:20 | 增量刷新日线 → 全市场扫描 → 筹码体检 → **双通过∩飙股** | ~15 分钟 |
 
 ### 5.2 创建方式
 
@@ -182,8 +198,9 @@ skill 目录若已是指向该根的联接，两个路径是同一个目录。
 ```text
 在 A 股全市场选股器上运行**盘中**扫描（周一~周五 11:30，午盘收市后）。
 
-执行命令（工作目录 D:/code/stock-multidim-battleplan）：
-  C:/Users/luoyunlai/.workbuddy/binaries/python/envs/default/Scripts/python.exe screener/scan_warfare.py --session midday --top 60
+按顺序执行（工作目录 D:/code/stock-multidim-battleplan，统一用
+C:/Users/luoyunlai/.workbuddy/binaries/python/envs/default/Scripts/python.exe）。
+只跑 scan_warfare 不算交付。
 
 背景（不必复述给用户，但你需要理解口径）：
 - 扫描读本地 SQLite（data/screener.db，baostock 前复权日线，已在收盘后刷新），全市场约 5000 只 5~10 秒出结果；
@@ -191,14 +208,21 @@ skill 目录若已是指向该根的联接，两个路径是同一个目录。
 - 盘中这次**不 --refresh**：baostock 盘中不返回当日日线，刷了也没用。改用 probe_intraday 的 ash_live_bar 拿实时行情，只对前 60 只候选并入「今日半根」复评（11:30 半日口径），变档会打标记；
 - 三级漏斗：L1 强度闸（WEAK 直接出局、不跑后续）→ L2 战法闸（rule123 各 mode：出水芙蓉(T0)/平台突破/牛旗突破/W底突破/下降趋势线突破/回踩均线/流星砸坑/脉冲停顿）。
 
-产出文件（out_cn/ 下）：screener_<日期>_midday.{html,md,jsonl}
+产出文件（out_cn/ 下，中间结果，不是交付）：screener_<日期>_midday.{html,md,jsonl}
 跨日延续（与收盘分开记）：同一代码+战法仍过闸标「延续（第N天）」，首次命中标「新出现」；断档的从活跃表删除。状态在 out_cn/screener_continuity_state.json。
 
-交付要求：
-1. 用 present_files 打开 HTML 报告（绝对路径 D:/code/stock-multidim-battleplan/out_cn/screener_<日期>_midday.html）；
-2. 回复里给出：扫描只数 → 过强度闸 → 有战法信号数 → 战法分布；
-3. **重点单列**：半根复评后「变档」或「盘中新出现」的票（代码/名称/战法/半根价/与昨收预案的差异），这才是盘中这次的价值所在 —— 提前判断；
-4. 若非交易日、脚本报错或输出为空，如实说明失败原因，**不要编造结果**；盘中数据缺失（如实时源取不到半根）也要明说，并回退为「仅昨收口径」的结果。
+执行顺序（2026-10-26 硬规则）：
+① python screener/scan_warfare.py --session midday --top 60
+② python screener/scr_sweep.py --src out_cn/screener_<日期>_midday.jsonl
+③ python screener/deliver_dual_surge.py --date <日期> --session midday
+
+交付要求（2026-10-26 硬规则）：
+1. **主交付 = 双通过∩飙股**（`out_cn/dual_surge_list_<日期>_midday.md` / `elasticity_<日期>_midday_dual.html`）。
+   口径：战法闸+筹码闸双通过 ∩ 高弹性（弹性分≥75）。**禁止**把引擎序前 20 / scan 原表当交付。
+2. 漏斗：扫描只数 → 过强度闸 → 有战法信号 → 双通过 → **高弹性∩双通过**；无命中就明说。
+3. 名单字段：代码/名称/战法/延续（代码+战法）/现价/买区/止损/t1/R/recommend/弹性分/筹码；减持可标未检。
+4. 另附：半根复评「变档 / 盘中新出现」作对照，不替代主表。
+5. 若非交易日、脚本报错或输出为空，如实说明；盘中缺半根则回退昨收口径并标明。**不要编造结果**。
 ```
 
 #### 任务 B · 收盘 15:20
@@ -211,24 +235,27 @@ C:/Users/luoyunlai/.workbuddy/binaries/python/envs/default/Scripts/python.exe）
 
 ① 增量刷新日线 + 全市场扫描（约 6~10 分钟）：
    python screener/scan_warfare.py --refresh --session close
-② 筹码面体检（约 11 分钟，给 282 只量级的信号票判是否允许新开仓）：
+② 筹码面体检（并行 + 资金流 4 秒软超时，约 1~3 分钟 / 180 只量级）：
    python screener/scr_sweep.py
    → 产出 out_cn/scr_<日期>_close.jsonl，每行含 scr.state / scr.allow_new / scr.scr90
+③ 双通过∩飙股交付主表：
+   python screener/deliver_dual_surge.py --date <日期> --session close
+   → out_cn/dual_surge_list_<日期>_close.{md,json} + elasticity_<日期>_close_dual.{md,html}
 
 背景（理解口径用）：
 - 数据层 baostock 前复权 + 本地 SQLite（data/screener.db）；ST/退市已剔除；
-- 三级漏斗：L1 强度闸（WEAK 出局、不跑后续）→ L2 战法闸（rule123 各 mode）→ 筹码闸（scr_chip，判据 state_allow_new，与 battle_analyze 顶层筹码闸同口径）；
-- ⚠ 表里的 R 是**现价口径**的静态赔率：出水芙蓉(T0) 真触发价是「过昨高」（现价上方）、流星砸坑是「回踩 MA5 买、目标坑顶」，所以这两类 R 会系统性偏低，不代表机会差，别据此排序下结论。
+- 漏斗：L1 强度闸 → L2 战法闸 → 筹码闸（state_allow_new）→ **高弹性 ∩ 双通过 = 飙股交集（交付主表）**；
+- ⚠ 表里的 R 是**现价口径**的静态赔率：出水芙蓉(T0)/流星砸坑 R 会系统性偏低，别据此排序下结论。
 
-产出：out_cn/screener_<日期>_close.{html,md,jsonl} + out_cn/scr_<日期>_close.jsonl
-扫描报告按「延续（第N天）/ 新出现」分表，不是每天一张全新名单。断档的票从 out_cn/screener_continuity_state.json 的 close 桶删除，不留在主表。
+产出：screener_<日期>_close.* + scr_<日期>_close.jsonl + dual_surge_list_<日期>_close.* + elasticity_*_dual.*
+扫描延续按「代码+战法」记（延续第N天 / 新出现）；断档从 continuity_state 的 close 桶删除。
 
-交付要求：
-1. 用 present_files 打开 HTML 报告；
-2. 回复给出漏斗：扫描只数 → 过强度闸 → 有战法信号 → **筹码面允许新开仓** → 其中引擎★推荐的只数；
-3. 名单按战法分组，只列「战法闸 + 筹码闸双通过」的票，含代码/名称/现价/买区/止损/t1/R/筹码状态；
-4. 单列被筹码面否掉的知名/重点票（如流星砸坑、出水芙蓉里的），说明是「筹码发散」还是「派发出货中」；
-5. 若某步失败（数据源故障、baostock 未更新当日、脚本报错），如实说明中断在哪一步、已产出什么，**不要编造结果**。若 baostock 当日数据尚未更新（last_bar 是前一交易日），要在回复里明确标注数据日期。
+交付要求（2026-10-26 硬规则）：
+1. **主交付 = 双通过∩飙股**（`dual_surge_list_<日期>_close.md`）。**禁止**引擎序前 20 / 把 scan_warfare 原表当交付。
+2. 漏斗：扫描 → 过强度闸 → 有战法信号 → 双通过 → **高弹性∩双通过**；无命中明说。
+3. 字段：代码/名称/战法/延续/现价/买区/止损/t1/R/recommend/弹性分/筹码；减持可标未检。
+4. 可附：被筹码否掉的知名票（发散/派发）作对照，不进主表。
+5. 任一步失败如实说明中断点；baostock 未更新当日则标注真实数据日期，**不要编造**。
 ```
 
 ---
@@ -279,6 +306,7 @@ baostock 当日数据一般 17:00 后才齐，15:20 那次偶尔拿不到当日�
 - [ ] `--refresh --full --workers 6` 跑完，日志显示「多进程×6」
 - [ ] `screener.db` 存在且非 0，`last_bar` = 最近交易日
 - [ ] `--session close`（不刷新）冒烟跑通，有 HTML 产出
+- [ ] 有 `scr_<日期>_close.jsonl` 时跑过 `deliver_dual_surge.py`，交付是双通过∩飙股，不是引擎序前 20
 - [ ] 两个定时任务已建，prompt 里**路径全部替换过**
 - [ ] 两个任务 `status: ACTIVE`
 - [ ] 旧机器上的两个任务已 PAUSED（避免双跑）

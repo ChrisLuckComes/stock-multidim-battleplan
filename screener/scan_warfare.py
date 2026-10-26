@@ -19,6 +19,12 @@
                       （probe_intraday.ash_live_bar）复评，输出两口径并列。
                       ⚠ 不对全市场调 ash_live_bar —— 5000 次实时请求必被限流。
                       开关 ASH_MERGE_LIVE_BAR（老罗 2026-10-19 拍板默认开）。
+                      --top 只限制半根复评只数，不是交付截断。
+
+★ 交付（老罗 2026-10-26）
+  本脚本只产扫描中间结果。午盘/收盘交付主表是
+  screener/deliver_dual_surge.py（高弹性 ∩ 双通过）。
+  禁止把引擎序前 20 或本扫描原表当交付。链路：本脚本 → scr_sweep → deliver_dual_surge。
 
 用法
 ----
@@ -860,6 +866,14 @@ def main():
         n_new = sum(1 for r in cand if r.get("status") == "新出现")
         print("延续 %d | 新出现 %d | 断档 %d" % (n_cont, n_new, len(dropped)))
     print("输出：\n  %s\n  %s\n  %s" % (jp, mp, hp))
+    try:
+        from screener.deliver_dual_surge import DELIVERY_RULE, delivery_next
+        print(DELIVERY_RULE)
+        print(delivery_next(today, args.session))
+    except Exception:
+        print("交付主表不是本扫描，也不是引擎序前 20。"
+              "下一步：python screener/deliver_dual_surge.py --date %s --session %s"
+              % (today, args.session))
     conn.close()
 
 
