@@ -7,8 +7,10 @@
     python screener/scr_sweep.py --limit 30           # 只跑前 N 只（试跑）
     python screener/scr_sweep.py --only-recommend     # 只跑引擎标 ★推荐 的票
     python screener/scr_sweep.py --out out_cn/scr_xxx.jsonl
+    python screener/scr_sweep.py --workers 6          # 并行；资金流 4 秒软超时
 
-产出：每行 = 原 row + scr{scr90, loose, state, state_allow_new, main_cost, err}
+产出：每行 = 原 row + scr{scr90, loose, state, allow_new, main_cost, fflow_src, err}
+本脚本是筹码体检，不是午盘/收盘交付。交付走 screener/deliver_dual_surge.py。
 ★ 口径（与 battle_analyze 顶层筹码闸一致）：`state_allow_new` 为准 ——
   False = 筹码面不允许新开仓（如「筹码发散」）。
 
@@ -27,6 +29,7 @@ import json
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 for p in (ROOT, os.path.join(ROOT, "screener")):
@@ -315,7 +318,91 @@ def render_chip_report_html(rows, out_html, date=None):
     return out_html
 
 
-def main():
+#: 批量资金流软超时（秒）。失败与 fetch_fflow 一样返回 {}，analyze 退「低位带替代」，
+#: 不改 state_allow_new。
+FFLOW_SOFT_TIMEOUT = 4
+
+
+def _round_or_none(v):
+    if isinstance(v, (int, float)):
+        return round(v, 2)
+    return None
+
+
+def fflow_soft(code, timeout=FFLOW_SOFT_TIMEOUT):
+    """批量体检的资金流。超时或失败返回 {}。
+
+    不套 ThreadPoolExecutor 做超时：with 退出会 shutdown(wait=True)，
+    4 秒到了仍要等请求结束，软超时失效。这里把 socket 超时收成 4 秒、只试一轮 http。
+    """
+    try:
+        url = SC.EM_FFLOW.format(secid=SC.secid_of(code))
+        payload = SC._get_json(url, timeout=timeout, retries=1, schemes=("http",))
+        data = (payload or {}).get("data") or {}
+        return SC._parse_fflow(data) or {}
+    except Exception:
+        return {}
+
+
+def _scr_payload(s):
+    if not isinstance(s, dict):
+        s = {}
+    return {
+        "scr90": _round_or_none(s.get("scr90")),
+        "loose": s.get("loose"),
+        "state": s.get("state"),
+        "allow_new": s.get("state_allow_new"),
+        "main_cost": _round_or_none(s.get("main_cost")),
+        "fflow_src": s.get("fflow_src"),
+    }
+
+
+def sweep_rows(rows, workers=6, analyze=None, bars_from_db=None, verbose=True):
+    """并行体检。返回行序与输入一致。日线仍走本地库，不改筹码状态判据。"""
+    analyze = analyze or SC.analyze
+    if bars_from_db is None:
+        def bars_from_db(code, n=120):
+            return SC.bars_from_db(code, n=n)
+    n = len(rows)
+    workers = max(1, int(workers or 1))
+    t0 = time.time()
+    ok = bad = err = 0
+    done = [None] * n
+
+    def _one(item):
+        i, r0 = item
+        r = dict(r0)
+        try:
+            bars = bars_from_db(r["code"], n=120)
+            s = analyze(r["code"], bars=bars, name=r.get("name")) or {}
+            r["scr"] = _scr_payload(s)
+        except Exception as e:
+            r["scr"] = {"err": "%s: %s" % (type(e).__name__, e)}
+        return i, r
+
+    if n == 0:
+        return []
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = [ex.submit(_one, (i, r)) for i, r in enumerate(rows)]
+        finished = 0
+        for fut in as_completed(futs):
+            i, r = fut.result()
+            done[i] = r
+            finished += 1
+            s = r.get("scr") or {}
+            if s.get("err"):
+                err += 1
+            elif s.get("allow_new"):
+                ok += 1
+            else:
+                bad += 1
+            if verbose and (finished % 20 == 0 or finished == n):
+                print("  %d/%d  通过%d 不通过%d 异常%d  用时%.0fs"
+                      % (finished, n, ok, bad, err, time.time() - t0), flush=True)
+    return done
+
+
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", default=None, help="指定 screener_*.jsonl")
     ap.add_argument("--out", default=None)
@@ -324,13 +411,16 @@ def main():
     ap.add_argument("--no-report", action="store_true",
                     help="不自动渲染带结论列的合并 MD（试跑时用）")
     ap.add_argument("--out-dir", default=os.path.join(ROOT, "out_cn"))
-    args = ap.parse_args()
+    ap.add_argument("--workers", type=int, default=6,
+                    help="并行体检线程数（默认 6；资金流 4 秒软超时）")
+    args = ap.parse_args(argv)
 
     src = args.src or latest_jsonl(args.out_dir)
     if not src or not os.path.exists(src):
         print("找不到 screener_*.jsonl（先跑 screener/scan_warfare.py）")
         return 1
-    rows = [json.loads(l) for l in open(src, encoding="utf-8")]
+    with open(src, encoding="utf-8") as f:
+        rows = [json.loads(l) for l in f if l.strip()]
     rows = [r for r in rows if r.get("mode") not in (None, "wait")]
     if args.only_recommend:
         rows = [r for r in rows if r.get("recommend")]
@@ -339,44 +429,32 @@ def main():
 
     out = args.out or os.path.join(args.out_dir,
                                    "scr_%s.jsonl" % os.path.basename(src)[len("screener_"):-len(".jsonl")])
+    # 日线优先本地 data/screener.db（bars 传入 analyze），只剩资金流走东财。
+    # 资金流失败本就降级「低位带替代」，不改 state_allow_new。
+    orig_fflow = SC.fetch_fflow
+    SC.fetch_fflow = fflow_soft
     t0 = time.time()
-    ok = bad = err = 0
+    try:
+        rows = sweep_rows(rows, workers=args.workers)
+    finally:
+        SC.fetch_fflow = orig_fflow
+    ok = sum(1 for r in rows if (r.get("scr") or {}).get("allow_new"))
+    err = sum(1 for r in rows if (r.get("scr") or {}).get("err"))
+    bad = len(rows) - ok - err
     with open(out, "w", encoding="utf-8") as f:
-        for i, r in enumerate(rows, 1):
-            try:
-                # ★ 优先用本地 data/screener.db 的日线（step① 已全市场落库），
-                #   不命中网络行情源 ⇒ 几乎零网络，彻底规避腾讯 fqkline 限流/被封。
-                #   bars=None 时 analyze 内部自动走东财→腾讯网络兜底，保持兼容。
-                bars = SC.bars_from_db(r["code"], n=120)
-                s = SC.analyze(r["code"], bars=bars, name=r.get("name")) or {}
-                r["scr"] = {
-                    "scr90": (round(s["scr90"], 2) if s.get("scr90") is not None else None),
-                    "loose": s.get("loose"),
-                    "state": s.get("state"),
-                    "allow_new": s.get("state_allow_new"),
-                    "main_cost": (round(s["main_cost"], 2) if s.get("main_cost") is not None else None),
-                }
-                if s.get("state_allow_new"):
-                    ok += 1
-                else:
-                    bad += 1
-            except Exception as e:
-                r["scr"] = {"err": "%s: %s" % (type(e).__name__, e)}
-                err += 1
+        for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
-            time.sleep(0.08)          # 温和节流：每只仅剩 1 次东财资金流请求，留足间隔
-            if i % 20 == 0:
-                print("  %d/%d  通过%d 不通过%d 异常%d  用时%.0fs"
-                      % (i, len(rows), ok, bad, err, time.time() - t0), flush=True)
     print("\n筹码面体检完成（%.0fs）：%d 只 → 允许新开仓 %d / 不允许 %d / 异常 %d"
           % (time.time() - t0, len(rows), ok, bad, err))
     print("输出：%s" % out)
+    tag = os.path.basename(src)[len("screener_"):-len(".jsonl")]
+    parts = tag.split("_", 1)
+    date_str = parts[0] if parts else None
+    sess = parts[1] if len(parts) > 1 else ""
+    print("本文件不是交付主表。下一步：python screener/deliver_dual_surge.py --date %s --session %s"
+          % (date_str or "<日期>", sess or "close"))
     # 全量跑完自动渲染「带结论列」合并报告（试跑/过滤/显式关闭时跳过）
     if not args.limit and not args.only_recommend and not args.no_report:
-        tag = os.path.basename(src)[len("screener_"):-len(".jsonl")]
-        parts = tag.split("_", 1)
-        date_str = parts[0] if parts else None
-        sess = parts[1] if len(parts) > 1 else ""
         # ⚑ 数据日期 + 口径都要写进报告（老罗 2026-10-21 吃过「盘中冒充收盘」的亏）
         label = ("%s · %s" % (date_str, {"close": "收盘", "midday": "盘中"}.get(sess, sess))
                  if date_str else None)

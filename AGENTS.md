@@ -282,8 +282,9 @@ P95 就被撑高，**明显在吸筹的票也会算出 SCR90 20%+ 被判「发�
 
 ### 1i. 全市场选股器（screener/ · 2026-10-19 建）
 
-> 三个脚本：`bao_store.py`（数据层）· `scan_warfare.py`（扫描层）· `scr_sweep.py`（筹码闸）。
+> 四步：`bao_store.py`（数据层）· `scan_warfare.py`（扫描）· `scr_sweep.py`（筹码闸）· `deliver_dual_surge.py`（交付主表）。
 > **完整用法与换机重建手册见 `screener/DEPLOY.md`** —— 拉源码 → 建数据 → 建定时任务，全在里面。
+> **交付硬规则（2026-10-26）**：午盘/收盘交付 = scan → scr_sweep → deliver_dual_surge。主表是高弹性 ∩ 双通过（战法闸 + 筹码 allow_new）。禁止只交引擎序前 20，也禁止把 scan 原表当交付。
 
 - **口径**：`baostock` **前复权**（`adjustflag='2'`）+ 本地 SQLite `data/screener.db`（215MB，**不入库**）。
   与战术执行链路（sina/tdx **不复权**）**刻意分家**，禁止混用（见 1g/1h）。
@@ -293,9 +294,9 @@ P95 就被撑高，**明显在吸筹的票也会算出 SCR90 20%+ 被判「发�
   ④ `--refresh` **必须把 `--workers` 传进 `refresh_bars`**（`3548cc0` 修，否则串行 44min）。
 - **ST 铁律**：`is_st()` 判据在**数据层**建清单时就剔除（涨跌幅 5%、流动性差、随时退市），
   扫描层同判据双保险（名称在两次刷新之间可能变 ST）。
-- **定时任务（绑机器、不随 git 走）**：盘中 11:30（不刷新，读本地库 + 半根复评 top 60）、
-  收盘 15:20（`--refresh` + 扫描 + 筹码体检）。automation 存本地 `~/.workbuddy`，
-  **不跨设备同步** ⇒ 换机必须重建，prompt 原文在 `screener/DEPLOY.md` §5.3。
+- **定时任务（绑机器、不随 git 走）**：盘中 11:30 与收盘 15:20 都走
+  `scan_warfare` → `scr_sweep` → `deliver_dual_surge`。`--top 60` 只是盘中半根复评上限，不是交付名单。
+  automation 存本地 `~/.workbuddy`，**不跨设备同步** ⇒ 换机必须重建，prompt 原文在 `screener/DEPLOY.md` §5.3。
 - 回归：`python -m pytest tests/test_screener.py -q`（全 mock，零联网）。
 
 ---
@@ -472,6 +473,7 @@ P95 就被撑高，**明显在吸筹的票也会算出 SCR90 20%+ 被判「发�
 - **股性活跃度：分数仍除股价，僵尸要换手也死（2026-10-24）**：`activity` 公式不改。`activity < 0.3` 且换手 `< 2%` 才标僵尸；换手不低标「高价压制」，不是僵尸。`activity_raw` = 振幅×换手，只供跨价比较，不是主门槛。软约束，`hard_gate=false`，不改 recommend。不按股价门槛或代码名开例外。
 - **完整引擎必显示股性活跃度（2026-10-24）**：A 股 `battle_analyze` 成功跑完必须带 `activity`，并出现在终端摘要、首屏徽章、一页汇总和筹码卡片后。换手先用日线字段，再筹码序列 / 同日缓存，仍缺走筹码取数（东财失败用 `fetch_bars_tx` 流通股本反算）。算不出写「活跃度：未知（缺换手）」，不把 0 当换手。不进战法扫描、不改 recommend。美股写不适用。
 - **⚑ 持仓/股池改动必须「资料库（真源）+ watch_cn.json（本地缓存）」双写同步，禁止只改其一（2026-10-21 老罗纠正）**：加股 / 清仓 / 止损改价 / 入池出池任何变动，两边必须同时更新、状态一致；漏写一边 = 数据分叉，下次读取会拿到错的持仓。标准链路 = 本地改 `watch/watch_cn.json` → `library/sync_library.py --market cn --push` 同步资料库（database-id `eLKj7AvdWJyFmHYP6bCmku`，单票改走 `library/library_pos.py` 的 `add`/`set`/`note`）；反向用 `--pull`。⚠ rebase/冲突解决时尤其要核对两边：本次 c0d252c 把 watch_cn.json 整体替换为 16 票精简版，解决冲突只把乐鑫科技 688018 并入 watch 却漏了资料库，已补（id `gZ14emYAYpQldZP3ZCPqsq`）。
+- **午盘/收盘战法扫描交付 = 双通过∩飙股（老罗 2026-10-26）**：链路 `scan_warfare` → `scr_sweep` → `deliver_dual_surge`。主表是高弹性（板块弹性分位≥75）∩ 战法闸+筹码 `allow_new`。禁止只交引擎序前 20。延续键仍是代码+战法。当日黑名单剔除。减持本档可标未检。
 
 ---
 

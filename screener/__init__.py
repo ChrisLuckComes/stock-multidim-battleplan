@@ -8,8 +8,11 @@ mode（流星砸坑 / 平台突破 / 牛旗 / 回踩 / ma_ride ...）。
 分层：
   bao_store.py    数据层：东财一次拉 universe + baostock 前复权日线 → SQLite
   scan_warfare.py 选股层：强度闸前置（WEAK 直接跳过后续）→ rule123 判定 → 候选
+  scr_sweep.py    筹码闸：信号票是否 allow_new
+  deliver_dual_surge.py  交付主表：高弹性 ∩ 双通过。午盘/收盘禁止只交引擎序前 20。
 
 盘中（11:30）与收盘（15:00）两档口径见 scan_warfare.py 的 --session。
+交付链路：scan_warfare → scr_sweep → deliver_dual_surge。
 跨日延续（代码 + mode，收盘 / 盘中分开）见 continuity.py，
 状态文件 out_cn/screener_continuity_state.json。
 """
