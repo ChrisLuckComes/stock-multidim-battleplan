@@ -938,6 +938,8 @@ def _emit_hold_winners(out, close, zone, plan, target=None, prev_close=None,
             "zone_hi": z.get("primary_hi"),
             "zone_lo": z.get("primary_lo"),
             "vwap": vwap,
+            "vwap5": z.get("vwap5"),
+            "last_close": close,
             "prev_close": prev_close,
             "day_open": day_open,
             "day_frac": day_frac,
@@ -2338,7 +2340,8 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None,
     sel = None
     if not invalid and (has_zone or not plan["recommend"]):
         sel = apply_us_hang(
-            px_now, hard, t1, plan=plan, vwap=vwap_hang, pre=prev_close,
+            px_now, hard, t1, plan=plan, vwap=vwap_hang, vwap5=z.get("vwap5"),
+            pre=prev_close, last_close=last_closed["c"],
             day_open=day_open, zone_lo=lo, zone_hi=hi, cap=cap,
             mode=plan.get("mode"), ride_state=ride, bars=hist,
             day_low=day_low, day_low_final=False, day_chg_pct=chg,
@@ -2373,10 +2376,18 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None,
                 "kind": "no_chase", "limit": None, "cap": cap, "qty": None,
                 "stop_struct": defend, "stop_hard": hard, "target1": t1,
                 "hang_tier": tier, "hang_anchor": anchor, "hang_why": sel["why"],
+                "dip_px": sel.get("dip_px"), "dip_basis": sel.get("dip_basis"),
+                "hang_stop": sel.get("hang_stop"),
+                "stop_retargeted": bool(sel.get("stop_retargeted")),
                 "reason": sel["why"]}
         else:
             limit = float(hang)
-            n = us_lots(account, limit, hard)
+            risk_stop = hard
+            if sel.get("stop_retargeted") and sel.get("hang_stop") is not None:
+                risk_stop = float(sel["hang_stop"])
+                print(f"  浅档止损: {risk_stop:.2f}"
+                      f"（计划止损宽于买价 5%，收到成本兜底，不收到更紧）")
+            n = us_lots(account, limit, risk_stop)
             mode_txt = plan.get("mode")
             if sel.get("structure_mode") and sel.get("structure_mode") != mode_txt:
                 mode_txt = "%s（结构 %s）" % (mode_txt, sel["structure_mode"])
@@ -2410,15 +2421,18 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None,
                 print(f"  止损锚  : ⚠ 硬止损距买区下沿仅 {z.get('hard_dist_atr')}×ATR（噪声带内）—— 名义上有止损、等于没有，改用更低限价")
             if z.get("struct_exec") or z.get("hard_exec"):
                 print(f"  离场纪律: {z.get('struct_exec')} ｜ {z.get('hard_exec')}")
-            if t1 and hard is not None:
-                risk, rew = limit - hard, t1 - limit
+            if t1 and risk_stop is not None:
+                risk, rew = limit - risk_stop, t1 - limit
                 rr_txt = f"{rew / risk:.2f}:1" if risk > 0 else "N/A"
                 print(f"  目标    : {t1}"
                       f"  → 挂 {limit:.2f}：风险 {risk:.2f} / 收益 {rew:.2f} = {rr_txt}")
             out["pre_order"] = {
                 "kind": kind, "limit": limit, "cap": cap, "qty": n,
                 "stop_struct": defend, "stop_hard": hard, "target1": t1,
-                "hang_tier": tier, "hang_anchor": anchor, "hang_why": sel["why"]}
+                "hang_tier": tier, "hang_anchor": anchor, "hang_why": sel["why"],
+                "dip_px": sel.get("dip_px"), "dip_basis": sel.get("dip_basis"),
+                "hang_stop": sel.get("hang_stop"),
+                "stop_retargeted": bool(sel.get("stop_retargeted"))}
     elif invalid:
         print(f"  无预案单：买区已作废 —— {plan.get('note')}")
     else:

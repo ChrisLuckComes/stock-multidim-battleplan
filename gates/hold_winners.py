@@ -7,11 +7,11 @@ is still intact. This is a soft label on battle plans: it does not flip
 
 Hard gate only when a sell is being decided. If the user reports or syncs a
 sell and the structure is still intact, the reply must push back at once:
-why the sell looks wrong, a shallow re-entry (buy-zone upper / VWAP / -1%,
-the cyber/software preference — do not drop the bid to a deep RR gate or a
-platform low just to get filled) or an explicit "do not chase" when price
-is already stretched, plus stop, target, and R >= 1.5. Do not agree or
-comfort a wrong sell.
+why the sell looks wrong, a shallow re-entry (buy-zone upper / session VWAP /
+-1% off the last completed close, not the prior bar) or an explicit "do not
+chase" when price is already stretched, plus stop, target, and R >= 1.5.
+Daily vwap5 is labeled "5日" and is not a session VWAP. A price below the
+true -1% is not a shallow bid. Do not agree or comfort a wrong sell.
 
 Complements, and must not weaken:
 - Close-only structural stops. An intraday pierce that closes back above
@@ -23,8 +23,10 @@ Complements, and must not weaken:
   stack breaks, and a confirmed top (top_verdict block).
 
 Shallow dip and the +5% stretch ceiling match gates/us_session_decide.py
-(SHALLOW_DIP_PCT, CHASE_RALLY_PCT). They are copied here so this module
-does not import the session stack.
+(SHALLOW_DIP_PCT, CHASE_RALLY_PCT, SHALLOW_STOP_MAX_PCT). They are copied
+here so this module does not import the session stack. After the close,
+-1% uses the last completed close. A stop wider than 5% of the bid may be
+pulled in to that cost floor and no tighter.
 """
 from __future__ import annotations
 
@@ -37,9 +39,13 @@ CITE = "%s · %s" % (RULE_ID, RULE_DATE)
 RR_MIN = 1.5
 # Same 1% dip as gates/us_session_decide.SHALLOW_DIP_PCT.
 SHALLOW_DIP = 0.01
+# Same cost-stop cap as rule123.STOP_MAX_PCT / us_session_decide.SHALLOW_STOP_MAX_PCT.
+SHALLOW_STOP_MAX_PCT = 0.05
+# Daily vwap5 this far under the true -1% is not a shallow bid.
+VWAP5_FLOOR_GAP = 0.02
 # Same "day gain >= 5% → do not chase" as CHASE_RALLY_PCT. Fraction, not percent.
 STRETCH_DAY = 0.05
-_PREF = {"买区上沿": 0, "VWAP": 1, "−1%": 2}
+_PREF = {"买区上沿": 0, "VWAP": 1, "−1%": 2, "5日": 3}
 
 
 def _num(v):
@@ -191,8 +197,24 @@ def _price_now(facts):
     return price
 
 
+def _dip_basis(facts):
+    """Open if the session has one; else the last completed close; else prev."""
+    opened = _num(facts.get("day_open"))
+    if opened is not None and opened > 0:
+        return opened
+    last = _num(facts.get("last_close"))
+    if last is None or last <= 0:
+        last = _num(facts.get("close"))
+    if last is not None and last > 0:
+        return last
+    prev = _num(facts.get("prev_close"))
+    if prev is not None and prev > 0:
+        return prev
+    return None
+
+
 def _shallow_raw(facts):
-    """Cyber/software shallow trio: zone upper, VWAP, −1%. No deep bid."""
+    """Zone upper, session VWAP, −1%. vwap5 is "5日" and only if it is not deeper."""
     raw = []
     zone_hi = _px(facts.get("zone_hi"))
     if zone_hi is not None:
@@ -200,12 +222,45 @@ def _shallow_raw(facts):
     vwap = _px(facts.get("vwap"))
     if vwap is not None:
         raw.append(("VWAP", vwap))
-    ref = _num(facts.get("day_open"))
-    if ref is None:
-        ref = _num(facts.get("prev_close"))
-    if ref is not None and ref > 0:
-        raw.append(("−1%", _px(ref * (1.0 - SHALLOW_DIP))))
+    basis = _dip_basis(facts)
+    dip = None
+    if basis is not None and basis > 0:
+        dip = _px(basis * (1.0 - SHALLOW_DIP))
+        raw.append(("−1%", dip))
+    v5 = _px(facts.get("vwap5"))
+    if v5 is None:
+        return raw
+    if dip is not None and v5 + 1e-9 < dip - VWAP5_FLOOR_GAP:
+        return raw
+    raw.append(("5日", v5))
     return raw
+
+
+def _cost_stop(px, plan_stop):
+    """Keep a stop already inside 5%. Wider stops move to px×95%, never tighter."""
+    if plan_stop is None or px is None or not (plan_stop < px):
+        return None, False
+    floor = _px(px * (1.0 - SHALLOW_STOP_MAX_PCT))
+    if floor is None or not (floor < px):
+        return plan_stop, False
+    if plan_stop + 1e-9 >= floor:
+        return plan_stop, False
+    return floor, True
+
+
+def _rr_gate(target, stop):
+    if target is None or stop is None or not (stop < target):
+        return None
+    return _px((target + RR_MIN * stop) / (1.0 + RR_MIN))
+
+
+def _cap_for_stop(cap, target, plan_stop, use_stop):
+    if cap is None:
+        return None
+    wide = _rr_gate(target, plan_stop)
+    if wide is None or abs(float(cap) - float(wide)) > 0.05:
+        return cap
+    return _rr_gate(target, use_stop)
 
 
 def _visible(px, price, zone_lo, zone_hi):
@@ -236,10 +291,25 @@ def shallow_book(facts, support=None):
     for name, px in _shallow_raw(facts):
         if px is None:
             continue
+        use_stop = stop
+        retargeted = False
         rr = reward_risk(px, stop, target)
         ok = _rr_ok(rr) and stop is not None and stop < px
         if ok and cap is not None and px > cap + 0.01:
             ok = False
+        if not ok:
+            matched, did = _cost_stop(px, stop)
+            if did:
+                cap_use = _cap_for_stop(cap, target, stop, matched)
+                rr2 = reward_risk(px, matched, target)
+                ok2 = _rr_ok(rr2) and matched is not None and matched < px
+                if ok2 and cap_use is not None and px > cap_use + 0.01:
+                    ok2 = False
+                if ok2:
+                    use_stop = matched
+                    retargeted = True
+                    rr = rr2
+                    ok = True
         visible = _visible(px, price, zone_lo, zone_hi)
         rows.append({
             "name": name,
@@ -247,6 +317,8 @@ def shallow_book(facts, support=None):
             "rr": None if rr is None else round(rr, 2),
             "ok": bool(ok and visible),
             "visible": bool(visible),
+            "stop": use_stop,
+            "stop_retargeted": retargeted,
         })
     ok_rows = [r for r in rows if r["ok"]]
     ok_rows.sort(key=lambda r: (-r["px"], _PREF.get(r["name"], 9)))
@@ -301,17 +373,26 @@ def _chase_why(book):
     return "不要追。"
 
 
+def _stop_phrase(chosen, stop):
+    if chosen and chosen.get("stop_retargeted"):
+        return "%s（买价 5%% 成本兜底）" % _fmt(chosen.get("stop"))
+    return "%s（收盘破）" % _fmt(stop)
+
+
 def _reentry_sentence(book):
     chosen = book.get("chosen")
     stop = book.get("stop")
+    if chosen and chosen.get("stop") is not None:
+        stop = chosen.get("stop")
     target = book.get("target")
+    stop_txt = _stop_phrase(chosen, stop)
     if book.get("do_not_chase") and chosen:
-        return ("%s回到 %s（%s，浅档）再接，止损 %s（收盘破），目标 %s，R=%s。"
+        return ("%s回到 %s（%s，浅档）再接，止损 %s，目标 %s，R=%s。"
                 % (_chase_why(book), _fmt(chosen["px"]), chosen["name"],
-                   _fmt(stop), _fmt(target), _fmt(chosen["rr"])))
+                   stop_txt, _fmt(target), _fmt(chosen["rr"])))
     if chosen and not book.get("do_not_chase"):
-        return ("接回限价 %s（%s，浅档），止损 %s（收盘破），目标 %s，R=%s。"
-                % (_fmt(chosen["px"]), chosen["name"], _fmt(stop),
+        return ("接回限价 %s（%s，浅档），止损 %s，目标 %s，R=%s。"
+                % (_fmt(chosen["px"]), chosen["name"], stop_txt,
                    _fmt(target), _fmt(chosen["rr"])))
     if stop is not None:
         return ("浅档没有 R≥%.1f 的可执行价，不要追，也不要放宽止损去凑赔率。"
@@ -337,7 +418,8 @@ def _base(label, view, book, line, verdict=None, pushback=None, hard_gate=False,
         chosen = {
             "name": c["name"],
             "px": c["px"],
-            "stop": book.get("stop"),
+            "stop": c.get("stop", book.get("stop")),
+            "stop_retargeted": bool(c.get("stop_retargeted")),
             "target": book.get("target"),
             "rr": c["rr"],
             "tier": "浅档",
@@ -473,6 +555,8 @@ def facts_from_analysis(analysis):
         "zone_hi": zone.get("primary_hi"),
         "zone_lo": zone.get("primary_lo"),
         "prev_close": meta.get("prev_close"),
+        "last_close": meta.get("basis_close"),
+        "vwap5": zone.get("vwap5"),
         "target": t1,
         "atr": struct.get("atr14"),
         "sea_sky": bool(targets.get("sea_sky")),
