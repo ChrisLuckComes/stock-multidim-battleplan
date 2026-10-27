@@ -523,6 +523,7 @@ def annotate_odds(rows, z, atr_v, last_c):
     """给每条赔率加风控标注（不删除任何一条 —— 全档枚举是硬要求）。"""
     struct_stop = z.get("struct_stop")
     zone_hi = z.get("primary_hi")
+    zone_lo = z.get("primary_lo")
     hard = z.get("hard_stop")
     for r in rows:
         w = []
@@ -532,6 +533,13 @@ def annotate_odds(rows, z, atr_v, last_c):
             w.append("买价≤硬止损")
         if zone_hi is not None and r["entry"] > zone_hi:
             w.append("追高（超出买区上沿）")
+        # ★ 2026-10-28 方案 C（老罗 301361 质疑「盈亏比最高 28.58 与买区 29.63~31.04 为何不一致」）：
+        #   买区下沿之下的深档属「回踩低吸」买法（vwap5 / 均线），与「平台突破」买区是两套
+        #   不同参照物 ⇒ 判据不动、不删档，只在标注里显式写明「买区外·回踩档」，避免把
+        #   它误当成突破买区内的档。与上方「追高（超出买区上沿）」对称。
+        # ⚑ 不以「买价≤/追高」开头 ⇒ 不计入 weak（回踩低吸是合法买法，不是弱/坏档）。
+        if zone_lo is not None and r["entry"] < zone_lo:
+            w.append("买区外·回踩档（低于买区下沿 %.2f）" % zone_lo)
         if r["risk_atr"] is not None and r["risk_atr"] < 0.35:
             w.append("薄止损（<0.35×ATR，噪声带内）")
         if not r["prehang"]:
