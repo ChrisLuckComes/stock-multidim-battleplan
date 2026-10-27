@@ -314,6 +314,22 @@ P95 就被撑高，**明显在吸筹的票也会算出 SCR90 20%+ 被判「发�
 
 ---
 
+## 1f. 特写逻辑清单 · 按需调用（禁止进默认流水线 · 老罗 2026-10-27 定）
+
+⚠ **「特写逻辑」= 只在某个特定时间窗口 / 特定事件期才有意义的分支代码。**
+这类代码**提交进仓库但不默认跑**，只提供参数供显式调用；**不得挂进每日流水线**。
+
+| 脚本 | 特写对象 | 调用方式 | 何时才有意义 |
+|---|---|---|---|
+| `screener/q3_filter.py` | **定期报告披露窗口**（当前 = 2026 三季报，报告期 `2026-09-30`，披露截止 10-31） | `python screener/q3_filter.py --date <YYYY-MM-DD> [--report-date <YYYY-MM-DD>]` | 只在披露窗口内。窗口外跑它，绝大多数票会落进「未出」档 ⇒ **无意义** |
+
+**默认链路（不得混入任何特写逻辑）**：
+`scan_warfare` → `scr_sweep` → `gen_pass_list` → `elastic_dual`（+ `deliver_dual_surge`）。
+
+⚠ 每日收盘自动化的 prompt / 命令序列里**禁止**出现 `q3_filter`；需要时**人工显式调用**。
+⚠ 通用闸门**不属**特写、必须常驻：`screener/filters.py`（高位闸 + 赔率闸）已接入
+`gen_pass_list` / `q3_filter` / `battle_analyze` / `session_decide` / `surge_pick`。
+
 ## 2. 账户配置边界 / Forbidden
 
 - **人与钱**（账户、主力/备用、单笔硬顶、风险预算%）→ `env` / `.env`（`account_config.py`）。

@@ -1,9 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""三季报披露状态过滤（老罗 2026-10-27「只要出了三季报的票，避免踩雷」）。
+"""定期报告披露状态过滤 —— ⚠ **特写逻辑，按需调用，不进默认流水线**。
 
-用法：
+⚠⚠ 老罗 2026-10-27 定：「q3 筛选这个代码，是这个三季报公布时间段才有的，属于特写逻辑，
+提交到代码仓库之后**不要默认跑**，而是提供参数供调用。」
+
+⇒ 本脚本**只在定期报告披露窗口内有意义**（当前 = 2026 三季报，报告期 2026-09-30；
+披露截止 10-31）。窗口外跑它没有意义（绝大多数票会落进 C 档「未出」）。
+⇒ **绝不挂进每日收盘扫描流水线**；需要时**显式调用**。
+
+用法（显式传参，默认不跑任何东西）：
     python screener/q3_filter.py --date 2026-10-27
+    python screener/q3_filter.py --date 2026-10-27 --report-date 2026-06-30   # 改看半年报
+    python screener/q3_filter.py --date 2026-10-27 --report-date 2026-12-31   # 改看年报窗口
+
 产出：
     out_cn/screener_<date>_close_q3.md / .html
     out_cn/q3_report_filter_<date>.json
@@ -31,7 +41,8 @@ from screener import filters as F   # ⚑ 高位闸/赔率闸 单一真源（与
 OUT = os.path.join(ROOT, "out_cn")
 UA = {"User-Agent": "Mozilla/5.0", "Referer": "https://data.eastmoney.com/"}
 BASE = "https://datacenter-web.eastmoney.com/api/data/v1/get"
-REPORT_DATE = "2026-09-30"
+# ⚑ 报告期（**特写参数**，由 --report-date 覆盖）。当前特写对象 = 2026 三季报。
+DEFAULT_REPORT_DATE = "2026-09-30"
 # ⚑ 阈值统一取自 screener/filters.py（单一真源，禁此处另写）
 HIGH_DEV_LIMIT = F.HIGH_DEV_LIMIT
 MIN_RR = F.MIN_RR
@@ -86,11 +97,11 @@ def fnum(v, nd=2):
         return str(v)
 
 
-def build(date):
-    print("拉取 %s 三季报 三张表 ..." % REPORT_DATE)
-    appt = fetch_all("RPT_PUBLIC_BS_APPOIN", "(REPORT_DATE='%s')" % REPORT_DATE)
-    cpd = fetch_all("RPT_LICO_FN_CPD", "(REPORTDATE='%s')" % REPORT_DATE)
-    pred = fetch_all("RPT_PUBLIC_OP_NEWPREDICT", "(REPORT_DATE='%s')" % REPORT_DATE)
+def build(date, report_date=DEFAULT_REPORT_DATE):
+    print("拉取 %s 定期报告 三张表（特写口径，按需调用）..." % report_date)
+    appt = fetch_all("RPT_PUBLIC_BS_APPOIN", "(REPORT_DATE='%s')" % report_date)
+    cpd = fetch_all("RPT_LICO_FN_CPD", "(REPORTDATE='%s')" % report_date)
+    pred = fetch_all("RPT_PUBLIC_OP_NEWPREDICT", "(REPORT_DATE='%s')" % report_date)
     print("  预约披露表 %d / 业绩报表 %d / 业绩预告 %d 行" % (len(appt), len(cpd), len(pred)))
 
     appt_map = {r["SECURITY_CODE"]: r for r in appt}
@@ -260,7 +271,7 @@ tr:nth-child(even) td{{background:#fafbfc}}
 LAMP_CN = {"green": "绿·可留", "yellow": "黄·利润质量存疑", "red": "红·业绩雷区", "blue": "蓝·仅预告", "gray": "灰·未出"}
 
 
-def render_md(rows, date):
+def render_md(rows, date, report_date=DEFAULT_REPORT_DATE):
     dbl = [r for r in rows if r["dual"]]
     A = [r for r in rows if r["tier"] == "A"]
     B = [r for r in rows if r["tier"] == "B"]
@@ -273,8 +284,10 @@ def render_md(rows, date):
     final_ok = [r for r in green if r["pos_ok"] and r["rr_ok"]]
     green_blk = [r for r in green if not (r["pos_ok"] and r["rr_ok"])]
     L = []
-    L.append("# 三季报披露过滤 · %s 收盘\n" % date)
-    L.append("> 口径：**只要已出三季报（正式报告或预告）**；A 档再按归母净利同比分红/黄/雷区 —— "
+    L.append("# 定期报告披露过滤 · %s 收盘（报告期 %s）\n" % (date, report_date))
+    L.append("> ⚠ **特写逻辑 · 按需调用**（老罗 2026-10-27）：本表只在定期报告披露窗口内有意义，"
+             "**不进每日流水线**，需显式跑 `screener/q3_filter.py --date <date> --report-date <期>`。\n")
+    L.append("> 口径：**只要已出该期报告（正式报告或预告）**；A 档再按归母净利同比分红/黄/雷区 —— "
              "**真正要避的雷是「业绩已出但很差」，不是「没出」**。\n")
     L.append("- 信号池 %d 只 → 双通过 %d 只" % (len(rows), len([r for r in rows if r["allow"]])))
     D = [r for r in rows if r["tier"] == "D"]
@@ -381,7 +394,7 @@ def render_md(rows, date):
     return "\n".join(L)
 
 
-def render_html(rows, date):
+def render_html(rows, date, report_date=DEFAULT_REPORT_DATE):
     dbl = [r for r in rows if r["dual"]]
     A = [r for r in rows if r["tier"] == "A"]
     ap = [r for r in A if r["allow"]]
@@ -393,7 +406,8 @@ def render_html(rows, date):
     green_blk = [r for r in green if not (r["pos_ok"] and r["rr_ok"])]
     B_ok = [r for r in rows if r["tier"] == "B" and r["allow"]]
     C_ok = [r for r in rows if r["tier"] in ("C", "D") and r["allow"]]
-    h = [HTML_HEAD.format(date=date, verdict_line="只要已出三季报（正式报告 A 档 / 预告 B 档）；"
+    h = [HTML_HEAD.format(date=date, verdict_line="⚠ 特写逻辑·按需调用（不进每日流水线）｜"
+            "只要已出 %s 期报告（正式报告 A 档 / 预告 B 档）；" % report_date +
             "A 档再按归母净利同比分红灯 —— 真正要避的雷是「业绩已出但很差」。")]
     h.append('<div class="card"><div class="kpi">')
     for lab, val in [("信号池", len(rows)), ("双通过", len(ap) + len(B_ok) + len(C_ok)),
@@ -484,21 +498,24 @@ def render_html(rows, date):
     h.append('<div class="foot">数据源：东财数据中心 RPT_PUBLIC_BS_APPOIN（预约披露表）/ '
              'RPT_LICO_FN_CPD（业绩报表）/ RPT_PUBLIC_OP_NEWPREDICT（业绩预告），报告期 %s。<br>'
              '生成：screener/q3_filter.py --date %s ｜ 净利同比=SJLTZ，营收同比=YSTZ，ROE=加权平均净资产收益率。</div>'
-             % (REPORT_DATE, date))
+             % (report_date, date))
     h.append("</body></html>")
     return "\n".join(h)
 
 
 def main():
-    ap = argparse.ArgumentParser(description="三季报披露状态过滤")
-    ap.add_argument("--date", default="2026-10-27")
+    ap = argparse.ArgumentParser(
+        description="定期报告披露状态过滤（⚠ 特写逻辑·按需调用，不进默认流水线）")
+    ap.add_argument("--date", default="2026-10-27", help="扫描日期 YYYY-MM-DD")
+    ap.add_argument("--report-date", default=DEFAULT_REPORT_DATE,
+                    help="报告期 YYYY-MM-DD（特写参数；默认 2026-09-30 = 三季报）")
     args = ap.parse_args()
-    rows = build(args.date)
+    rows = build(args.date, args.report_date)
     json_path = os.path.join(OUT, "q3_report_filter_%s.json" % args.date)
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(rows, f, ensure_ascii=False, indent=1)
-    md = render_md(rows, args.date)
-    html = render_html(rows, args.date)
+    md = render_md(rows, args.date, args.report_date)
+    html = render_html(rows, args.date, args.report_date)
     md_path = os.path.join(OUT, "screener_%s_close_q3.md" % args.date)
     html_path = os.path.join(OUT, "screener_%s_close_q3.html" % args.date)
     open(md_path, "w", encoding="utf-8").write(md)
