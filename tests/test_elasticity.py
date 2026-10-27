@@ -166,3 +166,53 @@ if __name__ == "__main__":
             print("   -", f)
         sys.exit(1)
     print("✅ 弹性闸门回归全部通过（主板/双创/北交 阈值与硬拒线、ST、样本不足、最大单日）")
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# ⚑ 2026-10-27 老罗纠正（双塔食品 002481「一年一个涨停板都没有」）：
+#    根因不是次数门槛，而是**窗口口径**：「252 根 bar」≠ 一年 ——
+#    **停牌股的 252 根 bar 会跨更长日历时间**（实测 002481 的 252 根起点
+#    = 2025-10-14，距今 378 个日历日）⇒ 一年前那次涨停被算进来。
+#    修法：弹性窗口按 **365 个日历日** 算（bars 根数门槛保留为样本不足保护）。
+# ─────────────────────────────────────────────────────────────────────────
+def _sparse_bars(n=60, start="2025-10-21", end="2026-10-27"):
+    """模拟长期停牌股：n 根 bar 稀疏地铺满 span 天（日期跨度大 ⇒ 根数少但日历长）。"""
+    import datetime
+    d0 = datetime.date.fromisoformat(start)
+    d1 = datetime.date.fromisoformat(end)
+    span = (d1 - d0).days
+    out = []
+    for i in range(n):
+        d = d0 + datetime.timedelta(days=round(span * i / (n - 1)))
+        c = 5.80 if i == 0 else 4.36
+        out.append({"d": d.isoformat(), "o": c, "h": c, "l": c, "c": c, "v": 1e6})
+    return out
+
+
+def test_calendar_year_window_excludes_stale_limitup():
+    """一年前（超 365 日历日）的涨停**不算**弹性日 ⇒ 该票判僵尸拒。"""
+    bars = _sparse_bars()
+    # 把第 2 根设成 2025-10-22 的涨停：+10.0%（5.80 → 6.38）
+    bars[1] = {"d": "2025-10-22", "o": 5.80, "h": 6.38, "l": 5.80, "c": 6.38, "v": 1e6}
+    r = EL.elasticity_check("002481", bars, name="双塔食品")
+    assert r["surge_days"] == 0, "超一年的涨停不应计入弹性日"
+    assert r["pass"] is False
+    assert "很少" in r["reason"]
+
+
+def test_same_stale_limitup_kept_when_within_365_days():
+    """同一形态但涨停在 365 日历日**之内** ⇒ 计入，仍是 1 次 ⇒ 主板过。"""
+    import datetime
+    bars = _sparse_bars(start="2025-11-05", end="2026-10-27")
+    bars[1] = {"d": "2025-11-06", "o": 5.80, "h": 6.38, "l": 5.80, "c": 6.38, "v": 1e6}
+    r = EL.elasticity_check("002481", bars, name="双塔食品")
+    assert r["surge_days"] == 1
+    assert r["pass"] is True
+
+
+def test_thresholds_unchanged_per_laolu():
+    """老罗 2026-10-27 最终标准：主板 ≥1 次；双创/北交 ≥2 次（均维持原样）。"""
+    import gates.elasticity as EL
+    assert EL.MIN_SURGE_MAIN == 1
+    assert EL.MIN_SURGE_20 == 2
+    assert EL.YEAR_CAL_DAYS == 365

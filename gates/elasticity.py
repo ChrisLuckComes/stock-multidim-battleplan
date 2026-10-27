@@ -6,12 +6,29 @@
     · 创业板之前很少 10cm 以上的也不要
     · 总之就是需要选出弹性好的股（当虹科技 688039 是不错的样本）
 
+⚑ 2026-10-27 老罗标准（最终）：
+    「主板 **0 次涨停**不算飙股」⇒ 主板弹性日 **≥ 1** 次。
+    「双创一年 **10cm 以上次数 0 次**也不算」+「双创可以允许**不涨停**，因为 20cm 涨停比较难得，
+      **按 10cm 次数以上**来算」+「双创 10cm 次数要 **>=2 次**，这个不用改」
+⇒ 门槛（**均维持原样**）：
+   · 主板：弹性日 = 收盘涨幅 ≥ 9.8%（涨停），**≥ 1 次**
+   · 双创/科创：弹性日 = 单日 ≥ 10%（**不必真涨停**，20cm 难得），**≥ 2 次**
+   · 北交：弹性日 = 单日 ≥ 15%（半板），**≥ 2 次**
+   ⚠ 「按 10cm 算」说的是**弹性日的定义**，不是放宽次数门槛。
+
+⚑ 同日另一处纠正（双塔食品 002481）：
+⇒ 根因不是次数门槛，而是**窗口口径**：「252 根 bar」≠ 一年。
+   **停牌股的 252 根 bar 会跨更长日历时间**（实测 002481 的 252 根起点 = 2025-10-14，
+   距今 **378 个日历日**）⇒ 把一年前那次涨停（2025-10-22，未封板，距今 370 天）也算了进来。
+⇒ 修法：弹性窗口由「252 根 bar」改为「**近 365 个日历日**」；次数门槛**保持原样**
+   （主板 ≥1 次、双创/北交 ≥2 次，均不动）。双塔按新窗口 = **0 次** ⇒ 正确被拒。
+
 ⇒ 用「过去约 252 个交易日里，单日能拉出多大级别」来定义弹性，按板块涨停上限**自适应**：
 
     板块           涨停上限   弹性日阈值         硬拒线（僵尸 / 很少）
-    主板(10%)      10%       涨停 ≥ 9.8%        一年 **0 次**涨停 → 拒
-    创业板/科创板   20%       单日 ≥ 10%         一年 **< 2 次** → 拒（“很少”）
-    北交所(30%)    30%       单日 ≥ 15%         一年 **< 2 次** → 拒（“很少”）
+    主板(10%)      10%       涨停 ≥ 9.8%        一年 **0 次** → 拒
+    创业板/科创板   20%       单日 ≥ 10%         一年 **< 2 次** → 拒（不要求真涨停）
+    北交所(30%)    30%       单日 ≥ 15%         一年 **< 2 次** → 拒（半板口径）
 
 为什么用「板块自适应阈值」：主板涨停 = 10%，创业板/科创板涨停 = 20%。拿同一根绝对值
 （比如统一“≥10%”）去卡，会把创业板/科创板全部误杀——它们平时就很少碰 10% 以内。
@@ -30,6 +47,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))        # 本目录（gates）
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))  # 父目录（根）
 
+import datetime
+
 import ash_market  # noqa: E402
 
 # ── 常量 ──────────────────────────────────────────────────────────
@@ -39,7 +58,11 @@ MAIN_ZT = 0.098            # 主板涨停判定（≥ 9.8%，容涨停价 roundi
 SURGE_20 = 0.10            # 20% 板块弹性日阈值（> 10cm）
 SURGE_30 = 0.15            # 30% 板块弹性日阈值（> 15cm，半板）
 MIN_SURGE_20 = 2           # 20% / 30% 板块「非很少」的最小弹性日数（< 2 = “很少” → 拒）
-# 主板只需 ≥ 1 次涨停即可（零涨停才拒）
+#   ⚑ 2026-10-27 老罗复核：「双创 10cm 次数要 >=2 次，这个不用改」⇒ 保持 2。
+#   双创弹性日按「单日 ≥10cm」计（20cm 涨停难得，**不必真涨停**）—— 这是**定义**，不是门槛。
+MIN_SURGE_MAIN = 1         # 主板最小弹性日数（老罗 2026-10-27：0 次涨停 = 不算飙股 ⇒ ≥1）
+# ⚑ 2026-10-27：弹性窗口按【日历日】算，不按 bar 根数（停牌股 252 根 bar 可跨 378 天）
+YEAR_CAL_DAYS = 365
 
 
 def _surge_thresh(lim: float):
@@ -48,10 +71,11 @@ def _surge_thresh(lim: float):
         return SURGE_30, MIN_SURGE_20, "北交"
     if lim >= 0.20:
         return SURGE_20, MIN_SURGE_20, "双创"
-    return MAIN_ZT, 1, "主板"
+    return MAIN_ZT, MIN_SURGE_MAIN, "主板"
 
 
-def elasticity_check(code, bars, name: str = "", year: int = YEAR) -> dict:
+def elasticity_check(code, bars, name: str = "", year: int = YEAR,
+                     year_cal_days: int = YEAR_CAL_DAYS) -> dict:
     """弹性体检：过去 ~year 个交易日里，能做出多大级别的单日拉升。
 
     参数
@@ -86,8 +110,20 @@ def elasticity_check(code, bars, name: str = "", year: int = YEAR) -> dict:
 
     lim = ash_market.board_limit_ratio(code, name or "")
     th, min_surge, board = _surge_thresh(lim)
-    n = min(len(bars), year)
-    recent = bars[-n:]
+    # ⚑ 窗口 = 近 365 个【日历日】（老罗 2026-10-27 纠正「双塔一年一个涨停板都没有」）。
+    #   原用「252 根 bar」近似一年：停牌股的 252 根 bar 会跨 378 个日历日
+    #   ⇒ 一年前的涨停被算进来（002481 双塔 2025-10-22 距今 370 天、且未封板）。
+    if year_cal_days and year_cal_days > 0:
+        _last = bars[-1].get("d") or ""
+        try:
+            _cut = (datetime.date.fromisoformat(_last[:10])
+                    - datetime.timedelta(days=year_cal_days)).isoformat()
+            recent = [b for b in bars if (b.get("d") or "") >= _cut]
+        except Exception:
+            recent = bars[-min(len(bars), year):]
+    else:
+        recent = bars[-min(len(bars), year):]
+    n = len(recent)
 
     sd = 0
     max_up = 0.0
@@ -105,7 +141,7 @@ def elasticity_check(code, bars, name: str = "", year: int = YEAR) -> dict:
     passed = sd >= min_surge
     if not passed:
         if board == "主板":
-            reason = "主板一年零涨停（弹性日 %d 次 < %d）" % (sd, min_surge)
+            reason = "主板一年仅 %d 次涨停（很少，< %d）" % (sd, min_surge)
         else:
             reason = "%s一年仅 %d 次 ≥ %.0fcm（很少，< %d）" % (board, sd, th * 100, min_surge)
         stage = "僵尸(拒)"
