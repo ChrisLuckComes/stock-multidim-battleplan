@@ -83,6 +83,11 @@ UA = "Mozilla/5.0"
 #   并发极敏感（step① 全量 5000×800 曾把它打挂，连累 scr_chip 降级也 501）。每次取数后
 #   强制节流，把有效速率压到 ~单线程 5~8 req/s，宁可慢也不触发封禁。
 TENCENT_THROTTLE = 0.12
+# 当日 bar 成片失败：先等再只重试失败的代码。第一轮并发失败后立刻重打，
+# 源还在限流里，第二次同样空。扫描在本函数返回后才开始，所以这轮必须做完再返回。
+FILL_BURST_MIN = 50
+FILL_BURST_WAIT = 600
+FILL_BURST_GAP = 0.3
 
 
 # ────────────────────────────── 代码工具 ──────────────────────────────
@@ -478,6 +483,29 @@ def ensure_today_bars(conn, target=None, codes=None, workers=6, verbose=True,
                 filled += 1
             else:
                 still.append(code)
+        failed = still
+        conn.commit()
+
+    # 仍成片失败：等过这一轮限流，只重试失败代码，每只留间隔。
+    if len(failed) > FILL_BURST_MIN:
+        if verbose:
+            print("  补齐失败 %d 只，超过 %d，等 %d 秒后只重试这批"
+                  % (len(failed), FILL_BURST_MIN, FILL_BURST_WAIT), flush=True)
+        time.sleep(FILL_BURST_WAIT)
+        still = []
+        for code in failed:
+            ref_v, ref_max = refs.get(code, (None, None))
+            try:
+                tb = synth_today_bar_tencent(code, target=target,
+                                              ref_v=ref_v, ref_max_v=ref_max)
+            except Exception:  # noqa: BLE001
+                tb = None
+            if tb and tb.get("d") == target:
+                save_bars(conn, code, [tb])
+                filled += 1
+            else:
+                still.append(code)
+            time.sleep(FILL_BURST_GAP)
         failed = still
         conn.commit()
 

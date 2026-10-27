@@ -155,6 +155,47 @@ def test_ensure_today_bars_reports_failure(monkeypatch):
     assert "000001" in res["failed_codes"]      # 补不成的必须报出，不能静默
 
 
+def test_ensure_today_bars_burst_waits_then_retries_only_failed(monkeypatch):
+    """失败超过 50 只才等，并且只重试这批。少量失败不进入这轮。"""
+    conn = _mk_conn()
+    today = store._today_bj()
+    n = store.FILL_BURST_MIN + 1
+    for i in range(n):
+        conn.execute("INSERT INTO bars VALUES(?,?,?,?,?,?,?)",
+                     ("%06d" % i, _days_ago(1), 1, 1, 1, 1, 100))
+    conn.commit()
+    calls = {"n": 0}
+
+    def fake_synth(code, target=None, ref_v=None, ref_max_v=None):
+        calls["n"] += 1
+        # 并发一轮 + 原串行重试都失败，等过之后的那轮才补上
+        if calls["n"] <= n * 2:
+            return None
+        return {"d": target, "o": 1, "h": 1, "l": 1, "c": 1, "v": 100}
+
+    slept = []
+    monkeypatch.setattr(store, "synth_today_bar_tencent", fake_synth)
+    monkeypatch.setattr(store.time, "sleep", slept.append)
+    res = store.ensure_today_bars(conn, target=today, verbose=False, workers=1)
+    assert res["filled"] == n
+    assert res["failed"] == 0
+    assert store.FILL_BURST_WAIT in slept
+    assert slept.count(store.FILL_BURST_GAP) == n
+
+
+def test_ensure_today_bars_small_failure_does_not_wait(monkeypatch):
+    conn = _mk_conn()
+    conn.execute("INSERT INTO bars VALUES(?,?,?,?,?,?,?)",
+                 ("000001", _days_ago(1), 1, 1, 1, 1, 100))
+    conn.commit()
+    slept = []
+    monkeypatch.setattr(store, "synth_today_bar_tencent", lambda *a, **k: None)
+    monkeypatch.setattr(store.time, "sleep", slept.append)
+    res = store.ensure_today_bars(conn, target=store._today_bj(), verbose=False)
+    assert res["failed"] == 1
+    assert store.FILL_BURST_WAIT not in slept
+
+
 # ────────────────────── ⑥ ensure_broad：宽基必须新鲜 ──────────────────────
 def test_ensure_broad_fills_index(monkeypatch):
     from screener import scan_warfare as SW
