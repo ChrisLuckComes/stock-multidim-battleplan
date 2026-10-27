@@ -1575,6 +1575,24 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
             valuation = FM.fetch_ash_valuation(secid)
         except Exception as e:
             valuation = {"error": str(e)}
+        # 联网估值不可得（报错/空）时，用本地财报快照自算兜底 —— 口径见 valuation_pe.py
+        # 场景：小盘/次新股无卖方覆盖 + 东财接口失败，valuation 长期为空 ⇒ 报告交白卷
+        if (not valuation) or valuation.get("error"):
+            try:
+                import valuation_pe as _VP
+                _loc = _VP.estimate(code, close=last_c)
+            except Exception:
+                _loc = None
+            if _loc:
+                valuation = {
+                    "src": "valuation_pe.py 本地自算（联网估值不可得，口径见脚本头部）",
+                    "error": valuation.get("error") if isinstance(valuation, dict) else "接口返空",
+                    "market_cap": _loc["mkt_cap"] * 1e8,
+                    "float_cap": (_loc.get("float_mkt_cap") or 0) * 1e8,
+                    "pe_dynamic": _loc["mid"]["pe"],
+                    "pe_static": None, "pe_ttm": None, "pb": None,
+                    "local": _loc,
+                }
 
     vp20 = volprice_20d(bars)
 

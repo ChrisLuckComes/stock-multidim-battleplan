@@ -662,12 +662,44 @@ def _valuation_fallback(a):
     val = a.get("valuation") or {}
     if not val:
         return [["估值", "接口未返回，需人工补"]]
-    return [["PE(动/静/TTM)", "%s / %s / %s"
+    out = [["PE(动/静/TTM)", "%s / %s / %s"
              % (num(val.get("pe_dynamic")), num(val.get("pe_static")),
                 num(val.get("pe_ttm")))],
             ["PB", num(val.get("pb"))],
             ["总市值 / 流通", "%.1f 亿 / %.1f 亿"
              % ((val.get("market_cap") or 0) / 1e8, (val.get("float_cap") or 0) / 1e8)]]
+    # 本地自算兜底（valuation_pe.py）：联网估值不可得时补上 EPS/PE/目标价矩阵/中长线判定
+    loc = val.get("local")
+    if loc:
+        m = loc.get("mid") or {}
+        tg = loc.get("target_grid") or []
+        if m:
+            out.append(["%sE EPS / PE" % (loc.get("as_of") or "")[:4],
+                        "%.4f / %.1f×（中性情景，全年归母同比 %+.2f%%）"
+                        % (m.get("eps") or 0, m.get("pe") or 0, m.get("growth") or 0)])
+        if len(tg) >= 2:
+            out.append(["目标价 PE%d×~%d×" % (tg[0]["pe"], tg[-1]["pe"]),
+                        "%.2f ~ %.2f（对应市值 %.1f ~ %.1f 亿，空间 %+.1f%% ~ %+.1f%%）"
+                        % (tg[0]["target"], tg[-1]["target"], tg[0]["mkt"], tg[-1]["mkt"],
+                           tg[0]["upside"], tg[-1]["upside"])])
+        ip = loc.get("implied_pe") or {}
+        if ip:
+            out.append(["技术位隐含 PE",
+                        " ｜ ".join("%s %.2f=%.1f×" % (k, v["price"], v["pe"])
+                                    for k, v in ip.items())])
+        mg = loc.get("margin")
+        if mg:
+            out.append(["净利率 YTD", "%.2f%%（上年同期 %.2f%%，降 %.2fpp）%s"
+                        % (mg["ytd"], mg["ytd_prev"], mg["drop_pp"], mg.get("flag") or "")])
+        out.append(["中长线判定", "%s（%s）"
+                    % (loc.get("verdict") or "—",
+                       " / ".join("%s %s" % (c["item"], "✓" if c["pass"] else "✗ %s" % c["actual"])
+                                  for c in (loc.get("long_term_checks") or [])))])
+        if val.get("src"):
+            out.append(["估值来源", str(val["src"])])
+    elif val.get("error"):
+        out.append(["取数失败", str(val["error"])])
+    return out
 
 
 def build_peers(a, n):
