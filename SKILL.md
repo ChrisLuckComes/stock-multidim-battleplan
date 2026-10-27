@@ -21,6 +21,7 @@ disable-model-invocation: true
 2. 所有 `python *.py` 的工作目录设成这个根。参数只用相对路径：`out_cn/`、`out_us/`、`reports/`、`data/cache/`。
 3. 禁止写死盘符、用户名、某台机器的 clone 位置，也禁止把 HTML 写到用户主目录下的 `stock-reports`。
 4. 报告落点：A 股 `reports/cn_<code>_<YYYYMMDD>.html`，美股 `reports/us_<ticker>_<YYYYMMDD>.html`。`notes` 与 `analysis` 同目录。
+5. 真相源是本 git 仓库。不要再维护第二套脚本拷贝。禁止在代码里写死绝对路径；部署要指向 skill 根时由运行环境配置。
 
 
 ## 执行原则

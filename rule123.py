@@ -528,9 +528,221 @@ def bars_from_yahoo_min(sym, interval="5m", range_="1d"):
     raise RuntimeError(f"Yahoo 分钟线 {sym} 全部失败 → " + " | ".join(errs) + hint)
 
 
+
+# ── 美股时段现价（2026-10-22 老罗纠正）──────────────────────────────
+# 白天（上海）做空扫描曾把 Nasdaq session=Closed 的 lastSalePrice(=昨收) 当现价，
+# 写成「现价=昨收」被骂。根因：正规盘/盘后结束后 Nasdaq 标 Closed，primaryData
+# 退回正规收盘价；但致富等券商 24h 可交易，夜盘仍有 Yahoo fullday / 新浪扩展价。
+# 铁律：夜盘≠盘前≠盘后≠盘中；什么时段就取什么时段的价，禁止用昨收冒充现价。
+_US_SESS_PRE = "Pre-Market"
+_US_SESS_OPEN = "Open"
+_US_SESS_AH = "After-Hours"
+_US_SESS_ON = "Overnight"
+_US_SESS_LABEL = {
+    _US_SESS_PRE: "盘前",
+    _US_SESS_OPEN: "盘中",
+    _US_SESS_AH: "盘后",
+    _US_SESS_ON: "夜盘",
+}
+
+
+def us_clock_session(now=None):
+    """按美东时钟切时段（与 Nasdaq marketStatus 对齐的墙钟口径）。
+
+    Pre-Market 04:00–09:30 ET · Open 09:30–16:00 · After-Hours 16:00–20:00
+    · 其余 = Overnight（夜盘）。周末/美股休市也归 Overnight（仍取扩展价，勿用昨收）。
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        et = (now or datetime.datetime.now(ZoneInfo("America/New_York")))
+        if et.tzinfo is None:
+            et = et.replace(tzinfo=ZoneInfo("America/New_York"))
+        else:
+            et = et.astimezone(ZoneInfo("America/New_York"))
+    except Exception:
+        # 无 zoneinfo 时按上海−12h 近似美东夏令（仅兜底）
+        bj = now or datetime.datetime.now()
+        et = bj - datetime.timedelta(hours=12)
+    # 周末没有正规盘。休市日无交易所日历，仍由 refine_us_spot 在 Nasdaq=Closed 时改取扩展价。
+    if et.weekday() >= 5:
+        return _US_SESS_ON
+    t = et.hour * 60 + et.minute
+    if 4 * 60 <= t < 9 * 60 + 30:
+        return _US_SESS_PRE
+    if 9 * 60 + 30 <= t < 16 * 60:
+        return _US_SESS_OPEN
+    if 16 * 60 <= t < 20 * 60:
+        return _US_SESS_AH
+    return _US_SESS_ON
+
+
+def _yahoo_fullday_spot(sym):
+    """Yahoo chart meta：fulldayPrice（含盘前/盘后/夜盘扩展）+ regularMarketPrice。
+
+    返回 (fullday|None, regular|None, as_of_str|None)。失败 → (None, None, None)。
+    """
+    s = sym.upper()
+    url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{s}"
+           f"?range=1d&interval=1m&includePrePost=true")
+    try:
+        j = fetch_json(url, timeout=15)
+        r0 = ((j.get("chart") or {}).get("result") or [None])[0] or {}
+        m = r0.get("meta") or {}
+        fd = m.get("fulldayPrice")
+        reg = m.get("regularMarketPrice")
+        try:
+            fd = float(fd) if fd is not None else None
+        except (TypeError, ValueError):
+            fd = None
+        try:
+            reg = float(reg) if reg is not None else None
+        except (TypeError, ValueError):
+            reg = None
+        as_of = None
+        # 末根扩展分钟线时间（若有）
+        ts = r0.get("timestamp") or []
+        q = ((r0.get("indicators") or {}).get("quote") or [{}])[0]
+        closes = q.get("close") or []
+        last_i = None
+        for i in range(len(closes) - 1, -1, -1):
+            if closes[i] is not None:
+                last_i = i
+                break
+        if last_i is not None and last_i < len(ts):
+            as_of = datetime.datetime.fromtimestamp(
+                ts[last_i], tz=datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        return fd, reg, as_of
+    except Exception:
+        return None, None, None
+
+
+def _sina_us_ext_spot(sym):
+    """新浪美股 hq.sinajs.cn：字段[21]=扩展时段价（盘前/盘后/夜盘打印），[1]=正规价。
+
+    返回 (ext|None, regular|None, as_of|None)。需 Referer。
+    """
+    s = sym.lower()
+    url = f"https://hq.sinajs.cn/list=gb_{s}"
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "Mozilla/5.0",
+                          "Referer": "https://finance.sina.com.cn"})
+        with urllib.request.urlopen(req, timeout=12) as r:
+            raw = r.read().decode("gbk", "ignore")
+        import re
+        m = re.search(r'="([^"]*)"', raw)
+        if not m:
+            return None, None, None
+        parts = m.group(1).split(",")
+        if len(parts) < 22:
+            return None, None, None
+        def _f(i):
+            try:
+                return float(parts[i]) if parts[i] not in ("", "--", "N/A") else None
+            except (TypeError, ValueError, IndexError):
+                return None
+        reg, ext = _f(1), _f(21)
+        as_of = parts[24] if len(parts) > 24 and parts[24] else (parts[3] if len(parts) > 3 else None)
+        return ext, reg, as_of
+    except Exception:
+        return None, None, None
+
+
+def refine_us_spot(sym, bars, spot, meta):
+    """按当前美东时段把 spot 校准为该时段价；Closed+昨收冒充现价时改用扩展价。
+
+    meta 增补：
+      session          墙钟时段名（Pre-Market/Open/After-Hours/Overnight），
+                       覆盖 Nasdaq 在夜盘误报的 Closed（保留 nasdaq_session）
+      nasdaq_session   原始 Nasdaq marketStatus
+      session_label    中文：盘前/盘中/盘后/夜盘
+      spot_source      nasdaq | yahoo_fullday | sina_ext | bars_close
+    日线 bars 不动（结构止损锚仍用最近已完成日线）。
+    """
+    meta = dict(meta or {})
+    nasdaq_sess = str(meta.get("session") or "").strip()
+    meta["nasdaq_session"] = nasdaq_sess
+    clock = us_clock_session()
+    meta["session"] = clock
+    meta["session_label"] = _US_SESS_LABEL.get(clock, clock)
+    prev = meta.get("prev_close")
+    if prev is None and bars:
+        prev = bars[-1].get("c")
+        meta["prev_close"] = prev
+
+    def _near(a, b, tol=1e-6):
+        if a is None or b is None:
+            return False
+        try:
+            return abs(float(a) - float(b)) <= max(tol, abs(float(b)) * 1e-8)
+        except (TypeError, ValueError):
+            return False
+
+    # 盘中：信任 Nasdaq Open 实时价
+    if clock == _US_SESS_OPEN and nasdaq_sess.lower() == "open" and spot is not None:
+        meta["spot_source"] = "nasdaq"
+        return bars, float(spot), meta
+
+    # 盘前/盘后：Nasdaq 若已标对应时段且报价≠昨收，直接用
+    ns_l = nasdaq_sess.lower().replace(" ", "")
+    if clock == _US_SESS_PRE and "pre" in ns_l and spot is not None and not _near(spot, prev):
+        meta["spot_source"] = "nasdaq"
+        return bars, float(spot), meta
+    if clock == _US_SESS_AH and ("after" in ns_l or "post" in ns_l) and spot is not None and not _near(spot, prev):
+        meta["spot_source"] = "nasdaq"
+        return bars, float(spot), meta
+
+    # 夜盘，或 Nasdaq Closed / 报价退回昨收：改取扩展价（Yahoo fullday → 新浪[21]）
+    need_ext = (
+        clock == _US_SESS_ON
+        or ns_l in ("", "closed")
+        or spot is None
+        or _near(spot, prev)
+    )
+    if need_ext:
+        fd, yreg, yas = _yahoo_fullday_spot(sym)
+        if fd is not None and not _near(fd, prev):
+            meta["spot_source"] = "yahoo_fullday"
+            if yas:
+                meta["as_of"] = yas
+            if yreg is not None and meta.get("prev_close") is None:
+                meta["prev_close"] = yreg
+            return bars, float(fd), meta
+        # fullday 若碰巧等于昨收，仍优先于「假实时」；再试新浪
+        sext, sreg, sas = _sina_us_ext_spot(sym)
+        if sext is not None and not _near(sext, prev):
+            meta["spot_source"] = "sina_ext"
+            if sas:
+                meta["as_of"] = sas
+            return bars, float(sext), meta
+        if fd is not None:
+            meta["spot_source"] = "yahoo_fullday"
+            if yas:
+                meta["as_of"] = yas
+            return bars, float(fd), meta
+        if sext is not None:
+            meta["spot_source"] = "sina_ext"
+            if sas:
+                meta["as_of"] = sas
+            return bars, float(sext), meta
+
+    # 兜底：仍有 Nasdaq/原 spot 就用；再不行用日线末收（并标明）
+    if spot is not None:
+        meta["spot_source"] = meta.get("spot_source") or "nasdaq"
+        return bars, float(spot), meta
+    if bars:
+        meta["spot_source"] = "bars_close"
+        return bars, float(bars[-1]["c"]), meta
+    return bars, spot, meta
+
+
 def bars_from_us(sym):
     """美股取数：Nasdaq（带盘前/市场状态）→ 东财 http → Yahoo（含 stooq 兜底）。
-    统一返回 (bars, spot, meta)。"""
+    统一返回 (bars, spot, meta)。
+
+    ★ 2026-10-22：返回前经 refine_us_spot —— 按美东墙钟取「当前时段」现价
+      （夜盘/盘前/盘后/盘中互不混用），禁止 Closed 时段用昨收冒充现价。
+    """
     errs = []
     for name, fn in (("nasdaq", bars_from_nasdaq),
                      ("eastmoney", bars_from_em_us),
@@ -542,8 +754,13 @@ def bars_from_us(sym):
             continue
         if len(out) == 2:                       # yahoo 返回 (bars, spot)
             bars, spot = out
-            return bars, spot, None
-        return out
+            meta = {"session": "", "as_of": None, "prev_close": None,
+                    "source": name}
+            return refine_us_spot(sym, bars, spot, meta)
+        bars, spot, meta = out
+        meta = dict(meta or {})
+        meta.setdefault("source", name)
+        return refine_us_spot(sym, bars, spot, meta)
     raise RuntimeError(f"美股 {sym} 全部数据源失败 → " + " | ".join(errs))
 
 

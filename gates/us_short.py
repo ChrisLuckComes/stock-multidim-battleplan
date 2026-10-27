@@ -295,10 +295,21 @@ def main():
     print("=" * 64)
     print(f"🩸 美股日内做空作战卡 · {sym} · {now_bj()}（北京）")
     print("=" * 64)
+    # ★ 2026-10-22：按时段标签现价（夜盘/盘前/盘后/盘中），禁止再写「实时/盘前」一把梭
+    if not isinstance(meta, dict):
+        meta = {}
     sess = meta.get("session") or "?"
+    sess_lbl = meta.get("session_label") or {
+        "Pre-Market": "盘前", "Open": "盘中", "After-Hours": "盘后",
+        "Overnight": "夜盘", "Closed": "已收盘",
+    }.get(sess, sess)
+    spot_src = meta.get("spot_source") or meta.get("source") or "?"
+    nasdaq_sess = meta.get("nasdaq_session")
     dev = f"{(spot / ref - 1) * 100:+.2f}%" if spot else "n/a"
-    print(f"昨收 {ref:.2f}（{lv['last_date']}）  实时/盘前 "
-          f"{spot if spot else 'n/a'} ({dev})  session={sess}")
+    print(f"昨收 {ref:.2f}（{lv['last_date']}）  {sess_lbl}现价 "
+          f"{spot if spot else 'n/a'} ({dev})  session={sess}"
+          f"  spot_source={spot_src}"
+          + (f"  nasdaq={nasdaq_sess}" if nasdaq_sess else ""))
     if spot:
         print(f"MA5 {lv['ma5']:.2f}（现价 {(spot / lv['ma5'] - 1) * 100:+.2f}%）"
               f"  MA10 {lv['ma10']:.2f}（{(spot / lv['ma10'] - 1) * 100:+.2f}%）  "
