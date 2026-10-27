@@ -17,10 +17,12 @@ import report_render as RR  # noqa: E402
 from gates.hold_winners import (  # noqa: E402
     CITE,
     assess,
+    facts_from_analysis,
     format_hold_line,
     from_analysis,
     main,
     review_sell,
+    shallow_book,
 )
 
 
@@ -160,6 +162,86 @@ def test_vwap_chosen_when_it_is_the_highest_qualified():
     )
     assert block["reentry"]["name"] == "VWAP"
     assert block["reentry"]["px"] == 40.0
+
+
+def test_txn_closed_shallow_uses_last_close_not_prior_bar():
+    facts = {
+        "close": 298.12,
+        "price": 296.0,
+        "last_close": 298.12,
+        "prev_close": 284.69,
+        "zone_lo": 280.0,
+        "zone_hi": 296.29,
+        "stop": 286.0,
+        "support": 286.0,
+        "target": 340.0,
+        "vwap": 293.0,
+        "vwap5": 283.29,
+        "mode": "platform_break",
+    }
+    book = shallow_book(facts)
+    assert book["chosen"]["name"] == "买区上沿"
+    assert abs(book["chosen"]["px"] - 296.29) < 0.001
+    names = {}
+    for row in book["rows"]:
+        names.setdefault(row["name"], []).append(row["px"])
+    assert abs(names["−1%"][0] - 295.14) < 0.001
+    assert abs(names["VWAP"][0] - 293.0) < 0.001
+    assert "5日" not in names
+    assert all(abs(px - 281.84) > 1 for pxs in names.values() for px in pxs)
+    assert all(row["name"] != "VWAP" or abs(row["px"] - 283.29) > 1
+               for row in book["rows"])
+
+
+def test_txn_wide_stop_hold_does_not_relabel_deep_dip():
+    facts = {
+        "close": 298.12,
+        "price": 296.0,
+        "prev_close": 284.69,
+        "zone_lo": 280.0,
+        "zone_hi": 296.29,
+        "stop": 272.39,
+        "support": 272.39,
+        "target": 310.29,
+        "cap": 287.55,
+        "vwap": 293.0,
+        "vwap5": 283.29,
+        "mode": "platform_break",
+    }
+    book = shallow_book(facts)
+    assert book["chosen"] is None
+    for row in book["rows"]:
+        assert not (row["name"] == "VWAP" and abs(row["px"] - 283.29) < 0.01)
+        if row["name"] == "−1%":
+            assert abs(row["px"] - 295.14) < 0.001
+            assert row["ok"] is False
+        assert abs(row["px"] - 281.84) > 0.5
+
+
+def test_facts_do_not_treat_vwap5_as_session_vwap():
+    analysis = {
+        "meta": {"basis_close": 298.12, "prev_close": 284.69},
+        "plan": {
+            "mode": "platform_break",
+            "buy_zone": {
+                "primary_hi": 296.29,
+                "primary_lo": 280.0,
+                "struct_stop": 272.39,
+                "vwap5": 283.29,
+            },
+        },
+        "targets": {"t1": 340.0},
+    }
+    facts = facts_from_analysis(analysis)
+    assert facts.get("vwap") is None
+    assert facts["vwap5"] == 283.29
+    assert facts["last_close"] == 298.12
+    book = shallow_book(facts)
+    assert book["chosen"]["name"] == "买区上沿"
+    assert all(row["name"] != "VWAP" for row in book["rows"])
+    dip_rows = [row for row in book["rows"] if row["name"] == "−1%"]
+    assert len(dip_rows) == 1
+    assert abs(dip_rows[0]["px"] - 295.14) < 0.001
 
 
 def test_from_analysis_stays_soft_until_a_sell_is_synced():

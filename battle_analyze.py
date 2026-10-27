@@ -339,7 +339,7 @@ def entry_candidates(bars, plan, probe_out, atr_v, odds_from_probe=None):
     # 下方（低吸类）—— 必须 > struct_floor（结构未破）；均线用滚动值
     vw = z.get("vwap5")
     if vw:
-        add("5 日 VWAP", vw, "below", "低吸带")
+        add("5日", vw, "below", "近5日典型价，不是当日分时均价")
     ma5r = rolling_sma_last(bars, 5)
     if ma5r is not None:
         add("MA5(滚动)", ma5r, "below", "低吸首选·实时均线(下一日平收近似)")

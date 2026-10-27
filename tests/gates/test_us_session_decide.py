@@ -17,7 +17,8 @@ from gates.us_session_decide import (decide_us, size_for_us, resolve_cap_us,
                                      fetch_intraday_nasdaq, _parse_et,
                                      select_us_hang, us_exec_target,
                                      lows_often_reach_depth, render_us,
-                                     apply_us_hang, partial_session_tape)
+                                     apply_us_hang, partial_session_tape,
+                                     dip_basis)
 from open_playbook import long_rr, max_entry_for_rr
 
 FAILS = []
@@ -533,6 +534,86 @@ def test_non_breakout_and_top_stay_silent():
     chk("顶部确认仍静默", sel2["emit"] is False, sel2)
 
 
+def test_dip_basis_open_then_last_close():
+    """有开盘用开盘；收盘后下一交易日用最近收盘，不用再前一根。"""
+    assert abs(dip_basis(100.0, 284.69, 298.12) - 100.0) < 1e-9
+    assert abs(dip_basis(None, 284.69, 298.12) - 298.12) < 1e-9
+    assert abs(dip_basis(None, 284.69, None) - 284.69) < 1e-9
+
+
+def test_txn_next_day_dip_uses_last_close():
+    """TXN 收盘后：last=298.12，前一根 284.69。浅档主挂买区上沿，−1%≈295.14。"""
+    sel = select_us_hang(
+        296.0, 272.39, 340.0, vwap=293.0, vwap5=283.29, pre=284.69,
+        last_close=298.12, zone_lo=280.0, zone_hi=296.29, mode="platform_break")
+    assert sel["tier"] == "浅档", sel
+    assert sel["anchor"] == "买区上沿", sel
+    assert abs(sel["hang"] - 296.29) < 0.001, sel
+    assert abs(sel["dip_px"] - 295.14) < 0.001, sel
+    assert abs(sel["hang"] - 281.84) > 1, sel
+    assert sel["stop_retargeted"] is False, sel
+    assert sel["anchor"] != "VWAP"
+    closed = select_us_hang(
+        None, 272.39, 340.0, vwap5=283.29, pre=284.69, last_close=298.12,
+        zone_lo=280.0, zone_hi=296.29, mode="platform_break")
+    assert closed["tier"] == "浅档" and closed["anchor"] == "买区上沿", closed
+    assert abs(closed["hang"] - 296.29) < 0.001, closed
+    assert abs(closed["dip_px"] - 295.14) < 0.001
+
+
+def test_txn_wide_stop_does_not_relabel_deep_as_dip():
+    """宽止损把真浅档的 R 打穿 1.5 时，不许把 281.84 标成 −1% 浅档。"""
+    sel = select_us_hang(
+        296.0, 272.39, 310.29, vwap=293.0, vwap5=283.29, pre=284.69,
+        last_close=298.12, zone_lo=280.0, zone_hi=296.29, cap=287.55,
+        mode="platform_break")
+    assert sel["tier"] == "不追", sel
+    assert sel["hang"] is None, sel
+    assert "浅档不可挂" in sel["why"], sel
+    assert sel.get("anchor") != "−1%"
+    assert abs(sel["dip_px"] - 295.14) < 0.001, sel
+    assert "281.84" not in (sel.get("why") or "")
+
+
+def test_txn_minus_one_is_not_the_prior_bar():
+    """没有买区时，最高合格浅档是真 −1%，不是前一根的 281.84，也不是 vwap5。"""
+    sel = select_us_hang(
+        296.0, 272.39, 340.0, vwap=293.0, vwap5=283.29, pre=284.69,
+        last_close=298.12, mode="platform_break")
+    assert sel["tier"] == "浅档", sel
+    assert sel["anchor"] == "−1%", sel
+    assert abs(sel["hang"] - 295.14) < 0.001, sel
+    assert abs(sel["hang"] - 281.84) > 1
+    assert sel["anchor"] != "VWAP"
+
+
+def test_vwap5_above_floor_is_labeled_five_day():
+    """5日高于真 −1% 时可以入选，名字是「5日」，不是裸 VWAP。"""
+    sel = select_us_hang(
+        100.0, 90.0, 120.0, vwap5=99.5, last_close=100.0, mode="platform_break")
+    assert sel["tier"] == "浅档", sel
+    assert sel["anchor"] == "5日", sel
+    assert abs(sel["hang"] - 99.5) < 0.001, sel
+
+
+def test_wide_stop_retarget_does_not_rename_deep_price():
+    """止损宽于 5% 且 cap 是那口宽止损的 R 闸：收到 95% 后仍挂浅档原锚。"""
+    sel = select_us_hang(
+        100.0, 70.0, 120.0, zone_lo=90.0, zone_hi=100.0, cap=90.0,
+        last_close=101.0, mode="platform_break")
+    assert sel["tier"] == "浅档", sel
+    assert sel["anchor"] == "买区上沿", sel
+    assert abs(sel["hang"] - 100.0) < 0.001, sel
+    assert sel["stop_retargeted"] is True, sel
+    assert abs(sel["hang_stop"] - 95.0) < 0.001, sel
+    tight = select_us_hang(
+        100.0, 70.0, 120.0, zone_lo=90.0, zone_hi=100.0, cap=80.0,
+        last_close=101.0, mode="platform_break")
+    assert tight["tier"] == "不追", tight
+    assert tight["hang"] is None, tight
+    assert "浅档不可挂" in tight["why"], tight
+
+
 def test_decide_prints_rerun_note():
     """盘中决策输出写明何时再跑，不靠全日低点。"""
     mins = mkx([100.0, 100.0, 99.0])
@@ -578,6 +659,12 @@ if __name__ == "__main__":
     test_veto_keeps_no_chase_gates()
     test_soft_veto_keeps_rr_floor()
     test_non_breakout_and_top_stay_silent()
+    test_dip_basis_open_then_last_close()
+    test_txn_next_day_dip_uses_last_close()
+    test_txn_wide_stop_does_not_relabel_deep_as_dip()
+    test_txn_minus_one_is_not_the_prior_bar()
+    test_vwap5_above_floor_is_labeled_five_day()
+    test_wide_stop_retarget_does_not_rename_deep_price()
     test_decide_prints_rerun_note()
     print("\n%d failed" % len(FAILS))
     sys.exit(1 if FAILS else 0)
