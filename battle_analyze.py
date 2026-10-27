@@ -350,8 +350,15 @@ def entry_candidates(bars, plan, probe_out, atr_v, odds_from_probe=None):
     if ma20r is not None:
         add("MA20(滚动)", ma20r, "below", "趋势线·实时均线")
     # 回踩深一档（结构止损上方 0.5×ATR，结构仍完整）
-    add("结构止损上方 0.5×ATR", (struct_floor or 0) + 0.5 * atr_v if struct_floor else None,
-        "below", "回踩深一档")
+    # ★ 2026-10-27 修（老罗质疑回踩档畸变 10.04/7.85）：小 ATR 票上「结构止损+0.5×ATR」
+    #   会落在买区下沿之下、紧贴止损，属纸面高赔率、实盘不可达（与 299-302 注释要砍的
+    #   「贴着结构止损的买区下沿」同类）。加买区下界闸门：该档必须 ≥ 买区下沿 primary_lo
+    #   才生成；出买区下沿即视为畸变剔除。趋势线/均线深档（如乐鑫 MA20 133.42<primary_lo）
+    #   是真实支撑、不在此列，不受影响。primary_lo 缺失时退化为原行为（不拦）。
+    _deep = (struct_floor or 0) + 0.5 * atr_v if struct_floor else None
+    _zone_lo = z.get("primary_lo")
+    if _deep is not None and (_zone_lo is None or _deep >= _zone_lo):
+        add("结构止损上方 0.5×ATR", _deep, "below", "回踩深一档")
     # 去重
     seen, uniq = set(), []
     for x in cands:
