@@ -6,6 +6,10 @@
 
 **跨平台**：原生支持 WorkBuddy、Cursor，以及任何能加载 SKILL.md 的通用 AI Agent。无外部付费数据源、零密钥依赖——A 股走东方财富、美股走 Yahoo，本仓库自带全部取数与判定脚本。不使用期权 Gamma / GEX。
 
+## 单仓库运行
+
+工作目录是 clone 下来的仓库根。命令用相对路径（例如 `python gates/us_short.py SNDK`），不在代码里写死某台机器的绝对路径。只保留这一份 checkout，不要再拷一份脚本到别的目录维护。定时任务把工作目录设成仓库根；Python 解释器放在那台机器的调度配置里，不写进 git。Windows、macOS、Linux 同一套相对路径。
+
 ---
 
 ## 这是什么

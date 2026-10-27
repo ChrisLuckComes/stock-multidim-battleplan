@@ -494,3 +494,11 @@ Cursor、WorkBuddy 或其他 Agent：找到这份 `AGENTS.md`，就在那个目�
 - 联接断了就重建联接，目标用「本仓库根」，不要 `git clone` 第二份进 skill 目录。
 - **notes_*.json / .env / rule123_all.json / out_*.txt 不入库。**
 - 命令、报告、缓存一律相对仓库根。禁止在说明或脚本里新增某用户的绝对路径。
+
+### 单仓库运行（2026-10-27）
+
+**真相源是本 git 仓库。** 跑 `python` 的工作目录 = 仓库根，命令和产物用相对路径。
+
+历史上 bot 运行环境里曾有一份 `agent-data/workflows/...` 脚本拷贝。以后只认本仓库的 checkout，不要再维护第二套拷贝。skill 要指向这里时用目录联接，目标是仓库根，由运行环境配置，不把某台机器的路径写进库。
+
+**禁止**在业务代码里写死绝对路径，包括 `/home/box/...`、`/workspace/...`、Windows 盘符。脚本用相对路径，或读取已有环境变量（如 `ASH_*`、`WB_US_PROXY`）。Windows、macOS、Linux 同一套相对路径。

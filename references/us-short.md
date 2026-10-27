@@ -56,7 +56,8 @@
 ## ⑥ 数据源备忘（2026-09-24 实测）
 
 - **Nasdaq assetclass 自动探测**（rule123.py 9/24 修）：`/info` 与 `/historical` 写死 `stocks` 时 ETF 全挂；现按 stocks→etf 自动试档并缓存。ETF 日线：SOXX/SMH/SOXS 275 根、SNDQ 106 根（成立日起）。
-- **盘前实时**：Nasdaq `/info` primaryData（session=Pre-Market）可用；新浪美股 `hq.sinajs.cn/list=gb_<sym>`（需 `Referer: finance.sina.com.cn`）字段 `[21]` 盘前价 `[22]` 涨跌% `[31]` 高 `[32]` 低，作兜底。
+- **盘前实时**：Nasdaq `/info` primaryData（session=Pre-Market）可用；新浪美股 `hq.sinajs.cn/list=gb_<sym>`（需 `Referer: finance.sina.com.cn`）字段 `[21]` 为**当前扩展时段价**（盘前/盘后/夜盘打印，勿一律叫盘前）`[22]` 涨跌% `[31]` 高 `[32]` 低，作兜底。
+- **夜盘 / 盘后现价（2026-10-22 老罗纠正）**：上海白天（美股正规收盘后～次日开盘前）做空扫描的 entry/现价锚必须按**当前实际时段**取价——夜盘取夜盘、盘后取盘后、盘前取盘前，**禁止用昨收冒充现价**，也禁止把夜盘写成盘前。Nasdaq `session=Closed` 时 `primaryData.lastSalePrice` 会退回正规收盘价；此时 `bars_from_us` → `refine_us_spot` 改用 Yahoo `fulldayPrice`（首选）/ 新浪 `[21]`，并把 `meta.session` 标成 `Overnight`（夜盘）/ `After-Hours`（盘后）/ `Pre-Market`（盘前）。结构止损锚仍按最近**已完成日线**。
 - **腾讯 `qt.gtimg.cn`** 返回的是收盘快照（时间戳 16:08），**不是盘前实时**，勿当实时源；其 kline 接口对美股只回 1~2 根，勿用于历史。
 
 ## ⑦ 实战档案
