@@ -402,9 +402,30 @@ def surge_report(code, boards=3, top=5, pool=15, bar_n=320, offline=False,
         })
 
     rep["boards"] = reps
+    # ⚑ 位置闸（老罗 2026-10-27）：现价离峰 / 离主力成本区太远 = 追高、赔率被吃光。
+    #   阈值与 screener/filters.py 同源；「距 60 日峰」是本地 bars 就能算的代理口径。
+    try:
+        from screener import filters as _F
+        _fh = _from_high(bars, 60)
+        _mc = _F.load_main_cost(code)
+        _dev = _F.dev_main_pct(bars[-1]["c"], _mc) if _mc else None
+        _near_peak = (_fh is not None and _fh > -3.0)
+        _far_cost = (_dev is not None and _dev >= _F.HIGH_DEV_LIMIT)
+        rep["position"] = {
+            "from_high60": _fh, "main_cost": _mc, "dev_main": _dev,
+            "high": bool(_near_peak or _far_cost),
+            "near_peak": _near_peak, "far_cost": _far_cost,
+            "note": _F.high_pos_note(bars[-1]["c"], _mc) if _mc else None,
+        }
+    except Exception:
+        rep["position"] = None
     rep["character"] = character(bars, code, ref_bars=ref)
     try:
-        rep["earnings"] = earnings_tone(earnings_rows(code))
+        # ⚑ 业绩口径统一（老罗 2026-10-27）：**正式报告优先于预告**。
+        #   原先只查预告表 ⇒ 票出了正式三季报后仍拿上一期预告评「业绩超预期=加分」
+        #   （实测 300839：预告 3-31 期扭亏 +184~205%，而它三季报 10-21 已披露）。
+        from screener import earnings as _E
+        rep["earnings"] = _E.merge_tone(_E.fetch_forecast(code), _E.fetch_report(code))
     except Exception as e:                         # noqa: BLE001
         rep["earnings"] = {"state": "error", "tone": "未取到", "note": str(e)[:80]}
     return rep
@@ -457,16 +478,39 @@ def render(rep, top=5):
     L.append("")
 
     e = rep.get("earnings") or {}
-    L.append("① 业绩（代理口径 = 东财业绩预告，**不是超预期**）")
+    L.append("① 业绩（口径 = %s，**不是超预期**）" % (e.get("src") or "东财业绩预告"))
     if e.get("state") == "ok":
         amp = e.get("add_amp")
-        L.append("   报告期 %s 公告 %s 类型 %s（%s） 同比 %s   ⇒ %s%s"
-                 % (e.get("report_date"), e.get("notice_date"),
-                    "/".join(e.get("types") or []), e.get("finance") or "—",
-                    ("%.1f%% ~ %.1f%%" % amp) if amp else "—",
-                    e.get("tone"), "（大加分项）" if e.get("strong") else ""))
+        if e.get("src") == "正式报告":
+            L.append("   报告期 %s 披露 %s ｜ 归母净利同比 %s ｜ 营收同比 %s ｜ ROE %s   ⇒ %s%s"
+                     % (e.get("report_date"), e.get("update_date"),
+                        ("%.1f%%" % e["np_yoy"]) if e.get("np_yoy") is not None else "—",
+                        ("%.1f%%" % e["rev_yoy"]) if e.get("rev_yoy") is not None else "—",
+                        ("%.2f" % e["roe"]) if e.get("roe") is not None else "—",
+                        e.get("tone"), "（大加分项）" if e.get("strong") else ""))
+        else:
+            L.append("   报告期 %s 公告 %s 类型 %s（%s） 同比 %s   ⇒ %s%s"
+                     % (e.get("report_date"), e.get("notice_date"),
+                        "/".join(e.get("types") or []), e.get("finance") or "—",
+                        ("%.1f%% ~ %.1f%%" % amp) if amp else "—",
+                        e.get("tone"), "（大加分项）" if e.get("strong") else ""))
     else:
         L.append("   %s" % e.get("tone"))
+    pos = rep.get("position") or {}
+    if pos:
+        L.append("⓪ 位置（高位风险 · 老罗 2026-10-27 闸）")
+        _fh = pos.get("from_high60")
+        _mc = pos.get("main_cost")
+        _dv = pos.get("dev_main")
+        _tag = "⛔高位·脱离成本区" if pos.get("high") else "✅位置正常"
+        L.append("   距 60 日峰 %s%s｜主力成本 %s%s ⇒ %s"
+                 % (("%.1f%%" % _fh) if _fh is not None else "—",
+                    "（贴峰）" if pos.get("near_peak") else "",
+                    ("%.2f" % _mc) if _mc else "—",
+                    ("（偏离 %+.1f%%）" % _dv) if _dv is not None else "",
+                    _tag))
+        if pos.get("note"):
+            L.append("   ⚠ %s" % pos["note"])
     if e.get("note"):                       # 离线态没有 note ⇒ 别打一行 "⚠ None"
         L.append("   ⚠ %s" % e["note"])
     L.append("")
