@@ -715,6 +715,19 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
             out["reason"] = reason + " 盯 %.2f：%s" % (wait_px, wait_note)
         elif wait_px is not None and price > wait_px and soft_cap is not None and price > soft_cap:
             out["reason"] = reason + " 买点窗口已过（容差带上沿 %.2f）。" % soft_cap
+        # ⚑ 位置闸提示（老罗 2026-10-27）：现价离主力成本区太远 = 追高。
+        #   **只提示、不否决** —— 盘中「能否买」仍由四要件决定（分时资金关 + R≥1.5 +
+        #   cap + 不追涨停，见 AGENTS.md §1b）。主力成本取自最近收盘的 scr jsonl，
+        #   盘中已「旧」，故只作位置参考，不作否决依据。
+        try:
+            from screener import filters as _F
+            _mc = _F.load_main_cost(code)
+            if _mc:
+                _note = _F.high_pos_note(price, _mc)
+                if _note:
+                    out["high_pos_note"] = _note
+        except Exception:
+            pass
         return out
 
     def _handoff(why):
@@ -857,6 +870,8 @@ def render(d):
     lines.append("分时  %s  %s" % (d["tape"]["label"], d["tape"]["text"]))
     lines.append("窗口  全天已出现 %d 根落在昨收 0%%～2%%" % d["dip_minutes"])
     lines.append("结论  %s。%s" % (d["action"], d["reason"]))
+    if d.get("high_pos_note"):
+        lines.append("位置  ⚠ %s" % d["high_pos_note"])
     if d.get("channel_source"):
         lines.append("来源  盘中通道·%s（计划买区已过，止损 %.2f，目标 %.2f）"
                      % (d["channel_source"], d["channel_stop"], d["channel_target"]))

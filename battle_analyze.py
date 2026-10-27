@@ -1665,6 +1665,28 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
                      % (_scr_d.get("state"), _scr_d.get("state_trade"),
                         "✅允许新开仓" if _scr_d.get("state_allow_new")
                         else "⛔不允许新开仓"))
+        # ⚑ 位置闸（老罗 2026-10-27）：现价离主力成本区太远 ⇒ 追高、赔率被吃光。
+        #   提示级（**不改 recommend**）；闸门单一真源 screener/filters.py。
+        #   与 gen_pass_list / q3_filter 同一口径 ⇒ 报告层与名单层不会打架。
+        try:
+            from screener import filters as _F
+            _mc = _scr_d.get("main_cost")
+            _spot = None
+            try:
+                _spot = (bars[-1] or {}).get("c") if bars else None
+            except Exception:
+                _spot = None
+            if not _spot:
+                _spot = (out.get("market_data") or {}).get("spot")
+            if _mc and _spot:
+                _dev = _F.dev_main_pct(_spot, _mc)
+                if _dev is not None:
+                    _vsrc.append("位置闸：现价 %.2f 距主力成本 %.2f 偏离 %+.1f%% ⇒ %s"
+                                 % (_spot, _mc, _dev,
+                                    "✅未脱离成本区" if _dev < _F.HIGH_DEV_LIMIT
+                                    else "⛔高位·脱离成本区（追高风险大）"))
+        except Exception:
+            pass
     _tv_d = out.get("top_verdict") or {}
     if _tv_d.get("level") in ("block", "alert"):
         _vsrc.append("顶部K线：%s %s" % (_tv_d.get("level"),

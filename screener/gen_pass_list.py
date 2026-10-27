@@ -5,12 +5,16 @@
 """
 import json
 import os
+import sys
 import argparse
 from bisect import bisect_right
 from collections import defaultdict
 from datetime import date
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+from screener import filters as F   # ⚑ 高位闸/赔率闸 单一真源（老罗 2026-10-27）
 OUT = os.path.join(ROOT, "out_cn")
 TAG = "0000-00-00_close"  # 由 main() 按 --date 覆盖，避免硬编码日期读错 jsonl
 
@@ -149,6 +153,11 @@ tr:hover td{background:#f7faff}
 .scr-拉升中{color:#2f6fed}
 .scr-筹码发散,.scr-破位下行,.scr-派发出货{color:#d4380d;font-weight:600}
 .foot{color:#8a9099;font-size:12px;margin:22px 0 8px}
+.v-ok{color:#237804;font-weight:600}
+.v-bad{color:#d4380d;font-weight:700}
+.v-warn{color:#8a6100;font-weight:600}
+.v-unknown{color:#8a9099}
+.hint{background:#fff8e6;border:1px solid #f0d68a;border-radius:8px;padding:9px 13px;font-size:12.5px;margin:10px 0;color:#5c4b12}
 """
     H = []
     H.append("<!doctype html><meta charset='utf-8'><title>双通过名单 · 按强度排序 · %s 收盘</title>" % TAG.split("_")[0])
@@ -275,6 +284,11 @@ tr:hover td{background:#f7faff}
 .scr-吸筹中,.scr-集中锁仓{color:#237804;font-weight:600}
 .scr-拉升中{color:#2f6fed}
 .foot{color:#8a9099;font-size:12px;margin:22px 0 8px}
+.v-ok{color:#237804;font-weight:600}
+.v-bad{color:#d4380d;font-weight:700}
+.v-warn{color:#8a6100;font-weight:600}
+.v-unknown{color:#8a9099}
+.hint{background:#fff8e6;border:1px solid #f0d68a;border-radius:8px;padding:9px 13px;font-size:12.5px;margin:10px 0;color:#5c4b12}
 """
     H = []
     H.append("<!doctype html><meta charset='utf-8'><title>双通过名单 · 强度×筹码 最佳排序 · %s 收盘</title>" % TAG.split("_")[0])
@@ -339,6 +353,10 @@ def main():
     allow = [r for r in rows if (r.get("scr") or {}).get("allow_new")]
     rej = [r for r in rows if not (r.get("scr") or {}).get("allow_new")]
     star = [r for r in allow if r.get("recommend")]
+    # ⚑ 高位闸 + 赔率闸（老罗 2026-10-27）：双通过 ≠ 可上 —— 离主力成本区太远 / 赔率不足的都要剔出来
+    judged = {r.get("code"): F.judge_row(r) for r in rows}
+    final = [r for r in allow if F.is_actionable(judged.get(r.get("code")) or {})]
+    blocked = [r for r in allow if r not in final]
 
     by = defaultdict(list)
     for r in allow:
@@ -349,31 +367,39 @@ def main():
     L = []
     L.append("# 双通过名单 · 战法闸 + 筹码闸 · %s 收盘\n" % TAG.split("_")[0])
     L.append("> 基准日 **%s**（当日已收盘）｜ 信号 %d 只 → 双通过 **%d** 只（★引擎推荐 %d）｜ "
-             "被筹码否 %d 只\n"
-             % (TAG.split("_")[0], len(rows), len(allow), len(star), len(rej)))
+             "被筹码否 %d 只｜ 🚦 **最终可上 %d 只**\n"
+             % (TAG.split("_")[0], len(rows), len(allow), len(star), len(rej), len(final)))
+    L.append("> 🚦 闸门（screener/filters.py 单一真源）：**高位闸** 现价偏离主力成本 < %.0f%% ｜ "
+             "**赔率闸** R(→t1) ≥ %.1f。双通过但被这两闸拦下的 **%d** 只标在「判定」列。\n"
+             % (F.HIGH_DEV_LIMIT, F.MIN_RR, len(blocked)))
     L.append("> 排序：战法优先级 → 组内按 R(→t1) 降序。`区内/区外` = 现价相对买区的位置，"
              "区外表示现价已离开买区、需等回踩。\n")
-    L.append("| 战法 | 双通过 | ★推荐 |")
-    L.append("|---|---|---|")
+    L.append("| 战法 | 双通过 | ★推荐 | 🚦最终可上 |")
+    L.append("|---|---|---|---|")
     for m in order:
         g = by[m]
-        L.append("| %s | %d | %d |"
-                 % (MODE_CN.get(m, m), len(g), sum(1 for r in g if r.get("recommend"))))
-    L.append("| **合计** | **%d** | **%d** |\n" % (len(allow), len(star)))
+        L.append("| %s | %d | %d | %d |"
+                 % (MODE_CN.get(m, m), len(g), sum(1 for r in g if r.get("recommend")),
+                    sum(1 for r in g if F.is_actionable(judged.get(r.get("code")) or {}))))
+    L.append("| **合计** | **%d** | **%d** | **%d** |\n"
+             % (len(allow), len(star), len(final)))
 
     for m in order:
         g = sorted(by[m], key=lambda r: -(r.get("rr1") or 0))
         L.append("## %s（%d 只，★%d）\n"
                  % (MODE_CN.get(m, m), len(g), sum(1 for r in g if r.get("recommend"))))
-        L.append("| 代码 | 名称 | 现价 | 买区 | 止损 | t1 | R→t1 | 筹码 | 推 |")
-        L.append("|---|---|---|---|---|---|---|---|---|")
+        L.append("| 代码 | 名称 | 现价 | 买区 | 止损 | t1 | R→t1 | 离主成本 | 筹码 | 推 | 判定 |")
+        L.append("|---|---|---|---|---|---|---|---|---|---|---|")
         for r in g:
             s = r.get("scr") or {}
-            L.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+            j = judged.get(r.get("code")) or {}
+            L.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
                 r.get("code"), r.get("name"), num(r.get("spot")), zone(r),
                 num(r.get("stop")), num(r.get("t1")), num(r.get("rr1"), "%.2f"),
+                F.fmt_dev(j.get("dev_main")),
                 SCR_CN.get(s.get("state"), s.get("state") or "-"),
-                "★" if r.get("recommend") else ""))
+                "★" if r.get("recommend") else "",
+                j.get("verdict_cn") or "—"))
         L.append("")
     md = os.path.join(OUT, "screener_%s_pass.md" % TAG)
     open(md, "w", encoding="utf-8").write("\n".join(L))
@@ -397,6 +423,11 @@ tr:hover td{background:#f7faff}
 .scr-拉升中{color:#2f6fed}
 .scr-筹码发散,.scr-破位下行,.scr-派发出货{color:#d4380d;font-weight:600}
 .foot{color:#8a9099;font-size:12px;margin:22px 0 8px}
+.v-ok{color:#237804;font-weight:600}
+.v-bad{color:#d4380d;font-weight:700}
+.v-warn{color:#8a6100;font-weight:600}
+.v-unknown{color:#8a9099}
+.hint{background:#fff8e6;border:1px solid #f0d68a;border-radius:8px;padding:9px 13px;font-size:12.5px;margin:10px 0;color:#5c4b12}
 """
     H = []
     H.append("<!doctype html><meta charset='utf-8'><title>双通过名单 · %s 收盘</title>" % TAG.split("_")[0])
@@ -405,30 +436,66 @@ tr:hover td{background:#f7faff}
     H.append("<div class='mut'>基准日 <b>%s</b>（当日已收盘）｜ 排序：战法优先级 → 组内按 R 降序</div>"
              % TAG.split("_")[0])
     H.append("<div class='kv'>信号 <b>%d</b> 只 → 双通过 <b>%d</b> 只（★引擎推荐 <b>%d</b>）"
-             "｜ 被筹码否 <b>%d</b> 只<br>"
+             "｜ 被筹码否 <b>%d</b> 只｜ 🚦 <b>最终可上 %d</b> 只<br>"
              "「区内/区外」= 现价相对买区的位置：<span class='zone-in'>区内</span> 现价就在买区，"
              "<span class='zone-out'>区外</span> 现价已离开买区、需等回踩。</div>"
-             % (len(rows), len(allow), len(star), len(rej)))
+             % (len(rows), len(allow), len(star), len(rej), len(final)))
+    H.append("<div class='hint'>🚦 <b>最终可上</b> = 双通过 + <b>高位闸</b>（现价偏离主力成本 &lt; %.0f%%）"
+             " + <b>赔率闸</b>（R→t1 ≥ %.1f）。双通过但被这两闸拦下的 <b>%d</b> 只，"
+             "「判定」列会写明原因（<span class='v-bad'>高位·脱离成本区</span> / "
+             "<span class='v-warn'>赔率不足</span>）。闸门单一真源：<code>screener/filters.py</code>。</div>"
+             % (F.HIGH_DEV_LIMIT, F.MIN_RR, len(blocked)))
+
+    # ── 🚦 最终可上清单 ──
+    H.append("<h2>🚦 最终可上（%d 只）</h2>" % len(final))
+    if final:
+        H.append("<table><tr><th>代码</th><th>名称</th><th>战法</th><th>现价</th><th>买区</th><th>止损</th>"
+                 "<th>t1</th><th>R→t1</th><th>离主成本</th><th>筹码</th><th>推</th></tr>")
+        for r in sorted(final, key=lambda x: -(x.get("rr1") or 0)):
+            s = r.get("scr") or {}
+            j = judged.get(r.get("code")) or {}
+            H.append("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td class='%s'>%s</td><td>%s</td>"
+                     "<td>%s</td><td>%s</td><td class='v-ok'>%s</td><td class='scr-%s'>%s</td>"
+                     "<td class='%s'>%s</td></tr>" % (
+                         r.get("code"), r.get("name"), MODE_CN.get(r.get("mode"), r.get("mode")),
+                         num(r.get("spot")), "zone-in" if r.get("in_zone") else "zone-out", zone(r),
+                         num(r.get("stop")), num(r.get("t1")), num(r.get("rr1"), "%.2f"),
+                         F.fmt_dev(j.get("dev_main")),
+                         SCR_CN.get(s.get("state"), s.get("state") or "-"),
+                         SCR_CN.get(s.get("state"), s.get("state") or "-"),
+                         "star" if r.get("recommend") else "", "★" if r.get("recommend") else ""))
+        H.append("</table>")
+    else:
+        H.append("<div class='hint'>今日无票同时通过高位闸与赔率闸 ⇒ <b>空仓也是一种决策</b>。</div>")
     for m in order:
         g = sorted(by[m], key=lambda r: -(r.get("rr1") or 0))
-        H.append("<h2>%s（%d 只，★%d）</h2>"
-                 % (MODE_CN.get(m, m), len(g), sum(1 for r in g if r.get("recommend"))))
+        H.append("<h2>%s（%d 只，★%d，🚦可上 %d）</h2>"
+                 % (MODE_CN.get(m, m), len(g), sum(1 for r in g if r.get("recommend")),
+                    sum(1 for r in g if F.is_actionable(judged.get(r.get("code")) or {}))))
         H.append("<table><tr><th>代码</th><th>名称</th><th>现价</th><th>买区</th><th>止损</th>"
-                 "<th>t1</th><th>R→t1</th><th>筹码</th><th>推</th></tr>")
+                 "<th>t1</th><th>R→t1</th><th>离主成本</th><th>筹码</th><th>推</th><th>判定</th></tr>")
         for r in g:
             s = r.get("scr") or {}
             lo, hi, iz = r.get("buy_lo"), r.get("buy_hi"), r.get("in_zone")
             zc = "zone-in" if iz else "zone-out"
             sc = SCR_CN.get(s.get("state"), s.get("state") or "-")
+            j = judged.get(r.get("code")) or {}
+            vc = F.VERDICT_COLOR.get(j.get("verdict") or "", "unknown")
             H.append("<tr><td>%s</td><td>%s</td><td>%s</td><td class='%s'>%s</td><td>%s</td>"
-                     "<td>%s</td><td>%s</td><td class='scr-%s'>%s</td><td class='%s'>%s</td></tr>" % (
+                     "<td>%s</td><td>%s</td><td>%s</td><td class='scr-%s'>%s</td><td class='%s'>%s</td>"
+                     "<td class='v-%s'>%s</td></tr>" % (
                          r.get("code"), r.get("name"), num(r.get("spot")), zc, zone(r),
                          num(r.get("stop")), num(r.get("t1")), num(r.get("rr1"), "%.2f"),
+                         F.fmt_dev(j.get("dev_main")),
                          sc, sc, "star" if r.get("recommend") else "",
-                         "★" if r.get("recommend") else ""))
+                         "★" if r.get("recommend") else "",
+                         vc, j.get("verdict_cn") or "—"))
         H.append("</table>")
     H.append("<div class='foot'>★ = 引擎额外推荐。R 为现价口径静态赔率；出水芙蓉（真触发价在昨高上方）、"
-             "流星砸坑（回踩 MA5 买）两类 R 会系统性偏低，不代表机会差，不据此排序。</div>")
+             "流星砸坑（回踩 MA5 买）两类 R 会系统性偏低，不代表机会差，不据此排序。<br>"
+             "「离主成本」= 现价相对主力成本（低位带均价退化口径）的偏离度；偏离越大＝离成本区越远＝"
+             "止损越宽、赔率被吃光。⚠ R 在高位票上会失真（t1 是「涨多了自然远」而止损没跟着走）"
+             "⇒ 高位闸与赔率闸必须并看。闸门单一真源：<code>screener/filters.py</code>。</div>")
     H.append("</div>")
     hp = os.path.join(OUT, "screener_%s_pass.html" % TAG)
     open(hp, "w", encoding="utf-8").write("\n".join(H))
