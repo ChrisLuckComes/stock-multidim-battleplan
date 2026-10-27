@@ -15,6 +15,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 from screener import filters as F   # ⚑ 高位闸/赔率闸 单一真源（老罗 2026-10-27）
+from screener import report_calendar as RC   # ⚑ 定期报告披露窗口（老罗 2026-10-27）
 OUT = os.path.join(ROOT, "out_cn")
 TAG = "0000-00-00_close"  # 由 main() 按 --date 覆盖，避免硬编码日期读错 jsonl
 
@@ -157,6 +158,8 @@ tr:hover td{background:#f7faff}
 .v-bad{color:#d4380d;font-weight:700}
 .v-warn{color:#8a6100;font-weight:600}
 .v-unknown{color:#8a9099}
+.rep-ok{color:#237804;font-weight:600}
+.rep-blind{color:#d4380d;font-weight:700}
 .hint{background:#fff8e6;border:1px solid #f0d68a;border-radius:8px;padding:9px 13px;font-size:12.5px;margin:10px 0;color:#5c4b12}
 """
     H = []
@@ -288,6 +291,8 @@ tr:hover td{background:#f7faff}
 .v-bad{color:#d4380d;font-weight:700}
 .v-warn{color:#8a6100;font-weight:600}
 .v-unknown{color:#8a9099}
+.rep-ok{color:#237804;font-weight:600}
+.rep-blind{color:#d4380d;font-weight:700}
 .hint{background:#fff8e6;border:1px solid #f0d68a;border-radius:8px;padding:9px 13px;font-size:12.5px;margin:10px 0;color:#5c4b12}
 """
     H = []
@@ -355,8 +360,32 @@ def main():
     star = [r for r in allow if r.get("recommend")]
     # ⚑ 高位闸 + 赔率闸（老罗 2026-10-27）：双通过 ≠ 可上 —— 离主力成本区太远 / 赔率不足的都要剔出来
     judged = {r.get("code"): F.judge_row(r) for r in rows}
-    final = [r for r in allow if F.is_actionable(judged.get(r.get("code")) or {})]
+    # ⚑ 定期报告披露窗口（老罗 2026-10-27）：**窗口内才核对披露状态，窗口外零开销**。
+    #   窗口 = 法定披露截止日前 before_days 天 ~ 截止日后 after_days 天。
+    #   窗口内「该期报告未出」= 业绩盲区（赌财报）⇒ 标出且**不进最终可上**。
+    win = None
+    try:
+        win = RC.annotate(rows, before_days=RC.DEFAULT_BEFORE_DAYS,
+                           after_days=RC.DEFAULT_AFTER_DAYS)
+    except Exception:
+        win = None
+    # 窗口内三档：① 业绩已明且非晚出 ⇒ 可上；② 晚出（赶deadline）⇒ 质量弱，出局；
+    #            ③ 既无报告也无预告 ⇒ 真盲区（赌财报），出局。
+    final = [r for r in allow
+             if F.is_actionable(judged.get(r.get("code")) or {})
+             and (win is None or (r.get("_report_shown")
+                                  and r.get("_report_tier") != "晚"))]
     blocked = [r for r in allow if r not in final]
+
+    def _rep_cell(r):
+        """报告披露状态单元格文案。窗口外 ⇒ 不适用。"""
+        if win is None:
+            return "—"
+        if not r.get("_report_shown"):
+            return "未出·盲区"
+        kind = r.get("_report_kind") or "已出"
+        tier = r.get("_report_tier") or ""
+        return ("%s·%s" % (kind, tier)) if tier else kind
 
     by = defaultdict(list)
     for r in allow:
@@ -372,6 +401,18 @@ def main():
     L.append("> 🚦 闸门（screener/filters.py 单一真源）：**高位闸** 现价偏离主力成本 < %.0f%% ｜ "
              "**赔率闸** R(→t1) ≥ %.1f。双通过但被这两闸拦下的 **%d** 只标在「判定」列。\n"
              % (F.HIGH_DEV_LIMIT, F.MIN_RR, len(blocked)))
+    if win:
+        L.append("> 📅 **定期报告披露窗口内**（%s，报告期 %s；法定截止 %s ⇒ 实际截止交易日 %s）："
+                 "窗口交易日 %s。\n"
+                 "> 　业绩已明 = 正式报告已出 **或** 该期预告已出（取更早者）；"
+                 "**未出·盲区**（赌财报）与**晚出·质量弱**（披露日落在窗口最后 %d 个交易日）"
+                 "**都不进最终可上**。全市场已出 %d 只。\n"
+                 % (win["period"], win["report_date"], win["deadline"],
+                    win["deadline_trade_day"], "、".join(win["trade_days"]),
+                    win.get("late_tail_days", 1), win.get("shown_count", 0)))
+    else:
+        L.append("> 📅 当前**不在定期报告披露窗口**（各期法定截止日前 %d 天起才启用报告闸）⇒ "
+                 "「报告」列不适用，本表不因此多做判断。\n" % RC.DEFAULT_BEFORE_DAYS)
     L.append("> 排序：战法优先级 → 组内按 R(→t1) 降序。`区内/区外` = 现价相对买区的位置，"
              "区外表示现价已离开买区、需等回踩。\n")
     L.append("| 战法 | 双通过 | ★推荐 | 🚦最终可上 |")
@@ -388,18 +429,21 @@ def main():
         g = sorted(by[m], key=lambda r: -(r.get("rr1") or 0))
         L.append("## %s（%d 只，★%d）\n"
                  % (MODE_CN.get(m, m), len(g), sum(1 for r in g if r.get("recommend"))))
-        L.append("| 代码 | 名称 | 现价 | 买区 | 止损 | t1 | R→t1 | 离主成本 | 筹码 | 推 | 判定 |")
-        L.append("|---|---|---|---|---|---|---|---|---|---|---|")
+        L.append("| 代码 | 名称 | 现价 | 买区 | 止损 | t1 | R→t1 | 离主成本 | 报告 | 筹码 | 推 | 判定 |")
+        L.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
         for r in g:
             s = r.get("scr") or {}
             j = judged.get(r.get("code")) or {}
-            L.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+            L.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
                 r.get("code"), r.get("name"), num(r.get("spot")), zone(r),
                 num(r.get("stop")), num(r.get("t1")), num(r.get("rr1"), "%.2f"),
-                F.fmt_dev(j.get("dev_main")),
+                F.fmt_dev(j.get("dev_main")), _rep_cell(r),
                 SCR_CN.get(s.get("state"), s.get("state") or "-"),
                 "★" if r.get("recommend") else "",
-                j.get("verdict_cn") or "—"))
+                ((("报告未出·盲区" if not r.get("_report_shown")
+                    else ("晚出·质量弱" if r.get("_report_tier") == "晚" else "")) + "｜")
+                 if win else "")
+                + (j.get("verdict_cn") or "—")))
         L.append("")
     md = os.path.join(OUT, "screener_%s_pass.md" % TAG)
     open(md, "w", encoding="utf-8").write("\n".join(L))
@@ -427,6 +471,8 @@ tr:hover td{background:#f7faff}
 .v-bad{color:#d4380d;font-weight:700}
 .v-warn{color:#8a6100;font-weight:600}
 .v-unknown{color:#8a9099}
+.rep-ok{color:#237804;font-weight:600}
+.rep-blind{color:#d4380d;font-weight:700}
 .hint{background:#fff8e6;border:1px solid #f0d68a;border-radius:8px;padding:9px 13px;font-size:12.5px;margin:10px 0;color:#5c4b12}
 """
     H = []
@@ -440,6 +486,18 @@ tr:hover td{background:#f7faff}
              "「区内/区外」= 现价相对买区的位置：<span class='zone-in'>区内</span> 现价就在买区，"
              "<span class='zone-out'>区外</span> 现价已离开买区、需等回踩。</div>"
              % (len(rows), len(allow), len(star), len(rej), len(final)))
+    if win:
+        H.append("<div class='hint'>📅 <b>定期报告披露窗口内</b>（%s，报告期 %s；法定截止 %s ⇒ "
+                 "实际截止交易日 <b>%s</b>；窗口交易日 %s）<br>"
+                 "业绩已明 = 正式报告已出 <b>或</b> 该期预告已出（取更早者）；"
+                 "<span class='rep-blind'>未出·盲区</span>（赌财报）与 <span class='rep-blind'>晚出·质量弱</span>"
+                 "（披露日落在窗口最后 %d 个交易日）<b>都不进最终可上</b>。全市场已出 %d 只。</div>"
+                 % (win["period"], win["report_date"], win["deadline"],
+                    win["deadline_trade_day"], "、".join(win["trade_days"]),
+                    win.get("late_tail_days", 1), win.get("shown_count", 0)))
+    else:
+        H.append("<div class='hint'>📅 当前<b>不在定期报告披露窗口</b>（各期法定截止日前 %d 天起才启用报告闸）"
+                 "⇒ 「报告」列不适用。</div>" % RC.DEFAULT_BEFORE_DAYS)
     H.append("<div class='hint'>🚦 <b>最终可上</b> = 双通过 + <b>高位闸</b>（现价偏离主力成本 &lt; %.0f%%）"
              " + <b>赔率闸</b>（R→t1 ≥ %.1f）。双通过但被这两闸拦下的 <b>%d</b> 只，"
              "「判定」列会写明原因（<span class='v-bad'>高位·脱离成本区</span> / "
@@ -450,17 +508,20 @@ tr:hover td{background:#f7faff}
     H.append("<h2>🚦 最终可上（%d 只）</h2>" % len(final))
     if final:
         H.append("<table><tr><th>代码</th><th>名称</th><th>战法</th><th>现价</th><th>买区</th><th>止损</th>"
-                 "<th>t1</th><th>R→t1</th><th>离主成本</th><th>筹码</th><th>推</th></tr>")
+                 "<th>t1</th><th>R→t1</th><th>离主成本</th><th>报告</th><th>筹码</th><th>推</th></tr>")
         for r in sorted(final, key=lambda x: -(x.get("rr1") or 0)):
             s = r.get("scr") or {}
             j = judged.get(r.get("code")) or {}
             H.append("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td class='%s'>%s</td><td>%s</td>"
-                     "<td>%s</td><td>%s</td><td class='v-ok'>%s</td><td class='scr-%s'>%s</td>"
+                     "<td>%s</td><td>%s</td><td class='v-ok'>%s</td><td class='%s'>%s</td>"
+                     "<td class='scr-%s'>%s</td>"
                      "<td class='%s'>%s</td></tr>" % (
                          r.get("code"), r.get("name"), MODE_CN.get(r.get("mode"), r.get("mode")),
                          num(r.get("spot")), "zone-in" if r.get("in_zone") else "zone-out", zone(r),
                          num(r.get("stop")), num(r.get("t1")), num(r.get("rr1"), "%.2f"),
                          F.fmt_dev(j.get("dev_main")),
+                         ("rep-ok" if r.get("_report_shown") else "rep-blind") if win else "",
+                         _rep_cell(r),
                          SCR_CN.get(s.get("state"), s.get("state") or "-"),
                          SCR_CN.get(s.get("state"), s.get("state") or "-"),
                          "star" if r.get("recommend") else "", "★" if r.get("recommend") else ""))
@@ -473,7 +534,7 @@ tr:hover td{background:#f7faff}
                  % (MODE_CN.get(m, m), len(g), sum(1 for r in g if r.get("recommend")),
                     sum(1 for r in g if F.is_actionable(judged.get(r.get("code")) or {}))))
         H.append("<table><tr><th>代码</th><th>名称</th><th>现价</th><th>买区</th><th>止损</th>"
-                 "<th>t1</th><th>R→t1</th><th>离主成本</th><th>筹码</th><th>推</th><th>判定</th></tr>")
+                 "<th>t1</th><th>R→t1</th><th>离主成本</th><th>报告</th><th>筹码</th><th>推</th><th>判定</th></tr>")
         for r in g:
             s = r.get("scr") or {}
             lo, hi, iz = r.get("buy_lo"), r.get("buy_hi"), r.get("in_zone")
@@ -482,20 +543,28 @@ tr:hover td{background:#f7faff}
             j = judged.get(r.get("code")) or {}
             vc = F.VERDICT_COLOR.get(j.get("verdict") or "", "unknown")
             H.append("<tr><td>%s</td><td>%s</td><td>%s</td><td class='%s'>%s</td><td>%s</td>"
-                     "<td>%s</td><td>%s</td><td>%s</td><td class='scr-%s'>%s</td><td class='%s'>%s</td>"
+                     "<td>%s</td><td>%s</td><td>%s</td><td class='%s'>%s</td>"
+                     "<td class='scr-%s'>%s</td><td class='%s'>%s</td>"
                      "<td class='v-%s'>%s</td></tr>" % (
                          r.get("code"), r.get("name"), num(r.get("spot")), zc, zone(r),
                          num(r.get("stop")), num(r.get("t1")), num(r.get("rr1"), "%.2f"),
                          F.fmt_dev(j.get("dev_main")),
+                         ("rep-ok" if r.get("_report_shown") else "rep-blind") if win else "",
+                         _rep_cell(r),
                          sc, sc, "star" if r.get("recommend") else "",
                          "★" if r.get("recommend") else "",
-                         vc, j.get("verdict_cn") or "—"))
+                         vc, ((("报告未出·盲区｜" if win and not r.get("_report_shown")
+                                 else ("晚出·质量弱｜" if win and r.get("_report_tier") == "晚" else "")))
+                              + (j.get("verdict_cn") or "—"))))
         H.append("</table>")
     H.append("<div class='foot'>★ = 引擎额外推荐。R 为现价口径静态赔率；出水芙蓉（真触发价在昨高上方）、"
              "流星砸坑（回踩 MA5 买）两类 R 会系统性偏低，不代表机会差，不据此排序。<br>"
              "「离主成本」= 现价相对主力成本（低位带均价退化口径）的偏离度；偏离越大＝离成本区越远＝"
              "止损越宽、赔率被吃光。⚠ R 在高位票上会失真（t1 是「涨多了自然远」而止损没跟着走）"
-             "⇒ 高位闸与赔率闸必须并看。闸门单一真源：<code>screener/filters.py</code>。</div>")
+             "⇒ 高位闸与赔率闸必须并看。闸门单一真源：<code>screener/filters.py</code>。<br>"
+             "「报告」列 = 该期定期报告是否已披露（<b>仅在法定披露截止日前 %d 天起的窗口内有效</b>，"
+             "窗口外不适用）。报告期日历单一真源：<code>screener/report_calendar.py</code>。</div>"
+             % RC.DEFAULT_BEFORE_DAYS)
     H.append("</div>")
     hp = os.path.join(OUT, "screener_%s_pass.html" % TAG)
     open(hp, "w", encoding="utf-8").write("\n".join(H))

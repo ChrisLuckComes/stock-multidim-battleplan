@@ -327,8 +327,16 @@ P95 就被撑高，**明显在吸筹的票也会算出 SCR90 20%+ 被判「发�
 `scan_warfare` → `scr_sweep` → `gen_pass_list` → `elastic_dual`（+ `deliver_dual_surge`）。
 
 ⚠ 每日收盘自动化的 prompt / 命令序列里**禁止**出现 `q3_filter`；需要时**人工显式调用**。
-⚠ 通用闸门**不属**特写、必须常驻：`screener/filters.py`（高位闸 + 赔率闸）已接入
-`gen_pass_list` / `q3_filter` / `battle_analyze` / `session_decide` / `surge_pick`。
+⚠ **通用闸门不属特写、必须常驻**（判别标准：**平时一直成立 ⇒ 通用闸门；
+只在某个披露窗口/事件期成立 ⇒ 特写逻辑**）：
+| 通用闸门 | 作用 | 接入点 |
+|---|---|---|
+| `screener/filters.py` | 高位闸（偏离主力成本 ≥35%）+ 赔率闸（R≥1.5） | `gen_pass_list` / `q3_filter` / `battle_analyze` / `session_decide` / `surge_pick` |
+| `screener/report_calendar.py` | **定期报告披露窗口**（按**交易日**：法定截止日前 3 个交易日起）＋ 披露早晚分层 | `gen_pass_list`（窗口内自动启用报告闸） |
+| `screener/earnings.py` | 业绩取数（**正式报告优先于预告**） | `surge_pick` |
+
+⚑ `report_calendar` 与 `q3_filter` 的区别：前者**常年成立**（每到窗口自动生效、窗口外自动不生效）⇒ 通用闸门；
+后者绑死某个报告期 ⇒ 特写逻辑。
 
 ## 2. 账户配置边界 / Forbidden
 

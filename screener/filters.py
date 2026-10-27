@@ -23,9 +23,16 @@
 """
 from __future__ import annotations
 
+import os
+
 # ── 阈值（唯一真源，各处引用此处，禁各自硬编码）──────────────────────────
-# 高位闸：现价偏离主力成本 ≥ 30% ⇒ 判「脱离成本区·高位」
-HIGH_DEV_LIMIT = 30.0
+# 高位闸：现价偏离主力成本 ≥ 35% ⇒ 判「脱离成本区·高位」
+#   ⚑ 2026-10-27 老罗定：从 30% 放宽到 35%（原 30% 把乐鑫科技 688018 +30.5% 误杀，
+#     而它是全集唯一「业绩+营收双升」且 R=2.84 的票）。可用环境变量 STOCK_HIGH_DEV_LIMIT 覆盖。
+try:
+    HIGH_DEV_LIMIT = float(os.environ.get("STOCK_HIGH_DEV_LIMIT", "") or 35.0)
+except (TypeError, ValueError):
+    HIGH_DEV_LIMIT = 35.0
 # 赔率闸：R(→t1) < 1.5 ⇒ 赔率不成立（与 battle_analyze METEOR_RR_GATE / us_session_decide 同尺）
 MIN_RR = 1.5
 

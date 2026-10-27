@@ -17,7 +17,8 @@ from screener import filters as F  # noqa: E402
 
 # ── 阈值单一真源 ────────────────────────────────────────────────────────────
 def test_thresholds_are_single_source():
-    assert F.HIGH_DEV_LIMIT == 30.0
+    # ⚑ 2026-10-27 老罗定：高位闸由 30% 放宽到 35%（原 30% 误杀乐鑫科技 688018 +30.5%）
+    assert F.HIGH_DEV_LIMIT == 35.0
     assert F.MIN_RR == 1.5
 
 
@@ -56,10 +57,10 @@ def test_pos_gate_unknown_is_not_a_rejection():
 
 
 def test_pos_gate_boundary_exactly_at_limit():
-    """偏离正好 30% ⇒ 判出局（阈值是「≥」）。"""
-    ok, _ = F.pos_ok(13.0, 10.0)
+    """偏离正好 35% ⇒ 判出局（阈值是「≥」）；34.9% ⇒ 放行。"""
+    ok, _ = F.pos_ok(13.5, 10.0)
     assert ok is False
-    ok2, _ = F.pos_ok(12.9, 10.0)
+    ok2, _ = F.pos_ok(13.49, 10.0)
     assert ok2 is True
 
 
