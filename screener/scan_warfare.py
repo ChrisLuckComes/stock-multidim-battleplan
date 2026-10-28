@@ -68,7 +68,7 @@ DEFAULT_TOP = 120
 
 
 # ────────────────────────── 宽基：落库 + 供 market_regime 复用 ──────────────────────────
-def ensure_broad(conn, verbose=True):
+def ensure_broad(conn, verbose=True, midday=False):
     """保证 3 个宽基日线在库内**且是最新交易日**；并把 market_regime 的取数 patch 成读库（不联网）。
 
     ⚠ 不 patch 的话，plan_entry 默认 market_regime_enabled=True 会给**每只票**都
@@ -84,20 +84,29 @@ def ensure_broad(conn, verbose=True):
     """
     today = store._today_bj()
     # ① 新鲜度：宽基末根 < 今日 → 单拉当日 bar
-    for c in BROAD_CODES:
-        md = store.max_date(conn, c)
-        if not md or md >= today:
-            continue
-        tb = store.synth_today_bar_tencent(c, target=today)
-        if tb and tb["d"] > md:
-            store.save_bars(conn, c, [tb])
-            conn.commit()
-            if verbose:
-                print("宽基补当日bar %s：%s O%.2f C%.2f v=%.0f"
-                      % (c, tb["d"], tb["o"], tb["c"], tb["v"]), flush=True)
-        elif verbose:
-            print("⚠ 宽基 %s 停在 %s（今日 %s 未取到）—— 今日可能非交易日，或单拉源不可用"
-                  % (c, md, today), flush=True)
+    # ⚑ 2026-10-28 修复（盘中 hang 根因）：盘中会话**绝不**拉今日宽基半根。
+    #   今日半根 bar 一旦写库 → 宽基末根变「今日」→ _session_target 把目标日锁成今日
+    #   → ensure_today_bars 全市场补今日半根 → 源取不到 → 600s 限流等待 + 半根污染库 → hang。
+    #   盘中目标日必须停在「最近完整交易日」（昨日收盘），宽基也只取昨日完整 bar。
+    if not midday:
+        for c in BROAD_CODES:
+            md = store.max_date(conn, c)
+            if not md or md >= today:
+                continue
+            tb = store.synth_today_bar_tencent(c, target=today)
+            if tb and tb["d"] > md:
+                store.save_bars(conn, c, [tb])
+                conn.commit()
+                if verbose:
+                    print("宽基补当日bar %s：%s O%.2f C%.2f v=%.0f"
+                          % (c, tb["d"], tb["o"], tb["c"], tb["v"]), flush=True)
+            elif verbose:
+                print("⚠ 宽基 %s 停在 %s（今日 %s 未取到）—— 今日可能非交易日，或单拉源不可用"
+                      % (c, md, today), flush=True)
+    else:
+        if verbose:
+            print("⚠ 盘中会话：跳过宽基「今日半根」单拉（宽基末根停在最近完整交易日，不锁今日）",
+                  flush=True)
     # ② 根数不足 → 全量落库（原逻辑；baostock 不可用时降级为不阻断）
     need = []
     for c in BROAD_CODES:
@@ -142,7 +151,7 @@ def ensure_broad(conn, verbose=True):
     return cache
 
 
-def _session_target(conn, cache=None):
+def _session_target(conn, cache=None, midday=False):
     """本次扫描的**目标交易日**（= 最近一个已收盘交易日）+ 是否陈旧。
 
     ⚑ 2026-10-21（老罗「彻底修复」· 漏洞 B）：扫描基准日必须等于「最近已收盘交易日」。
@@ -169,6 +178,19 @@ def _session_target(conn, cache=None):
     if broad_last and all_last and broad_last != all_last:
         print("⚠ 宽基末根 %s ≠ 全库最新 %s → 基准日取较新者 %s"
               % (broad_last, all_last, target), flush=True)
+    # ⚑ 2026-10-28 修复（盘中 hang 根因）：盘中会话绝不把目标日锁成「今日」。
+    #   盘中今日日线不完整（半根），一旦 target=今日就会触发 ensure_today_bars 全市场补
+    #   今日半根 → 源取不到 → 600s 限流等待 + 半根写库污染基准日 → hang。
+    #   盘中目标日必须收敛为「最近完整交易日」（任何 < 今日 的候选里取最新）。
+    if midday and target >= today:
+        capped = max((c for c in cands if c < today), default="")
+        if capped:
+            target = capped
+            print("⚠ 盘中会话：目标日由 %s 收敛为最近完整交易日 %s（不锁今日半根）"
+                  % (today, target), flush=True)
+        else:
+            print("⚠ 盘中会话：库内无任何 < 今日 的已收盘日，目标日维持 %s（数据可能严重不足）"
+                  % target, flush=True)
     stale = bool(after_close and target < today)
     if stale:
         print("⚠⚠ 基准日 %s < 今日 %s（已收盘但当日数据没拿到）→ 本次扫描**不出信号**"
@@ -742,9 +764,18 @@ def main():
     ap.add_argument("--continuity-state", default=None,
                     help="延续状态文件（默认 <out-dir>/screener_continuity_state.json）")
     args = ap.parse_args()
+    midday = (args.session == "midday")
 
     conn = store.connect()
     store.init_db(conn)
+    # ⚑ 2026-10-28 修复（防御）：盘中开始前清掉库内任何「今日」半根 bar，
+    #   杜绝上一跑/其他路径残留的今日半根污染基准日（10-27、10-28 两次 hang 的根因之一）。
+    #   收盘会话不动（今日完整 bar 由后续 ensure_today_bars 正常补齐）。
+    if midday:
+        n = conn.execute("DELETE FROM bars WHERE d = ?", (store._today_bj(),)).rowcount
+        conn.commit()
+        if n:
+            print("⚠ 盘中防御：清掉库内 %d 条今日半根 bar（d=%s）" % (n, store._today_bj()), flush=True)
     if args.refresh_universe or not conn.execute("SELECT COUNT(*) FROM stocks").fetchone()[0]:
         store.refresh_universe(conn)
     if args.refresh:
@@ -752,12 +783,12 @@ def main():
         #   而 CLI 默认已是 6。漏传会让全市场刷新从 ~6 分钟拖到 ~44 分钟
         #   （2026-10-19 实测：200 只 101s = 0.5s/只 ⇒ 5225 只 ≈ 44min）。
         store.refresh_bars(conn, full=args.full, limit=args.limit, workers=args.workers)
-    cache = ensure_broad(conn)
+    cache = ensure_broad(conn, midday=midday)
     # ⚑ 2026-10-21（老罗「彻底修复」· 漏洞 B/C）：扫描前**必经**两步
     #   ① 定「目标交易日」= 宽基末根与全库最新末根的较新者（= 最近已收盘交易日）
     #   ② 把全库日线补到该日 —— 此前只有 tencent_light 的③步会补、baostock/mp 路径从不补
     #      ⇒ 1989/5004 只停在 T-1 ⇒ 拿 T-1 判「今日信号」= 爱博医疗 W底误判的根因
-    target, stale = _session_target(conn, cache)
+    target, stale = _session_target(conn, cache, midday=midday)
     fill = store.ensure_today_bars(conn, target=target, verbose=True)
     index_last = target
 

@@ -342,12 +342,19 @@ def synth_today_bar_tencent(code, target=None, ref_v=None, ref_max_v=None):
     try:
         from fetch import fetch_ashare as _fa
         arr = _fa.fetch_kline(code, n=3)
-        if arr and arr[-1].get("d") >= target:
-            last = arr[-1]
-            # 新浪 getKLineData 的 volume 已是「股」（实拍量比=1.0 vs baostock），
-            # 与库内口径一致，直接采用、勿乘 100（×100 是腾讯分钟线手→股才需要）。
-            return {"d": last["d"], "o": last["o"], "c": last["c"],
-                    "h": last["h"], "l": last["l"], "v": float(last["v"])}
+        if arr:
+            # ⚑ 2026-10-28 修复（盘中 hang 根因）：只接受「恰好 d == target」的那根，
+            #   绝不能取 arr[-1]（盘中 新浪会把「今日半根」当作最新日K 返回，d=今日
+            #   满足 >= target，但它是半根 → 写进日线库污染基准日、触发全市场串行重试 hang）。
+            #   · target=今日（收盘）：取到今日完整收盘 bar；
+            #   · target=昨日（盘中）：取到昨日完整 bar，忽略今日半根；
+            #   · target=历史日：取到该历史日 bar（仍在 n=3 窗口内时）。
+            last = next((x for x in arr if x.get("d") == target), None)
+            if last:
+                # 新浪 getKLineData 的 volume 已是「股」（实拍量比=1.0 vs baostock），
+                # 与库内口径一致，直接采用、勿乘 100（×100 是腾讯分钟线手→股才需要）。
+                return {"d": last["d"], "o": last["o"], "c": last["c"],
+                        "h": last["h"], "l": last["l"], "v": float(last["v"])}
     except Exception:  # noqa: BLE001
         pass  # 新浪不可达 → 落到腾讯分钟线兜底
     # ② 兜底：腾讯分钟线合成（只有「今天」的分钟线；target 非今日则无解）
@@ -469,9 +476,18 @@ def ensure_today_bars(conn, target=None, codes=None, workers=6, verbose=True,
     conn.commit()
 
     # 失败重试（串行，降级：源可能只是瞬时限流）
+    # ⚑ 2026-10-28 修复（盘中 hang 根因）：加全局截止时间，绝不允许挂死。
+    #   此前成片失败会进入下面 600s 限流等待 + 全市场串行重试 → 一次扫描卡十几分钟。
     if failed and retry:
+        deadline = time.time() + 90
         still = []
         for code in failed:
+            if time.time() > deadline:
+                if verbose:
+                    print("  ⚠ 补齐重试超过 90s 截止，剩余 %d 只放弃（交扫描层 fail-closed）"
+                          % (len(failed) - len(still)), flush=True)
+                still.extend(failed[len(still):])
+                break
             ref_v, ref_max = refs.get(code, (None, None))
             try:
                 tb = synth_today_bar_tencent(code, target=target,
@@ -486,14 +502,18 @@ def ensure_today_bars(conn, target=None, codes=None, workers=6, verbose=True,
         failed = still
         conn.commit()
 
-    # 仍成片失败：等过这一轮限流，只重试失败代码，每只留间隔。
-    if len(failed) > FILL_BURST_MIN:
+    # 仍成片失败：仅「补今日 bar（收盘会话）」才值得等限流窗口；盘中补历史日等也白等。
+    if len(failed) > FILL_BURST_MIN and target == _today_bj():
         if verbose:
-            print("  补齐失败 %d 只，超过 %d，等 %d 秒后只重试这批"
-                  % (len(failed), FILL_BURST_MIN, FILL_BURST_WAIT), flush=True)
-        time.sleep(FILL_BURST_WAIT)
+            print("  补齐失败 %d 只，等 %d 秒后只重试这批（仅收盘会话补今日 bar 走此路）"
+                  % (len(failed), min(FILL_BURST_WAIT, 30)), flush=True)
+        time.sleep(min(FILL_BURST_WAIT, 30))   # ⚑ 2026-10-28 防御：最长等 30s，不睡 600s
         still = []
+        deadline = time.time() + 60
         for code in failed:
+            if time.time() > deadline:
+                still.extend(failed[len(still):])
+                break
             ref_v, ref_max = refs.get(code, (None, None))
             try:
                 tb = synth_today_bar_tencent(code, target=target,
@@ -508,6 +528,10 @@ def ensure_today_bars(conn, target=None, codes=None, workers=6, verbose=True,
             time.sleep(FILL_BURST_GAP)
         failed = still
         conn.commit()
+    elif len(failed) > FILL_BURST_MIN:
+        if verbose:
+            print("  ⚠ 补齐失败 %d 只（盘中补历史日，不等限流窗口，直接交扫描层 fail-closed）"
+                  % len(failed), flush=True)
 
     meta_set(conn, "today_bar_target", target)
     meta_set(conn, "today_bar_filled", str(filled))
