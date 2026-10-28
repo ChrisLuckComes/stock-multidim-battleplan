@@ -534,6 +534,7 @@ P95 就被撑高，**明显在吸筹的票也会算出 SCR90 20%+ 被判「发�
 - **不要轻易卖赢家（hold_winners，2026-10-27）**：结构未破（收盘仍在关键均线/结构止损上、T0 三线还在、不是收盘派发）优先拿住，不因换票卖掉。用户同步卖出时跑 `python gates/hold_winners.py --sold <价>`；卖错（结构未破、只是盘中洗、或卖进浅档）必须当场纠正，给买区上沿/VWAP/−1% 接回或写明不要追，止损不放宽，R≥1.5。收盘已破、排列打乱、顶部确认、收盘派发 → 卖出成立，转入卖后观察。软标签不改 recommend；`hard_gate` 只在卖错时为真。不削弱收盘破才走，也不削弱当日消息不许回补。
 - **⚑ 持仓/股池改动必须「资料库（真源）+ watch_cn.json（本地缓存）」双写同步，禁止只改其一（2026-10-21 老罗纠正）**：加股 / 清仓 / 止损改价 / 入池出池任何变动，两边必须同时更新、状态一致；漏写一边 = 数据分叉，下次读取会拿到错的持仓。标准链路 = 本地改 `watch/watch_cn.json` → `library/sync_library.py --market cn --push` 同步资料库（database-id `eLKj7AvdWJyFmHYP6bCmku`，单票改走 `library/library_pos.py` 的 `add`/`set`/`note`）；反向用 `--pull`。⚠ rebase/冲突解决时尤其要核对两边：本次 c0d252c 把 watch_cn.json 整体替换为 16 票精简版，解决冲突只把乐鑫科技 688018 并入 watch 却漏了资料库，已补（id `gZ14emYAYpQldZP3ZCPqsq`）。
 - **收盘战法扫描交付 = 板块内双通过∩飙股（老罗 2026-10-26，2026-10-28 加板块层）**：链路 `scan_warfare` → `scr_sweep` → `deliver_dual_surge` → `sector_dual`。午盘不跑扫描（半根K线不可靠），改 `intraday_alert`。主表是高弹性（板块弹性分位≥75）∩ 战法闸+筹码 `allow_new`。禁止只交引擎序前 20。延续键仍是代码+战法。当日黑名单剔除。减持本档可标未检。
+- **美股早间池扫描补 bar（2026-10-28，TEM）**：评分前必须走 `watch/us_session_bar.resolve_session_bar`。CNBC 当日 o/h/l/c 有 None 时，用 Nasdaq 同日完整日线（或已经取到的 Nasdaq bars）补齐后再评 T0/突破；禁止 `patch incomplete` 把这只票踢出命中表。CNBC 只在 OHLC 齐全时作可选富集（`patched_cnbc=true`，`src` 仍记主源）。两边都没有完整 OHLC 才写 err。回归 `python -m pytest tests/data/test_us_session_bar.py -q`。
 
 ---
 
