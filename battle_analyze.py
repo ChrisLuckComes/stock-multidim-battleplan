@@ -740,7 +740,17 @@ def _pick_recommend_cn(rows, z, bars=None):
         scored.sort(key=lambda x: -x[0])
         return scored
 
-    primary = _primary_pool(rows, exec_stop)
+    # ★ 2026-10-29 修（老罗定口径）：推荐档筛选必须用 struct_stop（交易逻辑失效位），
+    #   而不是 exec_stop（含 MA20 缓冲带的更宽执行位）。
+    #   理由：A股 T+1 当天买进当天止损不了 ⇒ 止损位只是「次日的退路」，
+    #   纠结缓冲带宽窄没有意义；R 门槛衡量的是「这笔交易值不值得做」，
+    #   应锚定结构失效位。
+    #   ⚑ 修复前此处传 exec_stop，与本函数 docstring「止损 = 引擎结构止损」
+    #     及 _pick_recommend_us 的写法均不一致 ⇒ 注释与实现脱节。
+    #   ⚑ 缓冲带并未作废：exec_stop 保留给 qty 仓位换算（更宽 ⇒ 更保守），
+    #     恰好补偿 T+1 隔夜跳空 —— 两个用途分用两把尺，互不干扰。
+    primary = _primary_pool(rows, struct_stop
+                            if struct_stop is not None else exec_stop)
     best = None
     for pool in (primary, rows):
         if not pool:
@@ -1370,6 +1380,24 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
     top_verdict = TS_TOP.top_verdict(bars, atr_v=atr_v, live_last=_ts_live,
                                      name=name or market_data.get("name"))
     z = plan.get("buy_zone") or {}
+    # ★ 2026-10-29 修：把 stop_plan 的两档止损补回 buy_zone。
+    #   rule123.attach_stops_targets 只在**部分**分支里回写 z["struct_stop"]/["hard_stop"]
+    #   （第 2819 行附近），另有一些构造路径直接给 result["stop_plan"] 赋值（如 5816 行）
+    #   而**不回写 z** ⇒ 这些票的 buy_zone 里根本没有这两个键（300244 实测确认）。
+    #   后果有三，且都静默：
+    #     ① entry_candidates 的「结构完整性闸门」（规则 21，老罗 2026-10-11 定：
+    #        below 档买点必须 > struct_stop，否则＝接飞刀不生成）恒因
+    #        struct_floor=None 而**完全失效** ⇒ 接飞刀档没被砍掉；
+    #     ② _primary_pool 恒返回 [] ⇒ 推荐档永远回落到全矩阵，优先口径形同虚设；
+    #     ③ exec_stop_of 退化成「只取 MA20」⇒ 缓冲带口径失真（本该在
+    #        struct/hard/MA20 三者里取最低）。
+    #   此处统一补键，让三个下游口径都拿到真实的结构/硬止损。
+    _sp = plan.get("stop_plan") or {}
+    for _k, _v in (("struct_stop", _sp.get("struct")),
+                   ("hard_stop", _sp.get("hard")),
+                   ("hard_trigger", _sp.get("trigger"))):
+        if z.get(_k) is None and isinstance(_v, (int, float)):
+            z[_k] = _v
     ma5 = R.sma(closes, 5)
     ema10 = R.ema(closes, 10)
     ma20 = R.sma(closes, 20)
