@@ -249,21 +249,33 @@ def fetch_daily(bs, code, start=DEFAULT_START, end=None):
     return bars
 
 
-def _parse_tencent_rows(arr, start, end):
-    """腾讯 qfq 行 → bars。顺序 [date, open, close, high, low, vol(手)]。"""
+def _parse_tencent_rows(arr, code, start, end):
+    """腾讯 qfq 行 → bars。顺序 [date, open, close, high, low, vol]。
+
+    ⚠⚑ **成交量单位按板块分两种（2026-10-28 根因修复）**：
+       · 科创板(688/689)：腾讯 fqkline 直接返回「股」（与 baostock 的 v 同口径，
+         无需 ×100；已对 688781/688050 等实证，长历史 2025→2026 一致）；
+       · 主板/创业板/北交所：返回「手」，需 ×100 对齐 baostock。
+    此前无条件 `float(row[5]) * 100` ⇒ 565 只科创板历史量被放大 100 倍，换手率
+    虚高 86%~453% ⇒ SCR/主成本/RVOL 全线失真。该问题在 scr_chip._resolve_vol_scale
+    (2026-10-26) 已实证并修了**分析侧**，**入库侧漏改**直到本次才一并修。
+    """
+    mk, d = ash_market.split_code(code)
+    is_star = d.startswith(("688", "689"))
+    scale = 1.0 if is_star else 100.0
     bars = []
     for row in arr or []:
         try:
-            d = str(row[0])
-            if d < start or d > end:
+            d_ = str(row[0])
+            if d_ < start or d_ > end:
                 continue
             bars.append({
-                "d": d,
+                "d": d_,
                 "o": float(row[1]),
                 "c": float(row[2]),
                 "h": float(row[3]),
                 "l": float(row[4]),
-                "v": float(row[5]) * 100.0,  # 手→股，对齐 baostock
+                "v": float(row[5]) * scale,
             })
         except (TypeError, ValueError, IndexError):
             continue
@@ -310,7 +322,7 @@ def fetch_daily_tencent(code, start=DEFAULT_START, end=None, count=800):
                 if not node:
                     break
                 arr = node.get("qfqday") or node.get("day") or []
-                bars = _parse_tencent_rows(arr, start, end)
+                bars = _parse_tencent_rows(arr, code, start, end)
                 if len(bars) > len(best):
                     best = bars
                 break

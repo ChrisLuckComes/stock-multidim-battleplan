@@ -1215,14 +1215,21 @@ def bars_from_db(code, n=120, db_path=None):
         # ★ 同上：db 的 v 单位虽确定为「股」（known_scale=0.01），仍要过一遍自洽校验
         #   ——股本反解错 / 字段错位会让换手率失真，进而污染整个 SCR。
         #   校验不过就返回 None 让调用方走网络兜底，**不喂错数**。
-        try:
-            probe = float(rows[-1][5]) if rows[-1][5] else 0.0
-        except (TypeError, ValueError):
-            probe = 0.0
-        try:
-            _resolve_vol_scale(probe, shares_hand, turn_pct, known_scale=0.01)
-        except RuntimeError:
-            return None
+        # ⚑ 2026-10-28 强化（科创板历史 ×100 事件）：只查末根会漏掉「整段错位但末根正确」
+        #   的情况（当日 bar 由分钟线合成、单位对，前段却放大 100 倍）。故改为抽样
+        #   末根 + 倒数第 10 / 20 根，任一根换手率自洽不过即放弃本地源、走网络兜底。
+        probe_idxs = [-1]
+        if len(rows) >= 20:
+            probe_idxs += [-10, -20]
+        for pi in probe_idxs:
+            try:
+                probe = float(rows[pi][5]) if rows[pi][5] else 0.0
+            except (TypeError, ValueError):
+                probe = 0.0
+            try:
+                _resolve_vol_scale(probe, shares_hand, turn_pct, known_scale=0.01)
+            except RuntimeError:
+                return None
     bars = []
     for d, o, h, l, c, v in rows:
         v_shares = float(v) if v is not None else 0.0
