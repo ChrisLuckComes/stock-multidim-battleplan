@@ -93,7 +93,8 @@ def ensure_broad(conn, verbose=True, midday=False):
             md = store.max_date(conn, c)
             if not md or md >= today:
                 continue
-            tb = store.synth_today_bar_tencent(c, target=today)
+            tb = store.synth_today_bar_tencent(c, target=today,
+                                               db_bars=store.load_bars(conn, c, n=60))
             if tb and tb["d"] > md:
                 store.save_bars(conn, c, [tb])
                 conn.commit()

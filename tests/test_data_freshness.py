@@ -132,7 +132,7 @@ def test_ensure_today_bars_fills_missing(monkeypatch):
                  ("600000", today, 1, 1, 1, 1, 100))
     conn.commit()
 
-    def fake_synth(code, target=None, ref_v=None, ref_max_v=None):
+    def fake_synth(code, target=None, ref_v=None, ref_max_v=None, db_bars=None):
         return {"d": target, "o": 1, "h": 1, "l": 1, "c": 1, "v": 100}
 
     monkeypatch.setattr(store, "synth_today_bar_tencent", fake_synth)
@@ -166,7 +166,7 @@ def test_ensure_today_bars_burst_waits_then_retries_only_failed(monkeypatch):
     conn.commit()
     calls = {"n": 0}
 
-    def fake_synth(code, target=None, ref_v=None, ref_max_v=None):
+    def fake_synth(code, target=None, ref_v=None, ref_max_v=None, db_bars=None):
         calls["n"] += 1
         # 并发一轮 + 原串行重试都失败，等过之后的那轮才补上
         if calls["n"] <= n * 2:
@@ -179,7 +179,11 @@ def test_ensure_today_bars_burst_waits_then_retries_only_failed(monkeypatch):
     res = store.ensure_today_bars(conn, target=today, verbose=False, workers=1)
     assert res["filled"] == n
     assert res["failed"] == 0
-    assert store.FILL_BURST_WAIT in slept
+    # ⚑ 2026-10-28：等的是「封顶 30s」而不是 FILL_BURST_WAIT=600
+    #   （等 600s 正是「一次扫描卡十几分钟」的 hang 根因，已被防御性改掉）。
+    #   断言「确实等过」+「等的是 30s 这档」，不是死钉 600。
+    assert min(store.FILL_BURST_WAIT, 30) in slept
+    assert store.FILL_BURST_WAIT not in slept, "不该再睡满 600s（hang 根因）"
     assert slept.count(store.FILL_BURST_GAP) == n
 
 
@@ -206,7 +210,7 @@ def test_ensure_broad_fills_index(monkeypatch):
                      (c, _days_ago(3), 1, 1, 1, 1, 100))
     conn.commit()
 
-    def fake_synth(code, target=None, ref_v=None, ref_max_v=None):
+    def fake_synth(code, target=None, ref_v=None, ref_max_v=None, db_bars=None):
         return {"d": target, "o": 1, "h": 1, "l": 1, "c": 1, "v": 100}
 
     monkeypatch.setattr(store, "synth_today_bar_tencent", fake_synth)

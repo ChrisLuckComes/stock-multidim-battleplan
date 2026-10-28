@@ -88,6 +88,17 @@ TENCENT_THROTTLE = 0.12
 FILL_BURST_MIN = 50
 FILL_BURST_WAIT = 600
 FILL_BURST_GAP = 0.3
+# ⚑ 腾讯**日K**（第三级兜底）的全局限速：跨线程的最小请求间隔（秒）。
+#   ⚠ 2026-10-28（老罗「换源」定案）实测：fqkline 主机对本机高频并发**极敏感** ——
+#   8 并发打 372 只（≈124 req/s）能成，但**紧接着整片 501 封禁**（连 minute/query
+#   路径一起挂，分钟线兜底随之失效）。⇒ 第三级必须走全局限速，无论几个 worker 在跑，
+#   请求间隔恒 ≥ TENCENT_THROTTLE（≈8 req/s），宁可慢也不触发封禁。
+TXDAY_THROTTLE_LOCK = threading.Lock()
+TXDAY_LAST_TS = [0.0]
+# 第三级日K 的取数窗口：target 前后各留几天，覆盖「停牌/非交易日」错位。
+TXDAY_LOOKBACK = 15
+TXDAY_LOOKAHEAD = 5
+TXDAY_COUNT = 40
 
 
 # ────────────────────────────── 代码工具 ──────────────────────────────
@@ -259,15 +270,19 @@ def _parse_tencent_rows(arr, start, end):
     return bars
 
 
-def _tencent_kline_urls(tcode, start, end, count, bj):
-    """沪深只用 web.ifzq。北交所这条接口只回当日 1 根，历史前复权在 newfqkline。"""
-    primary = ("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=%s,day,%s,%s,%d,qfq"
-               % (tcode, start, end, int(count)))
+def _tencent_kline_urls(tcode, start, end, count, bj, fq="qfq"):
+    """沪深只用 web.ifzq。北交所这条接口只回当日 1 根，历史前复权在 newfqkline。
+
+    ⚑ fq：复权口径。默认 qfq（前复权，与库内 baostock adjustflag='2' 同口径）；
+      传 "0" = 不复权（当日 bar 取值与 qfq 相同，但部分 host 上更不易被限流）。
+    """
+    primary = ("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=%s,day,%s,%s,%d,%s"
+               % (tcode, start, end, int(count), fq))
     urls = [primary]
     if bj:
         urls.append(
             "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get"
-            "?param=%s,day,%s,%s,%d,qfq" % (tcode, start, end, int(count))
+            "?param=%s,day,%s,%s,%d,%s" % (tcode, start, end, int(count), fq)
         )
     return urls
 
@@ -326,7 +341,139 @@ def _resolve_intraday_volume(cum, ref_v=None, ref_max_v=None):
     return v
 
 
-def synth_today_bar_tencent(code, target=None, ref_v=None, ref_max_v=None):
+def _txday_throttle():
+    """全局限速：保证腾讯 fqkline 的**相邻请求间隔** ≥ TENCENT_THROTTLE（跨线程）。
+
+    ⚑ 2026-10-28 实证：fqkline 主机对本机高频极敏感 —— 8 并发 ≈124 req/s 能成，
+    但**紧接着整片 501 封禁**（连 minute/query 路径一起挂）。故第三级日K 的
+    所有线程共用一把锁，把有效速率压到 ~8 req/s。
+    """
+    with TXDAY_THROTTLE_LOCK:
+        now = time.time()
+        gap = now - TXDAY_LAST_TS[0]
+        if gap < TENCENT_THROTTLE:
+            time.sleep(TENCENT_THROTTLE - gap)
+        TXDAY_LAST_TS[0] = time.time()
+
+
+def _tx_day_rows(code, count=TXDAY_COUNT):
+    """腾讯 **日K** 原始行 → {d: (o,c,h,l,v_raw)} 或 None。
+
+    ⚑ v_raw **原样返回、不换算** —— 腾讯 fqkline 的 v 单位在本仓库两处文档结论相反
+      （bao_store 600000 实测「手」×100 / scr_chip 688781 实测「股」），
+      绝不断言，由 `_resolve_tx_day_volume` 与库内同日 bar **对拍**定夺。
+
+    ⚑ 取数变体：**qfq**（前复权，与库内同口径）优先，失败再试**不复权**（fqt=0）
+      —— 当日 bar 在两种口径下取值相同（复权因子在最新日为 1），
+      但不复权变体在某些 host 上更不容易被限流（2026-10-28 实测）。
+    """
+    mk, digits = ash_market.split_code(code)
+    tcode = mk + digits
+    bj = (mk == "bj")
+    urls = []
+    for fq in ("qfq", "0"):
+        urls.extend(_tencent_kline_urls(tcode, "", "", count, bj, fq=fq))
+    for url in urls:
+        for _ in range(2):
+            _txday_throttle()
+            try:
+                txt = _http_get(url, timeout=20, referer="https://gu.qq.com/")
+                js = json.loads(txt)
+                node = (js.get("data") or {}).get(tcode) or {}
+                arr = node.get("qfqday") or node.get("day") or []
+                rows = {}
+                for row in arr:
+                    try:
+                        rows[str(row[0])] = (float(row[1]), float(row[2]), float(row[3]),
+                                             float(row[4]), float(row[5]))
+                    except (TypeError, ValueError, IndexError):
+                        continue
+                if rows:
+                    return rows
+            except Exception:  # noqa: BLE001
+                time.sleep(0.3)
+        if not bj:
+            break
+    return None
+
+
+def _resolve_tx_day_volume(rows, db_bars, v_raw, target):
+    """腾讯日K 的 v → 「股」（对齐库内 baostock 口径）→ float 或 None。
+
+    ★ **绝不断言单位**（仓库两处文档结论相反）⇒ 与**库内同日 bar 对拍**定夺：
+      取最近若干重叠日算相对误差 |tx*scale − db| / db，scale ∈ {1(已是股), 100(是手)}，
+      选误差最小的那档；**最佳误差仍 >10% ⇒ 弃用（None）** ——
+      宁可缺一根 bar，也不写错量纲（错 100 倍 ⇒ RVOL 闸门全线失真且静默）。
+
+    无重叠日时退回 `_resolve_intraday_volume` 自适应（ref_v / ref_max_v 兜底）。
+    """
+    if not db_bars:
+        return None
+    db_by_d = {}
+    for b in db_bars:
+        try:
+            db_by_d[str(b["d"])] = float(b["v"])
+        except (TypeError, ValueError, KeyError):
+            continue
+    # 取最近 5 个重叠日做对拍（越近越代表当前口径；**含 target 同日** —— 同一根 bar
+    # 的量直接比，是最硬的校准）
+    pairs = []
+    for d in sorted(db_by_d, reverse=True):
+        if d in rows:
+            tv = rows[d][4]
+            dv = db_by_d[d]
+            if dv > 0 and tv > 0:
+                pairs.append((tv, dv))
+        if len(pairs) >= 5:
+            break
+    if not pairs:
+        return None
+    best, best_err = None, None
+    for scale in (1.0, 100.0):
+        errs = []
+        for tv, dv in pairs:
+            errs.append(abs(tv * scale - dv) / dv)
+        err = sorted(errs)[len(errs) // 2]        # 中位数抗单点异常
+        if best_err is None or err < best_err:
+            best, best_err = scale, err
+    if best_err is None or best_err > 0.10:
+        return None                                  # 对不上 ⇒ 弃用，不写错量纲
+    return v_raw * best
+
+
+def synth_today_bar_txday(code, target=None, db_bars=None):
+    """腾讯 **日K**（第三级兜底）→ {d,o,h,l,c,v} 或 None。
+
+    ⚑ 2026-10-28（老罗「换源」定案）：新浪日K 会**整段限流**（沪市 600/601/603 排在
+      队列末段、整段撞上限流窗口，实测 372 只全挂），而腾讯**分钟线**在本机也被墙(501)
+      ⇒ 两级兜底同时失效 ⇒ 当日 bar 补不上 → 扫描层 fail-closed 把这批票全拦下。
+      ⇒ 加第三级：**腾讯日K**（fqkline/get，qfq）—— 该端点通、0.1s/只、直接给完整日K。
+
+    ⚑ 口径（★ 与库内自洽）：
+      · 库内 = baostock **前复权**(ADJUST='2')，腾讯取 **qfq** ⇒ 同为前复权；
+      · 当日那根本身在两种复权下都是**原始成交价**（前复权因子在最新日为 1），
+        故当日 bar 的 OHLC 与库内基准自洽（历史段的复权差异由刷新层的重叠校验兜）。
+
+    db_bars: 库内该票近期 bars（旧→新，v 为「股」）—— 供成交量单位**对拍**用。
+    """
+    target = target or _today_bj()
+    rows = _tx_day_rows(code)
+    if not rows:
+        return None
+    row = rows.get(target)
+    if not row:
+        return None
+    o, c, h, l, v_raw = row
+    # 结构自检：high/low 必须包住 open/close（挡掉畸形行）
+    if not (h >= max(o, c) - 1e-9 and l <= min(o, c) + 1e-9 and l <= h and h > 0):
+        return None
+    v = _resolve_tx_day_volume(rows, db_bars, v_raw, target)
+    if v is None or v <= 0:
+        return None
+    return {"d": target, "o": o, "c": c, "h": h, "l": l, "v": v}
+
+
+def synth_today_bar_tencent(code, target=None, ref_v=None, ref_max_v=None, db_bars=None):
     """合成「今日(收盘)日 K」→ {d,o,h,l,c,v} 或 None。
 
     ⚑ 2026-10-21（老罗「彻底修复」· 数据时效）源优先级 **新浪日K（主）→ 腾讯分钟线（兜底）**：
@@ -335,7 +482,12 @@ def synth_today_bar_tencent(code, target=None, ref_v=None, ref_max_v=None):
       · 腾讯分钟线 `web.ifzq.gtimg.cn`：本机常 501/被墙；即便通，cum 单位因票而异
         ⇒ 必须量纲自适应（见 _resolve_intraday_volume），否则 RVOL 闸门被毁。
 
+    ⚑ 2026-10-28（老罗「换源」定案）加**第三级：腾讯日K**（qfq）——
+      新浪整段限流 + 分钟线被墙时会同时失效（当日 bar 补不上 → 扫描层 fail-closed）。
+      腾讯日K 走 fqkline（与分钟线 minute/query **不同路径**）、且带全局限速。
+
     target: 目标交易日（默认今日）。传「宽基末根」可覆盖周末/节假日（新浪末根即最近交易日）。
+    db_bars: 库内近期 bars —— 供第三级的成交量单位**对拍**（见 synth_today_bar_txday）。
     """
     target = target or _today_bj()
     # ① 优先新浪日K（可出网；官方日K，比分钟线合成更准）
@@ -358,38 +510,48 @@ def synth_today_bar_tencent(code, target=None, ref_v=None, ref_max_v=None):
     except Exception:  # noqa: BLE001
         pass  # 新浪不可达 → 落到腾讯分钟线兜底
     # ② 兜底：腾讯分钟线合成（只有「今天」的分钟线；target 非今日则无解）
-    if target != _today_bj():
-        return None
-    mk, digits = ash_market.split_code(code)
-    tcode = mk + digits
-    url = "https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=%s" % tcode
-    try:
-        txt = _http_get(url, timeout=20, referer="https://gu.qq.com/")
-        js = json.loads(txt)
-        node = (js.get("data") or {}).get(tcode) or {}
-        arr = (node.get("data") or {}).get("data") or []
-        if not arr:
-            return None
-        rows = []
-        for s in arr:
-            parts = str(s).split()
-            if len(parts) < 3:
-                continue
-            try:
-                rows.append((parts[0], float(parts[1]), float(parts[2])))
-            except ValueError:
-                continue
-        if not rows:
-            return None
-        o = rows[0][1]
-        c = rows[-1][1]
-        hi = max(r[1] for r in rows)
-        lo = min(r[1] for r in rows)
-        cum = rows[-1][2]  # 累计量（单位因票而异 → 自适应换算）
-        v = _resolve_intraday_volume(cum, ref_v=ref_v, ref_max_v=ref_max_v)
-        return {"d": _today_bj(), "o": o, "c": c, "h": hi, "l": lo, "v": v}
-    except Exception:  # noqa: BLE001
-        return None
+    if target == _today_bj():
+        mk, digits = ash_market.split_code(code)
+        tcode = mk + digits
+        url = "https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=%s" % tcode
+        try:
+            txt = _http_get(url, timeout=20, referer="https://gu.qq.com/")
+            js = json.loads(txt)
+            node = (js.get("data") or {}).get(tcode) or {}
+            arr = (node.get("data") or {}).get("data") or []
+            if arr:
+                rows = []
+                for s in arr:
+                    parts = str(s).split()
+                    if len(parts) < 3:
+                        continue
+                    try:
+                        rows.append((parts[0], float(parts[1]), float(parts[2])))
+                    except ValueError:
+                        continue
+                if rows:
+                    o = rows[0][1]
+                    c = rows[-1][1]
+                    hi = max(r[1] for r in rows)
+                    lo = min(r[1] for r in rows)
+                    cum = rows[-1][2]  # 累计量（单位因票而异 → 自适应换算）
+                    v = _resolve_intraday_volume(cum, ref_v=ref_v, ref_max_v=ref_max_v)
+                    return {"d": _today_bj(), "o": o, "c": c, "h": hi, "l": lo, "v": v}
+        except Exception:  # noqa: BLE001
+            pass  # 分钟线不可达 → 落到第三级
+    # ③ 第三级兜底：腾讯日K（qfq，全局限速；成交量单位与库内对拍）
+    tb = synth_today_bar_txday(code, target=target, db_bars=db_bars)
+    if tb:
+        return tb
+    # ④ 末级兜底：无库内参照可对拍时，用量纲自适应（ref_v / ref_max_v）反推
+    rows = _tx_day_rows(code)
+    if rows and target in rows:
+        o, c, h, l, v_raw = rows[target]
+        if h >= max(o, c) - 1e-9 and l <= min(o, c) + 1e-9 and h > 0:
+            v = _resolve_intraday_volume(v_raw, ref_v=ref_v, ref_max_v=ref_max_v)
+            if v and v > 0:
+                return {"d": target, "o": o, "c": c, "h": h, "l": l, "v": v}
+    return None
 
 
 def append_today_bar_if_missing(conn, code, bars, target=None):
@@ -399,7 +561,8 @@ def append_today_bar_if_missing(conn, code, bars, target=None):
         return
     tb = synth_today_bar_tencent(code, target=target,
                                   ref_v=bars[-1]["v"] if bars else None,
-                                  ref_max_v=max((b["v"] for b in bars[-60:]), default=None))
+                                  ref_max_v=max((b["v"] for b in bars[-60:]), default=None),
+                                  db_bars=bars[-60:])
     if tb:
         save_bars(conn, code, [tb])
 
@@ -437,17 +600,23 @@ def ensure_today_bars(conn, target=None, codes=None, workers=6, verbose=True,
                 "failed_codes": []}
 
     # 参照量（用于分钟线量纲自适应）必须在**主线程**取：sqlite 连接不可跨线程共享
+    # ⚑ 2026-10-28：同时留 db_bars（近 60 根）供**第三级腾讯日K**做成交量单位**对拍**
+    #   —— 腾讯 fqkline 的 v 单位因票而异（手/股），绝不断言，用库内同日 bar 反解。
     refs = {}
+    db_refs = {}
     for code in todo:
         b = load_bars(conn, code, n=60)
         refs[code] = (b[-1]["v"] if b else None,
                       max((x["v"] for x in b), default=None))
+        if b:
+            db_refs[code] = b
 
     def _fetch(code):
         ref_v, ref_max = refs[code]
         try:
             return code, synth_today_bar_tencent(code, target=target,
-                                                  ref_v=ref_v, ref_max_v=ref_max)
+                                                  ref_v=ref_v, ref_max_v=ref_max,
+                                                  db_bars=db_refs.get(code))
         except Exception:  # noqa: BLE001
             return code, None
 
@@ -491,7 +660,8 @@ def ensure_today_bars(conn, target=None, codes=None, workers=6, verbose=True,
             ref_v, ref_max = refs.get(code, (None, None))
             try:
                 tb = synth_today_bar_tencent(code, target=target,
-                                              ref_v=ref_v, ref_max_v=ref_max)
+                                              ref_v=ref_v, ref_max_v=ref_max,
+                                              db_bars=db_refs.get(code))
             except Exception:  # noqa: BLE001
                 tb = None
             if tb and tb.get("d") == target:
@@ -517,7 +687,8 @@ def ensure_today_bars(conn, target=None, codes=None, workers=6, verbose=True,
             ref_v, ref_max = refs.get(code, (None, None))
             try:
                 tb = synth_today_bar_tencent(code, target=target,
-                                              ref_v=ref_v, ref_max_v=ref_max)
+                                              ref_v=ref_v, ref_max_v=ref_max,
+                                              db_bars=db_refs.get(code))
             except Exception:  # noqa: BLE001
                 tb = None
             if tb and tb.get("d") == target:
