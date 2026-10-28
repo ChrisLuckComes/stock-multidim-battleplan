@@ -161,26 +161,43 @@ cp .env.example .env     # 再按账户实际额度改：ASH_ACCOUNT / US_ACCOUN
 
 ## 5. 建两个定时任务
 
-### 5.0 交付硬规则（老罗 2026-10-26）
+### 5.0 交付硬规则（老罗 2026-10-26，2026-10-28 修订）
 
-午盘和收盘的交付主表一律是 **双通过 ∩ 飙股**。禁止只交引擎序前 20，也禁止把 `scan_warfare` 原表当交付。
+**两个任务的定位已经分开，不再是同一套链路：**
+
+| | 午盘 11:30 | 收盘 15:20 |
+|---|---|---|
+| 性质 | **轻量实时**（~4 秒） | **全量 + 正式交付**（~5~8 分钟） |
+| 跑什么 | 只有 `intraday_alert.py` | 全链路 ①~⑥ |
+| 有没有主表 | **没有**，输出三块实时清单 | 有，见下 |
+| 用途 | 盘中抓「今天钱往哪流」、首日 D0 当天可入 | 定次日挂单名单 |
+
+**收盘交付主表 = 板块层「可开」档**（`out_cn/sector_dual_<日期>_close.html`）：
 
 ```
-scan_warfare → scr_sweep（筹码双通过）→ deliver_dual_surge（高弹性 ∩ allow_new）
+scan_warfare --session close
+  → scr_sweep --src <当日 close jsonl>            （筹码闸 allow_new）
+  → gen_pass_list --date <日期>                   （双通过三视角 + 高位闸/赔率闸）
+  → elastic_dual --date <日期> --scr <jsonl>      （高弹性 ∩ 双通过）
+  → sector_selfcalc --rebuild-hist                （重建板块高位锚点）
+  → sector_dual --session close                   ← 最终主表，只取「可开」
 ```
 
 - 集合 B = 战法闸 + 筹码闸 `allow_new`
 - 集合 A = 高弹性（板块内弹性日数分位 ≥ 75）
-- 主表 = A ∩ B，排序沿用 `elastic_dual`（强度档 → 筹码档 → 强度分）
-- 产物：`out_cn/dual_surge_list_<日期>_<midday|close>.{md,json}`，以及 `elasticity_<日期>_<session>_dual.{md,html}`
-- `--top 60` 只是盘中半根复评上限，不是交付截断
+- 集合 C = **板块层**：所属板块本轮 D0 且在窗口内、未触高位闸门 L1/L2
+- 主表 = **A ∩ B ∩ C**，排序沿用 `elastic_dual`（强度档 → 筹码档 → 强度分）
+- 被 C 拦下的必须单列并写原因（闸门档位 / 板块未启动 / 未覆盖），**不得混进主表**
+- `--top 60` 只是盘中半根复评上限（现已不用于午盘），不是交付截断
+
+⚠ **禁止**只交引擎序前 20、禁止把 `scan_warfare` 原表当交付、禁止把「未覆盖」的票当可开。
 
 ### 5.1 时间点与职责
 
 | 任务 | 时间 | 做什么 | 耗时 |
 |---|---|---|---|
-| **盘中 11:30** | 周一~周五 11:30 | **只跑实时异动**（`intraday_alert.py`：板块 D0 / 高位闸门 / 涨幅榜可买 / 回踩候选）。**不跑全量扫描**——半根 K 线形态 49% 到收盘会变、可买名单 62.5% 到收盘被否（2026-10-28 实测） | ~10 秒 |
-| **收盘 15:20** | 周一~周五 15:20 | 增量刷新日线 → 全市场扫描 → 筹码体检 → 双通过∩飙股 → **重建锚点 + 板块层收敛（sector_dual）** | ~16 分钟 |
+| **盘中 11:30** | 周一~周五 11:30 | **只跑实时异动**（`intraday_alert.py`：板块 D0 / 高位闸门 / 涨幅榜可买 / 回踩候选）。**不跑全量扫描**——半根 K 线形态 49% 到收盘会变、可买名单 62.5% 到收盘被否（2026-10-28 实测） | **~4 秒**（实测 3.4s） |
+| **收盘 15:20** | 周一~周五 15:20 | 增量补当日 bar → 全市场扫描 → 筹码体检 → 双通过三视角 → 飙股交集 → **重建锚点 + 板块层收敛（sector_dual，最终主交付）** | ~5~8 分钟 |
 
 ### 5.2 创建方式
 
@@ -196,7 +213,7 @@ skill 目录若已是指向该根的联接，两个路径是同一个目录。
 - `cwds`: `["<新机器仓库绝对路径>"]`
 - `status`: `ACTIVE`
 - `prompt`: 原文见 §5.3 —— ⚑ **把里面所有 `D:/code/stock-multidim-battleplan`
-  替换成新机器路径，把 `C:/Users/luoyunlai/.workbuddy/binaries/python/envs/default/Scripts/python.exe`
+  替换成新机器路径，把 `C:/Users/luoyu/.workbuddy/binaries/python/envs/default/Scripts/python.exe`
   替换成 §2.1 确定的 `<PY>`**。
 
 ### 5.3 prompt 原文
@@ -211,7 +228,7 @@ skill 目录若已是指向该根的联接，两个路径是同一个目录。
 ⚠ 本任务**不跑** scan_warfare / scr_sweep / deliver_dual_surge。全市场全量扫描只在尾盘 15:20 跑。
 
 按顺序执行（工作目录 D:/code/stock-multidim-battleplan，统一用
-C:/Users/luoyunlai/.workbuddy/binaries/python/envs/default/Scripts/python.exe）：
+C:/Users/luoyu/.workbuddy/binaries/python/envs/default/Scripts/python.exe）：
 
 ① 实时异动快照（一次，约 10 秒）：
    python intraday_alert.py --top 14
@@ -242,44 +259,74 @@ out_cn/intraday_<日期>_midday.txt。
 
 #### 任务 B · 收盘 15:20
 
+> **2026-10-28 修订**：这是**当天唯一一次全量扫描**，也是唯一正式交付。午盘已不扫描（见 §5.4）。
+> 本段与线上 automation 的 prompt 保持逐字一致；改这里就必须同步改 automation，反之亦然。
+
 ```text
-在 A 股全市场选股器上运行**收盘**扫描（周一~周五 15:20，收盘后）。这是当天最完整的一次。
+在 A 股全市场选股器上运行**收盘**全链路（周一~周五 15:20，收盘后）。这是当天唯一一次全量扫描，也是唯一的正式交付。
 
-按顺序执行（工作目录 D:/code/stock-multidim-battleplan，统一用
-C:/Users/luoyunlai/.workbuddy/binaries/python/envs/default/Scripts/python.exe）：
+按顺序执行（工作目录 D:/code/stock-multidim-battleplan，统一用 <PY>）：
 
-① 增量刷新日线 + 全市场扫描（约 6~10 分钟）：
-   python screener/scan_warfare.py --refresh --session close
-② 筹码面体检（并行 + 资金流 4 秒软超时，约 1~3 分钟 / 180 只量级）：
-   python screener/scr_sweep.py
-   → 产出 out_cn/scr_<日期>_close.jsonl，每行含 scr.state / scr.allow_new / scr.scr90
-③ 双通过∩飙股交付主表：
-   python screener/deliver_dual_surge.py --date <日期> --session close
-   → out_cn/dual_surge_list_<日期>_close.{md,json} + elasticity_<日期>_close_dual.{md,html}
-④ 板块收敛层（2026-10-28 老罗新增，**主交付以这一步为准**）：
-   python gates/sector_selfcalc.py --rebuild-hist      # 先重建锚点（约 10~20 秒，收盘后必跑）
+① 增量补齐当日 bar + 全市场扫描（约 2~3 分钟，只拉增量，绝不加 --refresh）：
+   python screener/scan_warfare.py --session close
+   ⚠ 老罗 2026-10-23 铁律：只用 --session close 增量模式，禁止 --refresh。--refresh 会全量重拉 5000 只日线，
+     本机 baostock 不通时逐只回退取数，曾把整轮拖到 80+ 分钟且中途崩掉；真正的全市场扫描本身只需数秒。
+     当日 bar 由脚本内部 ensure_today_bars 自动增量补齐（实测 163s 补 5001 只），无需 --refresh。
+   ⚠ 新浪限流坑（2026-10-27 实证）：首轮补齐可能失败上百只（全是沪市 600/601/603，因 SQL GROUP BY code
+     把它们排在队列末段、整段撞上限流窗口）。失败数 > 50 时：等 10~20 分钟后原命令重跑（实测重跑 21s
+     补齐 496/497），不要改代码、不要加 --refresh。重跑后必须重新核对漏斗数字。
+② 筹码面体检（给信号票判是否允许新开仓）：
+   python screener/scr_sweep.py --src out_cn/screener_<日期>_close.jsonl
+   → out_cn/scr_<日期>_close.jsonl（scr.state / scr.allow_new / scr.scr90 / scr.main_cost）
+   ⚠ 必须显式 --src（latest_jsonl 按字典序取过错误文件）。
+③ 双通过名单三视角（秒级，读 ② 的 jsonl）：
+   python screener/gen_pass_list.py --date <日期>
+   → screener_<日期>_close_pass.{md,html} / _pass_strength / _pass_best
+   ⚠ 必须显式 --date。名单内置高位闸 + 赔率闸（screener/filters.py 单一真源），有「离主成本」列与
+     「判定」列，另有「🚦 最终可上」= 双通过 + 离主成本 <30% + R≥1.5。回复要给这一档只数。
+④ 飙股交集表（老罗指定重点产物，必须 html 交付）：
+   python screener/elastic_dual.py --date <日期> --scr out_cn/scr_<日期>_close.jsonl
+   → out_cn/elasticity_<日期>_close_dual.{md,html}
+⑤ 重建板块高位锚点（必须紧接 ④，约 10~20 秒）：
+   python gates/sector_selfcalc.py --rebuild-hist
+   ⚠ 锚点缓存 data/sector_high_hist.json 不入库（/data/ 被 gitignore），靠这一步每日重建。
+     若输出提示「已自动重建」= 缓存丢失，要在回复里提醒。
+   ⚠ 只有 git pull 带来 references/sector_map.json 变更时，才先跑 --check-map 再 --rebuild-hist。
+⑥ 板块收敛层（2026-10-28 老罗定：**这是最终主交付**）：
    python screener/sector_dual.py --date <日期> --session close
    → out_cn/sector_dual_<日期>_close.{md,html}（可开/降级/普涨跟涨/闸门拦/板块未启动/未覆盖 六档）
 
+⛔ 禁止执行 screener/q3_filter.py（老罗 2026-10-27 定：定期报告披露过滤是特写逻辑，只在披露窗口内
+   有意义，不挂进每日流水线）。同理不跑任何特写逻辑脚本（清单见 AGENTS.md §1f）。
+
 背景（理解口径用）：
-- 数据层 baostock 前复权 + 本地 SQLite（data/screener.db）；ST/退市已剔除；
-- 漏斗：L1 强度闸 → L2 战法闸 → 筹码闸（state_allow_new）→ 高弹性 ∩ 双通过 → **板块层可开（最终主表）**；
-- ⚠ 表里的 R 是**现价口径**的静态赔率：出水芙蓉(T0)/流星砸坑 R 会系统性偏低，别据此排序下结论。
-- ⚠ 高位锚点缓存 `data/sector_high_hist.json` **不入库**（`/data/` 被 gitignore）。换机器时为空，
-  `sector_dual` / `high_gate` 会自动重建并打一行提示；**真源只有入仓的 `references/sector_map.json`**。
+- 数据层 baostock 前复权 + 本地 SQLite（data/screener.db）；ST/退市已在数据层剔除；
+- 收盘增量补当日 bar 不走 baostock（ensure_today_bars → synth_today_bar_tencent → 新浪日K 主 +
+  腾讯分钟线兜底）；baostock 只在 --refresh 全量回填时当首选源，而本任务禁止 --refresh。
+- 漏斗：L1 强度闸（WEAK 出局）→ L2 战法闸（rule123 各 mode）→ 筹码闸（scr_chip / state_allow_new）
+  → 高弹性 ∩ 双通过 → **板块层可开（最终主表）**；
+- ⚠ 表里的 R 是现价口径静态赔率：出水芙蓉(T0) 真触发价在现价上方、流星砸坑是回踩 MA5 买，这两类 R
+  系统性偏低，别据此排序下结论。高位票 R 会失真（例：002696 R=2.71 但离主成本 +87.4%）⇒ 高位闸与赔率闸必须并看。
+- 板块收敛层口径：第1层板块层（本轮 D0 且在窗口内、未触 L1/L2）→ 第2层双通过 → 第3层飙股（弹性分位
+  ≥75）。六档：可开 / 降级 / 普涨跟涨 / 闸门拦 / 板块未启动 / 未覆盖。板块归属真源 = 入仓文件
+  references/sector_map.json（24 板块 138 只），未收录标「未覆盖」且不进主表 —— 这是刻意的。
+  ⚠ 主买区额外要求「当日板块仍在涨且扩散≥50%」，否则降为回踩区（否则会在板块转跌当天主买）。
+- ⚠ 高位锚点缓存不入库，sector_dual / high_gate 会自动重建并打提示；真源只有入仓的
+  references/sector_map.json。
 
-产出：screener_<日期>_close.* + scr_<日期>_close.jsonl + dual_surge_list_<日期>_close.* + elasticity_*_dual.*
-扫描延续按「代码+战法」记（延续第N天 / 新出现）；断档从 continuity_state 的 close 桶删除。
-
-交付要求（2026-10-26 硬规则）：
-1. **主交付 = 双通过∩飙股**（`dual_surge_list_<日期>_close.md`）。**禁止**引擎序前 20 / 把 scan_warfare 原表当交付。
-2. 漏斗：扫描 → 过强度闸 → 有战法信号 → 双通过 → **高弹性∩双通过**；无命中明说。
-3. 字段：代码/名称/战法/延续/现价/买区/止损/t1/R/recommend/弹性分/筹码；减持可标未检。
-4. 可附：被筹码否掉的知名票（发散/派发）作对照，不进主表。
-5. 任一步失败如实说明中断点；baostock 未更新当日则标注真实数据日期，**不要编造**。
+交付要求：
+1. **最终主交付 = 板块收敛层的「可开」档**（out_cn/sector_dual_<日期>_close.html）。主表只取「可开」；
+   「降级 / 普涨跟涨 / 闸门拦 / 板块未启动 / 未覆盖」必须单列并写原因，禁止混进主表。
+2. 用 present_files 打开 sector_dual 的 html；**必须同时**打开飙股交集表 html 与收盘 HTML 报告，
+   这两个是老罗的重点产物，漏交等于任务失败。
+3. 漏斗：扫描只数 → 过强度闸 → 有战法信号 → 筹码允许新开仓 → 引擎★推荐 → 🚦最终可上 → **板块层可开**。
+4. 名单字段：代码/名称/板块+窗口/战法/现价/买区/止损/t1/R/离主成本/弹性分/筹码。
+5. 单列三类被拦的：① 筹码否掉的（写发散 / 派发）② 高位闸/赔率闸拦的（写离主成本%与 R）
+   ③ 板块层拦的（写清是距低点 / 乖离 / 距D0 / 大类联动，或板块未启动 / 未覆盖）。
+6. 交集表统计：弹性达标（高/中各多少）→ 双通过 → 交集只数 → 旁路人工复核只数；列交集前 5。
+7. 任一步失败如实说明中断点与已产出内容；当日 bar 补齐失败数 > 50 要标注是否已重跑；
+   ② 失败导致无双通过数据时，必须明说「双通过侧缺失」。**不要编造结果**。
 ```
-
----
 
 ### 5.4 为什么午盘不扫描（2026-10-28 老罗定，实测依据）
 
