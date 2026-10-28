@@ -2131,7 +2131,10 @@ def _broken_hard_cands(bars, y, level, atr_v, long_yang, z):
     under_px = z.get("primary_lo")
     if under_px is None:
         under_px = level
-    under = [it for it in raw if it[1] is not None and it[1] < under_px]
+    # 买区下沿本身可以当硬锚（跳空日阳线下沿 = 缺口下沿 = primary_lo）。
+    # 硬止损再减 0.10×ATR，仍然落在买区之下。只认严格小于会把这根锚丢掉，
+    # 退回去拿买区上方的均线，最后被判「技术锚不可用」落到 5% 成本兜底。
+    under = [it for it in raw if it[1] is not None and it[1] <= under_px]
     pool = under or [it for it in raw if it[1] is not None]
     if not pool:
         return [("阳线下沿", y["l"])]
@@ -2261,11 +2264,23 @@ def stop_plan(bars, mode, z, atr_v):
         ok = []
         rejected = []
         usable_n = 0
+        # 硬锚要低于「实际会买的价」（买区下沿），不是只能低于突破位 level。
+        # 跳空把买区抬离突破位之后，缺口下沿高于 level、却仍在买价之下，
+        # 这是短线硬止损，不能因为「不低于 level」就整段丢掉、改走 5% 成本兜底。
+        _fill = buy_lo if buy_lo is not None else level
+
+        def _hard_anchor_ok(px):
+            if px is None or _fill is None:
+                return False
+            if px < level:
+                return True
+            return px <= _fill and (px - gap) < _fill
+
         for name, px in cands:
             if px is None:
                 continue
             h = px - gap
-            if not _usable(px):
+            if not _hard_anchor_ok(px):
                 rejected.append((name, px))
                 continue
             usable_n += 1
@@ -2277,7 +2292,7 @@ def stop_plan(bars, mode, z, atr_v):
             if first is None or h < first[2]:
                 first = (name, px, h)
         rej_note = (
-            f"已剔除不低于买价 {round(level, 2)} 的锚 {_rej_txt(rejected)}（止损必须低于买价）"
+            f"已剔除不低于买价 {round(_fill, 2)} 的锚 {_rej_txt(rejected)}（止损必须低于买价）"
             if rejected else None
         )
         if ok:
@@ -2334,7 +2349,12 @@ def stop_plan(bars, mode, z, atr_v):
         #   ⚑ 这条同时修掉了「向上突破档被误杀」：突破档买价本就在现价之上，
         #     其止损高于现价是**正常形态**，用 last_c 判「买入即止损」必误伤。
         _notes = []
-        if struct is None or struct >= level:
+        _fill = buy_lo if buy_lo is not None else level
+        # 结构止损落在突破位/回踩线 level 上，是「收盘破这条线」的定义，不是锚缺失。
+        # 用 >= 会把这条线改写成 level×(1−5%)，止损被放宽，短线 R 的分母被撑死。
+        # 只有缺失，或严格高于买价，才没有技术结构位，才允许成本兜底。
+        # 已有技术位但宽于 5%：收紧到成本上限（收紧合法），不许反过来放宽。
+        if struct is None or struct > level:
             struct, struct_name, _ = cost_capped_stop(level, None, "结构锚")
             _notes.append(
                 f"技术锚不可用（缺失或在买价 {round(level, 2)} 之上）⇒ 按成本口径兜底："
@@ -2344,17 +2364,29 @@ def stop_plan(bars, mode, z, atr_v):
             struct, struct_name, _c = cost_capped_stop(level, struct, struct_name or "结构锚")
             if _c:
                 _notes.append(f"结构锚宽于 {STOP_MAX_PCT:.0%} ⇒ 按成本上限收紧到 {struct}")
-        if hard is None or hard >= level:
-            hard, hard_name = struct, struct_name
+        # 硬止损：买价下方有技术锚就留着（可以紧于结构位，收紧合法）。
+        # 没有才按浮亏上限给盘中腿。不许把这条腿再拉宽到结构位或成本兜底上，
+        # 否则跳空后的缺口下沿会被旧突破位吞掉。
+        if hard is None or (_fill is not None and hard >= _fill):
+            hard, hard_name, _hc = cost_capped_stop(level, None, "硬止损锚")
+            if _hc:
+                _notes.append(
+                    f"买价下方无技术硬锚 ⇒ 盘中腿按浮亏上限 {STOP_MAX_PCT:.0%} "
+                    f"记 {hard}（仓位口径，不覆盖结构止损）"
+                )
         else:
             hard, hard_name, _c = cost_capped_stop(level, hard, hard_name or "硬止损锚")
             if _c:
                 _notes.append(f"硬止损锚宽于 {STOP_MAX_PCT:.0%} ⇒ 按成本上限收紧到 {hard}")
-        if hard is not None and struct is not None and hard > struct:
+        if (hard is not None and struct is not None and hard > struct
+                and (_fill is None or hard >= _fill)):
             hard, hard_name = struct, struct_name
-        # 贴线买：买区下沿至少在止损之上 STOP_HUG_ATR×ATR（防止「买在止损上」）
-        _hug = round(struct + STOP_HUG_ATR * atr_v, 2) if struct is not None else None
-        if _hug is not None and z.get("primary_lo") is not None and z["primary_lo"] < _hug:
+        # 贴线买：只在买区下沿已经落到硬止损上或之下时，才把下沿抬到止损之上。
+        # 买区下沿本来就等于突破位/回踩线时不抬 —— 那是买区定义，不是「买在止损上」。
+        # 抬整段 0.5×ATR 会把飞科这种「线下沿 = 平台」的买区上半段剪掉。
+        _lo = z.get("primary_lo")
+        if hard is not None and _lo is not None and _lo <= hard:
+            _hug = round(hard + STOP_HUG_ATR * atr_v, 2)
             z["primary_lo"] = _hug
             if z.get("primary_hi") is not None and z["primary_hi"] <= _hug:
                 z["primary_hi"] = round(_hug + 0.5 * atr_v, 2)
@@ -2363,7 +2395,7 @@ def stop_plan(bars, mode, z, atr_v):
             #   看的是 buy_lo_adjusted / stop_warning ⇒ 两者都没有时回写会被跳过，
             #   601233 那个「止损落在买区之内」的缺陷就会复发。
             z["buy_lo_adjusted"] = True
-            _notes.append(f"买区下沿贴线抬到 {_hug}（止损 {struct} + {STOP_HUG_ATR}×ATR）")
+            _notes.append(f"买区下沿贴线抬到 {_hug}（止损 {hard} + {STOP_HUG_ATR}×ATR）")
         if _notes:
             note = ((note + "；") if note else "") + "；".join(_notes)
         if warn:
@@ -2849,11 +2881,14 @@ def attach_stops_targets(plan, bars, atr_v, Hs, ev=None):
                 f"止损未落在现价 {round(last_c, 2)} 之下（{mode}）—— "
                 f"买入即止损，本单撤销"
             )
-        # 总闸门（2026-09-29 重写）：唯一不可让的是「**止损 < 买价**」。
+        # 总闸门（2026-09-29 重写）：止损严格高于买价 level 才是内部不一致。
         # ⚑ 旧判据用 last_c（现价）：向上突破档的买价本就在现价之上，其止损高于现价
         #   是**正常形态**，用现价判「买入即止损」会误杀全部突破档 —— 这正是
         #   「10 次有 9 次向上不能买」的一部分来源。改用买价 level 判；
         #   触发 = 成本兜底失效的内部不一致，如实撤销并留痕。
+        # ⚑ 止损 == level 不是失效：突破位/回踩线本身就是「收盘破这条线」。
+        #   用 >= 会把这条结构位整单撤销。买在线上的那一档由赔率表丢掉
+        #   （止损不得 ≥ 买价），买在线上方的档风险是正的。
         #
         # ⚠⚠ 2026-10-10 补第三档（真实漏放，非测试过时）：换判据后留下一个真空 ——
         #   止损落在「高于现价、低于买价」这一区间时两个判据都不管。
@@ -2869,11 +2904,17 @@ def attach_stops_targets(plan, bars, atr_v, Hs, ev=None):
         #     · 突破类（买价 > 现价，stop_plan 走的是突破位下方锚）：止损高于现价是
         #       正常形态（等的就是突破），放行但必须落 stop_warning 留痕，不可静默。
         _lvl = z.get("level")
-        if plan.get("recommend") and _lvl is not None:
+        # 买价用买区下沿。跳空后下沿高于突破位，硬止损可以落在两者之间
+        # （缺口下沿），不能拿突破位 level 把这条腿判成「高于买价」。
+        _fill = z.get("primary_lo")
+        if not isinstance(_fill, (int, float)) or (
+                _lvl is not None and _fill < _lvl):
+            _fill = _lvl
+        if plan.get("recommend") and _fill is not None:
             bad = [
                 f"{nm} {round(v, 2)}"
                 for nm, v in (("结构止损", sp.get("struct")), ("硬止损", sp.get("hard")))
-                if v is not None and v >= _lvl
+                if v is not None and v > _fill
             ]
             if bad:
                 plan["recommend"] = False
@@ -2881,7 +2922,7 @@ def attach_stops_targets(plan, bars, atr_v, Hs, ev=None):
                 plan["verdict"] = "止损未落在买价之下·成本兜底失效·不接"
                 _prev = plan.get("note") or ""
                 plan["note"] = (_prev + "；" if _prev else "") + (
-                    f"{'、'.join(bad)} 未落在买价 {round(_lvl, 2)} 之下 —— "
+                    f"{'、'.join(bad)} 未落在买价 {round(_fill, 2)} 之下 —— "
                     f"成本兜底失效（内部不一致），本单撤销"
                 )
             elif last_c is not None and mode not in BREAKOUT_MODES:

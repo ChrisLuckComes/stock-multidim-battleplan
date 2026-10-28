@@ -116,16 +116,12 @@ def test_stop_plan_two_layers_and_hard_below_buy():
     }
     atr_v = 0.84
     sp = stop_plan(bars, "platform_break", z, atr_v)
-    # ★ 2026-10-10 更新到 9-29 新口径「止损是成本管理，不存在无效档」：
-    #   技术锚（突破位 19.33 / MA5−0.1×ATR）宽于 STOP_MAX_PCT ⇒ 一律按成本兜底
-    #   收敛到买价×(1−5%)，锚名随之变成「成本兜底(浮亏≤5%)」。
-    #   本条断言改为校验**兜底后的不变量**（宽度上限），而不是记某个具体锚名 ——
-    #   锚名会随口径变，宽度上限才是这条规则真正要锁的东西。
-    floor = 19.33 * (1 - STOP_MAX_PCT)
-    assert sp["struct_anchor"] == "成本兜底(浮亏≤5%)", sp
-    # 容差 0.011：兜底价经 round(x, 2) 落盘，与未取整的理论值最多差半个跳。
-    assert abs(sp["struct"] - floor) < 0.011, sp
-    assert sp["hard"] == sp["struct"], sp
+    # 结构止损就是突破位本身（收盘破）。不得因为 struct == level
+    # 被改写成买价×(1−5%) 的成本兜底 —— 那是放宽，不是收紧。
+    assert "成本兜底" not in (sp["struct_anchor"] or ""), sp
+    assert abs(sp["struct"] - 19.33) < 0.011, sp
+    assert sp["hard"] is not None and sp["hard"] < z["primary_lo"], sp
+    assert sp["hard"] < sp["struct"], sp
 
 
 def test_stop_plan_narrow_break_hard_below_buy_lo():
@@ -244,12 +240,10 @@ def test_pullback_tight_stop_is_not_noise_flagged():
          "primary_hi": round(ma5 + 0.05 * atr_v, 2)}
 
     sp = stop_plan(bars, "line_pullback", z, atr_v)
-    # ★ 2026-10-10 更新到 9-29 新口径：MA5 = 买价本身（level 就是 ma5）⇒ 技术锚
-    #   「不低于买价」被铁律剔除，改按成本兜底 买价×(1−5%)。
-    #   本条真正要锁的主张**不变且仍成立**：回踩类不得按突破类口径报噪声带
-    #   （hard_noise 必须 False）。锚名随口径变，噪声带口径才是这条规则的不变量。
-    assert sp["hard_anchor"] == "成本兜底(浮亏≤5%)", sp
-    assert abs(sp["hard"] - ma5 * (1 - STOP_MAX_PCT)) < 0.011, sp
+    # 结构止损是回踩线。硬止损是线下技术锚（阳线下沿 − gap），不是 5% 成本兜底。
+    # 本条要锁的是：回踩类不得按突破类口径报噪声带（hard_noise 必须 False）。
+    assert "成本兜底" not in (sp["struct_anchor"] or ""), sp
+    assert sp["hard"] is not None and sp["hard"] < z["primary_lo"], sp
     assert sp["hard_noise"] is False, "回踩类不得按突破类口径报噪声带"
 
     # 同一几何、突破类：仍必须按突破类口径报警（回踩类不报警、突破类报警）。
