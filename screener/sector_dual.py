@@ -316,9 +316,31 @@ def build(date_tag, scr_path=None, sector_map=None, use_gate=True, quotes=None):
                      key=lambda m: -m[2])[:4]
         if not top:
             continue
+        # ⚑ 2026-10-28 补：这一节原来只列「板块内涨幅最强」，明天等于没有可执行的价位。
+        #   实测 10-20（端侧首轮 D0）当天，系统内部是认出乐鑫科技的 —— STRONG +
+        #   line_pullback + 集中锁仓 + 领涨，买区 119.64~123.48、止损 115.52、t2 160.48，
+        #   只是 R=1.4 差 0.1 没过赔率闸、买区在现价上方 1%，最终没交到手上，6 天后 +55%。
+        #   ⇒ 这里把「该板块内今日已有战法信号的票」连买区/止损/R 一起列出来，
+        #     绕过可开档的个股两闸（只作观察、仍不给买入结论）。
+        sig = []
+        for c in (smap.get(s["name"]) or []):
+            d = scr_ix.get(str(c))
+            if not d or not d.get("mode"):
+                continue
+            if str(d.get("verdict") or "").upper() == "WEAK":
+                continue
+            sig.append({
+                "code": str(c), "name": d.get("name"), "mode": d.get("mode"),
+                "mode_raw": d.get("mode"),
+                "spot": d.get("spot"), "buy_lo": d.get("buy_lo"),
+                "buy_hi": d.get("buy_hi"), "stop": d.get("stop"),
+                "rr1": d.get("rr1"), "score": d.get("strength_score") or 0,
+                "leader": bool(d.get("leader")),
+            })
+        sig.sort(key=lambda x: (-x["score"], -x["rr1"] if x["rr1"] else 0))
         watch.append({"sector": s["name"], "window": s["window"],
                       "d0_count": s["d0_count"], "chg": s["chg"],
-                      "excess": s["excess"], "top": top})
+                      "excess": s["excess"], "top": top, "sig": sig[:3]})
 
     stat = dict(st)
     stat.update({
@@ -446,10 +468,19 @@ def render_md(rows, summary, stat, date_tag, session, scr_path):
                  "但板块内今天没有一只票走到买点（涨得太快/没回踩到位）。")
         L.append("> 明天要做的是盯它们**回踩到 MA5/MA10 缩量不破**，而不是今天追进去。")
         L.append("")
-        L.append("| 板块 | 窗口 | 今日 | 超额 | 本轮D0 | 今日板块内最强（代码/名称/涨幅） |")
+        L.append("| 板块 | 窗口 | 今日 | 超额 | 本轮D0 | 明日盯什么（已有战法信号的优先，含买区/止损/R） |")
         L.append("|---|---|---|---|---|---|")
         for w in watch:
-            mem = "、".join("%s %s %+.2f%%" % (m[0], m[1], m[2]) for m in w["top"])
+            if w.get("sig"):
+                mem = "<br>".join(
+                    "%s %s · %s · 买 %s~%s · 损 %s · R=%s" % (
+                        x["code"], x["name"], _mode(x),
+                        GPL.num(x.get("buy_lo")), GPL.num(x.get("buy_hi")),
+                        GPL.num(x.get("stop")), GPL.num(x.get("rr1"), "%.2f"))
+                    for x in w["sig"])
+            else:
+                mem = ("今天无战法信号，只能等形态：" +
+                       "、".join("%s %s %+.2f%%" % (m[0], m[1], m[2]) for m in w["top"]))
             L.append("| %s | %s | %+.2f%% | %+.2f | %d | %s |" % (
                 w["sector"], w["window"], w["chg"], w["excess"], w["d0_count"], mem))
     else:
@@ -588,14 +619,24 @@ def render_html(rows, summary, stat, date_tag, session, scr_path):
     body.append("<div class='sec'>五、板块强但今日无买点：明日盯这些回踩（%d 个板块）</div>"
                 % len(watch))
     if watch:
-        body.append("<div class='warn'><b>不是买入名单。</b>这些板块处在 D0 主买/回踩窗口、且没触高位闸门，"
-                    "但板块内今天没有一只票走到买点（涨得太快 / 没回踩到位）。<br>"
-                    "明天要做的是盯它们<b>回踩到 MA5/MA10 缩量不破</b>，而不是今天追进去。</div>")
+        body.append("> <b>不是买入名单。</b>这些板块处在 D0 主买/回踩窗口、且没触高位闸门，"
+                    "但板块内今天没有一只票走到可开（涨太快 / 买区外 / R 不足 / 筹码未过）。<br>"
+                    "明天要做的是盯它们<b>回踩到 MA5/MA10 缩量不破</b>，或<b>放量站上今日高点</b>，"
+                    "不是今天追进去。</div>")
         body.append("<table><tr><th class='l'>板块</th><th>窗口</th><th>今日</th><th>超额</th>"
-                    "<th>本轮D0</th><th class='l'>今日板块内最强（代码/名称/涨幅）</th></tr>")
+                    "<th>本轮D0</th><th class='l'>明日盯什么（已有战法信号的优先，含买区/止损/R）</th></tr>")
         for w in watch:
-            mem = "、".join("<span class='code'>%s</span> %s %+.2f%%" % (m[0], m[1], m[2])
-                           for m in w["top"])
+            if w.get("sig"):
+                mem = "<br>".join(
+                    "<span class='code'>%s</span> %s · %s · 买 %s~%s · 损 %s · R=%s" % (
+                        x["code"], x["name"], _mode(x),
+                        GPL.num(x.get("buy_lo")), GPL.num(x.get("buy_hi")),
+                        GPL.num(x.get("stop")), GPL.num(x.get("rr1"), "%.2f"))
+                    for x in w["sig"])
+            else:
+                mem = ("今天无战法信号，只能等形态：" +
+                       "、".join("<span class='code'>%s</span> %s %+.2f%%" % (m[0], m[1], m[2])
+                                for m in w["top"]))
             body.append("<tr><td class='l'>%s</td><td>%s</td><td>%+.2f%%</td><td>%+.2f</td>"
                         "<td>%d</td><td class='l'>%s</td></tr>" % (
                             w["sector"], w["window"], w["chg"], w["excess"],
