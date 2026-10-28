@@ -701,6 +701,28 @@ def _primary_pool(rows, struct_stop):
             and abs(r["stop"] - struct_stop) < 0.005]
 
 
+def _tactical_pool(rows, struct_stop):
+    """结构位本身，或更紧、仍在结构位之上的技术锚。
+
+    宽于结构位的止损（5% 成本兜底、近 10/20 根最低）不参与作战 R。
+    那些锚把分母撑大，会把买区上沿这种短线档压成无意义的超低 R。
+    """
+    if struct_stop is None:
+        return []
+    out = []
+    for r in rows:
+        stp = r.get("stop")
+        if not isinstance(stp, (int, float)):
+            continue
+        if stp < struct_stop - 0.005:
+            continue
+        name = r.get("stop_name") or ""
+        if "成本兜底" in name or name.startswith("近 10") or name.startswith("近 20"):
+            continue
+        out.append(r)
+    return out
+
+
 def _pick_recommend_cn(rows, z, bars=None):
     """A 股：可预挂、不追高、不破位、风险够，里面「达成率×赔率」联合最高的一条。
 
@@ -751,14 +773,29 @@ def _pick_recommend_cn(rows, z, bars=None):
     #     恰好补偿 T+1 隔夜跳空 —— 两个用途分用两把尺，互不干扰。
     primary = _primary_pool(rows, struct_stop
                             if struct_stop is not None else exec_stop)
-    best = None
-    for pool in (primary, rows):
+    tactical = _tactical_pool(rows, struct_stop)
+
+    def _top(pool):
         if not pool:
-            continue
+            return None
         sc = _feas(pool)
-        if sc:
-            best = sc[0]
-            break
+        if not sc:
+            return None
+        return sc[0]
+
+    best = _top(primary)
+    # 结构位那一档 R<1.5 时，改用仍在结构位之上的更紧技术锚。
+    # 不回落到结构位以下的宽止损 —— 那是仓位口径，不是作战 R。
+    if best is None or (best[3].get("r1") or 0) < 1.5:
+        # 薄止损（<0.35×ATR，与 annotate_odds 同一档）不能拿来把 R 做上去。
+        tight = [r for r in tactical
+                 if (r.get("r1") or 0) >= 1.5
+                 and (r.get("risk_atr") or 0) >= 0.35]
+        alt = _top(tight)
+        if alt is not None:
+            best = alt
+    if best is None:
+        best = _top(rows)
     if best is None:
         return None
     score, ar, src, r = best
