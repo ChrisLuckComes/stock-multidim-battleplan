@@ -331,13 +331,19 @@ def _resolve_intraday_volume(cum, ref_v=None, ref_max_v=None):
     v = float(cum)
     if ref_v and ref_v > 0:
         r = v / ref_v
-        if 0.2 <= r <= 5.0:
+        # ⚑ 2026-10-28 修（339 只科创板成交量被放大 100 倍的真凶）：
+        #   原判据 `0.2 <= r <= 5.0` **区间太窄** —— 真实放量 5 倍以上就被判成「手」
+        #   再 ×100（当天 688783 真实放量 9.0 倍 → 库里写成 899 倍，RVOL 闸门全线失真）。
+        #   「手→股」的错位必然是 **~0.01 量级**（正好差 100 倍），不可能落在 0.1~30；
+        #   而真实单日放量到 9 倍、20 倍都很常见 ⇒ 上界必须放宽到 30。
+        if 0.08 <= r <= 30.0:
             return v                    # 与库内同量级 ⇒ 已是「股」
         v = v * 100.0                    # 差约 100 倍 ⇒ cum 是「手」
     else:
         v = v * 100.0
-    if ref_max_v and ref_max_v > 0 and v > ref_max_v * 3.0:
-        return float(cum)               # 放大后超历史极值 ⇒ 原值才是「股」
+    # 放大后若超过历史极值 30 倍 ⇒ 说明原值才是「股」，宁可退回原值也不写错量纲
+    if ref_max_v and ref_max_v > 0 and v > ref_max_v * 30.0:
+        return float(cum)
     return v
 
 
@@ -567,6 +573,101 @@ def append_today_bar_if_missing(conn, code, bars, target=None):
         save_bars(conn, code, [tb])
 
 
+def _sina_hq_vol(codes, timeout=15):
+    """批量取新浪 hq 的当日成交量（**股**，交易所口径）→ {code: v}。
+
+    ⚑ 用 hq.sinajs.cn 的实时快照（第 9 字段=成交量·股、第 10 字段=成交额）。
+      收盘后它就是当日最终值，且**与内部补齐链路完全独立** ⇒ 适合当量纲真值。
+    """
+    out = {}
+    for i in range(0, len(codes), 120):
+        part = codes[i:i + 120]
+        syms = []
+        for c in part:
+            try:
+                mk, digits = ash_market.split_code(str(c))
+            except Exception:  # noqa: BLE001
+                continue
+            syms.append(mk + digits)
+        if not syms:
+            continue
+        url = "https://hq.sinajs.cn/list=" + ",".join(syms)
+        try:
+            req = urllib.request.Request(url, headers={
+                "Referer": "https://finance.sina.com.cn",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+            txt = urllib.request.urlopen(req, timeout=timeout).read().decode("gbk", "ignore")
+        except Exception:  # noqa: BLE001
+            continue
+        for line in txt.split("\n"):
+            line = line.strip()
+            if not line.startswith("var hq_str_"):
+                continue
+            head, sep, rest = line.partition('="')
+            if not sep:
+                continue
+            body = rest.rsplit('"', 1)[0]
+            a = body.split(",")
+            if len(a) < 10:
+                continue
+            try:
+                v = float(a[8])
+            except (TypeError, ValueError):
+                continue
+            if v > 0:
+                out[head[len("var hq_str_"):][-6:]] = v
+    return out
+
+
+def verify_today_volume(conn, target=None, codes=None, verbose=True, tol=0.02):
+    """用新浪 hq 的当日成交量复核当日 bar 的 v —— 修正量纲错（静默污染的解药）。
+
+    ⚑ 2026-10-28 立（起因：迪安诊断可买那天做数据体检）：
+      收盘扫描后发现 **339 只科创板票**当日成交量被放大 **正好 100 倍**
+      （688783 库内写 161 亿股、真实 1.61 亿股；688781 视涯 3.66 亿 vs 365 万股）。
+      抽样 14/14 用「库内 ÷100」精确等于新浪真值 ⇒ 是**量纲错、不是真放量**。
+
+      链路里判量的位置有四处（新浪日K / 腾讯分钟线 / 腾讯日K对拍 / 自适应兜底），
+      任一处判错都会**静默**污染 RVOL 与「放量突破」判定 —— 而这直接决定买不买。
+      ⇒ 补齐之后再回**交易所口径**核对一遍，偏差 >tol 就用新浪值覆盖，并报出只数。
+
+    ⚠ 只在 target == 今日时有效（新浪 hq 只给最新交易日）；历史日不动，避免误伤复权口径。
+    """
+    target = target or _today_bj()
+    if target != _today_bj():
+        return {"checked": 0, "fixed": 0, "note": "target 非今日，跳过量纲复核"}
+    if codes is None:
+        rows = conn.execute("SELECT code, v FROM bars WHERE d=?", (target,)).fetchall()
+    else:
+        rows = []
+        for c in codes:
+            r = conn.execute("SELECT v FROM bars WHERE code=? AND d=?", (c, target)).fetchone()
+            if r and r[0]:
+                rows.append((c, r[0]))
+    cur = {str(c): float(v) for c, v in rows if v}
+    if not cur:
+        return {"checked": 0, "fixed": 0}
+    real = _sina_hq_vol(list(cur))
+    fixed = []
+    for c, v in cur.items():
+        r = real.get(c)
+        if not r or r <= 0:
+            continue
+        if abs(v - r) / r > tol:
+            conn.execute("UPDATE bars SET v=? WHERE code=? AND d=?", (r, c, target))
+            fixed.append((c, v, r))
+    if fixed:
+        conn.commit()
+    if verbose:
+        print("  当日量纲复核：核对 %d 只（新浪真值 %d 只），修正 %d 只"
+              % (len(cur), len(real), len(fixed)), flush=True)
+        for c, v, r in fixed[:6]:
+            print("    ⚠ %s 库内 %.0f → 真实 %.0f（差 %.0f 倍）"
+                  % (c, v, r, (v / r if r else 0)), flush=True)
+    return {"checked": len(cur), "fixed": len(fixed),
+            "codes": [c for c, _, _ in fixed]}
+
+
 def ensure_today_bars(conn, target=None, codes=None, workers=6, verbose=True,
                        progress=200, sleep=0.0, retry=1):
     """把库内日线补到 **target 日** —— 收盘扫描前的**必经步骤**。
@@ -596,8 +697,10 @@ def ensure_today_bars(conn, target=None, codes=None, workers=6, verbose=True,
         meta_set(conn, "today_bar_target", target)
         meta_set(conn, "today_bar_filled", "0")
         meta_set(conn, "today_bar_failed", "0")
+        vf = verify_today_volume(conn, target, verbose=verbose)
+        meta_set(conn, "today_vol_fixed", str(vf.get("fixed", 0)))
         return {"target": target, "checked": 0, "filled": 0, "failed": 0,
-                "failed_codes": []}
+                "failed_codes": [], "vol_fixed": vf.get("fixed", 0)}
 
     # 参照量（用于分钟线量纲自适应）必须在**主线程**取：sqlite 连接不可跨线程共享
     # ⚑ 2026-10-28：同时留 db_bars（近 60 根）供**第三级腾讯日K**做成交量单位**对拍**
@@ -707,6 +810,9 @@ def ensure_today_bars(conn, target=None, codes=None, workers=6, verbose=True,
     meta_set(conn, "today_bar_target", target)
     meta_set(conn, "today_bar_filled", str(filled))
     meta_set(conn, "today_bar_failed", str(len(failed)))
+    # ⚑ 2026-10-28：补完之后**必须**回交易所口径核对成交量（当天 339 只科创板被放大 100 倍）
+    vf = verify_today_volume(conn, target, verbose=verbose)
+    meta_set(conn, "today_vol_fixed", str(vf.get("fixed", 0)))
     if verbose:
         print("当日bar补齐（目标 %s）：待补%d 已补%d 仍缺%d  用时%.0fs"
               % (target, len(todo), filled, len(failed), time.time() - t0), flush=True)
@@ -714,7 +820,8 @@ def ensure_today_bars(conn, target=None, codes=None, workers=6, verbose=True,
             print("  ⚠ 补不到当日bar（将被扫描层 fail-closed 拦下，不出信号）：%d 只，例：%s"
                   % (len(failed), ", ".join(failed[:10])), flush=True)
     return {"target": target, "checked": len(todo), "filled": filled,
-            "failed": len(failed), "failed_codes": failed}
+            "failed": len(failed), "failed_codes": failed,
+            "vol_fixed": vf.get("fixed", 0)}
 
 
 def _finalize_today_bars(conn, result, verbose=True):
