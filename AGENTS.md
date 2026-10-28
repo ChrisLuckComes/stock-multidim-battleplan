@@ -297,7 +297,8 @@ P95 就被撑高，**明显在吸筹的票也会算出 SCR90 20%+ 被判「发�
 
 > 四步：`bao_store.py`（数据层）· `scan_warfare.py`（扫描）· `scr_sweep.py`（筹码闸）· `deliver_dual_surge.py`（交付主表）。
 > **完整用法与换机重建手册见 `screener/DEPLOY.md`** —— 拉源码 → 建数据 → 建定时任务，全在里面。
-> **交付硬规则（2026-10-26）**：午盘/收盘交付 = scan → scr_sweep → deliver_dual_surge。主表是高弹性 ∩ 双通过（战法闸 + 筹码 allow_new）。禁止只交引擎序前 20，也禁止把 scan 原表当交付。
+> **交付硬规则（2026-10-26，2026-10-28 修订）**：**尾盘**交付 = scan → scr_sweep → deliver_dual_surge → sector_dual。主表是「强势板块内」的高弹性 ∩ 双通过（战法闸 + 筹码 allow_new）。禁止只交引擎序前 20，也禁止把 scan 原表当交付。
+> **午盘不再跑全量扫描（2026-10-28 老罗定）**：半根 K 线形态 49% 到收盘会改判、午盘「可买」62.5% 到收盘被否、尾盘又新增 118 只午盘看不到的。午盘只跑 `intraday_alert.py`（实时板块 D0 + 高位闸门 + 涨幅榜可买 + 回踩候选，约 10 秒）。实测见 `screener/DEPLOY.md` §5.4。
 > **板块收敛层（2026-10-28 老罗加）**：交付主表前必须再过一道 `screener/sector_dual.py` —— 把「双通过 ∩ 飙股」按**所属板块**过滤，只留本轮 D0 且在窗口内、未触高位闸门的；未收录板块的票标「未覆盖」**不进主表**。
 > 起因：每天选出 N 个不同板块的票，5 万本金买 3 只就满，被迫"每样一点"，拿没有板块支撑的票对冲（圆通速递 = 物流方向当天零资金，纯为分散买，白亏）。
 
@@ -309,8 +310,9 @@ P95 就被撑高，**明显在吸筹的票也会算出 SCR90 20%+ 被判「发�
   ④ `--refresh` **必须把 `--workers` 传进 `refresh_bars`**（`3548cc0` 修，否则串行 44min）。
 - **ST 铁律**：`is_st()` 判据在**数据层**建清单时就剔除（涨跌幅 5%、流动性差、随时退市），
   扫描层同判据双保险（名称在两次刷新之间可能变 ST）。
-- **定时任务（绑机器、不随 git 走）**：盘中 11:30 与收盘 15:20 都走
-  `scan_warfare` → `scr_sweep` → `deliver_dual_surge`。`--top 60` 只是盘中半根复评上限，不是交付名单。
+- **定时任务（绑机器、不随 git 走）**：**盘中 11:30 只跑 `intraday_alert.py`**（实时异动，不扫描）；
+  **收盘 15:20 走全链路** `scan_warfare --refresh` → `scr_sweep` → `deliver_dual_surge` →
+  `sector_selfcalc --rebuild-hist` → `sector_dual`。
   automation 存本地 `~/.workbuddy`，**不跨设备同步** ⇒ 换机必须重建，prompt 原文在 `screener/DEPLOY.md` §5.3。
 - 回归：`python -m pytest tests/test_screener.py -q`（全 mock，零联网）。
 
@@ -519,7 +521,7 @@ P95 就被撑高，**明显在吸筹的票也会算出 SCR90 20%+ 被判「发�
 - **完整引擎必显示股性活跃度（2026-10-24）**：A 股 `battle_analyze` 成功跑完必须带 `activity`，并出现在终端摘要、首屏徽章、一页汇总和筹码卡片后。换手先用日线字段，再筹码序列 / 同日缓存，仍缺走筹码取数（东财失败用 `fetch_bars_tx` 流通股本反算）。算不出写「活跃度：未知（缺换手）」，不把 0 当换手。不进战法扫描、不改 recommend。美股写不适用。
 - **不要轻易卖赢家（hold_winners，2026-10-27）**：结构未破（收盘仍在关键均线/结构止损上、T0 三线还在、不是收盘派发）优先拿住，不因换票卖掉。用户同步卖出时跑 `python gates/hold_winners.py --sold <价>`；卖错（结构未破、只是盘中洗、或卖进浅档）必须当场纠正，给买区上沿/VWAP/−1% 接回或写明不要追，止损不放宽，R≥1.5。收盘已破、排列打乱、顶部确认、收盘派发 → 卖出成立，转入卖后观察。软标签不改 recommend；`hard_gate` 只在卖错时为真。不削弱收盘破才走，也不削弱当日消息不许回补。
 - **⚑ 持仓/股池改动必须「资料库（真源）+ watch_cn.json（本地缓存）」双写同步，禁止只改其一（2026-10-21 老罗纠正）**：加股 / 清仓 / 止损改价 / 入池出池任何变动，两边必须同时更新、状态一致；漏写一边 = 数据分叉，下次读取会拿到错的持仓。标准链路 = 本地改 `watch/watch_cn.json` → `library/sync_library.py --market cn --push` 同步资料库（database-id `eLKj7AvdWJyFmHYP6bCmku`，单票改走 `library/library_pos.py` 的 `add`/`set`/`note`）；反向用 `--pull`。⚠ rebase/冲突解决时尤其要核对两边：本次 c0d252c 把 watch_cn.json 整体替换为 16 票精简版，解决冲突只把乐鑫科技 688018 并入 watch 却漏了资料库，已补（id `gZ14emYAYpQldZP3ZCPqsq`）。
-- **午盘/收盘战法扫描交付 = 双通过∩飙股（老罗 2026-10-26）**：链路 `scan_warfare` → `scr_sweep` → `deliver_dual_surge`。主表是高弹性（板块弹性分位≥75）∩ 战法闸+筹码 `allow_new`。禁止只交引擎序前 20。延续键仍是代码+战法。当日黑名单剔除。减持本档可标未检。
+- **收盘战法扫描交付 = 板块内双通过∩飙股（老罗 2026-10-26，2026-10-28 加板块层）**：链路 `scan_warfare` → `scr_sweep` → `deliver_dual_surge` → `sector_dual`。午盘不跑扫描（半根K线不可靠），改 `intraday_alert`。主表是高弹性（板块弹性分位≥75）∩ 战法闸+筹码 `allow_new`。禁止只交引擎序前 20。延续键仍是代码+战法。当日黑名单剔除。减持本档可标未检。
 
 ---
 
