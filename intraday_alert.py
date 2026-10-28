@@ -37,6 +37,7 @@ if HERE not in sys.path:
 
 from ash_market import board_limit_ratio, is_bj  # noqa: E402
 from gates import sector_launch  # noqa: E402
+from gates import sector_selfcalc  # noqa: E402
 
 UA_SINA = {"User-Agent": "Mozilla/5.0", "Referer": "https://vip.stock.finance.sina.com.cn/"}
 
@@ -202,6 +203,65 @@ def retrace_candidates(lst):
     return out
 
 
+def gate_map():
+    """{code: 高位闸门行}，覆盖 references/sector_map.json 里所有代表票。
+
+    覆盖不到 12 个自算板块之外的票（东财板块拿不到成分股，push2 clist 的
+    b:BKxxxx 参数一律被拒）。未覆盖 = 不拦，但也不给「板块OK」背书。
+    """
+    try:
+        rows = sector_selfcalc.high_gate()
+        smap = sector_selfcalc.load_map()
+    except Exception as e:
+        print("  ⚠ 高位闸门不可用：%s: %s" % (type(e).__name__, e))
+        return [], {}
+    m = {}
+    for r in rows:
+        for c in smap.get(r["name"], []):
+            m[str(c)] = r
+    return rows, m
+
+
+def apply_gate(lst, gmap):
+    """给个股打上所属板块的闸门标记；禁开的摘掉「可买」。"""
+    for r in lst:
+        g = gmap.get(r["code"])
+        r["gate"] = g
+        if not g:
+            continue
+        short = g["name"].split("·")[-1][:6]
+        if g["block_open"]:
+            r["tags"] = [t for t in r["tags"] if t != "可买"] + ["%s禁开" % short]
+        elif g["chase_ban"]:
+            r["tags"] = [t for t in r["tags"] if t != "可买"] + ["%s只挂回踩" % short]
+        else:
+            r["tags"] = r["tags"] + ["%sOK" % short]
+    return lst
+
+
+def print_gate(top=12):
+    rows, _ = gate_map()
+    if not rows:
+        return []
+    weak = sector_selfcalc.idx_is_weak()
+    print("【高位闸门】宽松版（距低点≥%.0f%% / 乖离≥%.0f%% 降级；≥%.0f%% / ≥%.0f%% / 距D0≥%.0f%% 禁开）"
+          "  弱市=%s" % (sector_selfcalc.HIGH_L1_DIST_LOW,
+                        sector_selfcalc.HIGH_L1_MA20_DEV,
+                        sector_selfcalc.HIGH_L2_DIST_LOW,
+                        sector_selfcalc.HIGH_L2_MA20_DEV,
+                        sector_selfcalc.HIGH_L2_DIST_D0,
+                        "是" if weak else "否"))
+    print("  %-20s %-8s %-4s %7s %7s %7s %5s  %s" % (
+        "板块", "闸门", "开仓", "等权涨", "距低点", "乖离", "D0次", "触发原因"))
+    print("  " + "-" * 104)
+    for r in rows[:top]:
+        print("  %-20s %-8s %-4s %+7.2f%% %+6.1f%% %+6.1f%% %5d  %s" % (
+            r["name"][:18], r["state_cn"], "禁" if r["block_open"] else "可",
+            r["chg"], r["dist_low"], r["ma20_dev"], r["d0_count"],
+            "；".join(r["reasons"]) or "-"))
+    return rows
+
+
 def print_boards(top=12):
     idx = sector_launch.index_change("sz399006")
     print("【板块】基准创业板指 %+.2f%%" % idx)
@@ -225,17 +285,23 @@ def print_boards(top=12):
     return hot
 
 
-def print_stocks(only_pool=False, pages=3, exclude_bj=True, top=20):
+def print_stocks(only_pool=False, pages=3, exclude_bj=True, top=20, gmap=None):
     rows = fetch_rank(pages=pages)
     if not rows:
         print("【个股】涨幅榜取数失败")
         return [], []
     pool = pool_codes() if only_pool else None
     lst = screen(rows, only_pool=pool, exclude_bj=exclude_bj)
+    if gmap:
+        lst = apply_gate(lst, gmap)
     buy = [r for r in lst if "可买" in r["tags"]]
-    retr = retrace_candidates(lst)
-    print("【个股】涨幅榜 %d 只（前 %d 页）→ 可买 %d / 明日回踩候选 %d"
-          % (len(rows), pages, len(buy), len(retr)))
+    retr_all = retrace_candidates(lst)
+    retr = [r for r in retr_all
+            if not (r.get("gate") and r["gate"]["block_open"])]
+    cut = len(retr_all) - len(retr)
+    print("【个股】涨幅榜 %d 只（前 %d 页）→ 可买 %d / 明日回踩候选 %d%s"
+          % (len(rows), pages, len(buy), len(retr),
+             ("（闸门剔除 %d）" % cut) if cut else ""))
 
     if buy:
         print("—— 可买（今涨幅 %.0f~%.0f%%、站上均价、距涨停≥%.0f%%）" %
@@ -252,11 +318,14 @@ def print_stocks(only_pool=False, pages=3, exclude_bj=True, top=20):
               % (RETRACE_LO, RETRACE_HI, RETRACE_MIN_AMT))
         print("  %-8s %-8s %7s %8s %8s %8s %8s %8s %s" % (
             "代码", "名称", "今涨幅", "买①均价", "买②实体中", "买③今低",
-            "最小额", "额亿", "仓位可行"))
+            "最小额", "额亿", "板块/仓位"))
         for r in retr[:top]:
-            print("  %-8s %-8s %+6.2f%% %8.2f %8.2f %8.2f %7.0f %7.1f  %s" % (
+            g = r.get("gate")
+            gtag = ("%s%s" % (g["name"].split("·")[-1][:6],
+                              "" if not g["chase_ban"] else "只挂回踩")) if g else "未覆盖"
+            print("  %-8s %-8s %+6.2f%% %8.2f %8.2f %8.2f %7.0f %7.1f  %s %s" % (
                 r["code"], r["name"][:8], r["chg"], r["buy_vwap"], r["buy_mid"],
-                r["buy_low"], r["lot_amt"], r["amt_yi"],
+                r["buy_low"], r["lot_amt"], r["amt_yi"], gtag,
                 "✓" if r["lot_ok"] else "✗超%.0f万" % (LOT_CAP_YUAN / 1e4)))
         n_ok = sum(1 for r in retr if r["lot_ok"])
         print("  （最小申报 ≤%.0f 万的 %d 只；✗ 的是股价把最小仓位顶死了，再强也买不了）"
@@ -273,6 +342,7 @@ def main():
     ap.add_argument("--num", type=int, default=100, help="每页条数")
     ap.add_argument("--pages", type=int, default=3, help="拉前几页（默认 3 页=前 300 名）")
     ap.add_argument("--top", type=int, default=12)
+    ap.add_argument("--no-gate", action="store_true", help="跳过高位闸门")
     a = ap.parse_args()
 
     while True:
@@ -281,10 +351,14 @@ def main():
         print("盘中异动 %s" % ts)
         print("=" * 80)
         try:
+            _, gmap = ([], {}) if a.no_gate else gate_map()
+            if not a.no_gate:
+                print_gate(a.top)
+                print()
             print_boards(a.top)
             print()
             print_stocks(only_pool=a.pool, pages=a.pages,
-                         exclude_bj=a.no_bj, top=a.top)
+                         exclude_bj=a.no_bj, top=a.top, gmap=gmap)
         except Exception as e:
             print("扫描异常：%s: %s" % (type(e).__name__, e))
         if not a.loop:
