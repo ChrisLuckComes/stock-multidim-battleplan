@@ -90,9 +90,23 @@ def window_of(d0_count, chg=None, breadth=None, d0_date=None, today=None,
       ⚠ 但门槛**不能设成 >0**：创业板大涨 3.4% 的日子几乎全板块跑输，一刀切会让普涨日
       全部降级、工具天天 0 只。⇒ 用 EXCESS_TOL_MIN（−2.0）容忍小幅跑输，只拦明显掉队。
 
-    D0/D1/D2 + 当日走强（涨 + 扩散≥50% + 超额≥−2.0）→ 主买区；
+    ⚑ 2026-10-28 修③（老罗理念：去掉我执、只跟资金）：**主买区只给「首轮 D0」**。
+      用 12 只端侧 SoC 成分、321 个交易日回测「D0 当日收盘 → 次日开盘等权买入」：
+
+        | 场景 | n | 持3日 | 持5日 | 持10日 |
+        |---|---|---|---|---|
+        | 首轮 D0 | 22 | +1.57% / 胜64% | +1.55% / 59% | +1.52% / 57% |
+        | 重复 D0（连涨中） | 15 | −1.08% / 40% | +0.35% / 53% | **−3.36% / 33%** |
+        | 暴跌日接刀（≤−5%+扩散≤30%） | 12 | **−0.56% / 33%** | −0.41% / 42% | +0.31% / 50% |
+
+      ⇒ 首轮 D0 是唯一稳定正期望的入场点（3/5/10 日全正、胜率 57~64%）；
+        重复 D0 能博 5 日短线但拿 10 日就崩（中位 −6.71%）；
+        **暴跌日接刀期望为负**（胜率 33%）—— 老罗 10-27 买恒玄就是这一类。
+      ⇒ 原「D0/D1/D2 都是主买区」作废：D1/D2 属重复 D0，降为回踩区（可做短、禁追阳）。
+
+    首轮 D0 + 当日走强（涨 + 扩散≥50% + 超额≥−2.0）→ 主买区；
     当日转跌 / 扩散跌破一半 / 明显跑输 → 回踩区（只准挂单不追）；
-    D3~5 → 回踩区；D5+ 或启动已超 7 个自然日 → 只持区。
+    重复 D0（第 2~5 次）→ 回踩区；>5 次或启动已超 7 个自然日 → 只持区。
     """
     n = int(d0_count or 0)
     if n <= 0:
@@ -110,7 +124,7 @@ def window_of(d0_count, chg=None, breadth=None, d0_date=None, today=None,
             stale = False
     if n > 5 or stale:
         return WIN_PULL if n <= 5 else WIN_HOLD
-    if n <= 3:
+    if n == 1:
         return WIN_BUY if up_today else WIN_PULL
     return WIN_PULL
 
@@ -263,7 +277,8 @@ def build(date_tag, scr_path=None, sector_map=None, use_gate=True, quotes=None):
                                    "大盘普涨里跟涨、不是资金进攻方向，只准挂单不追"
                                    % (s["chg"], s["excess"]))
                 else:
-                    item["why"] = "本轮第 %d 次 D0，只准挂回踩不追" % s["d0_count"]
+                    item["why"] = ("本轮第 %d 次 D0（非首轮）—— 重复 D0 历史持 10 日"
+                                   "均值 −3.4%%/胜率 33%%，只准挂回踩做短、禁追阳" % s["d0_count"])
             else:
                 if item["stk_ok"] in ("high_pos", "low_rr"):
                     item["cat"] = C_DEGRADE
@@ -272,8 +287,8 @@ def build(date_tag, scr_path=None, sector_map=None, use_gate=True, quotes=None):
                     ok, zw = zone_ok(r)
                     if ok:
                         item["cat"] = C_OPEN
-                        item["why"] = "板块第 %d 次 D0（今日 %+.2f%%、扩散 %.0f%%、超额 %+.2f）" % (
-                            s["d0_count"], s["chg"], s["breadth"] * 100, s["excess"])
+                        item["why"] = "板块首轮 D0（今日 %+.2f%%、扩散 %.0f%%、超额 %+.2f）" % (
+                            s["chg"], s["breadth"] * 100, s["excess"])
                         if item["stk_ok"] == "unknown":
                             item["why"] += "；⚠ " + item["stk_why"]
                     else:
@@ -453,7 +468,7 @@ def render_md(rows, summary, stat, date_tag, session, scr_path):
             s["gate"], s["window"], s["n_cand"]))
     L.append("")
     L.append("---")
-    L.append("窗口口径：D0/D1/D2（本轮第 1~3 次）主买 ｜ D3~5 只准挂回踩 ｜ D5+ 只持不开。")
+    L.append("窗口口径：**首轮 D0**（本轮第 1 次）主买 ｜ 重复 D0（第 2~5 次）只准挂回踩做短 ｜ D5+ 只持不开。回测：首轮 D0 持5日 +1.55%/胜率59%；重复 D0 持10日 −3.36%/胜率33%。")
     L.append("高位闸门：L1 禁追阳线（弱市升级为连回踩也不接）｜ L2 禁新开仓 ｜ L3 按个股结构减。")
     return "\n".join(L)
 
@@ -613,7 +628,7 @@ def render_html(rows, summary, stat, date_tag, session, scr_path):
 板块覆盖 <b>%d</b> 个 / <b>%d</b> 只代表票 ｜ 双通过侧数据：%s（%s）
 </div>
 %s
-<div class="sub" style="margin-top:24px">窗口：D0/D1/D2 主买 ｜ D3~5 只准挂回踩 ｜ D5+ 只持不开。
+<div class="sub" style="margin-top:24px">窗口：**首轮 D0** 主买 ｜ 重复 D0 只准挂回踩 ｜ D5+ 只持不开。
 高位闸门：L1 禁追阳线（弱市升级为连回踩也不接）｜ L2 禁新开仓 ｜ L3 按个股结构减。</div>
 """ % (date_tag, sess_cn, CSS, date_tag, sess_cn,
        stat["idx"], "是" if stat["weak"] else "否",

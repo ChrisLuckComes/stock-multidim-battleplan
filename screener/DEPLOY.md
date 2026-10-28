@@ -61,7 +61,7 @@ git log --oneline -1      # 应看到 3548cc0 或更新的提交
 
 ```bash
 <PY> -m pip install baostock          # 必需：日线数据源（前复权）
-<PY> -m pip install tdxpy             # 可选：通达信兜底源（默认关，ASH_TDX_FALLBACK=1 才启用）
+<PY> -m pip install tdxpy             # ⛔ 2026-10-28 作废：通达信已收费不可用，不要装（主链路不依赖）
 <PY> -m pip install pytest            # 可选：跑回归测试
 ```
 
