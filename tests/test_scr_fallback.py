@@ -217,3 +217,83 @@ def test_analyze_把来源带进结果(monkeypatch, tmp_path):
     assert r["kline_src"] == "tx"
     assert r["fflow_src"] == "none"
     assert "腾讯" in r["src_note"]
+
+
+# ─────────────────── ③ 缓存时效：盘中半日快照不得在收盘后复用 ───────────────────
+class TestCacheSettled:
+    """2026-10-28 老罗问「视涯不是一直集中吗」查出的坑。
+
+    原判据「收盘后当日一律有效」会让**上午写的半日快照**冒充收盘数据：
+    688781 视涯 10:21 缓存末根是盘中快照（收 43.58、换手 2.90%、量 120.9 万股），
+    真实收盘 43.74、换手 8.79%、量 365.9 万股。筹码模型靠换手定衰减速度，
+    拿 1/3 的换手去跑 ⇒ 主成本堆在高位、SCR90 压到 19.73 判「吸筹中」，
+    而全量收盘数据是 21.24「筹码发散」。**同一只票两条相反结论。**
+    判据对齐 bars_source._check_rules 铁律②（存盘早于定稿时刻＝疑为半日 bar）。
+    """
+
+    @staticmethod
+    def _p(saved_at, last_d):
+        return {"saved_at": saved_at, "bars": [{"d": last_d, "c": 10.0}]}
+
+    def test_intraday_snapshot_invalid_after_close(self):
+        now = S.dt.datetime(2026, 10, 28, 17, 55)
+        p = self._p("2026-10-28T10:21:16", "2026-10-28")
+        assert S._cache_valid(p, now) is False, "盘中半日快照不能在收盘后冒充定稿数据"
+
+    def test_settled_cache_valid_after_close(self):
+        now = S.dt.datetime(2026, 10, 28, 17, 55)
+        p = self._p("2026-10-28T15:20:03", "2026-10-28")
+        assert S._cache_valid(p, now) is True
+
+    def test_previous_day_bar_valid_after_close(self):
+        """末根不是当天（周末/节后/停牌）⇒ 序列早已定稿，不受定稿时刻限制。"""
+        now = S.dt.datetime(2026, 10, 28, 17, 55)
+        p = self._p("2026-10-28T10:21:16", "2026-10-27")
+        assert S._cache_valid(p, now) is True
+
+    def test_intraday_ttl_still_applies_in_session(self):
+        now = S.dt.datetime(2026, 10, 28, 11, 30)
+        fresh = self._p("2026-10-28T11,29:00".replace(",", ":"), "2026-10-28")
+        stale = self._p("2026-10-28T10:21:16", "2026-10-28")
+        assert S._cache_valid(fresh, now) is True
+        assert S._cache_valid(stale, now) is False, "盘中仍按 120s TTL 判"
+
+
+# ─────────────────── ③ 缓存时效：盘中半日快照不得在收盘后复用 ───────────────────
+class TestCacheSettled:
+    """2026-10-28 老罗问「视涯不是一直集中吗」查出的坑。
+
+    原判据「收盘后当日一律有效」会让**上午写的半日快照**冒充收盘数据：
+    688781 视涯 10:21 缓存末根是盘中快照（收 43.58、换手 2.90%、量 120.9 万股），
+    真实收盘 43.74、换手 8.79%、量 365.9 万股。筹码模型靠换手定衰减速度，
+    拿 1/3 的换手去跑 ⇒ 主成本堆在高位、SCR90 压到 19.73 判「吸筹中」，
+    而全量收盘数据是 21.24「筹码发散」。**同一只票两条相反结论。**
+    判据对齐 bars_source._check_rules 铁律②（存盘早于定稿时刻＝疑为半日 bar）。
+    """
+
+    @staticmethod
+    def _p(saved_at, last_d):
+        return {"saved_at": saved_at, "bars": [{"d": last_d, "c": 10.0}]}
+
+    def test_intraday_snapshot_invalid_after_close(self):
+        now = S.dt.datetime(2026, 10, 28, 17, 55)
+        p = self._p("2026-10-28T10:21:16", "2026-10-28")
+        assert S._cache_valid(p, now) is False, "盘中半日快照不能在收盘后冒充定稿数据"
+
+    def test_settled_cache_valid_after_close(self):
+        now = S.dt.datetime(2026, 10, 28, 17, 55)
+        p = self._p("2026-10-28T15:20:03", "2026-10-28")
+        assert S._cache_valid(p, now) is True
+
+    def test_previous_day_bar_valid_after_close(self):
+        """末根不是当天（周末/节后/停牌）⇒ 序列早已定稿，不受定稿时刻限制。"""
+        now = S.dt.datetime(2026, 10, 28, 17, 55)
+        p = self._p("2026-10-28T10:21:16", "2026-10-27")
+        assert S._cache_valid(p, now) is True
+
+    def test_intraday_ttl_still_applies_in_session(self):
+        now = S.dt.datetime(2026, 10, 28, 11, 30)
+        fresh = self._p("2026-10-28T11,29:00".replace(",", ":"), "2026-10-28")
+        stale = self._p("2026-10-28T10:21:16", "2026-10-28")
+        assert S._cache_valid(fresh, now) is True
+        assert S._cache_valid(stale, now) is False, "盘中仍按 120s TTL 判"

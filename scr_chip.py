@@ -45,7 +45,10 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 import ash_market  # noqa: E402  A股代码→市场/涨跌幅判定唯一真源（920=北交所，secid 前缀 0）
 CACHE_DIR = os.path.join(ROOT, "data", "cache")
-INTRADAY_TTL = 120          # 盘中日线缓存有效期（秒）；收盘后当日有效
+INTRADAY_TTL = 120          # 盘中日线缓存有效期（秒）；收盘后只认已定稿的
+#: A 股当日日线定稿时刻：早于此写入的「末根＝当天」缓存＝盘中半日快照，收盘后不得复用。
+#: 与 bars_source.ASH_SETTLED / _check_rules 铁律②同口径（2026-10-28 对齐）。
+SETTLED_TIME = dt.time(15, 0)
 EM_KLINE = ("https://push2his.eastmoney.com/api/qt/stock/kline/get"
             "?secid={secid}&klt=101&fqt=1&end=20500101&lmt={lmt}"
             "&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61")
@@ -543,14 +546,35 @@ def _cache_path(code, us_mode=False):
 
 
 def _cache_valid(payload, now):
-    """同日缓存是否可用：收盘后当日有效；盘中只认 120s 内的（日线还在变）。"""
+    """同日缓存是否可用。
+
+    ⚑ 2026-10-28 修（老罗问「视涯不是一直集中吗」查出）：
+      原判据「收盘后当日一律有效」会把**盘中的半日快照**当成收盘数据复用。
+      实证 688781 视涯：10:21 写过一份缓存，末根 bar 是盘中快照
+      （收 43.58、量 120.9 万股、换手 **2.90%**），真实收盘 43.74、量 365.9 万股、换手 **8.79%**。
+      筹码模型靠换手率决定衰减速度 ⇒ 拿 1/3 的换手去跑，
+      成本全堆在高位（主力成本 45.08 而非 37.14）、SCR90 压到 19.73（差 0.27 压线 <20）
+      ⇒ 判「吸筹中·允许新开仓」；同一只票收盘全量数据算是 SCR90 21.24「筹码发散·禁开」。
+      **两条结论相反，老罗照上午那份买进了 200 股。**
+
+    ⇒ 判据与 `bars_source._check_rules` 铁律②对齐（那边早有「存盘早于定稿时刻＝疑为半日 bar」，
+      筹码模块漏了）：收盘后复用缓存时，若末根 bar 就是**当天**，
+      则要求它写于当日定稿时刻（15:00）之后，否则一律失效重取。
+      末根不是当天（周末/节后/停牌）不受此限——那时序列已定稿。
+    """
     try:
         ts = dt.datetime.fromisoformat(str(payload.get("saved_at")))
     except Exception:
         return False
     if ts.date() != now.date():
         return False
+    bars = payload.get("bars") or []
+    last_d = str(bars[-1].get("d") or "")[:10] if bars else ""
+    bar_is_today = bool(last_d) and last_d == str(now.date())
     if now.time() >= dt.time(15, 5):
+        # 盘中的半日快照不能在收盘后冒充定稿数据
+        if bar_is_today and ts.time() < SETTLED_TIME:
+            return False
         return True
     return (now - ts).total_seconds() <= INTRADAY_TTL
 
