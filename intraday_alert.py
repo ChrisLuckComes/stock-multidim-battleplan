@@ -45,6 +45,12 @@ BUY_LO, BUY_HI = 3.0, 7.0   # 可买涨幅区间
 MIN_ROOM = 2.0          # 距涨停最小空间（pct），不够就是买不进
 RETRACE_LO, RETRACE_HI = 7.0, 15.0   # 明日回踩候选的今日涨幅区间
 RETRACE_MIN_AMT = 5.0   # 回踩候选最小成交额（亿）
+LOT_CAP_YUAN = 50000    # 单笔上限（老罗 A股口径），超过则最小申报就吃不消
+
+
+def min_lot(code):
+    """最小申报股数：科创板 200 股起（不是 100，也不能减半）。"""
+    return 200 if str(code).startswith("688") else 100
 
 # 伪板块：地域/统计口径/题材蹭热点，不是「资金进攻的产业方向」，判 D0 无意义
 PSEUDO_BOARD_KW = (
@@ -186,10 +192,13 @@ def retrace_candidates(lst):
         if r["vwap_dev"] < 0:             # 收盘破均价，说明尾盘被砸
             continue
         body_mid = (r["open"] + r["cur"]) / 2 if r["open"] > 0 else r["vwap"]
+        lot_amt = r["cur"] * min_lot(r["code"])
         out.append(dict(r, buy_vwap=round(r["vwap"], 2),
                         buy_mid=round(body_mid, 2),
-                        buy_low=round(r["low"], 2)))
-    out.sort(key=lambda r: -r["amt_yi"])
+                        buy_low=round(r["low"], 2),
+                        lot_amt=round(lot_amt, 0),
+                        lot_ok=lot_amt <= LOT_CAP_YUAN))
+    out.sort(key=lambda r: (-r["lot_ok"], -r["amt_yi"]))
     return out
 
 
@@ -241,12 +250,17 @@ def print_stocks(only_pool=False, pages=3, exclude_bj=True, top=20):
     if retr:
         print("—— 明日回踩候选（今日涨 %.0f~%.0f%% 未封板、均价上方、额≥%.0f亿）"
               % (RETRACE_LO, RETRACE_HI, RETRACE_MIN_AMT))
-        print("  %-8s %-8s %7s %7s %8s %8s %8s  %s" % (
-            "代码", "名称", "今涨幅", "距涨停", "买①均价", "买②实体中", "买③今低", "额亿"))
+        print("  %-8s %-8s %7s %8s %8s %8s %8s %8s %s" % (
+            "代码", "名称", "今涨幅", "买①均价", "买②实体中", "买③今低",
+            "最小额", "额亿", "仓位可行"))
         for r in retr[:top]:
-            print("  %-8s %-8s %+6.2f%% %+6.1f%% %8.2f %8.2f %8.2f  %.1f" % (
-                r["code"], r["name"][:8], r["chg"], r["room"],
-                r["buy_vwap"], r["buy_mid"], r["buy_low"], r["amt_yi"]))
+            print("  %-8s %-8s %+6.2f%% %8.2f %8.2f %8.2f %7.0f %7.1f  %s" % (
+                r["code"], r["name"][:8], r["chg"], r["buy_vwap"], r["buy_mid"],
+                r["buy_low"], r["lot_amt"], r["amt_yi"],
+                "✓" if r["lot_ok"] else "✗超%.0f万" % (LOT_CAP_YUAN / 1e4)))
+        n_ok = sum(1 for r in retr if r["lot_ok"])
+        print("  （最小申报 ≤%.0f 万的 %d 只；✗ 的是股价把最小仓位顶死了，再强也买不了）"
+              % (LOT_CAP_YUAN / 1e4, n_ok))
     return buy, retr
 
 
