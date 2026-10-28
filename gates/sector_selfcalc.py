@@ -197,20 +197,38 @@ def build_high_hist(days=90, sector_map=None, write=True, quiet=False):
     return out
 
 
-def load_high_hist(max_age_days=7):
-    """读缓存；缺失或过旧则重建。"""
+def load_high_hist(max_age_days=7, why=None):
+    """读锚点缓存；缺失 / 过旧 / 板块数对不上（说明映射表改过）则自动重建。
+
+    ⚑ `data/` 在 .gitignore 里，**锚点缓存不入仓**——换机器、换 agent 时是空的。
+      所以这条必须能自愈：缺了就现算（约 10~20 秒，走 bars_source 日线缓存），
+      并且**大声说出来**，不静默降级（静默 = 拿空锚点算出正常档位，最危险）。
+      真正入仓的是 `references/sector_map.json`，那才是唯一真源。
+    """
+    reason = why or "缓存缺失"
     try:
         with open(HIGH_HIST_PATH, encoding="utf-8") as f:
             h = json.load(f)
         if h.get("sectors"):
             rd = h.get("ref_date")
-            if rd:
-                age = (datetime.date.today()
-                       - datetime.date(*[int(x) for x in rd.split("-")])).days
-                if age <= max_age_days:
-                    return h
-    except Exception:
-        pass
+            # 映射表改过（板块数变了）⇒ 锚点必须重算，否则新板块永远没有闸门
+            if len(h["sectors"]) != len(load_map()):
+                reason = "映射表板块数已变（缓存 %d → 现在 %d）" % (
+                    len(h["sectors"]), len(load_map()))
+                raise ValueError(reason)
+            if not rd:
+                raise ValueError("缓存无 ref_date")
+            age = (datetime.date.today()
+                   - datetime.date(*[int(x) for x in rd.split("-")])).days
+            if age > max_age_days:
+                reason = "锚点已过期 %d 天（ref_date=%s）" % (age, rd)
+                raise ValueError(reason)
+            return h
+    except Exception as e:
+        if not str(e).startswith(("缓存缺失", "锚点已过期", "映射表", "缓存无")):
+            reason = "%s: %s" % (type(e).__name__, e)
+    print("⚠ 高位锚点需重建（%s）→ 现算 %d 板块日线，约 10~20 秒…"
+          % (reason, len(load_map())))
     return build_high_hist(quiet=True)
 
 
@@ -355,8 +373,65 @@ def gate_of(code, gate_rows=None, sector_map=None):
     return None
 
 
-def print_gate(rows=None, top=16):
+def verify_map(sector_map=None, quiet=False):
+    """体检 references/sector_map.json（**入仓文件**，换机器/换 agent 全靠它）。
+
+    查四件事：
+      1. 每只代码能否取到行情（退市/写错的代码会一直静默拉不到）
+      2. 同一只票是否被塞进多个板块（会让板块等权被重复计权）
+      3. 每个板块的样本数（<3 只时扩散度只有 0/33/67/100 四档，判 D0 不可靠）
+      4. 名称是否与代码对得上（防手抄串行）
+
+    返回 {"ok":bool, "rows":[板块体检], "codes":{code:name}, "bad":[...]}
+    """
+    smap = sector_map or load_map()
+    seen, dup = {}, []
+    for name, codes in smap.items():
+        for c in codes:
+            if c in seen:
+                dup.append((c, seen[c], name))
+            seen[c] = name
+    q = fetch_quotes(list(seen.keys()))
+    bad = [c for c in seen if c not in q]
+    rows = []
+    for name, codes in smap.items():
+        got = [c for c in codes if c in q]
+        rows.append({
+            "name": name, "declared": len(codes), "fetched": len(got),
+            "miss": [c for c in codes if c not in q],
+            "thin": len(got) < 3,
+        })
+    ok = not bad and not dup and not any(r["thin"] for r in rows)
+    res = {"ok": ok, "rows": rows, "codes": {c: q[c]["name"] for c in q},
+           "bad": bad, "dup": dup, "n_sector": len(smap), "n_code": len(seen)}
+    if not quiet:
+        print("映射表体检：%d 板块 / %d 只代码" % (len(smap), len(seen)))
+        print("%-24s %6s %6s  %s" % ("板块", "声明", "取到", "问题"))
+        print("-" * 72)
+        for r in rows:
+            prob = []
+            if r["miss"]:
+                prob.append("取数失败:" + ",".join(r["miss"]))
+            if r["thin"]:
+                prob.append("样本<3，扩散度不可靠")
+            print("%-24s %6d %6d  %s" % (r["name"][:22], r["declared"], r["fetched"],
+                                         "；".join(prob) or "-"))
+        if dup:
+            print("\n⚠ 重复归属（同票在多板块，会重复计权）：")
+            for c, a, b in dup:
+                print("  %s 同时在「%s」和「%s」" % (c, a, b))
+        if bad:
+            print("\n⚠ 取数失败（退市或代码写错）：%s" % "、".join(bad))
+        print("\n结论：%s" % ("通过" if ok else "有问题，见上"))
+    return res
+
+
+def print_gate(rows=None, top=16, hist=None):
     rows = rows if rows is not None else high_gate()
+    rd = (hist or load_high_hist()).get("ref_date")
+    print("锚点 ref_date=%s（%s）｜ 锚点收盘后重建，盘中只换现价"
+          % (rd or "?",
+             "今日" if rd == datetime.date.today().isoformat() else "非今日·注意陈旧"))
     print("%-22s %-8s %-6s %7s %7s %7s %8s %5s  %s" % (
         "板块", "闸门", "开仓", "等权涨", "距低点", "乖离", "距D0", "D0次", "触发原因"))
     print("-" * 112)
@@ -517,8 +592,14 @@ def main():
     ap.add_argument("--rs", type=int, default=0, help="改为算 N 日板块 RS（日线，收盘用）")
     ap.add_argument("--high", action="store_true", help="高位闸门（L0/L1/L2/L3）")
     ap.add_argument("--rebuild-hist", action="store_true", help="重建高位锚点缓存（收盘后跑）")
+    ap.add_argument("--check-map", action="store_true",
+                    help="体检 references/sector_map.json（改完表必跑）")
     ap.add_argument("--top", type=int, default=20)
     a = ap.parse_args()
+
+    if a.check_map:
+        r = verify_map()
+        return 0 if r["ok"] else 1
 
     if a.rebuild_hist:
         build_high_hist()

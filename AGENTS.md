@@ -298,6 +298,8 @@ P95 就被撑高，**明显在吸筹的票也会算出 SCR90 20%+ 被判「发�
 > 四步：`bao_store.py`（数据层）· `scan_warfare.py`（扫描）· `scr_sweep.py`（筹码闸）· `deliver_dual_surge.py`（交付主表）。
 > **完整用法与换机重建手册见 `screener/DEPLOY.md`** —— 拉源码 → 建数据 → 建定时任务，全在里面。
 > **交付硬规则（2026-10-26）**：午盘/收盘交付 = scan → scr_sweep → deliver_dual_surge。主表是高弹性 ∩ 双通过（战法闸 + 筹码 allow_new）。禁止只交引擎序前 20，也禁止把 scan 原表当交付。
+> **板块收敛层（2026-10-28 老罗加）**：交付主表前必须再过一道 `screener/sector_dual.py` —— 把「双通过 ∩ 飙股」按**所属板块**过滤，只留本轮 D0 且在窗口内、未触高位闸门的；未收录板块的票标「未覆盖」**不进主表**。
+> 起因：每天选出 N 个不同板块的票，5 万本金买 3 只就满，被迫"每样一点"，拿没有板块支撑的票对冲（圆通速递 = 物流方向当天零资金，纯为分散买，白亏）。
 
 - **口径**：`baostock` **前复权**（`adjustflag='2'`）+ 本地 SQLite `data/screener.db`（215MB，**不入库**）。
   与战术执行链路（sina/tdx **不复权**）**刻意分家**，禁止混用（见 1g/1h）。
@@ -324,7 +326,11 @@ P95 就被撑高，**明显在吸筹的票也会算出 SCR90 20%+ 被判「发�
 | `screener/q3_filter.py` | **定期报告披露窗口**（当前 = 2026 三季报，报告期 `2026-09-30`，披露截止 10-31） | `python screener/q3_filter.py --date <YYYY-MM-DD> [--report-date <YYYY-MM-DD>]` | 只在披露窗口内。窗口外跑它，绝大多数票会落进「未出」档 ⇒ **无意义** |
 
 **默认链路（不得混入任何特写逻辑）**：
-`scan_warfare` → `scr_sweep` → `gen_pass_list` → `elastic_dual`（+ `deliver_dual_surge`）。
+`scan_warfare` → `scr_sweep` → `gen_pass_list` → `elastic_dual` → `sector_dual`（+ `deliver_dual_surge`）。
+
+> `sector_dual` 是最外层收敛：`elastic_dual` 出「双通过 ∩ 飙股」，`sector_dual` 再按板块 D0 窗口
+> + 高位闸门筛一遍，分五档输出（可开 / 降级 / 普涨跟涨 / 闸门拦 / 板块未启动 / 未覆盖）。
+> **主表只取「可开」**。板块归属真源 = 入仓文件 `references/sector_map.json`。
 
 ⚠ 每日收盘自动化的 prompt / 命令序列里**禁止**出现 `q3_filter`；需要时**人工显式调用**。
 ⚠ **通用闸门不属特写、必须常驻**（判别标准：**平时一直成立 ⇒ 通用闸门；
@@ -334,6 +340,8 @@ P95 就被撑高，**明显在吸筹的票也会算出 SCR90 20%+ 被判「发�
 | `screener/filters.py` | 高位闸（偏离主力成本 ≥35%）+ 赔率闸（R≥1.5） | `gen_pass_list` / `q3_filter` / `battle_analyze` / `session_decide` / `surge_pick` |
 | `screener/report_calendar.py` | **定期报告披露窗口**（按**交易日**：法定截止日前 3 个交易日起）＋ 披露早晚分层 | `gen_pass_list`（窗口内自动启用报告闸） |
 | `screener/earnings.py` | 业绩取数（**正式报告优先于预告**） | `surge_pick` |
+| `gates/sector_selfcalc.py` | **板块 D0 窗口 + 高位闸门**（L0/L1/L2/L3，弱市加成、大类联动） | `screener/sector_dual` / `intraday_alert` |
+| `screener/sector_dual.py` | **板块收敛层**：双通过∩飙股 → 按板块过滤，未覆盖不进主表 | 午盘 / 尾盘交付主表 |
 
 ⚑ `report_calendar` 与 `q3_filter` 的区别：前者**常年成立**（每到窗口自动生效、窗口外自动不生效）⇒ 通用闸门；
 后者绑死某个报告期 ⇒ 特写逻辑。

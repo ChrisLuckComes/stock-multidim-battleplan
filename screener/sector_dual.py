@@ -1,0 +1,507 @@
+# -*- coding: utf-8 -*-
+"""板块层 × 双通过 × 飙股 —— 午盘 / 尾盘全量扫描的最终收敛层。
+
+老罗 2026-10-28 原话：
+  「午盘和尾盘的全量扫描，需要接入这个新代码，最终需要在强势板块中，选到双通过+飙股，
+    我每天全量选票可能选到 N 个不同板块，如果我只做强势板块，就不会在什么圆通速递上面
+    白白亏钱做所谓的对冲了。」
+
+问题：`elastic_dual` 出的交集（高弹性 ∩ 双通过）有 20~40 只，横跨十几个方向。
+老罗资金 5 万，买 3 只就满，于是被迫"每样买一点"，结果是拿没有板块支撑的票去对冲
+（圆通速递：物流方向当天无任何资金进攻，纯靠"分散"当理由买），对冲变成了白亏。
+
+本模块在最外层加一道**板块闸**，把「双通过+飙股」的候选按所属板块过滤：
+
+  第 1 层 板块层（本模块新增）
+      板块必须处在 D0 启动后的可开窗口（D0/D1/D2 主买、D3~5 只准回踩），
+      且未触发高位闸门（见 topics/high-gate.md）。
+  第 2 层 双通过    战法闸 + 筹码闸（scr_<date>_close.jsonl）
+  第 3 层 飙股      板块内弹性日数分位 ≥75（高弹性档）
+
+归属：`references/sector_map.json`（23 板块 125 只，自维护）。
+   ⚠ 未收录的票一律标「未覆盖」→ 不进主表。这是刻意的：宁可错过，
+     也不拿"不知道属于什么方向"的票去凑仓位（圆通就是这么买进来的）。
+   要提覆盖率就往 sector_map.json 加票，加完跑
+   `python gates/sector_selfcalc.py --rebuild-hist`。
+
+用法
+----
+    python screener/sector_dual.py --date 2026-10-28 --session close
+    python screener/sector_dual.py --session midday      # 午盘（11:30）
+    可选 --no-gate（只看板块 D0 窗口，不看高位闸门）
+
+⚠ 午盘口径限制：`scr_sweep` 只在收盘跑，所以午盘的「双通过」侧读的是**昨收**筹码口径，
+  盘中新出现的信号只进 midday jsonl，不进交集表。板块层（D0 / 闸门 / 距低点）是**实时**的。
+  报告头会标明两侧各自的数据日期。
+
+产物：out_cn/sector_dual_<date>_<session>.{md,html}
+"""
+import argparse
+import datetime
+import os
+import sys
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+from gates import sector_selfcalc as SSC      # noqa: E402
+from screener import elastic_dual as ED       # noqa: E402
+from screener import gen_pass_list as GPL     # noqa: E402
+
+OUT = os.path.join(_ROOT, "out_cn")
+
+# 时点窗（见 topics/sector-launch.md）：D0/D1/D2 主买，D3~5 只准回踩，D5+ 只持
+WIN_BUY = "主买区"
+WIN_PULL = "回踩区"
+WIN_HOLD = "只持区"
+WIN_NONE = "未启动"
+
+# 分类标签
+C_OPEN = "可开"
+C_DEGRADE = "降级"
+C_FOLLOW = "普涨跟涨"
+C_GATE = "闸门拦"
+C_WEAK = "板块未启动"
+C_MISS = "未覆盖"
+
+# 普涨跟涨：绝对涨幅够、扩散够，但超额不够（大涨普涨日 D0 的相对阈值天然苛刻）
+FOLLOW_MIN_CHG = 2.0
+FOLLOW_MIN_BREADTH = 0.70
+
+
+def window_of(d0_count, chg=None, breadth=None, d0_date=None, today=None):
+    """板块出手窗口。
+
+    ⚑ 2026-10-28 修：**不能只看「本轮第几次 D0」**。实测食品饮料本轮 D0 在 10-26（count=1），
+      但今天板块等权 −0.65%、扩散 67%，若只看计数会被判进「主买区」，等于在板块转跌当天
+      主买 —— 那正是"板块错配"的原病。⇒ 主买区额外要求**当日板块仍在涨且扩散≥50%**。
+
+    D0/D1/D2 + 当日走强 → 主买区；当日转跌/扩散跌破一半 → 回踩区（只准挂单不追）；
+    D3~5 → 回踩区；D5+ 或启动已超 7 个自然日 → 只持区。
+    """
+    n = int(d0_count or 0)
+    if n <= 0:
+        return WIN_NONE
+    up_today = bool(chg is not None and chg > 0
+                    and (breadth is None or breadth >= 0.5))
+    stale = False
+    if d0_date:
+        try:
+            d0d = datetime.date(*[int(x) for x in d0_date.split("-")])
+            today = today or datetime.date.today()
+            stale = (today - d0d).days > 7
+        except Exception:
+            stale = False
+    if n > 5 or stale:
+        return WIN_PULL if n <= 5 else WIN_HOLD
+    if n <= 3:
+        return WIN_BUY if up_today else WIN_PULL
+    return WIN_PULL
+
+
+def sector_of(code, smap):
+    c = str(code)
+    for name, members in smap.items():
+        if c in members:
+            return name
+    return None
+
+
+def build(date_tag, scr_path=None, sector_map=None, use_gate=True, quotes=None):
+    """返回 (候选明细, 板块汇总, 统计)。"""
+    # ── 第 2、3 层：双通过 ∩ 飙股（复用 elastic_dual，禁另造） ──────────────
+    best, by_elastic, bypass, st = ED.build_dual("%s_close" % date_tag, scr_path=scr_path)
+
+    # ── 第 1 层：板块（一次取数，供 board_strength / high_gate 共用）────────
+    smap = sector_map or SSC.load_map()
+    all_codes = [c for v in smap.values() for c in v]
+    q = quotes if quotes is not None else SSC.fetch_quotes(all_codes)
+
+    try:
+        from gates.sector_launch import index_change
+        idx = index_change("sz399006")
+    except Exception:
+        idx = 0.0
+
+    boards = {b["name"]: b for b in SSC.board_strength(idx, quotes=q)}
+    weak = SSC.idx_is_weak()
+    gates = {g["name"]: g for g in (SSC.high_gate(quotes=q, weak=weak) if use_gate else [])}
+
+    # ── 板块汇总表 ────────────────────────────────────────────────────────
+    summary = []
+    for name, b in boards.items():
+        g = gates.get(name) or {}
+        win = window_of(g.get("d0_count"), chg=b["chg"], breadth=b["breadth"],
+                        d0_date=g.get("d0_date"))
+        block = bool(g.get("block_open"))
+        summary.append({
+            "name": name,
+            "state": b["state"],
+            "chg": b["chg"],
+            "excess": b["excess"],
+            "breadth": b["breadth"],
+            "d0_count": g.get("d0_count", 0),
+            "dist_low": g.get("dist_low"),
+            "ma20_dev": g.get("ma20_dev"),
+            "gate": g.get("state_cn") or "未启用",
+            "level": g.get("level", 0),
+            "block_open": block,
+            "window": win,
+            "reasons": g.get("reasons") or [],
+            "n_cand": 0,
+        })
+    sec_ix = {s["name"]: s for s in summary}
+
+    # ── 给每只候选定板块 + 判定 ──────────────────────────────────────────
+    rows = []
+    for r in best:
+        name = sector_of(r["code"], smap)
+        s = sec_ix.get(name) if name else None
+        item = dict(r, sector=name)
+        if not s:
+            item["cat"] = C_MISS
+            item["why"] = "不在 sector_map（%d 板块 %d 只）内，板块强度未知" % (
+                len(smap), len(all_codes))
+            item["window"] = "-"
+            item["gate"] = "-"
+        else:
+            s["n_cand"] += 1
+            item["window"] = s["window"]
+            item["gate"] = s["gate"]
+            if s["block_open"]:
+                item["cat"] = C_GATE
+                item["why"] = s["gate"] + "：" + "；".join(s["reasons"][:2])
+            elif s["window"] == WIN_NONE:
+                # 区分「真的没动」和「普涨但超额不够」——后者不是没启动，是没跑赢
+                if (s["chg"] >= FOLLOW_MIN_CHG
+                        and s["breadth"] >= FOLLOW_MIN_BREADTH):
+                    item["cat"] = C_FOLLOW
+                    item["why"] = ("今日 %+.2f%%、扩散 %.0f%% 但超额仅 %+.2f（<%+.1f），"
+                                   "属普涨跟涨、无独立资金"
+                                   % (s["chg"], s["breadth"] * 100, s["excess"],
+                                      SSC.D0_MIN_EXCESS))
+                else:
+                    item["cat"] = C_WEAK
+                    item["why"] = "板块本轮无 D0（今日 %+.2f%%、扩散 %.0f%%）" % (
+                        s["chg"], s["breadth"] * 100)
+            elif s["window"] == WIN_HOLD:
+                item["cat"] = C_DEGRADE
+                item["why"] = "本轮已 %d 次 D0，超过只持线" % s["d0_count"]
+            elif s["window"] == WIN_PULL:
+                item["cat"] = C_DEGRADE
+                if s["d0_count"] <= 3 and (s["chg"] < 0
+                                          or s["breadth"] < 0.5):
+                    item["why"] = ("板块今日转弱（%+.2f%%、扩散 %.0f%%），本轮第 %d 次 D0 已进回踩，"
+                                   "只准挂单不追" % (s["chg"], s["breadth"] * 100, s["d0_count"]))
+                else:
+                    item["why"] = "本轮第 %d 次 D0，只准挂回踩不追" % s["d0_count"]
+            else:
+                item["cat"] = C_OPEN
+                item["why"] = "板块第 %d 次 D0（今日 %+.2f%%、扩散 %.0f%%、超额 %+.2f）" % (
+                    s["d0_count"], s["chg"], s["breadth"] * 100, s["excess"])
+        rows.append(item)
+
+    order = {C_OPEN: 0, C_DEGRADE: 1, C_FOLLOW: 2, C_GATE: 3, C_WEAK: 4, C_MISS: 5}
+    rows.sort(key=lambda r: (order[r["cat"]], -(r.get("strength_score") or 0)))
+    summary.sort(key=lambda s: (-s["level"], -s["d0_count"], -(s["chg"] or 0)))
+
+    stat = dict(st)
+    stat.update({
+        "idx": idx,
+        "weak": weak,
+        "n_sector": len(smap),
+        "n_cover": len(all_codes),
+        "open": sum(1 for r in rows if r["cat"] == C_OPEN),
+        "degrade": sum(1 for r in rows if r["cat"] == C_DEGRADE),
+        "follow": sum(1 for r in rows if r["cat"] == C_FOLLOW),
+        "gate": sum(1 for r in rows if r["cat"] == C_GATE),
+        "weak_sec": sum(1 for r in rows if r["cat"] == C_WEAK),
+        "miss": sum(1 for r in rows if r["cat"] == C_MISS),
+        "sectors_open": sorted({r["sector"] for r in rows if r["cat"] == C_OPEN}),
+    })
+    return rows, summary, stat
+
+
+def _vt(r):
+    return ("强" if r.get("verdict_raw") == "STRONG"
+            else ("中" if r.get("verdict_raw") == "NEUTRAL" else "弱"))
+
+
+def _mode(r):
+    return GPL.MODE_CN.get(r.get("mode_raw") or r.get("dual_mode"),
+                           r.get("mode_raw") or r.get("dual_mode") or "-")
+
+
+def render_md(rows, summary, stat, date_tag, session, scr_path):
+    L = []
+    sess_cn = "午盘" if session == "midday" else "尾盘/收盘"
+    L.append("# 强势板块 × 双通过 × 飙股 · %s · %s" % (date_tag, sess_cn))
+    L.append("")
+    L.append("三层过滤：**① 板块层**（本轮 D0 且未触高位闸门）→ **② 双通过**（战法闸+筹码闸）"
+             "→ **③ 飙股**（板块内弹性分位 ≥75）。")
+    L.append("")
+    L.append("- 基准创业板指 **%+.2f%%** ｜ 弱市（<MA10）= **%s** ｜ 高位闸门 %s"
+             % (stat["idx"], "是" if stat["weak"] else "否",
+                "启用" if any(s["gate"] != "未启用" for s in summary) else "未启用"))
+    L.append("- 板块覆盖：**%d 个板块 %d 只代表票**（`references/sector_map.json`）；"
+             "未收录的票标「未覆盖」，**不进主表**" % (stat["n_sector"], stat["n_cover"]))
+    L.append("- 双通过 ∩ 飙股 = **%d 只** → 可开 **%d** ／ 降级 %d ／ 普涨跟涨 %d ／ 闸门拦 %d ／ 板块未启动 %d ／ 未覆盖 %d"
+             % (len(rows), stat["open"], stat["degrade"], stat["follow"],
+                stat["gate"], stat["weak_sec"], stat["miss"]))
+    L.append("- 数据源：双通过 `%s`（%s）；板块层为实时/当日快照"
+             % (os.path.basename(scr_path) if scr_path else "无",
+                "昨收口径" if session == "midday" else "当日收盘"))
+    L.append("")
+
+    L.append("## 一、可开：强势板块内（%d 只）" % stat["open"])
+    L.append("")
+    if stat["open"]:
+        L.append("| # | 板块 | 窗口 | 强度档 | 筹码档 | 强度分 | 弹性分 | 代码 | 名称 | 战法 | 现价 | 买区 | 止损 | R→t1 | 领头羊 |")
+        L.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+        for i, r in enumerate([x for x in rows if x["cat"] == C_OPEN], 1):
+            L.append("| %d | %s | %s | %s | %s | %.1f | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+                i, r["sector"], r["window"], _vt(r),
+                GPL.CHIP_BIN.get(r["chip_tier"], "其他"), r["strength_score"],
+                r["elastic_score"], r["code"], r["name"], _mode(r),
+                GPL.num(r.get("spot")), GPL.zone(r), GPL.num(r.get("stop")),
+                GPL.num(r.get("rr1"), "%.2f"), "★" if r.get("leader") else ""))
+    else:
+        L.append("> **今日没有「强势板块内的双通过飙股」。** 这不是工具坏了，是数据事实：")
+        L.append("> 交集里的票全部落在闸门拦下 / 板块未启动 / 未覆盖三档。按纪律今天不该新开仓。")
+    L.append("")
+
+    L.append("## 二、降级：板块可跟但时点或闸门吃紧（%d 只）" % stat["degrade"])
+    L.append("")
+    if stat["degrade"]:
+        L.append("| # | 板块 | 窗口 | 强度分 | 代码 | 名称 | 战法 | 现价 | 买区 | 原因 |")
+        L.append("|---|---|---|---|---|---|---|---|---|---|")
+        for i, r in enumerate([x for x in rows if x["cat"] == C_DEGRADE], 1):
+            L.append("| %d | %s | %s | %.1f | %s | %s | %s | %s | %s | %s |" % (
+                i, r["sector"], r["window"], r["strength_score"], r["code"], r["name"],
+                _mode(r), GPL.num(r.get("spot")), GPL.zone(r), r["why"]))
+    else:
+        L.append("（无）")
+    L.append("")
+
+    L.append("## 三、拦下：普涨跟涨 / 闸门 / 板块未启动（%d 只）"
+             % (stat["follow"] + stat["gate"] + stat["weak_sec"]))
+    L.append("")
+    blk = [x for x in rows if x["cat"] in (C_FOLLOW, C_GATE, C_WEAK)]
+    if blk:
+        L.append("| # | 板块 | 类别 | 代码 | 名称 | 战法 | 现价 | 拦下原因 |")
+        L.append("|---|---|---|---|---|---|---|---|")
+        for i, r in enumerate(blk, 1):
+            L.append("| %d | %s | %s | %s | %s | %s | %s | %s |" % (
+                i, r["sector"], r["cat"], r["code"], r["name"], _mode(r),
+                GPL.num(r.get("spot")), r["why"]))
+    else:
+        L.append("（无）")
+    L.append("")
+
+    L.append("## 四、未覆盖：不在映射表，不进主表（%d 只）" % stat["miss"])
+    L.append("")
+    miss = [x for x in rows if x["cat"] == C_MISS]
+    if miss:
+        L.append("> 这些票双通过+飙股都成立，但**不知道属于什么方向**，无法判断板块强弱。")
+        L.append("> 圆通速递那笔就是这么买进来的——「分散」当了理由，方向没人管。")
+        L.append("")
+        L.append("| # | 代码 | 名称 | 强度分 | 弹性分 | 战法 | 现价 | 买区 |")
+        L.append("|---|---|---|---|---|---|---|---|")
+        for i, r in enumerate(miss, 1):
+            L.append("| %d | %s | %s | %.1f | %s | %s | %s | %s |" % (
+                i, r["code"], r["name"], r["strength_score"], r["elastic_score"],
+                _mode(r), GPL.num(r.get("spot")), GPL.zone(r)))
+    else:
+        L.append("（无）")
+    L.append("")
+
+    L.append("## 五、板块全景（含无候选的板块）")
+    L.append("")
+    L.append("| 板块 | 今日 | 超额 | 扩散 | 本轮D0 | 距60日低点 | MA20乖离 | 高位闸门 | 窗口 | 候选 |")
+    L.append("|---|---|---|---|---|---|---|---|---|---|")
+    for s in summary:
+        L.append("| %s | %+.2f%% | %+.2f | %.0f%% | %d | %s | %s | %s | %s | %d |" % (
+            s["name"], s["chg"], s["excess"], s["breadth"] * 100, s["d0_count"],
+            ("%+.1f%%" % s["dist_low"]) if s["dist_low"] is not None else "-",
+            ("%+.1f%%" % s["ma20_dev"]) if s["ma20_dev"] is not None else "-",
+            s["gate"], s["window"], s["n_cand"]))
+    L.append("")
+    L.append("---")
+    L.append("窗口口径：D0/D1/D2（本轮第 1~3 次）主买 ｜ D3~5 只准挂回踩 ｜ D5+ 只持不开。")
+    L.append("高位闸门：L1 禁追阳线（弱市升级为连回踩也不接）｜ L2 禁新开仓 ｜ L3 按个股结构减。")
+    return "\n".join(L)
+
+
+CSS = """
+body{font-family:-apple-system,"Segoe UI",Microsoft YaHei,sans-serif;margin:24px;background:#fff;color:#1a1a1a}
+h1{font-size:20px;margin:0 0 4px}.sub{color:#666;font-size:13px;margin:2px 0 10px}
+.kv{background:#f6f8fa;border-radius:8px;padding:12px 16px;margin:12px 0;font-size:13px;line-height:1.9}
+.kv b{color:#c0392b}
+table{border-collapse:collapse;width:100%;font-size:12.5px;margin-top:8px}
+th,td{border:1px solid #e3e6ea;padding:5px 7px;text-align:right;white-space:nowrap}
+th{background:#f0f3f6;text-align:center}.l{text-align:left}
+.code{font-family:ui-monospace,Consolas,monospace}
+.sec{margin-top:28px;font-size:16px;border-left:4px solid #c0392b;padding-left:10px}
+.sec.g{border-left-color:#237804}.sec.b{border-left-color:#888}
+.v{display:inline-block;padding:1px 6px;border-radius:4px;font-size:12px}
+.v-strong{background:#fde8e8;color:#c0392b}.v-neutral{background:#fff4e0;color:#a06800}.v-weak{background:#eef0f3;color:#888}
+.tag{display:inline-block;padding:1px 6px;border-radius:4px;font-size:11.5px}
+.t-open{background:#e8f5e9;color:#237804}.t-deg{background:#fff4e0;color:#a06800}
+.t-gate{background:#fde8e8;color:#c0392b}.t-miss{background:#eef0f3;color:#666}
+.chip-3{color:#237804;font-weight:700}.chip-2{color:#2f6fed;font-weight:600}.chip-1{color:#888}
+.warn{background:#fff8e6;border:1px solid #f0d98c;border-radius:8px;padding:10px 14px;margin:10px 0;font-size:12.5px;line-height:1.7;color:#7a5b00}
+.ok{background:#eef7ee;border:1px solid #b7dfb7;border-radius:8px;padding:10px 14px;margin:10px 0;font-size:13px;line-height:1.7;color:#1b5e20}
+"""
+
+
+def render_html(rows, summary, stat, date_tag, session, scr_path):
+    sess_cn = "午盘" if session == "midday" else "尾盘/收盘"
+
+    def td_open(i, r):
+        return ("<tr><td>%d</td><td class='l'>%s</td><td>%s</td><td>%s</td><td class='chip-%d'>%s</td>"
+                "<td><b>%.1f</b></td><td>%s</td><td class='code'>%s</td><td class='l'>%s</td>"
+                "<td class='l'>%s</td><td>%s</td><td class='l'>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
+                    i, r["sector"], r["window"], _vt(r), r["chip_tier"],
+                    GPL.CHIP_BIN.get(r["chip_tier"], "其他"), r["strength_score"],
+                    r["elastic_score"], r["code"], r["name"], _mode(r),
+                    GPL.num(r.get("spot")), GPL.zone(r), GPL.num(r.get("stop")),
+                    GPL.num(r.get("rr1"), "%.2f"), "★" if r.get("leader") else ""))
+
+    opens = [x for x in rows if x["cat"] == C_OPEN]
+    degs = [x for x in rows if x["cat"] == C_DEGRADE]
+    blk = [x for x in rows if x["cat"] in (C_FOLLOW, C_GATE, C_WEAK)]
+    miss = [x for x in rows if x["cat"] == C_MISS]
+
+    if opens:
+        open_block = "<div class='ok'>今日可开 <b>%d</b> 只，全部落在强势板块的 D0 主买 / 回踩窗口内。</div>" % len(opens)
+    else:
+        open_block = ("<div class='warn'><b>今日没有「强势板块内的双通过飙股」。</b><br>"
+                      "这不是工具坏了，是数据事实：交集的票全部落在 闸门拦下 / 板块未启动 / 未覆盖 三档。"
+                      "按纪律今天不该新开仓。</div>")
+
+    body = []
+    body.append("<div class='sec g'>一、可开：强势板块内（%d 只）</div>" % len(opens))
+    body.append(open_block)
+    if opens:
+        body.append("<table><tr><th>#</th><th>板块</th><th>窗口</th><th>强度档</th><th>筹码档</th>"
+                    "<th>强度分</th><th>弹性分</th><th>代码</th><th>名称</th><th>战法</th>"
+                    "<th>现价</th><th>买区</th><th>止损</th><th>R→t1</th><th>领头羊</th></tr>")
+        body.extend(td_open(i, r) for i, r in enumerate(opens, 1))
+        body.append("</table>")
+
+    body.append("<div class='sec'>二、降级：板块可跟但时点/闸门吃紧（%d 只）</div>" % len(degs))
+    if degs:
+        body.append("<table><tr><th>#</th><th>板块</th><th>窗口</th><th>强度分</th><th>代码</th>"
+                    "<th>名称</th><th>战法</th><th>现价</th><th>买区</th><th class='l'>原因</th></tr>")
+        for i, r in enumerate(degs, 1):
+            body.append("<tr><td>%d</td><td class='l'>%s</td><td>%s</td><td>%.1f</td>"
+                        "<td class='code'>%s</td><td class='l'>%s</td><td class='l'>%s</td>"
+                        "<td>%s</td><td class='l'>%s</td><td class='l'>%s</td></tr>" % (
+                            i, r["sector"], r["window"], r["strength_score"], r["code"],
+                            r["name"], _mode(r), GPL.num(r.get("spot")), GPL.zone(r), r["why"]))
+        body.append("</table>")
+    else:
+        body.append("<div class='sub'>（无）</div>")
+
+    body.append("<div class='sec b'>三、拦下：普涨跟涨 / 闸门 / 板块未启动（%d 只）</div>" % len(blk))
+    if blk:
+        body.append("<table><tr><th>#</th><th>板块</th><th>类别</th><th>代码</th><th>名称</th>"
+                    "<th>战法</th><th>现价</th><th class='l'>拦下原因</th></tr>")
+        for i, r in enumerate(blk, 1):
+            cls = {"闸门拦": "t-gate", "普涨跟涨": "t-deg"}.get(r["cat"], "t-miss")
+            body.append("<tr><td>%d</td><td class='l'>%s</td><td><span class='tag %s'>%s</span></td>"
+                        "<td class='code'>%s</td><td class='l'>%s</td><td class='l'>%s</td>"
+                        "<td>%s</td><td class='l'>%s</td></tr>" % (
+                            i, r["sector"], cls, r["cat"], r["code"], r["name"],
+                            _mode(r), GPL.num(r.get("spot")), r["why"]))
+        body.append("</table>")
+    else:
+        body.append("<div class='sub'>（无）</div>")
+
+    body.append("<div class='sec b'>四、未覆盖：不在映射表，不进主表（%d 只）</div>" % len(miss))
+    if miss:
+        body.append("<div class='warn'>双通过+飙股成立，但<b>不知道属于什么方向</b>，无法判断板块强弱。"
+                    "圆通速递那笔就是这么买进来的——「分散」当了理由，方向没人管。</div>")
+        body.append("<table><tr><th>#</th><th>代码</th><th>名称</th><th>强度分</th><th>弹性分</th>"
+                    "<th>战法</th><th>现价</th><th>买区</th></tr>")
+        for i, r in enumerate(miss, 1):
+            body.append("<tr><td>%d</td><td class='code'>%s</td><td class='l'>%s</td><td>%.1f</td>"
+                        "<td>%s</td><td class='l'>%s</td><td>%s</td><td class='l'>%s</td></tr>" % (
+                            i, r["code"], r["name"], r["strength_score"], r["elastic_score"],
+                            _mode(r), GPL.num(r.get("spot")), GPL.zone(r)))
+        body.append("</table>")
+    else:
+        body.append("<div class='sub'>（无）</div>")
+
+    body.append("<div class='sec b'>五、板块全景</div>")
+    body.append("<table><tr><th>板块</th><th>今日</th><th>超额</th><th>扩散</th><th>本轮D0</th>"
+                "<th>距60日低点</th><th>MA20乖离</th><th>高位闸门</th><th>窗口</th><th>候选</th></tr>")
+    for s in summary:
+        lvl = s["level"]
+        gcls = "t-gate" if lvl >= 2 else ("t-deg" if lvl == 1 else "t-open")
+        body.append("<tr><td class='l'>%s</td><td>%+.2f%%</td><td>%+.2f</td><td>%.0f%%</td><td>%d</td>"
+                    "<td>%s</td><td>%s</td><td><span class='tag %s'>%s</span></td><td>%s</td><td>%d</td></tr>" % (
+                        s["name"], s["chg"], s["excess"], s["breadth"] * 100, s["d0_count"],
+                        ("%+.1f%%" % s["dist_low"]) if s["dist_low"] is not None else "-",
+                        ("%+.1f%%" % s["ma20_dev"]) if s["ma20_dev"] is not None else "-",
+                        gcls, s["gate"], s["window"], s["n_cand"]))
+    body.append("</table>")
+
+    return """<!doctype html><meta charset="utf-8"><title>强势板块×双通过×飙股 %s %s</title>
+<style>%s</style>
+<h1>强势板块 × 双通过 × 飙股</h1>
+<div class="sub">%s · %s ｜ 板块层(D0窗口+高位闸门) → 双通过(战法+筹码) → 飙股(板块内弹性分位≥75)</div>
+<div class="kv">
+基准创业板指 <b>%+.2f%%</b> ｜ 弱市(&lt;MA10) = <b>%s</b><br>
+双通过 ∩ 飙股 = <b>%d</b> 只 → 可开 <b>%d</b> ／ 降级 %d ／ 普涨跟涨 %d ／ 闸门拦 %d ／ 板块未启动 %d ／ 未覆盖 %d<br>
+板块覆盖 <b>%d</b> 个 / <b>%d</b> 只代表票 ｜ 双通过侧数据：%s（%s）
+</div>
+%s
+<div class="sub" style="margin-top:24px">窗口：D0/D1/D2 主买 ｜ D3~5 只准挂回踩 ｜ D5+ 只持不开。
+高位闸门：L1 禁追阳线（弱市升级为连回踩也不接）｜ L2 禁新开仓 ｜ L3 按个股结构减。</div>
+""" % (date_tag, sess_cn, CSS, date_tag, sess_cn,
+       stat["idx"], "是" if stat["weak"] else "否",
+       len(rows), stat["open"], stat["degrade"], stat["follow"], stat["gate"],
+       stat["weak_sec"], stat["miss"],
+       stat["n_sector"], stat["n_cover"],
+       os.path.basename(scr_path) if scr_path else "无",
+       "昨收口径" if session == "midday" else "当日收盘",
+       "\n".join(body))
+
+
+def main():
+    ap = argparse.ArgumentParser(description="强势板块 × 双通过 × 飙股（全量扫描收敛层）")
+    ap.add_argument("--date", default=datetime.date.today().strftime("%Y-%m-%d"))
+    ap.add_argument("--session", default="close", choices=["close", "midday"])
+    ap.add_argument("--scr", default=None, help="双通过 jsonl（默认最新 scr_*_close.jsonl）")
+    ap.add_argument("--out-dir", default=OUT)
+    ap.add_argument("--no-gate", action="store_true", help="只看板块 D0 窗口，不看高位闸门")
+    for a in [ap.parse_args()]:
+        args = a
+
+    scr_path = args.scr or ED._latest_scr_jsonl()
+    if not scr_path:
+        print("⚠ 没找到 scr_*_close.jsonl，双通过侧为空")
+
+    rows, summary, stat = build(args.date, scr_path=scr_path,
+                                use_gate=not args.no_gate)
+    os.makedirs(args.out_dir, exist_ok=True)
+    base = os.path.join(args.out_dir, "sector_dual_%s_%s" % (args.date, args.session))
+    with open(base + ".md", "w", encoding="utf-8") as f:
+        f.write(render_md(rows, summary, stat, args.date, args.session, scr_path))
+    with open(base + ".html", "w", encoding="utf-8") as f:
+        f.write(render_html(rows, summary, stat, args.date, args.session, scr_path))
+
+    print("基准创业板指 %+.2f%% ｜ 弱市=%s ｜ 板块 %d 个 / %d 只"
+          % (stat["idx"], "是" if stat["weak"] else "否", stat["n_sector"], stat["n_cover"]))
+    print("双通过∩飙股 %d 只 → 可开 %d ／ 降级 %d ／ 普涨跟涨 %d ／ 闸门拦 %d ／ 板块未启动 %d ／ 未覆盖 %d"
+          % (len(rows), stat["open"], stat["degrade"], stat["follow"],
+             stat["gate"], stat["weak_sec"], stat["miss"]))
+    if stat["sectors_open"]:
+        print("可开板块：%s" % "、".join(stat["sectors_open"]))
+    print("输出：\n  %s.md\n  %s.html" % (base, base))
+
+
+if __name__ == "__main__":
+    main()

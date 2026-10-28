@@ -179,8 +179,8 @@ scan_warfare → scr_sweep（筹码双通过）→ deliver_dual_surge（高弹�
 
 | 任务 | 时间 | 做什么 | 耗时 |
 |---|---|---|---|
-| **盘中 11:30** | 周一~周五 11:30 | **不刷新日线**。扫描 → 筹码体检 → **双通过∩飙股**。半根复评仍只覆盖前 60 只候选 | ~3 分钟 |
-| **收盘 15:20** | 周一~周五 15:20 | 增量刷新日线 → 全市场扫描 → 筹码体检 → **双通过∩飙股** | ~15 分钟 |
+| **盘中 11:30** | 周一~周五 11:30 | **不刷新日线**。扫描 → 筹码体检 → 双通过∩飙股 → **板块层收敛（sector_dual）**。半根复评仍只覆盖前 60 只候选 | ~3.5 分钟 |
+| **收盘 15:20** | 周一~周五 15:20 | 增量刷新日线 → 全市场扫描 → 筹码体检 → 双通过∩飙股 → **重建锚点 + 板块层收敛（sector_dual）** | ~16 分钟 |
 
 ### 5.2 创建方式
 
@@ -219,18 +219,24 @@ C:/Users/luoyunlai/.workbuddy/binaries/python/envs/default/Scripts/python.exe）
 产出文件（out_cn/ 下，中间结果，不是交付）：screener_<日期>_midday.{html,md,jsonl}
 跨日延续（与收盘分开记）：同一代码+战法仍过闸标「延续（第N天）」，首次命中标「新出现」；断档的从活跃表删除。状态在 out_cn/screener_continuity_state.json。
 
-执行顺序（2026-10-26 硬规则）：
+执行顺序（2026-10-26 硬规则；④ 为 2026-10-28 老罗新增）：
 ① python screener/scan_warfare.py --session midday --top 60
 ② python screener/scr_sweep.py --src out_cn/screener_<日期>_midday.jsonl
 ③ python screener/deliver_dual_surge.py --date <日期> --session midday
+④ python screener/sector_dual.py --date <日期> --session midday
 
-交付要求（2026-10-26 硬规则）：
-1. **主交付 = 双通过∩飙股**（`out_cn/dual_surge_list_<日期>_midday.md` / `elasticity_<日期>_midday_dual.html`）。
-   口径：战法闸+筹码闸双通过 ∩ 高弹性（弹性分≥75）。**禁止**把引擎序前 20 / scan 原表当交付。
-2. 漏斗：扫描只数 → 过强度闸 → 有战法信号 → 双通过 → **高弹性∩双通过**；无命中就明说。
-3. 名单字段：代码/名称/战法/延续（代码+战法）/现价/买区/止损/t1/R/recommend/弹性分/筹码；减持可标未检。
-4. 另附：半根复评「变档 / 盘中新出现」作对照，不替代主表。
-5. 若非交易日、脚本报错或输出为空，如实说明；盘中缺半根则回退昨收口径并标明。**不要编造结果**。
+交付要求（2026-10-28 修订）：
+1. **主交付 = 强势板块内的双通过∩飙股**（`out_cn/sector_dual_<日期>_midday.md` / `.html`）。
+   三层：① 板块层（本轮 D0 且在窗口内、未触高位闸门）→ ② 双通过（战法+筹码）→ ③ 飙股（弹性分≥75）。
+   **主表只取「可开」**；「降级 / 普涨跟涨 / 闸门拦 / 板块未启动 / 未覆盖」必须单列并写原因，
+   **禁止**把它们混进主表，也禁止拿引擎序前 20 / scan 原表当交付。
+2. 板块归属真源 = **入仓文件** `references/sector_map.json`（24 板块 138 只）。
+   未收录的票标「未覆盖」，**不进主表**——这是刻意的（圆通速递就是这么买进来的）。
+   要提覆盖率就往表里加票，加完必跑 `python gates/sector_selfcalc.py --check-map` + `--rebuild-hist`。
+3. 漏斗：扫描只数 → 过强度闸 → 有战法信号 → 双通过 → 高弹性∩双通过 → **板块层可开**；无命中就明说。
+4. 名单字段：代码/名称/**板块+窗口**/战法/延续（代码+战法）/现价/买区/止损/t1/R/recommend/弹性分/筹码。
+5. 另附：半根复评「变档 / 盘中新出现」作对照，不替代主表。
+6. 若非交易日、脚本报错或输出为空，如实说明；盘中缺半根则回退昨收口径并标明。**不要编造结果**。
 ```
 
 #### 任务 B · 收盘 15:20
@@ -249,11 +255,17 @@ C:/Users/luoyunlai/.workbuddy/binaries/python/envs/default/Scripts/python.exe）
 ③ 双通过∩飙股交付主表：
    python screener/deliver_dual_surge.py --date <日期> --session close
    → out_cn/dual_surge_list_<日期>_close.{md,json} + elasticity_<日期>_close_dual.{md,html}
+④ 板块收敛层（2026-10-28 老罗新增，**主交付以这一步为准**）：
+   python gates/sector_selfcalc.py --rebuild-hist      # 先重建锚点（约 10~20 秒，收盘后必跑）
+   python screener/sector_dual.py --date <日期> --session close
+   → out_cn/sector_dual_<日期>_close.{md,html}（可开/降级/普涨跟涨/闸门拦/板块未启动/未覆盖 六档）
 
 背景（理解口径用）：
 - 数据层 baostock 前复权 + 本地 SQLite（data/screener.db）；ST/退市已剔除；
-- 漏斗：L1 强度闸 → L2 战法闸 → 筹码闸（state_allow_new）→ **高弹性 ∩ 双通过 = 飙股交集（交付主表）**；
+- 漏斗：L1 强度闸 → L2 战法闸 → 筹码闸（state_allow_new）→ 高弹性 ∩ 双通过 → **板块层可开（最终主表）**；
 - ⚠ 表里的 R 是**现价口径**的静态赔率：出水芙蓉(T0)/流星砸坑 R 会系统性偏低，别据此排序下结论。
+- ⚠ 高位锚点缓存 `data/sector_high_hist.json` **不入库**（`/data/` 被 gitignore）。换机器时为空，
+  `sector_dual` / `high_gate` 会自动重建并打一行提示；**真源只有入仓的 `references/sector_map.json`**。
 
 产出：screener_<日期>_close.* + scr_<日期>_close.jsonl + dual_surge_list_<日期>_close.* + elasticity_*_dual.*
 扫描延续按「代码+战法」记（延续第N天 / 新出现）；断档从 continuity_state 的 close 桶删除。
@@ -315,6 +327,8 @@ baostock 当日数据一般 17:00 后才齐，15:20 那次偶尔拿不到当日�
 - [ ] `screener.db` 存在且非 0，`last_bar` = 最近交易日
 - [ ] `--session close`（不刷新）冒烟跑通，有 HTML 产出
 - [ ] 有 `scr_<日期>_close.jsonl` 时跑过 `deliver_dual_surge.py`，交付是双通过∩飙股，不是引擎序前 20
+- [ ] 跑过 `sector_dual.py`，**主表只列「可开」**（板块 D0 窗口内 + 未触高位闸门）；
+      「未覆盖」的票没有被混进主表；改过 `references/sector_map.json` 的话跑过 `--check-map` + `--rebuild-hist`
 - [ ] 两个定时任务已建，prompt 里**路径全部替换过**
 - [ ] 两个任务 `status: ACTIVE`
 - [ ] 旧机器上的两个任务已 PAUSED（避免双跑）
