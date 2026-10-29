@@ -522,7 +522,14 @@ def _ma_map(struct):
 
 
 def facts_from_analysis(analysis):
-    """Pull a facts dict off a battle_analyze result. Missing fields stay missing."""
+    """Pull a facts dict off a battle_analyze result. Missing fields stay missing.
+
+    隔离约定（2026-10-29 卓易误杀固化）：本模块只消费**持仓结构**信号
+    (close/support/stop/mode/ma5-20/top_block/distribution_close/align_broken)，
+    **不接收开仓类信号**（强度 WEAK / 筹码破位 / 形态 mode=wait）。
+    开仓硬闸是「该不该新买」的过滤器，不是「已持仓该不该清」的依据；
+    塞入开仓类字段会被本函数直接忽略，绝不会进入 structure_view 的 broken 判定。
+    """
     a = analysis if isinstance(analysis, dict) else {}
     meta = a.get("meta") or {}
     plan = a.get("plan") or {}

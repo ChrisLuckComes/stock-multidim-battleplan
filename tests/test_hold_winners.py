@@ -334,3 +334,29 @@ def test_battle_summary_surfaces_the_rule():
     summary = RR.build_summary(a, {})
     assert "赢家持有" in summary
     assert "不要轻易卖出这一腿" in summary
+
+
+def test_open_gate_never_justifies_a_sell():
+    """卓易场景 (2026-10-29)：开仓三闸全红，但持仓结构未破。
+
+    开仓硬闸（强度 WEAK / 筹码破位 / 形态 wait）是**新开仓过滤器**，
+    不是**斩仓刀**。即使 facts 里塞入开仓类差信号，只要持仓结构 intact，
+    review_sell 仍须判 wrong_sell（硬纠正），绝不能判 sell_stands。
+    这条锁定「隔离」行为，防止未来把开仓闸误接入清仓判定。
+    """
+    facts = _leg(
+        strength="WEAK",
+        chip="破位下行中",
+        open_signal="wait",
+        open_gate_red=True,
+    )
+    # 结构 intact：收盘 40 > 支撑 37.5，无派发 / 无顶确认 / 均线未破。
+    block = review_sell(facts, sold_px=40.0)
+    assert block["verdict"] == "wrong_sell", (
+        "开仓硬闸不能作为斩仓理由：结构未破时卖出必须被纠正"
+    )
+    assert block["broken"] == [], "broken 只认持仓结构，不认开仓信号"
+    assert block["intact"] is True
+    assert block["hard_gate"] is True
+    assert block["reentry"] is not None
+    assert block["reentry"]["rr"] >= 1.5
