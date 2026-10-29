@@ -24,7 +24,7 @@
      ①结构是否破位 ②RR≥1.5 ③止损距离≥0.25×ATR。
 
 反向 ETF 方向（务必先读）：
-  买入 SOXS/MUZ/SNDQ/SKDD **等于做空**标的；在券商下 `sell short` 单 =
+  买入 SOXS/MUZ/SNDQ/SKDD/LITZ/AAOZ **等于做空**标的；在券商下 `sell short` 单 =
   **双倍做多**标的。换算用名义杠杆（默认），实测单日 beta 会漂（9/23 实测
   1.93~1.95x / SOXS 3.11x），可用 --beta 修正。
 
@@ -35,9 +35,9 @@
   python us_short.py MU --etf MUZ             # 指定反向工具（默认按映射表）
   python us_short.py SNDK --beta 1.95         # 用实测 beta 替代名义杠杆
 
-股池映射（2026-09-24 配置化）：正股 ↔ 反向ETF 对应关系在仓库根 `reverse_etf.json`
+股池映射（2026-09-24 配置化）：正股 ↔ 反向ETF 对应关系在 `gates/reverse_etf.json`
 的 pairs 里维护（etf/lev 必填，beta/note 可选），加一对就支持一只新票，代码零改动。
-无映射时脚本会提示怎么加；内置兜底只有 MU/SNDK/SKHY/SOXX 四对。
+无映射时脚本会提示怎么加；内置兜底含 MU/SNDK/SKHY/SOXX/LITE（文件缺失时用）。
 
 多空转换（2026-09-24 老罗追加需求）：
   「在压力位/非常超买处做空，到支撑位平空，站稳支撑则建议做多」→ 输出
@@ -73,7 +73,7 @@ from levels import (NOISE_ATR, RSI_OB, RSI_OS,               # noqa: F401
                     structural_levels)
 
 # 已核实方向与名义杠杆的反向 ETF —— **配置化（2026-09-24）**：真实股池在
-# `reverse_etf.json`（老罗自行扩充），此处仅留代码内置兜底（文件缺失/损坏时用，
+# 同目录 `reverse_etf.json`（老罗自行扩充），此处仅留代码内置兜底（文件缺失/损坏时用，
 # 保证脚本不至于因为配置问题整个跑不了）。扩充新对前仍须先核 direction/
 # 杠杆/成立日——json 的 _readme 字段写了核实清单。
 DEFAULT_REVERSE_ETF = {
@@ -81,6 +81,7 @@ DEFAULT_REVERSE_ETF = {
     "SNDK": {"etf": "SNDQ", "lev": 2.0},
     "SKHY": {"etf": "SKDD", "lev": 2.0},
     "SOXX": {"etf": "SOXS", "lev": 3.0},
+    "LITE": {"etf": "LITZ", "lev": 2.0},
 }
 REVERSE_ETF_PATH = os.path.join(HERE, "reverse_etf.json")
 
