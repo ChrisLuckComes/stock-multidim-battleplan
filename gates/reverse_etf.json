@@ -5,6 +5,7 @@
     "SNDK": { "etf": "SNDQ", "lev": 2.0, "since": "2026-04-22", "issuer": "Tradr", "note": "2026-07-21 做过 1:10 反向拆股" },
     "SKHY": { "etf": "SKDD", "lev": 2.0, "since": "2026-07-14", "issuer": "GraniteShares", "note": "费率 2.20%" },
     "SOXX": { "etf": "SOXS", "lev": 3.0, "since": null, "issuer": "Direxion" },
-    "AAOI": { "etf": "AAOZ", "lev": 2.0, "since": "2026-07-14", "issuer": "Tradr", "note": "AUM 仅约 $5.6M，盘口薄、滑点大；正股 AAOI 波动极大，止损务必放宽" }
+    "AAOI": { "etf": "AAOZ", "lev": 2.0, "since": "2026-07-14", "issuer": "Tradr", "note": "AUM 仅约 $5.6M，盘口薄、滑点大；正股 AAOI 波动极大，止损务必放宽" },
+    "LITE": { "etf": "LITZ", "lev": 2.0, "since": "2026-04-22", "issuer": "Tradr", "note": "Cboe；日目标 −200% Lumentum；费率 1.49%；买入 LITZ=做空 LITE，禁止 sell short 该 ETF" }
   }
 }

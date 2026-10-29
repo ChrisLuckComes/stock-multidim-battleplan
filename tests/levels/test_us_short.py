@@ -166,6 +166,12 @@ import tempfile
 
 m = U.load_reverse_etf(refresh=True)
 chk("配置含内置四对", {"MU", "SNDK", "SKHY", "SOXX"} <= set(m), str(sorted(m)))
+chk("配置含 LITE→LITZ",
+    m.get("LITE", {}).get("etf") == "LITZ" and m["LITE"].get("lev") == 2.0
+    and m["LITE"].get("since") == "2026-04-22" and m["LITE"].get("issuer") == "Tradr",
+    str(m.get("LITE")))
+chk("兜底含 LITE→LITZ", U.DEFAULT_REVERSE_ETF.get("LITE", {}).get("etf") == "LITZ")
+chk("AAOI→AAOZ 仍在", m.get("AAOI", {}).get("etf") == "AAOZ")
 chk("配置键统一大写", all(k == k.upper() for k in m))
 
 with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as tf:
