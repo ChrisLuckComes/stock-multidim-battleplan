@@ -134,6 +134,41 @@ def ensure_broad(conn, verbose=True, midday=False):
                 print("⚠ 宽基全量落库失败（%s: %s）—— 继续用库内现有数据"
                       % (type(e).__name__, e), flush=True)
 
+    # ②.5 ⚑⚑⚑ 宽基【量级体检 + 自动重拉】（2026-10-30 修 RS 斜率 -99.6% 的真 bug）
+    #   症状：宽基 key 下装的是**别的标的**（sh000001 里装的是平安银行 000001，
+    #   2025-07-01~2026-10-16 共 314 根）⇒ 20 日 RS 窗口覆盖污染段
+    #   ⇒ rs_slope ≈ -99.6% ⇒ **沪市主板全部票**强度档被压成 NEUTRAL。
+    #   ② 的「根数不足」发现不了（根数是够的，只是量级错）⇒ 必须单独体检。
+    #   判据：末根收盘落在 BROAD_INDEX_RANGE 之外 ⇒ 序列被换过标的 ⇒ 用腾讯重拉历史。
+    for c in BROAD_CODES:
+        rng = store.BROAD_INDEX_RANGE.get(c)
+        if not rng:
+            continue
+        bs_ = store.load_bars(conn, c, n=BROAD_N)
+        if not bs_:
+            continue
+        try:
+            last_c = float(bs_[-1]["c"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if rng[0] <= last_c <= rng[1]:
+            continue
+        if verbose:
+            print("⚠ 宽基 %s 量级异常（末根 c=%.2f，合理区间 %s）⇒ 重拉历史"
+                  % (c, last_c, rng), flush=True)
+        try:
+            fixed = store.fetch_daily_tencent(c, count=BROAD_N)
+        except Exception as e:  # noqa: BLE001
+            if verbose:
+                print("  ⚠ 宽基 %s 重拉失败（%s: %s）—— 沿用库内数据（量级仍错，"
+                      "RS 维度会失真）" % (c, type(e).__name__, e), flush=True)
+            continue
+        n_written = store.save_bars(conn, c, fixed)
+        conn.commit()
+        if verbose:
+            print("  宽基 %s 已重拉 %d 根（守卫拦截了污染数据则实际写入更少）"
+                  % (c, n_written), flush=True)
+
     cache = {c: store.load_bars(conn, c, n=BROAD_N) for c in BROAD_CODES}
 
     from gates import market_regime as MR

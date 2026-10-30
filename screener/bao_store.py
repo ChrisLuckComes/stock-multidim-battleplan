@@ -590,6 +590,12 @@ def _sina_hq_vol(codes, timeout=15):
 
     ⚑ 用 hq.sinajs.cn 的实时快照（第 9 字段=成交量·股、第 10 字段=成交额）。
       收盘后它就是当日最终值，且**与内部补齐链路完全独立** ⇒ 适合当量纲真值。
+
+    ⚑⚑⚑ 2026-10-30 修**key 撞号**（老罗「RS 斜率 -99.6% 是不是 bug」追出来的同源问题）：
+      原实现用 `head[-6:]` 取后 6 位当 key ⇒ 新浪返回的 `hq_str_sh000001`（上证指数）
+      与 `hq_str_sz000001`（平安银行）**后 6 位都是 000001** ⇒ 后者覆盖前者
+      ⇒ 量纲复核把**上证指数的成交量写进了平安银行 000001**（库内 1.86 亿 → 真值 4.98 亿）。
+      ⇒ 改为**保留完整市场前缀**作 key（`sh000001` / `sz000001`），调用方按前缀精确匹配。
     """
     out = {}
     for i in range(0, len(codes), 120):
@@ -627,7 +633,14 @@ def _sina_hq_vol(codes, timeout=15):
             except (TypeError, ValueError):
                 continue
             if v > 0:
-                out[head[len("var hq_str_"):][-6:]] = v
+                # ⚑ 保留完整市场前缀（2026-10-30 修撞号：sh000001 与 sz000001
+                #   后 6 位相同，截断会让上证指数的量覆盖平安银行的量）
+                sym = head[len("var hq_str_"):]
+                if sym:
+                    out[sym] = v
+                    # 裸 6 位 key 兼容（仅当该裸码未被更精确的带前缀 key 占用）
+                    bare = sym[-6:]
+                    out.setdefault(bare, v)
     return out
 
 
@@ -662,7 +675,15 @@ def verify_today_volume(conn, target=None, codes=None, verbose=True, tol=0.02):
     real = _sina_hq_vol(list(cur))
     fixed = []
     for c, v in cur.items():
+        # ⚑ 2026-10-30 修撞号：优先按「带前缀」精确匹配，其次才用裸 6 位。
+        #   否则 sh000001(上证指数) 的量会串给 000001(平安银行)。
         r = real.get(c)
+        if (r is None or r <= 0) and len(str(c)) == 6:
+            try:
+                mk, digits = ash_market.split_code(str(c))
+                r = real.get(mk + digits)
+            except Exception:  # noqa: BLE001
+                r = None
         if not r or r <= 0:
             continue
         if abs(v - r) / r > tol:
@@ -849,9 +870,62 @@ def _finalize_today_bars(conn, result, verbose=True):
     return result
 
 
+# ────────────────────────────── 宽基指数写入守卫 ──────────────────────────────
+# ⚑⚑⚑ 2026-10-30（老罗「RS 斜率 -99.6% 是不是 bug」查出来的真 bug）：
+#   `sh000001`（上证指数）这个 key 下，2025-07-01~2026-10-16 共 **314 根**装的是
+#   **平安银行 000001 的行情**（o/h/l/c/v 逐字段与 000001 完全一致），只有 2026-10-21
+#   之后 8 根是真上证指数（3600+）。
+#   ⇒ 20 日 RS 窗口正好覆盖污染段 ⇒ rs_now/rs_prev ≈ 0.0036 ⇒ **rs_slope ≈ -99.6%**
+#   ⇒ 所有**沪市主板**票（600/601/603/605 等）被判「RS 走弱」→ 强度档被压成 NEUTRAL
+#   （迎驾贡酒/今世缘/山西汾酒/皇台酒业…全部中招）。
+#   根因是历史遗留的代码撞号（早期 market_of 把 sh000001 判成 sz → 拼出 sz000001），
+#   已被 2026-10-21 的 ash_market 修好，但**历史污染段没人冲**（INSERT OR REPLACE
+#   只覆盖同名同日期的根）。
+#   ⇒ 这里加**量级守卫**：宽基指数的收盘价必须落在该指数的合理区间，否则
+#     **拒绝写入**（宁可当天补不上，也不能把别的标的写进来）。
+BROAD_INDEX_RANGE = {
+    # code: (合理收盘下限, 合理收盘上限) —— 越界即「标的被换了」
+    "sh000001": (1500.0, 6000.0),      # 上证指数
+    "sh000300": (1500.0, 8000.0),      # 沪深300
+    "sh000016": (1000.0, 8000.0),      # 上证50
+    "sz399001": (4000.0, 30000.0),     # 深证成指
+    "sz399006": (800.0, 8000.0),       # 创业板指
+    "bj899050": (500.0, 5000.0),        # 北证50
+}
+
+
+def _broad_range_ok(code, bars):
+    """宽基指数量级校验：全部 bar 的收盘都在合理区间才放行。
+
+    返回 (ok, bad_sample) —— bad_sample 给第一条越界样本便于报错定位。
+    """
+    rng = BROAD_INDEX_RANGE.get(code)
+    if not rng:
+        return True, None
+    lo, hi = rng
+    for b in bars:
+        try:
+            c = float(b["c"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not (lo <= c <= hi):
+            return False, (b.get("d"), c)
+    return True, None
+
+
 def save_bars(conn, code, bars):
-    """覆盖写（INSERT OR REPLACE）某票的全部 bars。"""
+    """覆盖写（INSERT OR REPLACE）某票的全部 bars。
+
+    ⚑ 宽基指数走**量级守卫**（BROAD_INDEX_RANGE）：收盘越界即判定「标的被换」，
+      直接拒绝写入并告警 —— 宁可当天 bar 补不上（扫描层 fail-closed），
+      也不能把平安银行写进上证指数（2026-10-30 实测污染 314 根 ⇒ RS 斜率 -99.6%）。
+    """
     if not bars:
+        return 0
+    ok, bad = _broad_range_ok(code, bars)
+    if not ok:
+        print("⚠ 拒绝写入宽基 %s：收盘 %s 越界（合理区间 %s）⇒ 源取错了标的"
+              % (code, bad[1], BROAD_INDEX_RANGE.get(code)), flush=True)
         return 0
     conn.executemany(
         "INSERT OR REPLACE INTO bars(code,d,o,h,l,c,v) VALUES(?,?,?,?,?,?,?)",
