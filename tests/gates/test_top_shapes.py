@@ -123,6 +123,27 @@ class TestPatterns(unittest.TestCase):
         self._detect(closes, "矩形")
 
 
+class TestBearishContext(unittest.TestCase):
+    """大背景层：形态破位（首选）→ 趋势破位兜底（老罗 2026-10-31）。"""
+
+    def test_trend_fallback_when_no_pattern(self):
+        """无顶部形态但趋势破位（跌破 MA20 且 MA20 走空）⇒ 兜底给背景。"""
+        closes = legs_to_closes([(100, 10), (88, 12), (84, 8), (80, 6)])
+        bars = bars_from_closes(closes)
+        ctx = TS.bearish_context(bars)
+        self.assertIsNotNone(ctx, "下跌趋势应给出兜底背景")
+        self.assertTrue(ctx.get("fallback"), "应是兜底背景")
+        self.assertIn("兜底", ctx["name"])
+        self.assertEqual(ctx["start_i"], ctx["start_i"])   # 成立日存在
+
+    def test_uptrend_no_context(self):
+        """持续上涨 ⇒ 既无形态背景也无趋势兜底 ⇒ 无背景。"""
+        closes = legs_to_closes([(140, 25)])
+        bars = bars_from_closes(closes)
+        ctx = TS.bearish_context(bars)
+        self.assertIsNone(ctx, "纯上涨不应有做空背景")
+
+
 class TestNoFalsePositive(unittest.TestCase):
     def test_clean_uptrend_no_bearish_top(self):
         closes = legs_to_closes([(100, 10), (110, 10), (120, 10), (130, 10),

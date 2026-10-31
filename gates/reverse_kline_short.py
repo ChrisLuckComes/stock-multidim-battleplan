@@ -282,10 +282,16 @@ def scan_reversal_kline(bars, from_date=None, lv=None, hs=None, atr=None,
     return signals, hs, suppressed
 
 
-def fmt_reversal(signals, bars):
-    """渲染反转K线识别信号表。"""
+def fmt_reversal(signals, bars, sort_by_ctx=False):
+    """渲染反转K线识别信号表。
+
+    sort_by_ctx=True ⇒ 按**背景新鲜度**排序（刚成立优先 → 早期 → 中段 → 晚期），
+    同档再按日期倒序——这就是「今天先做哪只」的排序键。
+    """
     if not signals:
         return ["（反转K线识别：扫描区间未识别到合格的裸K进场信号）"]
+    if sort_by_ctx:
+        signals = sorted(signals, key=lambda x: (-(x.get("ctx_score") or 0), -x["i"]))
     out = []
     out.append(f"共识别 {len(signals)} 个合格信号（按日期）：")
     out.append(f"  {'日期':12} {'模板':28} {'到位阻力':14} "
@@ -313,6 +319,8 @@ def main():
     ap.add_argument("symbol", help="正股 ticker（如 SNDK / MU / SKHY / SOXX）")
     ap.add_argument("--from", dest="from_date", default="2026-06-01",
                     help="扫描起始日（默认 2026-06-01，对应本轮存储/半导体见顶）")
+    ap.add_argument("--sort", dest="sort_by", default="date", choices=["date", "ctx"],
+                    help="排序：date=按日期（默认）/ ctx=按背景新鲜度（刚成立优先）")
     ap.add_argument("--ctx-only", dest="ctx_only", action="store_true",
                     help="只报「顶部形态已破位（下跌波段成立）」背景下的信号（不报抢跑）")
     ap.add_argument("--no-trend-gate", dest="no_trend_gate", action="store_true",
@@ -347,7 +355,7 @@ def main():
         print("── T0头肩顶战法（趋势闸门：不破MA20 一律不做空；破MA20后形态符合即可空）· 裸K进场信号 ──")
         if supp:
             print(f"  （未破 MA20 被闸门拦下 {supp} 个合格信号——价格仍在 MA20 之上，不做空）")
-    for line in fmt_reversal(signals, bars):
+    for line in fmt_reversal(signals, bars, sort_by_ctx=(a.sort_by == "ctx")):
         print(f"  {line}")
     print()
     print("说明：反转K线识别本身不绑定头肩顶，只认「在阻力区出现反转K线」；"

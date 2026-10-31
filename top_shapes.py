@@ -537,14 +537,22 @@ def detect_top_shapes(bars, window=SHAPE_WINDOW, atr=None):
     return out
 
 
-def bearish_context(bars, window=SHAPE_WINDOW):
+def bearish_context(bars, window=SHAPE_WINDOW, trend_fallback=True):
     """★ **大背景层**（老罗 2026-10-31 定的做空范式）：顶部形态已识别且**已破位**
     ⇒ 这只票进入**下跌波段**，该波段内**持续可以做空**（不是只做一次）。
 
     背景成立日 = **形态完成之后**首次「收盘跌破形态触发位（颈线/下轨）」那根。
-    ⚠ 必须限定在形态完成之后找破位日——否则会找到远古的旧跌破，
+    ⚠ 必须限定在形态完成之后找破位日——否则会找到很久以前的旧跌破，
       把背景成立日推到几个月前，导致所有信号都算"背景晚期"。
-    返回 dict(name, break_level, start_i, start_d, age_bars, alive, shape)；
+
+    ★ **兜底（老罗 2026-10-31：「当识别不出形态，就识别下跌趋势」）**：
+      形态识别率不可能 100%，**没有形态 ≠ 没有做空机会**。
+      形态背景找不到时，退化为**趋势破位兜底**：
+        收盘跌破 MA20 **且** MA20 走空（5 根前更高）⇒ 判定"下跌趋势成立"，
+        触发位取当时的 MA20（价格重回其上方 ⇒ 兜底背景失效）。
+      兜底背景天然形成得晚 ⇒ 背景年龄大 ⇒ 自动落到"背景中段/晚期"档（降档但不给否）。
+
+    返回 dict(name, break_level, start_i, start_d, age_bars, alive, fallback, shape)；
     无可用背景时返回 None。
     """
     if not bars or len(bars) < 30:
@@ -567,7 +575,25 @@ def bearish_context(bars, window=SHAPE_WINDOW):
             continue
         if best is None or st > best["start_i"]:
             best = {"name": x["pattern"], "break_level": bl, "start_i": st,
-                    "start_d": bars[st]["d"], "shape": x}
+                    "start_d": bars[st]["d"], "shape": x, "fallback": False}
+    # ★ 兜底：形态背景缺失 ⇒ 用「趋势破位」当背景
+    if best is None and trend_fallback:
+        closes = [b["c"] for b in bars]
+        ma20 = _roll_ma(closes, 20)
+        st = None
+        lvl = None
+        for i in range(25, len(bars)):
+            m = ma20[i]
+            if m is None:
+                continue
+            m5 = ma20[i - 5] if i >= 5 else None
+            if bars[i]["c"] < m and (m5 is None or m < m5):
+                st = i
+                lvl = m
+                break
+        if st is not None:
+            best = {"name": "下跌趋势(兜底)", "break_level": lvl, "start_i": st,
+                    "start_d": bars[st]["d"], "shape": None, "fallback": True}
     if best is None:
         return None
     last = bars[-1]["c"]

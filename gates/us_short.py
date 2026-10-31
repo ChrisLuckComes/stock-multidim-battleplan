@@ -407,7 +407,9 @@ def main():
         if _ctx:
             _gn, _gs = ctx_grade(_ctx)
             print("── ★ 大背景（做空范式）──")
-            print("  背景形态 : %s（触发位 %.2f）" % (_ctx["name"], _ctx["break_level"]))
+            print("  背景形态 : %s%s（触发位 %.2f%s）" % (
+                _ctx["name"], "　★兜底" if _ctx.get("fallback") else "",
+                _ctx["break_level"], " = 当时MA20" if _ctx.get("fallback") else ""))
             print("  背景成立 : %s（收盘跌破触发位）｜至今第 %d 根｜%s"
                   % (_ctx["start_d"], _ctx["age_bars"], _gn))
             print("  背景状态 : %s%s" % ("仍有效（价格仍在触发位下方）" if _ctx["alive"]
