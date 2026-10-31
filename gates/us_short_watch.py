@@ -175,17 +175,17 @@ def _verdict(c):
     if not sg:
         return "盯盘", ("背景成立(%s·第%s根)但尚无「阻力区反转K线」触发 ⇒ 等信号，"
                         "不主动开仓" % (c.get("ctx_grade"), c.get("ctx_age")))
+    # ★ 判定顺序按「可行动性」排：**信号新鲜度最先**（最 actionable 的理由），
+    #   再查背景年龄。旧信号是「现在该不该追」的第一问题，优先报。
+    sig_age = c.get("sig_age")
+    if sig_age is not None and sig_age > MAX_SIG_AGE:
+        return "不推荐", ("入场信号已是 %d 个交易日前（%s）⇒ 已错过入场时机，不追空"
+                          % (sig_age, sg.get("date")))
     age = sg.get("ctx_age")
     if age is not None and age > MAX_BG_AGE:
         return "不推荐", ("进场时背景已第 %d 根（>%d）⇒ 波段过老，"
                           "校准显示越晚进场越差（刚成立 +0.37R / 中段 -0.23R）"
                           % (age, MAX_BG_AGE))
-    # ★ 信号新鲜度：太旧的信号已经错过入场时机
-    sig_age = c.get("sig_age")
-    if sig_age is not None and sig_age > MAX_SIG_AGE:
-        return "不推荐", ("入场信号已是 %d 个交易日前（%s）⇒ 已错过入场时机，"
-                          "不追空（当前背景第 %s 根）"
-                          % (sig_age, sg.get("date"), c.get("ctx_age")))
     rr = sg.get("rr") or 0
     if rr < MIN_RR:
         return "不推荐", ("盈亏比 %.2f < %.1f（仅供参考排序门槛；"
@@ -197,6 +197,30 @@ def _verdict(c):
                         c.get("ctx_name"), age, c.get("ctx_grade"),
                         "/".join(sg.get("templates") or [])[:14], rr,
                         sg.get("stop") or 0, sg.get("target") or 0))
+
+
+def brief_line(c):
+    """★ 纯文本摘要（贴进对话）：一行结论 + 点位 + 盈亏比。"""
+    if c.get("error"):
+        return "  %-6s ⚠ %s" % (c["sym"], c["error"])
+    v = c.get("verdict") or "?"
+    sg = c.get("signal") or {}
+    e = c.get("etf") or {}
+    head = "%-6s %-9.2f 【%s】" % (c["sym"], c["close"], v)
+    if v == "推荐" and sg and e.get("entry"):
+        return ("%s 背景 %s·第%s根 ｜ %s ｜ 正股 入场%.2f 止损%.2f 目标%.2f ｜ RR %.2f"
+                " ｜ **%s 买%.4g 止损%.4g 目标%.4g**"
+                % (head, c.get("ctx_name"), c.get("ctx_age"),
+                   "/".join(sg.get("templates") or [])[:10],
+                   sg["entry"], sg["stop"], sg["target"], sg.get("rr") or 0,
+                   e["code"], e["entry"], e["stop"], e["target"]))
+    if v == "盯盘":
+        return ("%s 背景 %s·第%s根（%s）｜等「阻力区反转K线」触发，%s"
+                % (head, c.get("ctx_name"), c.get("ctx_age"), c.get("ctx_grade"),
+                   e.get("code") and ("盯 %s" % e["code"]) or ""))
+    # 不推荐：给理由（简洁）
+    reason = (c.get("verdict_reason") or "").split("（")[0].split("；")[0]
+    return "%s %s" % (head, reason)
 
 
 def line(c):
@@ -254,6 +278,8 @@ def main():
     ap.add_argument("symbols", nargs="*", help="指定 ticker（默认用固定标的池）")
     ap.add_argument("--pool", default=None, help="自定义标的池 JSON")
     ap.add_argument("--json", action="store_true", help="输出 JSON")
+    ap.add_argument("--brief", action="store_true",
+                    help="★ 纯文本摘要（贴进对话用）：每票一段，去掉装饰线")
     a = ap.parse_args()
 
     syms = [s.upper() for s in a.symbols] if a.symbols else load_pool(a.pool)
@@ -263,12 +289,20 @@ def main():
     if a.json:
         print(json.dumps(cards, ensure_ascii=False, default=str, indent=2))
         return
-    print("=" * 118)
-    print("美股固定标的 · 做空决策卡（%s）｜⚠ A股无融券、美股无融资 ⇒ 做空只走反向ETF"
-          % " ".join(syms))
-    print("=" * 118)
-    for c in cards:
-        print(line(c))
+    if a.brief:
+        # ★ 纯文本摘要模式：老罗 2026-10-31 定「只推文本摘要到对话」
+        print("【美股做空作战方案】%s（数据 %s）" % (" ".join(syms),
+                                                 cards[0].get("date", "")[:10] if cards else ""))
+        print("⚠ A股无融券、美股无融资 ⇒ 做空只走反向ETF；背景=顶部形态破位（下跌波段）")
+        for c in cards:
+            print(brief_line(c))
+    else:
+        print("=" * 118)
+        print("美股固定标的 · 做空作战方案（%s）｜⚠ A股无融券、美股无融资 ⇒ 做空只走反向ETF"
+              % " ".join(syms))
+        print("=" * 118)
+        for c in cards:
+            print(line(c))
     ok = [c for c in cards if actionable(c)]
     watch = [c for c in cards if c.get("verdict") == "盯盘"]
     print("=" * 118)
