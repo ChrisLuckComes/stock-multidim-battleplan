@@ -1,22 +1,35 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""bt_us_short_calib_2026-10-31.py —— 美股做空阈值**校准**（30 只样本，含稳健性检验）
+"""bt_us_short_calib_2026-10-31.py —— 美股做空阈值**校准**（用老罗自己的标的）
 
-老罗 2026-10-31：「先做3（阈值校准）再做2（写进默认）……以后我会这样问 或者定时跑
-然后直接出作战方案 点位 盈亏比 推荐/不推荐」。
+老罗 2026-10-31：
+  ① 「先做3（阈值校准）再做2（写进默认）」——先校准，再把结论固化成默认口径；
+  ② 「重点其实还是美股我的标的，测A股我又不能空，**股性很重要**」
+     ⇒ 样本池 = **核心池（他的固定5只）** + 同存储/半导体链扩展池（补样本量），
+       **剔除大盘科技**（低波动慢节奏，股性不同，阈值不可套用）；
+  ③ 「以后我会这样问 或者定时跑 然后直接出作战方案 点位 盈亏比 推荐/不推荐」。
 
-要校准的四个维度（网格）：
-  ① 背景过滤：全部信号 / 仅「背景下」信号（bg_age≥0，即形态破位之后的波段内）
-  ② 止损宽度：信号棒高 + mult×ATR（mult ∈ 0.2/0.3/0.45/0.6）
-  ③ 目标 R 上限：结构支撑 T1 原样 / 截断到 1.5R / 2R / 3R
-  ④ 同票冷却：同一票 N 根内不再开新仓（0/5/10/15）
+★ 校准维度（网格 2×4×4×4 = 128 组）：
+  ① 背景过滤：全部信号 / 仅「波段内」（顶部形态已破位）
+  ② 止损宽度：信号棒高 + mult×ATR（0.2/0.3/0.45/0.6）
+  ③ 目标 R 上限：结构支撑 T1 原样 / 截断 1.5R / 2R / 3R
+  ④ 同票冷却：0/5/10/15 根
 
-防过拟合设计：
-  · 样本分**前后半**（按 ticker 排序切分），看两半的最优参数是否一致；
-  · 每只票单独统计（看结论是否靠个别票撑着）；
-  · 输出样本数，低样本组合一律标注「样本不足」。
+★ 防过拟合设计：
+  · **截尾统计**（±3R）+ 中位数 + 原始均值三口径对照（单笔极值会带偏排序）；
+  · **时间切分** walk-forward（训练段选参 → 样本外评估；A/B 按字母切是错的）；
+  · **超额口径**（等权 17 只基准、同一持有窗口、按**实际出场点**算）——
+    熊市里做空天然赚钱，绝对收益说明不了问题；
+  · **核心池 / 链池**分开出结果；逐票方向一致性。
 
-口径：入场=信号棒**次日开盘**（真实成交）；判定窗口 40 根；先触目标=止盈 / 先触止损=止损。
+★ 实证结论（2026-10-30 数据，17 只 × 135 笔）：
+  · **见顶前**（<2026-06-22 存储链集体见顶）做空 ⇒ 超额 **-7.52%**（负期望）
+  · **见顶后**做空 ⇒ 超额 **+3.34%**，正收益率 59%
+    ⇒ **「已见顶下跌」是这套做空法的必要前提，不是加分项**（已固化为默认波段内闸门）
+  · 目标**截断到 2R**；同票**冷却 5 根**；止损 0.20~0.30×ATR（放宽反而更差）
+  · ⚠ 网格最优**是过拟合**（A→B 样本外 +0.24 → -0.34）⇒ 只固化样本内外一致的规则
+
+用法：
+  python bt_us_short_calib_2026-10-31.py              # 取数+缓存+全量校准
+  python bt_us_short_calib_2026-10-31.py --use-cache  # 只用本地缓存（不联网）
 """
 import json
 import os
@@ -219,6 +232,37 @@ def run(bars, sigs, stop_mult, cap_r, cooldown, ctx_only, bars_all, ctx_cache=No
 WINSOR = 3.0    # ★ 单笔实际R 截尾上限（±3R）——防单笔暴赚/巨亏主导均值
 
 
+# ★ 存储链集体见顶日（老罗 2026-10-31 定的分段点：见顶前做空是负期望）
+TOP_DATE = "2026-06-22"
+
+
+def build_bench(bars_by_sym):
+    """等权市场基准（个股日收益中位数累乘）—— 做空在熊市天然赚钱，必须看超额。"""
+    daily = {}
+    for _sym, bars in bars_by_sym.items():
+        prev = None
+        for b in bars:
+            if prev is not None and prev > 0:
+                daily.setdefault(b["d"], []).append(b["c"] / prev - 1.0)
+            prev = b["c"]
+    med = {}
+    for dt, rs in daily.items():
+        rs.sort()
+        med[dt] = rs[len(rs) // 2]
+    idx = {}
+    v = 1.0
+    for dt in sorted(med):
+        v *= (1.0 + med[dt])
+        idx[dt] = v
+    return idx
+
+
+def mkt_between(idx, d0, d1):
+    if d0 not in idx or d1 not in idx:
+        return None
+    return (idx[d1] / idx[d0] - 1.0) * 100.0
+
+
 def agg(rows):
     """聚合统计。⚑ **必须看稳健口径**：
 
@@ -386,6 +430,109 @@ def main():
     print("  ⇒ %d/%d 只在该参数下为正期望（样本小，仅看方向一致性）" % (pos, len(per)))
 
     # ── 背景年龄分层（时点化口径）──
+    # ══ ★ 见顶前后分段 + 超额口径（老罗 2026-10-31：最关键的检验）══
+    print("\n" + "=" * 112)
+    print("★ 见顶前后分段 · 超额口径（基准 = %d 只等权；按**实际出场点**算收益）" % len(syms))
+    print("=" * 112)
+    idx = build_bench({k: v[0] for k, v in prepped.items()})
+    base_rows = run_all(syms, stop_mult=0.3, cap_r=2.0, cooldown=10, ctx_only=True)
+
+    def excess_stats(rows, sel):
+        rs = [r for r in rows if sel(r)]
+        sr, xr = [], []
+        for r in rs:
+            sym = r["sym"]
+            bars = prepped[sym][0]
+            j = [k for k, sg in enumerate(prepped[sym][1]) if sg["date"] == r["d"]]
+            if not j:
+                continue
+            sg = prepped[sym][1][j[0]]
+            atr = sg.get("atr")
+            if not atr:
+                continue
+            i = sg["i"]
+            entry = bars[i + 1]["o"]
+            seg = bars[i + 1:i + 1 + FWD]
+            if len(seg) < 10:
+                continue
+            stop = sg["h"] + 0.30 * atr
+            tgt = sg["target"]
+            if stop <= entry or tgt >= entry:
+                continue
+            risk = (stop - entry) / entry * 100.0
+            if r.get("plan_r") and r["plan_r"] > 2.0:
+                tgt = entry * (1 - 2.0 * risk / 100.0)
+            hit_t = hit_s = None
+            for k, b in enumerate(seg):
+                if hit_t is None and b["l"] <= tgt:
+                    hit_t = k
+                if hit_s is None and b["h"] >= stop:
+                    hit_s = k
+            if hit_t is not None and (hit_s is None or hit_t <= hit_s):
+                exit_px, out_i = tgt, i + 1 + hit_t
+            elif hit_s is not None:
+                exit_px, out_i = stop, i + 1 + hit_s
+            else:
+                exit_px, out_i = seg[-1]["c"], i + len(seg)
+            sret = (entry - exit_px) / entry * 100.0     # 空单收益(%)，正=赚
+            mr = mkt_between(idx, bars[i + 1]["d"], bars[out_i]["d"])
+            sr.append(sret)
+            if mr is not None:
+                xr.append(sret - mr)
+        if not sr:
+            return None
+
+        def q(v, p):
+            v = sorted(v)
+            return v[min(len(v) - 1, int(len(v) * p))]
+
+        return (len(sr), sum(sr) / len(sr), q(sr, 0.5),
+                100.0 * sum(1 for x in sr if x > 0) / len(sr),
+                (sum(xr) / len(xr), q(xr, 0.5),
+                 100.0 * sum(1 for x in xr if x > 0) / len(xr)) if xr else None)
+
+    for lbl, sel in (
+            ("全部信号", lambda r: True),
+            ("★见顶前(<%s)" % TOP_DATE, lambda r: r["d"] < TOP_DATE),
+            ("★见顶后(≥%s)" % TOP_DATE, lambda r: r["d"] >= TOP_DATE),
+            ("见顶后+背景0~10根", lambda r: r["d"] >= TOP_DATE and r.get("bg_age") is not None
+             and 0 <= r["bg_age"] <= 10),
+            ("见顶后+背景刚成立0~3", lambda r: r["d"] >= TOP_DATE and r.get("bg_age") is not None
+             and 0 <= r["bg_age"] <= 3),
+    ):
+        st = excess_stats(base_rows, sel)
+        if not st:
+            continue
+        n, mean, med, win, x = st
+        print("%-22s n=%3d ｜ 空单收益 均值%+7.2f%% 中位%+7.2f%% 正收益率%3.0f%%"
+              % (lbl, n, mean, med, win))
+        if x:
+            print("%-22s       ｜ **超额** 均值%+7.2f%% 中位%+7.2f%% 正收益率%3.0f%%"
+                  % ("", x[0], x[1], x[2]))
+    print("  ⇒ **「已见顶下跌」是必要前提**：见顶前做空是负期望，见顶后才转正")
+
+    # ══ 时间切分 walk-forward（按日期，不是按字母）══
+    print("\n" + "=" * 112)
+    print("★ 时间切分 walk-forward（训练段选参 → 样本外评估；A/B 按字母切是错的）")
+    print("=" * 112)
+    dates = sorted({r["d"] for r in base_rows})
+    cut = dates[int(len(dates) * 0.7)]
+    print("  训练段 ≤ %s ｜ 样本外 > %s" % (cut, cut))
+    tr = [r for r in base_rows if r["d"] <= cut]
+    te = [r for r in base_rows if r["d"] > cut]
+    a, b = agg(tr), agg(te)
+    print("  基准参数（仅背景/0.30ATR/2R/冷10）：训练 n=%3d 截尾R %+.2f｜样本外 n=%3d 截尾R %+.2f"
+          % (a["n"], a["rr"], b["n"], b["rr"]))
+    for aname, afn in (("背景刚成立0~3", lambda z: z is not None and 0 <= z <= 3),
+                       ("背景早期4~10", lambda z: z is not None and 4 <= z <= 10),
+                       ("背景中段11~25", lambda z: z is not None and 11 <= z <= 25)):
+        atr_ = agg([r for r in tr if afn(r.get("bg_age"))])
+        ate_ = agg([r for r in te if afn(r.get("bg_age"))])
+        if atr_["n"] >= 8 and ate_["n"] >= 8:
+            print("    %-14s 训练 n=%3d R %+.2f｜样本外 n=%3d R %+.2f %s"
+                  % (aname, atr_["n"], atr_["rr"], ate_["n"], ate_["rr"],
+                     "★样本外为正" if ate_["rr"] > 0 and atr_["rr"] > 0 else ""))
+
     print("\n  背景年龄分层（时点口径，验证「越晚进场越差」）：")
     buckets = [("★抢跑(背景未成立)", lambda a: a is not None and a < 0),
                ("背景刚成立(0~3根)", lambda a: a is not None and 0 <= a <= 3),
