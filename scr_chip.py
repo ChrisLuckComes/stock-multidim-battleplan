@@ -71,6 +71,17 @@ EM_FFLOW_US = ("http://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
                "?lmt=0&klt=101&secid={secid}&fields1=f1,f2,f3,f7"
                "&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63")
 
+# ── 资金流备用源：新浪个股资金流历史（★ S3，2026-10-31 加）────────────────
+# 起因：东财 fflow 在批量回测后被限流（整站 RemoteDisconnected，连 kline 一起断），
+#   主力层就彻底没数。新浪这个端点一次给 300 天、0.25s，且 **ratioamount 与东财
+#   f57（主力净占比）同口径同量纲（都是小数、都带符号）** ⇒ 可直接互为兜底。
+#   字段：opendate 日期 | trade 收盘 | changeratio 涨跌幅(小数) | netamount 主力净额(元)
+#         ratioamount 主力净占比(小数,带符号) | r0_net 超大单净额 | r0_ratio 超大单占比
+SINA_FFLOW = ("http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+              "MoneyFlow.ssl_qsfx_zjlrqs?page=1&num={num}&sort=opendate&asc=0&daima={sym}")
+SINA_UA = dict(UA)
+SINA_UA["Referer"] = "http://finance.sina.com.cn/"
+
 # ── 备用源：腾讯行情（2026-10-15 加）—— 东财整体不可用时兜底，避免筹码面「交白卷」 ──
 # 起因：众生药业 002317 连跑两次 scr_chip 都「东财接口失败：Remote end closed」。
 #   实测根因是**东财 HTTPS 在本环境被中间设备拦**（http 明文正常），已修（见 _get_json）；
@@ -346,32 +357,115 @@ def fetch_bars_us(sym, n=120):
     return bars, name
 
 
-def _parse_fflow(fd):
-    """东财资金流文本 → {日期: 主力净流入占成交比 ρ(0~1)}，只取净买入（出流记 0）。
+#: 东财 fflow daykline 文本字段序（fields2=f51..f63）→ 0-based 索引：
+#:   0 日期 | 1 主力净额 | 2 小单净额 | 3 中单净额 | 4 大单净额 | 5 超大单净额
+#:   6 主力净占比 | 7 小单占比 | 8 中单占比 | 9 大单占比 | 10 超大单占比
+#:   11 收盘价 | 12 涨跌幅
+FF_IDX = {"main_net": 1, "sm_net": 2, "md_net": 3, "lg_net": 4, "xl_net": 5,
+          "main_ratio": 6, "sm_ratio": 7, "md_ratio": 8, "lg_ratio": 9,
+          "xl_ratio": 10, "close": 11, "chg": 12}
 
-    字段序：日期,主力净额,…,**主力占比(p[6])**,…。取不到返回 {}（上层退备用口径）。
+
+def _parse_fflow_detail(fd):
+    """东财资金流文本 → {日期: {main_ratio, main_net, xl_net, lg_net, md_net, sm_net, …}}。
+
+    ★ S1（老罗 2026-10-31 拍板重建）：**保留符号**。旧版 `max(0.0, p[6])` 把主力
+      净流出清零 ⇒ 模型在**数据层**就看不见派发，只能输出「吸筹」，这是判据永远偏多的
+      第一层根因。四档（超大/大/中/小单）全部解析，供「主力内部结构」描述用。
+    数值解析失败写 None，不吞成 0（0 是有效值，混起来会造假信号）。
     """
     out = {}
     for line in (fd.get("klines") or []):
         p = line.split(",")
-        if len(p) >= 7:
-            try:
-                out[p[0]] = max(0.0, float(p[6])) / 100.0
-            except ValueError:
+        if len(p) < 7:
+            continue
+        rec = {}
+        for k, i in FF_IDX.items():
+            if len(p) <= i:
+                rec[k] = None
                 continue
+            try:
+                rec[k] = float(p[i])
+            except (TypeError, ValueError):
+                rec[k] = None
+        if rec.get("main_ratio") is None:
+            continue
+        rec["main_ratio"] /= 100.0          # 百分比 → 小数；**保留正负**
+        out[p[0]] = rec
     return out
 
 
-def fetch_fflow(code):
-    """A 股东财逐日资金流 → {日期: 主力净流入占成交比 ρ(0~1)}，只取净买入（出流出记 0）。
+def _parse_fflow(fd):
+    """东财资金流文本 → {日期: 主力净流入占成交比 ρ（**带符号**，−1~1）}。
 
-    ⚠ 接口只给**净额**、不给主力「买入额」⇒ ρ 是净买入口径的近似。取不到就返回 {}（上层会退到备用口径）。
+    ★ S1：不再把净流出清成 0 —— ρ<0 是「主力在卖」，S2 的主力层靠它减仓，
+      否则模型对派发结构性盲（A/B 已证：40→50 派发 300 万股完全无感）。
+    p[6]=主力净占比；取不到返回 {}（上层退「低位带均价」口径）。
     """
+    return {d: r["main_ratio"] for d, r in _parse_fflow_detail(fd).items()}
+
+
+def _parse_fflow_sina(rows):
+    """新浪资金流历史 JSON 行 → {日期: ρ(带符号, 小数)}。
+
+    `ratioamount` 与东财 f57/100 **同口径同量纲**（主力净占比、带符号、小数），
+    故两源可直接互换，不影响 S2 的减仓量纲（净卖出量 = |ρ| × vol）。
+    """
+    out = {}
+    for r in (rows or []):
+        d = r.get("opendate")
+        v = r.get("ratioamount")
+        if not d or v is None:
+            continue
+        try:
+            out[str(d)] = float(v)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def fetch_fflow_sina(code, num=300, us_mode=False):
+    """新浪个股资金流历史 → {日期: ρ(带符号)}；失败返回 {}。
+
+    ★ S3 备用源：东财 fflow 被限流（整站 RemoteDisconnected）时唯一可用的**历史**
+    带符号资金流。实测一次 300 天 / 0.25s。
+    """
+    if us_mode:
+        return {}
     try:
-        d = _get_json(EM_FFLOW.format(secid=secid_of(code))).get("data") or {}
-        return _parse_fflow(d)
+        sym = tx_symbol(code)
+        url = SINA_FFLOW.format(num=int(num), sym=sym)
+        req = urllib.request.Request(url, headers=SINA_UA)
+        with urllib.request.urlopen(req, timeout=15) as r:
+            raw = r.read().decode("utf-8", "ignore")
+        if not raw.strip().startswith("["):
+            return {}
+        return _parse_fflow_sina(json.loads(raw))
     except Exception:
         return {}
+
+
+def fetch_fflow_ex(code, num=300):
+    """→ (ρ dict, 源标签 "em"/"sina"/"none")。东财优先，断连/限流自动切新浪。"""
+    try:
+        d = _get_json(EM_FFLOW.format(secid=secid_of(code))).get("data") or {}
+        ff = _parse_fflow(d)
+        if ff:
+            return ff, "em"
+    except Exception:
+        pass
+    ff = fetch_fflow_sina(code, num=num)
+    return (ff, "sina") if ff else ({}, "none")
+
+
+def fetch_fflow(code):
+    """A 股逐日资金流 → {日期: 主力净流入占成交比 ρ（**带符号**）}。
+
+    ★ S1：不再把净流出清成 0（ρ<0 = 主力在卖，S2 靠它减仓）。
+    ★ S3：东财不可用时自动切新浪历史（同口径），不再直接退「低位带替代」。
+    ⚠ 接口只给**净额**、不给主力「买入额」⇒ ρ 仍是净买入口径的近似。
+    """
+    return fetch_fflow_ex(code)[0]
 
 
 def fetch_fflow_us(sym):
@@ -716,20 +810,37 @@ def _fetch_raw(code, n=120, us_mode=False, allow_fallback=True):
                            + (f"；腾讯备用源也不可用：{meta.get('em_err')}" if us_mode else ""))
 
     fflow = _parse_fflow(fd)
-    if not fflow:
-        meta["fflow"] = "none"                    # 主力成本会退到「低位带均价」口径
-    if meta["kline"] == "tx":
-        meta["fflow"] = "none"                    # 腾讯无资金流 ⇒ 同上
+    if fflow:
+        meta["fflow"] = "em"
+    elif not us_mode:
+        # ★ S3（2026-10-31）：东财 fflow 被限流时切**新浪历史**（ratioamount 同口径带符号），
+        #   不再直接退「低位带替代」——那样主力层整块失效，比换个源降级更严重。
+        #   注意与 kline 源无关：腾讯日线 + 新浪资金流也能配对（只是换手率是自算的）。
+        fflow = fetch_fflow_sina(code, num=300)
+        meta["fflow"] = "sina" if fflow else "none"
+    else:
+        meta["fflow"] = "none"
     return bars, name, fflow, meta
 
 
 # ─────────────────────────── 筹码分布模型 ───────────────────────────
-def chip_model(bars, keep_last=8, main_rho=None, decay_k=1.0, us_mode=False):
+def chip_model(bars, keep_last=8, main_rho=None, decay_k=1.0, us_mode=False,
+               main_decay=0.999, return_meta=False):
     """三角分布 + 换手衰减。返回 (prices, dist, snaps, bin_w, miss, main_dist)。
 
-    `main_rho` = {日期: 主力净买入占成交比} ⇒ 同步累出**主力筹码分布** `main_dist`：
-    每个交易日只有「主力净买入那一份」进入主力分布（tri × ρ），同样按换手衰减。
-    ⇒ 主力分布的重心＝**主力成本**，代表「庄真正出手的价格带」，而不是散户追出来的高位。
+    `main_rho` = {日期: 主力净买入占成交比 ρ}（**带符号**，负=净卖出）⇒ 同步累出
+    **主力筹码分布** `main_dist`：重心＝**主力成本**（庄真正出手的价格带）。
+
+    ★ S2（老罗 2026-10-31 重建）：主力层三个动作——
+      ① **每日基础老化** `main_decay`（≈1，只防无限累积；**不用全市场换手率**，
+         否则把「散户换手」误当「主力卖出」，与 ③ 重复计减仓）；
+      ② ρ>0：按当日三角分布加仓，加仓量 = ρ × vol（与 ρ 的定义一致）；
+      ③ ρ<0：净卖出量 = |ρ| × vol，**按占现有存量的比例**等比例减仓。
+    旧逻辑 `if rho > 0` 让净流出日既不减仓也不老化 ⇒ 存量只增不减/冻结 ⇒ 天生
+    「锁仓·浮盈」，对派发结构性盲（A/B：40 元建仓→50 元派发 300 万股完全无感）。
+
+    return_meta=True 时返回 7 元组（末位 main_meta：存量轨迹/峰值/清仓比），
+    默认仍返回 6 元组，兼容既有调用方。
     """
     lo = min(b["l"] for b in bars)
     hi = max(b["h"] for b in bars)
@@ -750,6 +861,8 @@ def chip_model(bars, keep_last=8, main_rho=None, decay_k=1.0, us_mode=False):
     dist = [0.0] * n_bins
     m_dist = [0.0] * n_bins
     snaps = []
+    m_trace = []                                  # 每日主力存量（S2 存量趋势用）
+    m_peak = 0.0
     for b in bars:
         r = min(max(b["turnover"] / 100.0, 0.0), 1.0) if b["turnover"] > 0 else med_r
         l, h = b["l"], b["h"]
@@ -778,13 +891,37 @@ def chip_model(bars, keep_last=8, main_rho=None, decay_k=1.0, us_mode=False):
         rho = float((main_rho or {}).get(b["d"], 0.0) or 0.0)
         for i in range(n_bins):
             dist[i] = dist[i] * decay + tri[i]
+        # ── 主力层（S2）：基础老化 → 流入加仓 → 流出按存量比例减仓 ──────────
+        if main_decay != 1.0:
+            for i in range(n_bins):
+                m_dist[i] *= main_decay
         if rho > 0:
             for i in range(n_bins):
-                m_dist[i] = m_dist[i] * decay + tri[i] * rho
+                m_dist[i] += tri[i] * rho
+        elif rho < 0:
+            cur = sum(m_dist)
+            if cur > 0:
+                cut = min(abs(rho) * vol / cur, 0.95)       # 净卖出量 / 当前存量，上限 95%
+                f = 1.0 - cut
+                for i in range(n_bins):
+                    m_dist[i] *= f
+        m_tot = sum(m_dist)
+        if m_tot > m_peak:
+            m_peak = m_tot
+        m_trace.append(m_tot)
         snaps.append(dist[:])
         if len(snaps) > keep_last:
             snaps.pop(0)
-    return prices, dist, snaps, w, miss, m_dist
+    if not return_meta:
+        return prices, dist, snaps, w, miss, m_dist
+    return prices, dist, snaps, w, miss, m_dist, {
+        "hold": m_trace[-1] if m_trace else 0.0,
+        "peak": m_peak,
+        "trace": m_trace,
+        "days_used": sum(1 for b in bars if abs(float((main_rho or {}).get(b["d"], 0.0) or 0.0)) > 0),
+        "days_in": sum(1 for b in bars if float((main_rho or {}).get(b["d"], 0.0) or 0.0) > 0),
+        "days_out": sum(1 for b in bars if float((main_rho or {}).get(b["d"], 0.0) or 0.0) < 0),
+    }
 
 
 # ─────────────────────────── 指标提取 ───────────────────────────
@@ -1305,8 +1442,8 @@ def analyze(code, n=120, decay_k=None, half_life=CHIP_HALF_LIFE, us_mode=False,
         if len(bars) < MIN_BARS:
             raise RuntimeError(f"{code} 本地 db 仅 {len(bars)} 根日线（< {MIN_BARS}），不出结论")
         # 日线来自本地 db：仅资金流仍走网络；东财失败则 main_rho 为空（主力成本退低位带）
-        main_rho_now = fetch_fflow(code) if not us_mode else {}
-        _meta = {"kline": "db", "fflow": "em" if main_rho_now else "none",
+        main_rho_now, _fsrc = (fetch_fflow_ex(code) if not us_mode else ({}, "none"))
+        _meta = {"kline": "db", "fflow": _fsrc,
                  "note": "日线取自本地 data/screener.db（不命中网络行情源，规避限流）"}
         if name is None:
             name = str(code).zfill(6)
@@ -1318,9 +1455,9 @@ def analyze(code, n=120, decay_k=None, half_life=CHIP_HALF_LIFE, us_mode=False,
     if decay_k is None:
         decay_k = solve_decay_k(bars, half_life=half_life)
     main_rho = main_rho_now                       # 逐日主力净买入占比（算主力成本用，已并行取到）
-    prices, dist, snaps, w, miss, m_dist = chip_model(bars, keep_last=KEEP,
-                                                      main_rho=main_rho, decay_k=decay_k,
-                                                      us_mode=us_mode)
+    prices, dist, snaps, w, miss, m_dist, m_meta = chip_model(
+        bars, keep_last=KEEP, main_rho=main_rho, decay_k=decay_k,
+        us_mode=us_mode, return_meta=True)
 
     def summary(d, close):
         p5 = cost_at(prices, d, 5)
@@ -1397,13 +1534,57 @@ def analyze(code, n=120, decay_k=None, half_life=CHIP_HALF_LIFE, us_mode=False,
     below_now = prices[hi_i] < close          # 低位带是否真的在现价下方
     # ── 主力成本：优先「资金流口径」（主力净买入那批筹码的重心），取不到退到「低位带均价」 ──
     mtot = sum(m_dist) if m_dist else 0.0
-    if mtot > 0:
+    _m_peak_raw = m_meta.get("peak") or 0.0
+    # ⚑ 清仓判定（S2）：存量相对峰值 < 1e-4 ⇒ 视为已清空。剩余 1e-6 股的加权重心
+    #   没有意义，继续算会输出「主力成本 41.51」这种误导数字（合成 A/B 已踩）。
+    _cleared = bool(_m_peak_raw > 0 and mtot / _m_peak_raw < 1e-4)
+    if _cleared:
+        main_cost = None
+        main_src = "已清仓"
+    elif mtot > 0:
         main_cost = sum(p * m for p, m in zip(prices, m_dist)) / mtot
         main_src = "资金流"
     else:
         main_cost = band_avg_cost(prices, dist, lo_i, hi_i)
         main_src = "低位带替代"
     low_cost = band_avg_cost(prices, dist, lo_i, hi_i)
+    # ── ★ S2 主力层派生指标（存量趋势 / 清仓 / 浮盈）────────────────────────
+    #   m_dist 经 S2 重写后是「剩余主力筹码」，故 main_cost = 剩余存量的重心。
+    #   m_trace = 逐日主力存量；用它算趋势与清仓，不再只看单点成本。
+    m_hold = m_meta.get("hold") or 0.0
+    m_peak = m_meta.get("peak") or 0.0
+    m_trace = m_meta.get("trace") or []
+    m_din = m_meta.get("days_in", 0)
+    m_dout = m_meta.get("days_out", 0)
+    # 存量保留比（相对窗口内峰值）：<5% ⇒ 主力已基本清仓（这是旧模型永远看不到的）
+    m_keep_ratio = (m_hold / m_peak) if m_peak > 0 else None
+    m_chg5 = ((m_trace[-1] - m_trace[-6]) / m_trace[-6]
+              if len(m_trace) >= 6 and m_trace[-6] > 0 else None)
+    m_chg10 = ((m_trace[-1] - m_trace[-11]) / m_trace[-11]
+               if len(m_trace) >= 11 and m_trace[-11] > 0 else None)
+    # 主力浮盈率：只在「资金流口径」下有意义（低位带替代时它不是主力成本）
+    m_pnl = ((close - main_cost) / main_cost * 100
+             if main_cost and main_cost > 0 and main_src == "资金流" else None)
+    if m_peak <= 0 or (m_din + m_dout) == 0:
+        m_phase, m_phase_note = "无资金流", "未取到资金流，主力层不可用（成本为低位带替代）"
+    elif m_keep_ratio is not None and m_keep_ratio < 0.05:
+        m_phase = "已清仓"
+        m_phase_note = (f"主力存量已降至峰值的 {m_keep_ratio * 100:.1f}%"
+                        f"（{m_din} 日净买入 / {m_dout} 日净卖出）⇒ 派发基本完成")
+    elif m_chg5 is not None and m_chg5 <= -0.15:
+        m_phase = "减仓中"
+        m_phase_note = (f"主力存量近 5 日 {m_chg5 * 100:+.1f}%"
+                        f"（保留峰值 {m_keep_ratio * 100:.0f}%）⇒ 在派发，别当锁仓拿")
+    elif m_chg5 is not None and m_chg5 >= 0.15:
+        m_phase = "加仓中"
+        m_phase_note = (f"主力存量近 5 日 {m_chg5 * 100:+.1f}%"
+                        f"（保留峰值 {m_keep_ratio * 100:.0f}%）⇒ 在收集")
+    elif m_hold > 0:
+        m_phase = "锁仓/持平"
+        m_phase_note = (f"主力存量近 5 日 {m_chg5 * 100:+.1f}%"
+                        if m_chg5 is not None else "主力存量基本未变")
+    else:
+        m_phase, m_phase_note = "无资金流", "主力存量为 0，无有效资金流样本"
     # ⚑ 跨日只能比**份额**（低位带占全部筹码之比＝图上那截柱的相对高度）。
     #   比绝对量会被「总筹码每天在增减」污染，导致任何票都判不出锁仓。
     mass_now = band_share(dist, lo_i, hi_i)
@@ -1448,6 +1629,11 @@ def analyze(code, n=120, decay_k=None, half_life=CHIP_HALF_LIFE, us_mode=False,
         "peak_conc": peak_conc,
         "lock": locked, "lock_spread": spread, "mass_chg": mass_chg,
         "low_cost": low_cost, "main_cost": main_cost, "main_src": main_src,
+        # ★ S2 主力层（存量趋势 —— 旧模型只有单点成本，看不到派发）
+        "main_hold": m_hold, "main_peak": m_peak, "main_keep_ratio": m_keep_ratio,
+        "main_chg5": m_chg5, "main_chg10": m_chg10, "main_pnl": m_pnl,
+        "main_phase": m_phase, "main_phase_note": m_phase_note,
+        "main_days_in": m_din, "main_days_out": m_dout,
         "dist_pos": dist_pos, "scr_hist": scr_hist[-12:], "series": series[-10:],
         "verdict": verdict, "why": why, "action": act,
         "state": state, "state_why": state_why, "state_action": state_act,
@@ -1495,8 +1681,25 @@ def render(r):
     mc = r["main_cost"]
     if mc:
         gap = (r["close"] / mc - 1) * 100
-        tag = "" if r["main_src"] == "资金流" else f"（资金流取不到，退低位带口径）"
+        tag = "" if r["main_src"] == "资金流" else "（资金流取不到，退低位带口径）"
         print(f" 主力成本 {cur}{mc:.2f}{tag}｜现价相对主力成本 {gap:+.1f}%")
+    elif r.get("main_src") == "已清仓":
+        print(" 主力成本 —（主力已清仓，无剩余筹码重心；旧模型此处会给出误导性成本）")
+    # ★ S2 主力行为（存量趋势）：判断「加仓 / 派发 / 清仓」的唯一依据。
+    #   旧模型只有单点成本、看不到派发 ⇒ 会把「主力已跑光」读成「锁仓浮盈」。
+    if r.get("main_phase") and r["main_phase"] != "无资金流":
+        parts = [f"主力行为：{r['main_phase']}"]
+        keep, c5, pnl = r.get("main_keep_ratio"), r.get("main_chg5"), r.get("main_pnl")
+        if keep is not None:
+            parts.append(f"存量保留峰值 {keep * 100:.0f}%")
+        if c5 is not None:
+            parts.append(f"近 5 日 {c5 * 100:+.1f}%")
+        if pnl is not None:
+            parts.append(f"主力浮盈 {pnl:+.1f}%")
+        parts.append(f"净买入 {r.get('main_days_in', 0)} 日 / 净卖出 {r.get('main_days_out', 0)} 日")
+        print("｜".join(parts))
+        if r.get("main_phase_note"):
+            print(f"   ↳ {r['main_phase_note']}")
     print(f" 平均成本 {cur}{r['M']:.2f}｜获利盘 {r['profit']:.1f}%｜主峰 {cur}{r['main_price']:.2f}"
           f"｜底部峰 {bp}｜{'单峰' if r['n_peak'] <= 1 else str(r['n_peak']) + ' 峰（分歧）'}")
     if r.get("vol_poc") is not None:
