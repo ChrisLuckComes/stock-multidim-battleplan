@@ -1391,8 +1391,26 @@ def build_scr(a, n):
         ("低位带 %d 日" % int(_scr_lock_days()), "<b>%s</b>"
          % ("%+.1f%%" % ((r.get("mass_chg") or 0) * 100)
             if r.get("mass_chg") is not None else "—")),
+        ("量峰VPOC", "<b>%s</b>" % (num(r.get("vol_poc"), 2)
+                              if r.get("vol_poc") is not None else "—")),
+        ("成本峰·量峰背离", "<b>%s</b>"
+         % ("%+.1f%%" % r.get("poc_div_pct")
+            if r.get("poc_div_pct") is not None else "—")),
     ]
     kp = "\n    ".join('<div class="kpi">%s <b>%s</b></div>' % (k, v) for k, v in kpis)
+    # ★ 2026-10-31 A 层：量价 VPOC（成本峰语言）增强 —— scr_chip 已算好，这里只渲染。
+    #   只描述状态（量峰=成交战场位、成本峰与量峰背离），不输出买法（与筹码面口径一致）。
+    vp = r.get("vprofile")
+    vp_line = ""
+    if vp and vp != "—":
+        _vpc = {"突破上方·回踩不破则继续": "b-ok",
+                "贴量峰·支撑确认": "b-ok",
+                "跌破量峰·转弱": "b-no"}.get(vp, "b-warn")
+        vp_line = ("<p class='note'><b>量价 VPOC</b>（成本峰语言 · A层增强）："
+                   "<span class='badge %s'>%s</span> %s"
+                   "<br><span>量峰＝成交战场位；成本峰与量峰同源（日线三角假设），"
+                   "价值在二者背离读，非独立 L2 信号。</span></p>"
+                   % (_vpc, esc(vp), esc(r.get("vprofile_note") or "")))
     # 现价 / 你的成本 vs 主力成本：三者是**不同的两件事**，分开说（老罗 2026-10-14 追问后定的口径）
     guard = ""
     if devi is not None:
@@ -1416,7 +1434,7 @@ def build_scr(a, n):
     return (
         "<div class='card'>%s"
         "<p><span class='badge %s'>筹码状态：%s</span> %s</p>"
-        "<div class='kpis'>%s</div>"
+        "<div class='kpis'>%s</div>%s"
         "<p class='note'><b>动作</b>：%s</p>"
         "%s"
         "%s"
@@ -1425,7 +1443,7 @@ def build_scr(a, n):
         "绝对值有偏差、方向性判读可用；只支持 A 股，解禁/股本变动未回溯修正。</p>"
         "</div>"
         % (head, cls, esc(st), esc(str(r.get("state_why") or r.get("why") or "")),
-           kp, esc(str(r.get("state_action") or r.get("action") or "—")),
+           kp, vp_line, esc(str(r.get("state_action") or r.get("action") or "—")),
            guard, note(n.get("scr_note"), ""),
            ("%.3f（按半衰期 %s 日自求）" % (r.get("decay_k") or 0, r.get("half_life"))
             if r.get("k_auto") else "%.3f（人工指定）" % (r.get("decay_k") or 0)))

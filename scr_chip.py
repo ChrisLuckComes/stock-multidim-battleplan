@@ -877,6 +877,53 @@ def band_avg_cost(prices, dist, lo_i, hi_i):
             if tot > 0 else None)
 
 
+def vol_poc_of(bars, us_mode=False):
+    """量价分布 VPOC（Volume Point of Control）：不做换手衰减、纯按成交量加权，
+    把每日成交量按三角分布铺在 [低,高]（峰=VWAP），累加得「成交量分布」，
+    其密度最大格 = 成交量最大的价位（战场位）。
+
+    ⚠ 与 chip_model 的「成本分布」同源（都用日线三角假设），差异只在：
+         成本分布 = 三角 × 换手衰减（存活筹码）⇒ 持仓成本重心（main_price）；
+         量分布   = 三角 × 纯成交量（不衰减）⇒ 成交战场位（vol_poc）。
+    所以这是**同一假设族内的第二种加权**，不是独立 L2 信号——价值在于：
+      ① 把现有主峰「讲成 VPOC 语言」（回踩不破=支撑 / 突破回踩=继续）；
+      ② 免费给出「成本峰 vs 量峰」背离读。
+    真·Volume Profile（逐价成交量）需 TDX/L2，当前数据源（日线 OHLCV 仅 1 个 v 字段）无。
+    """
+    if not bars:
+        return None
+    lo = min(b["l"] for b in bars)
+    hi = max(b["h"] for b in bars)
+    span = max(hi - lo, hi * 0.001, 1e-6)
+    n_bins = min(1500, max(200, int(span / 0.01) + 1))
+    w = span / n_bins
+    prices = [lo + (i + 0.5) * w for i in range(n_bins)]
+    vdist = [0.0] * n_bins
+    for b in bars:
+        l, h = b["l"], b["h"]
+        vol = (b["v"] * 100.0) if not us_mode else b["v"]
+        if h <= l:
+            vdist[min(int((l - lo) / w), n_bins - 1)] += vol
+            continue
+        vwap = (b["amt"] / vol) if vol > 0 else (l + h) / 2
+        peak = min(max(vwap, l + 1e-9), h - 1e-9)
+        i0 = max(int((l - lo) / w), 0)
+        i1 = min(int((h - lo) / w), n_bins - 1)
+        tot = 0.0
+        tri = [0.0] * (i1 - i0 + 1)
+        for k, i in enumerate(range(i0, i1 + 1)):
+            x = prices[i]
+            wt = (x - l) / (peak - l) if x <= peak else (h - x) / (h - peak)
+            tri[k] = wt
+            tot += wt
+        if tot > 0:
+            for k, i in enumerate(range(i0, i1 + 1)):
+                vdist[i] += tri[k] * vol / tot
+    if not vdist or sum(vdist) <= 0:
+        return None
+    return prices[max(range(len(vdist)), key=lambda i: vdist[i])]
+
+
 # ─────────────────────────── 综合结论 ───────────────────────────
 def judge(scr90, scr70, scr_hist, close, M, p5, p15, p85, p95, profit,
           vol_ratio, turnover, n_peak, locked, mass_chg, peak_price, dist_pos):
@@ -1309,6 +1356,27 @@ def analyze(code, n=120, decay_k=None, half_life=CHIP_HALF_LIFE, us_mode=False,
     pk_idx, main_i = peaks_of(prices, dist, w)
     n_peak = len(pk_idx)
     main_price = prices[main_i]
+    # ★ A 层（2026-10-31）：量峰 VPOC + 成本峰/量峰背离 + 两条行为标注。
+    #   vol_poc = 成交量分布最大价位（战场位）；main_price = 成本分布峰（持仓重心）。
+    vol_poc = vol_poc_of(bars, us_mode)
+    poc_div_pct = None
+    vprofile = "—"
+    vprofile_note = ""
+    if vol_poc and main_price:
+        poc_div_pct = (main_price - vol_poc) / vol_poc * 100
+        rel = close / vol_poc - 1
+        if rel >= 0.03:
+            vprofile = "突破上方·回踩不破则继续"
+            vprofile_note = (f"现价已站上量峰 {vol_poc:.2f} 上方 {rel * 100:.1f}%，"
+                             f"量峰转为下方支撑；回踩该位不破即延续")
+        elif rel > -0.03:
+            vprofile = "贴量峰·支撑确认"
+            vprofile_note = (f"现价贴着量峰 {vol_poc:.2f}（±3% 内），"
+                             f"成交量最大价位=当前关键支撑，不破即稳")
+        else:
+            vprofile = "跌破量峰·转弱"
+            vprofile_note = (f"现价已跌穿量峰 {vol_poc:.2f} 下方 {abs(rel) * 100:.1f}%，"
+                             f"量峰转为上方阻力，偏弱")
     # ★★ 「底部成峰」两个正交指标（老罗 2026-10-14 修正 SCR90 只看两端的缺陷）：
     #   peak_conc = 主峰 ±10% 价格带内的筹码占全部筹码之比（图上「峰的柱子有多粗」）
     #   vac_share = 峰区上沿 P85 到现价之间的筹码占比（这段越空＝中段真空、无人挂单）
@@ -1374,6 +1442,8 @@ def analyze(code, n=120, decay_k=None, half_life=CHIP_HALF_LIFE, us_mode=False,
         "scr90": scr90, "scr70": scr70, "M": M, "profit": profit,
         "p5": p5, "p15": p15, "p85": p85, "p95": p95,
         "peak_price": peak_price, "main_price": main_price,
+        "vol_poc": vol_poc, "poc_div_pct": poc_div_pct,
+        "vprofile": vprofile, "vprofile_note": vprofile_note,
         "low_lo": low_lo, "low_hi": low_hi, "below_now": below_now, "n_peak": n_peak,
         "peak_conc": peak_conc,
         "lock": locked, "lock_spread": spread, "mass_chg": mass_chg,
@@ -1429,6 +1499,11 @@ def render(r):
         print(f" 主力成本 {cur}{mc:.2f}{tag}｜现价相对主力成本 {gap:+.1f}%")
     print(f" 平均成本 {cur}{r['M']:.2f}｜获利盘 {r['profit']:.1f}%｜主峰 {cur}{r['main_price']:.2f}"
           f"｜底部峰 {bp}｜{'单峰' if r['n_peak'] <= 1 else str(r['n_peak']) + ' 峰（分歧）'}")
+    if r.get("vol_poc") is not None:
+        div = r.get("poc_div_pct")
+        div_txt = f"｜成本峰-量峰背离 {div:+.1f}%" if div is not None else ""
+        print(f" 量峰VPOC {cur}{r['vol_poc']:.2f}｜{r['vprofile']}{div_txt}")
+        print(f"   ↳ {r.get('vprofile_note', '')}")
     if r["dist_pos"] is not None:
         pos = ("峰区上方 %.0f%%" % (r["dist_pos"] * 100)) if r["dist_pos"] > 1 else (
             "峰区下方" if r["dist_pos"] < 0 else "峰区内 %.0f%%" % (r["dist_pos"] * 100))
