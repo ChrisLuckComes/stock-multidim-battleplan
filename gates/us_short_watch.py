@@ -47,6 +47,7 @@ except Exception:
 from gates.us_short import (etf_from_underlying, load_reverse_etf,   # noqa: E402
                             STRUCT_STOP_ATR)
 from levels import levels_from_bars                                # noqa: E402
+from us_short import min_entry_for_rr                              # noqa: E402
 from top_patterns import detect_head_shoulders_top                  # noqa: E402
 from top_shapes import bearish_context, ctx_grade                  # noqa: E402
 
@@ -77,6 +78,36 @@ def one_card(sym, pairs):
     lv = levels_from_bars(bars)
     hs = detect_head_shoulders_top(bars, ma50=lv.get("ma50"))
     ctx = bearish_context(bars)
+    # ── ★ ① 主决策（裸K结构位，**口径唯一真源** plan_levels，与 us_short.py 同源）──
+    from gates.us_short import (NOISE_ATR, STRUCT_STOP_ATR, plan_levels,
+                                rr_ratio)
+    anchor = bars[-1]["c"]
+    pl = plan_levels(bars, anchor, STRUCT_STOP_ATR, lv=lv)
+    atr = pl["atr"]
+    main_cands = []
+    if pl["broken"]:
+        main_cands.append(("破位延续空(目标S2)", anchor, pl["stop"], pl["t2"]))
+        main_cands.append(("反抽S_broken不过空", pl["s_broken"], pl["stop"], pl["t2"]))
+    else:
+        main_cands.append(("反抽R1不过空", pl["r1"], pl["stop"], pl["t1"]))
+    rr_ladder = []
+    t1 = pl["t1"]
+    for rr in (3.0, 2.5, 2.0, 1.5, 1.0):
+        e = min_entry_for_rr(rr, t1, pl["stop"])
+        rr_ladder.append((rr, e))
+    # ── ★ 日内追跌档（老罗手法：跌势成立顺势做，止损=前一日低点）──
+    #   ⚠ 实证（bt_us_short_trend_2026-10-31.py，270 笔 13:00 平仓）：
+    #     反抽不过 = +6.56%／胜率 91.3%（肥）；**跳空低开就追 = −0.47%／胜率 45%（亏）**
+    prev_low5 = min(b["l"] for b in bars[-6:-1]) if len(bars) > 6 else None
+    chase = []
+    if ctx and ctx.get("alive") and prev_low5:
+        for lvl, nm in ((pl["s_broken"], "反抽S_broken不过"), (pl["r1"], "反抽R1不过")):
+            # ⚠ 只留**距现价 ≤1.5×ATR** 的反抽位：太远的反抽（如 +24%）当日摸不到，
+            #   报了也是噪音（老罗：一屏干净、别看无效档）。
+            if lvl > anchor and (lvl - anchor) <= 1.5 * atr:
+                stop = max(prev_low5, lvl - 1.0 * atr) if atr else prev_low5
+                if stop < lvl:
+                    chase.append((nm, lvl, stop))
     grade, score = ctx_grade(ctx) if ctx else ("无背景", 0)
     # 背景下入场信号（最新一笔）
     from gates.reverse_kline_short import scan_reversal_kline
@@ -101,6 +132,14 @@ def one_card(sym, pairs):
     card = {
         "sym": sym, "date": last["d"], "close": last["c"],
         "sig_age": sig_age,
+        "mode": "破位结构空" if pl["broken"] else "反抽结构空",
+        "main_cands": [{"name": n, "entry": e, "stop": cs, "target": tg,
+                         "rr": rr_ratio(e, tg, cs)}
+                        for (n, e, cs, tg) in main_cands],
+        "rr_ladder": rr_ladder,
+        "s_broken": pl["s_broken"], "r1": pl["r1"], "t1": pl["t1"], "t2": pl["t2"],
+        "atr": atr,
+        "chase": [{"name": n, "entry": e, "stop": st} for (n, e, st) in chase],
         "ctx_name": (ctx or {}).get("name"),
         "ctx_fallback": bool((ctx or {}).get("fallback")),
         "ctx_break": (ctx or {}).get("break_level"),
@@ -352,36 +391,62 @@ def _verdict(c):
 
 
 def brief_line(c):
-    """★ 纯文本摘要（贴进对话）：一行结论 + **当下点位** + 盈亏比。"""
+    """★ 纯文本摘要（贴进对话）：**①主决策**（下单价）+ 追跌档 + 落地价 + 旁证一行。"""
     if c.get("error"):
         return "  %-6s ⚠ %s" % (c["sym"], c["error"])
     v = c.get("verdict") or "?"
-    sg = c.get("signal") or {}
+    out = []
+    head = "%-6s %-9.2f 【%s】%s" % (c["sym"], c["close"], v,
+                                     ("  " + c.get("mode", "")) if c.get("mode") else "")
+    # ① 主决策（裸K结构位，与 us_short.py 同源）—— **下单看这里**
+    cands = c.get("main_cands") or []
+    if cands:
+        bits = []
+        for cd in cands:
+            rr = cd.get("rr")
+            bits.append("%s 入场%.2f 止损%.2f 目标%.2f RR%s"
+                        % (cd["name"], cd["entry"], cd["stop"], cd["target"],
+                           ("%.2f" % rr) if rr is not None else "—"))
+        out.append("%s  ① 主决策：%s" % (head, " ｜ ".join(bits)))
+        lad = c.get("rr_ladder") or []
+        gate = [x for x in lad if abs(x[0] - 1.5) < 1e-9]
+        if gate:
+            out.append("            RR≥1.5 门槛：入场价 ≥ %.2f（当前 %.2f %s）"
+                       % (gate[0][1], c["close"],
+                          "够" if c["close"] >= gate[0][1] else "不够"))
+    else:
+        out.append("%s  ① 主决策：—" % head)
+    # ② 日内追跌档（实证：反抽不过=肥；跳空追=亏 ⇒ 只给反抽）
+    ch = c.get("chase") or []
+    if ch:
+        cd = ch[0]
+        out.append("            ② 日内追跌档：%s（等回抽到 %.2f（+%.1f%%）被打回再进｜止损 前低 %.2f）"
+                   % (cd["name"], cd["entry"],
+                      (cd["entry"] / c["close"] - 1) * 100 if c.get("close") else 0,
+                      cd["stop"]))
+    # ③ 落地：反向ETF 价
     e = c.get("etf") or {}
-    head = "%-6s %-9.2f 【%s】" % (c["sym"], c["close"], v)
-    chase = c.get("chased_pct")
-    chase_txt = ""
-    if chase is not None and chase < -0.5:
-        chase_txt = "（较信号价已跌%.1f%%）" % chase
-    if v.startswith("推荐") and sg:
-        ne, ns, nt = c.get("now_entry"), c.get("now_stop"), c.get("now_target")
-        etf_txt = ""
-        if e.get("code"):
-            ref = c["close"]
-            etf_txt = (" ｜ **%s 买%.4g 止损%.4g 目标%.4g**"
-                       % (e["code"], etf_from_underlying(ne, ref, e.get("ref") or ref, e.get("lev") or 2.0),
-                          etf_from_underlying(ns, ref, e.get("ref") or ref, e.get("lev") or 2.0),
-                          etf_from_underlying(nt, ref, e.get("ref") or ref, e.get("lev") or 2.0)))
-        return ("%s 背景 %s·**信号时第%s根**(现第%s根) ｜ %s ｜ **现价入场 %.2f 止损 %.2f 目标 %.2f ｜ 盈亏比 %.2f**%s%s"
-                % (head, c.get("ctx_name"), sg.get("ctx_age"), c.get("ctx_age"),
-                   "/".join(sg.get("templates") or [])[:10],
-                   ne or 0, ns or 0, nt or 0, c.get("rr_now") or 0, chase_txt, etf_txt))
-    if v == "盯盘":
-        return ("%s 背景 %s·第%s根（%s）｜等「阻力区反转K线」触发，%s"
-                % (head, c.get("ctx_name"), c.get("ctx_age"), c.get("ctx_grade"),
-                   ("盯 %s" % e["code"]) if e.get("code") else ""))
-    reason = (c.get("verdict_reason") or "").split("（")[0].split("；")[0]
-    return "%s %s" % (head, reason)
+    if e.get("code") and cands:
+        ref = c["close"]
+        lev = e.get("lev") or 2.0
+        er = e.get("ref") or ref
+        cd = cands[0]
+        t1 = c.get("t1") or cd["target"]
+        t2 = c.get("t2")
+        out.append("            ③ 落地 %s(%sx)：买 %.4g ｜ 止损 %.4g ｜ 目标(T1) %.4g%s"
+                   % (e["code"], lev,
+                      etf_from_underlying(cd["entry"], ref, er, lev),
+                      etf_from_underlying(cd["stop"], ref, er, lev),
+                      etf_from_underlying(t1, ref, er, lev),
+                      ("｜T2 %.4g(远)" % etf_from_underlying(t2, ref, er, lev))
+                      if t2 else ""))
+    # ④ 旁证一行
+    ctx = c.get("ctx_name") or "无"
+    age = (c.get("signal") or {}).get("ctx_age")
+    _rs = (c.get("verdict_reason") or "").split("｜")[0][:34]
+    out.append("            ④ 旁证：背景 %s（%s）｜%s"
+               % (ctx, ("信号时第%s根" % age) if age is not None else "未破位", _rs))
+    return "\n".join(out)
 
 
 def line(c):
