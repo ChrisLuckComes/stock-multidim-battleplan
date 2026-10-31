@@ -379,6 +379,23 @@ def main():
               "禁止破位急跌中追空。最终能否空仍由原闸（结构破位+RR≥1.5+止损距离≥0.25×ATR）决定，"
               "50日线仅作参考锚，不作否决依据。")
     print()
+    # ★ 2026-10-31：T0头肩顶战法 的入场部分 = 反转K线识别（4模板 × 3过滤）。
+    #   头肩顶只提供「顶部结构阻力区」（见上方上下文），本识别在阻力区扫描裸K反转进场。
+    #   注意：这是「入场触发」展示，原「破位/反抽结构位空 + RR≥1.5」决策闸仍独立生效，互不替代。
+    try:
+        from reverse_kline_short import scan_reversal_kline, fmt_reversal  # 懒导入，避免循环
+        _rfrom = bars[max(0, len(bars) - 90)]["d"]   # 近 ~90 日窗口看当前可触发信号
+        _rsigs, _, _supp = scan_reversal_kline(bars, from_date=_rfrom, lv=lv, hs=hs, atr=atr)
+        print("── T0头肩顶战法 · 反转K线识别（裸K进场信号；近90日；趋势闸门=跌破MA50或颈线已破）──")
+        for _rl in fmt_reversal(_rsigs, bars):
+            print(f"  {_rl}")
+        if _supp:
+            print(f"  （另有 {_supp} 个合格信号因趋势背景不符被闸门拦下——上升途中提前抄顶伪信号）")
+        print("  说明：反转K线识别本身不绑定头肩顶，只认「阻力区出现反转K线」；"
+              "全区间(2026-06起)扫描请用 `python gates/reverse_kline_short.py %s`" % sym)
+    except Exception as e:
+        print(f"  （反转K线识别扫描异常：{type(e).__name__}: {e}）")
+    print()
     print("── 反向 ETF 换算（买入 = 做空；sell short = 双倍做多）──")
     pair = load_reverse_etf().get(sym, {})
     etf_code = (a.etf or pair.get("etf") or "")
