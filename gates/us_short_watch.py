@@ -70,7 +70,7 @@ def one_card(sym, pairs):
     """单票决策卡。返回 dict（任何异常都收敛成 error 字段，不中断整屏）。"""
     import rule123 as R
     try:
-        bars, _spot, _meta = R.bars_from_us(sym)
+        bars, spot, _meta = R.bars_from_us(sym)
     except Exception as e:
         return {"sym": sym, "error": "%s: %s" % (type(e).__name__, e)}
     if len(bars) < 60:
@@ -99,6 +99,23 @@ def one_card(sym, pairs):
     #   ⚠ 实证（bt_us_short_trend_2026-10-31.py，270 笔 13:00 平仓）：
     #     反抽不过 = +6.56%／胜率 91.3%（肥）；**跳空低开就追 = −0.47%／胜率 45%（亏）**
     prev_low5 = min(b["l"] for b in bars[-6:-1]) if len(bars) > 6 else None
+    # ── ★ 深跌反抽（**实时**，老罗手法：夜盘/盘前跌深 → 反抽 → 进）──
+    #   ⚠ 日线回测实证（bt_us_short_trend_2026-10-31.py 邻近口径）：
+    #     「跌深」本身无 alpha（次日 ≥20% 占 0%）⇒ 它不是信号，是**执行位置**。
+    #   ⇒ 本档只做**执行提示**：现价已跌透 ⇒ 给出「反抽到 X% 就进」的触发带 + ETF 价 + 止损参考。
+    #   ⚠ 出场由老罗自己决定（「我什么时候平仓就是我自己看着办」）⇒ 系统不设平仓时点。
+    deep = None
+    ref_close = bars[-1]["c"]
+    cur = spot or ref_close
+    cur_pct = (cur / ref_close - 1.0) * 100.0
+    if cur_pct <= -DEEP_D:
+        trig_pct = -DEEP_R
+        trig_px = ref_close * (1 + trig_pct / 100.0)
+        deep = {"cur": cur, "cur_pct": cur_pct,
+                "trig_px": trig_px, "trig_pct": trig_pct,
+                "stop_ref": prev_low5,
+                "note": "已跌 %.1f%%（≥%.0f%%）⇒ 反抽到 %.1f%%（%.2f）就进"
+                        % (cur_pct, DEEP_D, trig_pct, trig_px)}
     chase = []
     if ctx and ctx.get("alive") and prev_low5:
         for lvl, nm in ((pl["s_broken"], "反抽S_broken不过"), (pl["r1"], "反抽R1不过")):
@@ -140,6 +157,7 @@ def one_card(sym, pairs):
         "s_broken": pl["s_broken"], "r1": pl["r1"], "t1": pl["t1"], "t2": pl["t2"],
         "atr": atr,
         "chase": [{"name": n, "entry": e, "stop": st} for (n, e, st) in chase],
+        "deep": deep,
         "ctx_name": (ctx or {}).get("name"),
         "ctx_fallback": bool((ctx or {}).get("fallback")),
         "ctx_break": (ctx or {}).get("break_level"),
@@ -316,6 +334,9 @@ def one_card(sym, pairs):
 #                         跌这么多天吗？有的无底洞呢」⇒ 改用**价格口径**判定（见下）。
 # ★ 现在的唯一门槛：**用当前价格重算盈亏比，到位就能做**（老罗原则）。
 MIN_RR_NOW = 1.5       # 当前价重算的盈亏比门槛（目标=现实可达 / 止损=当前结构位）
+# ★ 深跌反抽档（老罗 2026-10-31：「夜盘开盘 -3%，反抽到 -1% 买进去」）
+DEEP_D = 3.0           # 跌深门槛：现价较昨收跌 ≥3%（老罗的 -3%）
+DEEP_R = 1.0           # 反抽触发：反抽回到 -1% 就进（老罗的 -1%）
 MIN_RR = 1.0           # ⚠ RR 只作参考排序门槛（老罗 2026-10-31：RR 不代表能达成）
 
 
@@ -416,11 +437,13 @@ def brief_line(c):
                           "够" if c["close"] >= gate[0][1] else "不够"))
     else:
         out.append("%s  ① 主决策：—" % head)
-    # ② 日内追跌档（实证：反抽不过=肥；跳空追=亏 ⇒ 只给反抽）
+    # ② 执行位置（**不是信号**）：实证（无未来函数口径）触达即进 +1.94%/胜率64%，
+    #    同期「开盘就追」= −5.81%/胜率9% ⇒ 反抽是**更好的位置**，不是 alpha；
+    #    ⚠ 早期版本用收盘判断「被打回」⇒ 未来函数，胜率虚高到 92.8%，已修。
     ch = c.get("chase") or []
     if ch:
         cd = ch[0]
-        out.append("            ② 日内追跌档：%s（等回抽到 %.2f（+%.1f%%）被打回再进｜止损 前低 %.2f）"
+        out.append("            ② 执行位置（非信号）：%s（回抽到 %.2f（+%.1f%%）就进｜止损 前低 %.2f）"
                    % (cd["name"], cd["entry"],
                       (cd["entry"] / c["close"] - 1) * 100 if c.get("close") else 0,
                       cd["stop"]))
@@ -440,6 +463,19 @@ def brief_line(c):
                       etf_from_underlying(t1, ref, er, lev),
                       ("｜T2 %.4g(远)" % etf_from_underlying(t2, ref, er, lev))
                       if t2 else ""))
+    # ②b 深跌反抽实时档（执行位置提示，不是信号）
+    dp = c.get("deep")
+    if dp:
+        e2 = c.get("etf") or {}
+        etx = ""
+        if e2.get("code"):
+            ref = c["close"]
+            etx = ("｜**%s 触发价 %.4g**｜止损参考 %.2f"
+                   % (e2["code"],
+                      etf_from_underlying(dp["trig_px"], ref, e2.get("ref") or ref,
+                                          e2.get("lev") or 2.0),
+                      dp["stop_ref"] or 0))
+        out.append("            ②b 深跌反抽：%s%s" % (dp["note"], etx))
     # ④ 旁证一行
     ctx = c.get("ctx_name") or "无"
     age = (c.get("signal") or {}).get("ctx_age")

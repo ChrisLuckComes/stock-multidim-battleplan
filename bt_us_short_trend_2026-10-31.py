@@ -200,10 +200,13 @@ def run_chase(data, emap, require_ctx=True, stop_mode="prev_low"):
             if pl["broken"] and today["o"] < anchor:
                 # 破位延续：今日开盘低于昨收 ⇒ 顺势追
                 cands.append(("破位延续追跌", today["o"], prev_low, today["o"]))
-            # 反抽不过：今日上摸阻力位后被打回（收在阻力下方）
+            # 反抽不过：**触达即进**（⚠ 早期版本用 `today["c"] < lvl`（收盘被打回）判定
+            #   ⇒ **未来函数**：实盘挂单到阻力位时并不知道今天会不会被打回，
+            #   而那个条件在下跌趋势里近乎等价于「今天是下跌日」⇒ 胜率虚高到 92.8%。
+            #   正确口径 = **盘中触达该价位就进**（不看收盘），次日 13:00 平。
             for lvl, nm in ((pl["s_broken"], "反抽S_broken不过"),
                             (pl["r1"], "反抽R1不过")):
-                if today["h"] >= lvl and today["c"] < lvl:
+                if today["h"] >= lvl:
                     stop = max(prev_low, lvl - 1.0 * atr) if stop_mode == "prev_low" else lvl
                     cands.append((nm, lvl, stop, today["c"]))
             for cname, fill_px, stop, _ref in cands:
