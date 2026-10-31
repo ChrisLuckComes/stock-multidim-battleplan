@@ -50,7 +50,9 @@ for grp,name,code in STOCKS:
     first_shape=None; shape_names=[]; block_i=None
     for i in range(lo_i, hi_i2 + 1):
         seg = bars[:i+1]
-        shp = [s for s in TS.detect_top_shapes(seg) if s['bias']=='bearish']
+        # ⚑ 只认**新形成**（signal_i == i）：形态会一直挂在图上，用「存在」是假命中
+        shp = [s for s in TS.detect_top_shapes(seg)
+               if s.get('signal_i') == i and s.get('bias') == 'bearish']
         if shp:
             first_shape = i
             shape_names = sorted({s['pattern'] for s in shp})
