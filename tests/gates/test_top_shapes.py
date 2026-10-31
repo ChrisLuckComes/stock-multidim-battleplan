@@ -136,6 +136,32 @@ class TestNoFalsePositive(unittest.TestCase):
         bars = bars_from_closes([100, 101, 102])
         self.assertEqual(TS.detect_top_shapes(bars), [], "数据不足应安全返回空")
 
+    def test_flag_continuation(self):
+        """旗形：陡峭旗杆 + 窄幅下倾旗面 ⇒ 中继形态，**不是**圆顶。
+
+        老罗 2026-10-31 实测：明月镜片这根「旗形」曾被误判成圆顶 ⇒ 顶部闸门误杀。
+        """
+        closes = legs_to_closes([(100, 10), (132, 8), (131, 1), (129, 1), (127, 1)])
+        bars = bars_from_closes(closes)
+        got = names(TS.detect_top_shapes(bars))
+        self.assertIn("旗形", got, f"应识别出旗形，实际 {got}")
+        self.assertNotIn("圆顶", got, f"旗形不得被误判成圆顶，实际 {got}")
+
+    def test_dome_needs_gradual_arc(self):
+        """圆顶必须是**渐进多段**推进：单根脉冲不得主导。"""
+        closes = legs_to_closes([(112, 8), (108, 4), (120, 8), (116, 4),
+                                  (125, 8), (118, 6)])
+        bars = bars_from_closes(closes)
+        got = names(TS.detect_top_shapes(bars))
+        self.assertIn("圆顶", got, f"应识别出圆顶，实际 {got}")
+
+    def test_dome_rejects_single_bar_pulse(self):
+        """一根涨停拉完的「顶」不是圆顶（单根涨幅占总涨幅 > 45% ⇒ 旗杆）。"""
+        closes = legs_to_closes([(112, 8), (108, 4), (140, 2), (132, 3)])
+        bars = bars_from_closes(closes)
+        got = names(TS.detect_top_shapes(bars))
+        self.assertNotIn("圆顶", got, f"单根脉冲主导不得判成圆顶，实际 {got}")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

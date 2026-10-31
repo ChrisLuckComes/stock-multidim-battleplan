@@ -96,14 +96,22 @@ def detect_pivots(bars, thr_mult=PIVOT_ATR_MULT, atr=None):
             if hi_p - l >= thr:
                 pivots.append((hi_i, hi_p, "H"))
                 state = "down"
-                lo_i, lo_p = i, l
+                # ⚑ 摆动点索引必须唯一：同一根 K 不能既是高又是低
+                #   （涨停日「开=最低、收=最高」最常见）⇒ 低点候选从**下一根**起算
+                if i + 1 < n:
+                    lo_i, lo_p = i + 1, bars[i + 1]["l"]
+                else:
+                    lo_i, lo_p = i, l
         else:
             if l <= lo_p:
                 lo_i, lo_p = i, l
             if h - lo_p >= thr:
                 pivots.append((lo_i, lo_p, "L"))
                 state = "up"
-                hi_i, hi_p = i, h
+                if i + 1 < n:
+                    hi_i, hi_p = i + 1, bars[i + 1]["h"]
+                else:
+                    hi_i, hi_p = i, h
     # 收尾：当前候选极值即为最后一个摆动点
     tail = (hi_i, hi_p, "H") if state == "up" else (lo_i, lo_p, "L")
     if not pivots or pivots[-1][0] != tail[0]:
@@ -198,12 +206,15 @@ def _det_triple_top(bars, pivots, tol=EQ_TOL):
     return None
 
 
-def _det_v_top(bars, pivots, steep=0.08, max_bars=25):
-    """V顶（尖顶）：急速拉升后急速下杀，形成 ∧ 形。
+def _det_v_top(bars, pivots, steep=0.12, fall_pct=0.10, max_bars=8):
+    """V顶（尖顶）：**短促**的急速拉升 + 随后的急速下杀（∧ 形）。
 
-    「底」直接取自 bars（尖顶前的一段最低价），不要求它同时是摆动低点。
+    ⚑ 口径收紧（老罗 2026-10-31 回溯实测：旧判据「25根内涨8%」在 13 只
+      今年见顶股上**全部**于 2026-04-01 误触发 ⇒ 涨 8% 又跌 8% 的普通回调
+      根本不是尖顶）。现在要求：涨 ≥12% 且**用时 ≤8 根**，跌 ≥10% 且 ≤8 根。
     """
-    for hi in [p for p in pivots if p[2] == "H"][-3:]:
+    # ⚑ 从**最新**的峰往回试：返回第一个成立的匹配（顶部判断要的是"最近那个顶"）
+    for hi in reversed([p for p in pivots if p[2] == "H"][-3:]):
         hi_i, hi_p, _ = hi
         win0 = max(0, hi_i - max_bars)
         seg = bars[win0:hi_i + 1]
@@ -212,28 +223,38 @@ def _det_v_top(bars, pivots, steep=0.08, max_bars=25):
         base_i = min(range(len(seg)), key=lambda k: seg[k]["l"])
         base_px = seg[base_i]["l"]
         rise = (hi_p / base_px - 1.0) if base_px > 0 else 0.0
-        after = bars[hi_i + 1:]
+        n_up = hi_i - (win0 + base_i)
+        after = bars[hi_i + 1:hi_i + 1 + max_bars]
         if not after:
             continue
         low_after = min(b["l"] for b in after)
         fall = (hi_p / low_after - 1.0) if low_after > 0 else 0.0
-        n_up = hi_i - (win0 + base_i)
-        if rise >= steep and fall >= steep and n_up <= max_bars:
+        if rise >= steep and fall >= fall_pct and n_up <= max_bars:
             return _shape("V顶", "bearish", peak=hi_p, support=low_after,
                           break_level=hi_p, pivots=[hi], signal_i=hi_i, peak_i=hi_i,
                           note=f"尖顶：{n_up}根内涨{rise * 100:.0f}%，"
-                               f"随后急速回落 {fall * 100:.0f}%")
+                               f"随后 ≤{max_bars}根回落 {fall * 100:.0f}%")
     return None
 
 
-def _det_dome_top(bars, pivots, min_rise=0.10, fade=0.75):
-    """圆顶：连续三个更高的峰，但后段涨幅明显衰减（动能衰竭的圆弧顶）。"""
+def _det_dome_top(bars, pivots, min_rise=0.10, fade=0.75, min_leg=4,
+                  max_pulse=0.45, min_span=12):
+    """圆顶：连续三个更高的峰，且后段涨幅明显衰减（动能衰竭的**圆弧**顶）。
+
+    ⚑ 三条排除口径（老罗 2026-10-31 实测踩过：明月镜片「旗形」被误判成圆顶）：
+      ① 每段间隔 ≥ min_leg 根 —— 圆弧是**渐进推进**，不是一两根拉完；
+      ② 单根脉冲不得主导：区间内单根最大涨幅 ≤ max_pulse × 总涨幅
+         （一根涨停占 94% 涨幅 = **旗杆**，不是圆弧）；
+      ③ 上涨段总长 ≥ min_span 根。
+    """
     hs = [p for p in pivots if p[2] == "H"]
     if len(hs) < 3:
         return None
     for k in range(len(hs) - 1, 1, -1):
         H1, H2, H3 = hs[k - 2], hs[k - 1], hs[k]
         if not (H1[1] < H2[1] < H3[1]):
+            continue
+        if (H2[0] - H1[0]) < min_leg or (H3[0] - H2[0]) < min_leg:
             continue
         inc1, inc2 = H2[1] - H1[1], H3[1] - H2[1]
         if inc1 <= 0 or inc2 > fade * inc1:
@@ -242,12 +263,80 @@ def _det_dome_top(bars, pivots, min_rise=0.10, fade=0.75):
             continue
         if bars[-1]["c"] >= H3[1]:
             continue   # 还没回落，圆弧未完成
+        seg = bars[H1[0]:H3[0] + 1]
+        if len(seg) < min_span:
+            continue
+        tot = H3[1] - H1[1]
+        pulse = max((seg[i]["c"] - seg[i - 1]["c"]) for i in range(1, len(seg)))
+        if pulse > max_pulse * tot:
+            continue   # 单根脉冲主导 ⇒ 旗杆式急拉，不是圆弧
         lo_piv = [p for p in pivots if p[2] == "L" and H1[0] <= p[0] <= H3[0]]
         support = min([p[1] for p in lo_piv], default=None)
         return _shape("圆顶", "bearish", peak=H3[1], support=support,
-                      break_level=H3[1], pivots=[H1, H2, H3], signal_i=H3[0], peak_i=H3[0],
-                      note=f"三峰递增但动能衰竭（后段涨幅仅为前段 {inc2 / inc1:.0%}），已回落破顶")
+                      break_level=H3[1], pivots=[H1, H2, H3], signal_i=H3[0],
+                      peak_i=H3[0],
+                      note=f"三峰递增但动能衰竭（后段涨幅仅为前段 {inc2 / inc1:.0%}）、"
+                           f"总涨 {tot / H1[1] * 100:.0f}% 跨 {len(seg)} 根（单根最大仅占 "
+                           f"{pulse / tot * 100:.0f}%），已回落破顶")
     return None
+
+
+def _det_flag(bars, pivots, pole_gain=0.15, pole_bars=16, band_ratio=0.45,
+              flag_min=3, flag_max=8):
+    """旗形（上升中继）：陡峭**旗杆** + 窄幅下倾**旗面**。
+
+    ⚑ 这是**中继形态**，不是顶部反转 ⇒ bias=continuation，**不进顶部候选池**
+      （老罗 2026-10-31：明月镜头的"旗形"曾被误判成圆顶 → 顶部闸门误杀）。
+    """
+    n = len(bars)
+    # ① 旗杆：最近 20 根内最强的一段上攻。
+    #    ⚑ 口径：**先定旗杆低点 l，再取其后 pole_bars 根内的最高点作旗杆顶**
+    #      （不能只按「涨幅最大」取区间终点——那样旗杆顶会落在半山腰，
+    #        导致「旗面超过旗杆顶」误判，实测踩过）。
+    best = None
+    for l in range(max(0, n - 20), n - 1):
+        lo_px = bars[l]["l"]
+        if lo_px <= 0:
+            continue
+        seg = list(enumerate(bars[l + 1:min(n, l + 1 + pole_bars)], start=l + 1))
+        if not seg:
+            continue
+        e, top = max(seg, key=lambda t: t[1]["h"])
+        gain = (top["h"] - lo_px) / lo_px
+        if best is None or gain > best[0]:
+            best = (gain, l, e)
+    if best is None or best[0] < pole_gain:
+        return None
+    gain, l, e = best
+    pole_hi = bars[e]["h"]
+    pole_lo = bars[l]["l"]
+    pole_len = pole_hi - pole_lo
+    if pole_len <= 0:
+        return None
+    # ② 旗面：旗杆顶之后的窄幅震荡（必须是**当前**结构）
+    fl = bars[e + 1:e + 1 + flag_max]
+    if len(fl) < flag_min or e + 1 + flag_max < n - 1:
+        return None
+    hi = max(b["h"] for b in fl)
+    lo = min(b["l"] for b in fl)
+    band = hi - lo
+    if band > band_ratio * pole_len:
+        return None       # 旗面太宽 ⇒ 不是旗形（是下跌或杂乱震荡）
+    if lo <= pole_lo:
+        return None       # 旗面跌破旗杆底 ⇒ 旗形已失败
+    if hi > pole_hi:
+        return None       # 旗面超过旗杆顶 ⇒ 那是加速不是旗形
+    drift = (fl[-1]["c"] / fl[0]["h"] - 1.0) if fl[0]["h"] else 0.0
+    if drift > 0.02:
+        return None       # 旗面不是下倾/走平 ⇒ 不认（那是新一轮上攻）
+    return _shape(
+        "旗形", "continuation", peak=pole_hi, support=pole_lo,
+        break_level=pole_lo, pivots=[(l, pole_lo, "L"), (e, pole_hi, "H")],
+        signal_i=e, peak_i=e,
+        note=f"旗杆 {bars[l]['d']}({pole_lo:.2f})→{bars[e]['d']}({pole_hi:.2f}) "
+             f"涨{gain * 100:.0f}%/{e - l}根；旗面 {fl[0]['d']}~{fl[-1]['d']}（{len(fl)}根）"
+             f"带宽{band:.2f}=旗杆{band / pole_len * 100:.0f}%、下倾{drift * 100:.0f}% "
+             f"⇒ **上涨中继，不是顶部反转**")
 
 
 def _det_diamond(bars, pivots):
@@ -409,13 +498,27 @@ def detect_top_shapes(bars, window=SHAPE_WINDOW, atr=None):
                  + ("（头部下跌放量确认）" if hs.get("volume_confirmed") else "")
                  + ("· 已破位" if hs.get("neckline_broken") else "· 未破位")))
     for det in (_det_double_top, _det_triple_top, _det_v_top, _det_dome_top,
-                _det_diamond, _det_rectangle, _det_line_family):
+                _det_flag, _det_diamond, _det_rectangle, _det_line_family):
         try:
             s = det(win, pivots)
         except Exception:
             s = None
         if s:
             out.append(s)
+    # ── 旗形覆盖：同一位置若同时存在「旗形(中继)」与偏空顶部形态，
+    #    且旗面未破（旗形检测已保证）⇒ 该顶部形态改判为「旗面内，按中继处理」。
+    #    依据：老罗 2026-10-31 —— 明月镜头的"旗形"曾被误判成圆顶/尖顶 → 顶部闸门误杀。
+    flags = [x for x in out if x["pattern"] == "旗形"]
+    if flags:
+        for x in out:
+            if x is flags[0] or x["bias"] != "bearish":
+                continue
+            for fg in flags:
+                if abs((x.get("peak_i") or -99) - (fg.get("signal_i") or -99)) <= 2:
+                    x["bias"] = "continuation"
+                    x["covered_by_flag"] = True
+                    x["note"] = (x.get("note") or "") + "｜⚑ 与旗形同位 ⇒ 旗面未破，按**中继**处理"
+                    break
     # ── 索引还原成绝对索引 ──
     for s in out:
         s["pivots"] = [(i + off, px, t) for (i, px, t) in s.get("pivots", [])]
@@ -434,7 +537,8 @@ def detect_top_shapes(bars, window=SHAPE_WINDOW, atr=None):
     return out
 
 
-BIAS_CN = {"bearish": "偏空(顶部反转)", "bullish": "偏多", "neutral": "中性/需看突破方向"}
+BIAS_CN = {"bearish": "偏空(顶部反转)", "bullish": "偏多",
+           "neutral": "中性/需看突破方向", "continuation": "中继形态(非顶部反转)"}
 
 
 def fmt_shapes(shapes, bars=None):

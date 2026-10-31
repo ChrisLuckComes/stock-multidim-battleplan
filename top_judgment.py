@@ -56,9 +56,10 @@ VOL_CN = {"huge": "巨量", "heavy": "放量", "flat": "平量", "thin": "缩量
 #                         下降三角形/扩散三角形/上升楔形；另加「菱形」
 #                         （图注：菱形反转**一般只会出现在头部**）。
 #   不入池：上升三角形（向上突破为多头）、下降楔形（偏多结构）、
-#           矩形（图注：矩形反转出现在**底部**比头部多）。
+#           矩形（图注：矩形反转出现在**底部**比头部多）、
+#           旗形（**上涨中继**，老罗 2026-10-31：明月镜头的旗形曾被误判成圆顶）。
 #   ⇒ 这三个仍会出现在 `top_shapes.py` 的形态清单里（可看），但不参与顶部硬指标。
-NOT_TOP_CANDIDATE = ("上升三角形", "下降楔形", "矩形")
+NOT_TOP_CANDIDATE = ("上升三角形", "下降楔形", "矩形", "旗形")
 
 # 避雷清单（老罗 2026-09-25 追问「如果有需要避雷」；随形态层替换后重写）
 PITFALLS = [
@@ -270,7 +271,12 @@ def analyze_top_shapes(bars, atr_v=None, lookback=WAVE_LOOKBACK, scan=SCAN_BARS,
         sig_i = s.get("signal_i")
         if sig_i is None or sig_i >= n:
             continue
+        # 顶部候选 = **偏空形态**（+ 菱形）；中性/偏多/中继一律不参与。
+        # ⚑ 必须看 bias 而不是只看形态名：被「旗形覆盖」改判为中继的顶部形态
+        #   （老罗 2026-10-31：明月镜头的旗形曾被误判成圆顶/尖顶）同样要排除。
         if s.get("pattern") in NOT_TOP_CANDIDATE:
+            continue
+        if s.get("bias") != "bearish" and s.get("pattern") != "菱形":
             continue
         shape_broken = bool(s.get("confirmed"))
         # ⚑ **统一时效口径**（与旧模块「只判定最近 scan 根内的信号」一致）：
