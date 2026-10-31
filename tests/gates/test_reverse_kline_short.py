@@ -152,5 +152,57 @@ class TestNoFalseTrigger(unittest.TestCase):
         self.assertEqual(hits, 0, "纯上涨趋势不应产出做空信号")
 
 
+class TestTrendGate(unittest.TestCase):
+    """趋势背景闸门 _in_decline：MA50 非强制，靠 头肩顶 / 近端回撤 判主跌浪。"""
+
+    @staticmethod
+    def _bars_with_high_then_fall(high=100.0, last=93.0, n=30):
+        bs = []
+        for k in range(n):
+            if k < 10:                      # 前段冲高到 high
+                px = 90.0 + (high - 90.0) * k / 9.0
+                bs.append({"d": "d%d" % k, "o": px - 0.2, "h": px + 0.3,
+                           "l": px - 0.5, "c": px, "v": 1.0})
+            else:                           # 后段回落到 last
+                bs.append({"d": "d%d" % k, "o": last + 0.3, "h": last + 0.6,
+                           "l": last - 0.3, "c": last, "v": 1.0})
+        return bs
+
+    def test_new_stock_in_decline_allowed(self):
+        """新股（无头肩顶）主跌浪：近端回撤≥6% ⇒ 放行（不依赖 MA50）。"""
+        bs = self._bars_with_high_then_fall(high=100.0, last=93.0)
+        hs = {"detected": False}
+        ok, reason = T._in_decline(bs[-1]["c"], hs, bs, len(bs) - 1)
+        self.assertTrue(ok, "新股主跌浪应放行，不应因无 MA50 被卡")
+        self.assertIn("回撤", reason)
+
+    def test_at_high_uptrend_blocked(self):
+        """上升途中、近端未回撤（close≈近期高点）⇒ 拦下（提前抄顶伪信号）。"""
+        bs = base_uptrend(n=30, top=100.0)   # 收 100，近 30 日高≈100
+        hs = {"detected": False}
+        ok, _ = T._in_decline(bs[-1]["c"], hs, bs, len(bs) - 1)
+        self.assertFalse(ok, "仍在高位未回撤不应放行")
+
+    def test_hst_head_only_not_enough(self):
+        """仅低于头部、颈线未破、且 20 日未回撤 ⇒ 不放行（避免提前抄顶）。"""
+        # 第5根冲到 100（头），其后 20+ 根在 99 横盘：低于头部但未进入主跌浪
+        bs = []
+        for k in range(30):
+            px = 100.0 if k == 5 else 99.0
+            bs.append({"d": "d%d" % k, "o": px - 0.2, "h": px + 0.3,
+                       "l": px - 0.3, "c": px, "v": 1.0})
+        hs = {"detected": True, "neckline": None, "head": (5, 100.0)}
+        ok, _ = T._in_decline(bs[-1]["c"], hs, bs, len(bs) - 1)
+        self.assertFalse(ok, "仅低于头部、未破颈线、未回撤不应放行")
+
+    def test_hst_neckline_broken_allowed(self):
+        """头肩顶颈线已破 ⇒ 放行（最强顶部确认）。"""
+        bs = self._bars_with_high_then_fall(high=100.0, last=93.0)
+        hs = {"detected": True, "neckline": 95.0, "head": (5, 100.0)}
+        ok, reason = T._in_decline(bs[-1]["c"], hs, bs, len(bs) - 1)
+        self.assertTrue(ok)
+        self.assertIn("颈线", reason)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

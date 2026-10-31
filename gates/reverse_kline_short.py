@@ -196,14 +196,37 @@ def detect_reversal_kline(bars, i, mets, ma20_series, resists, atr):
     }
 
 
+def _in_decline(close_i, hs, bars, i, lookback=20, off=0.06):
+    """T0头肩顶战法趋势背景闸门：判「是否处于主跌浪 / 已见顶下跌」（**MA50 非强制**）。
+
+    只用 bars[:i+1] 的历史判据，不依赖未来、不依赖 MA50（新股 MA50 不成熟）：
+      1) 头肩顶颈线已破（close < neckline）：全局 HST 的颈线是两肩间低点，
+         早于顶部的棒其收盘高于颈线 ⇒ 不会被误放行——顶部确认最强。
+      2) 近端主跌浪：收盘 ≤ lookback 个交易日前收盘的 (1-off)（默认 20 日下跌 ≥6%）——
+         新股 / 无头肩顶也适用，纯价格趋势，彻底脱钩 MA50。
+    返回 (ok, reason)。
+    """
+    neck = hs.get("neckline") if hs.get("detected") else None
+    if neck is not None and close_i < neck:
+        return True, "颈线已破"
+    if i >= lookback:
+        base = bars[i - lookback]["c"]
+        if base > 0 and close_i <= base * (1 - off):
+            return True, f"{lookback}日回撤≥{int(off * 100)}%(主跌浪)"
+    return False, None
+
+
 def scan_reversal_kline(bars, from_date=None, lv=None, hs=None, atr=None,
                         trend_gate=True):
     """扫描 from_date 起至今的反转K线识别信号（T0头肩顶战法 = 用 HST 阻力区做组合）。
 
     ⚑ 趋势背景闸门（trend_gate=True，T0头肩顶战法专用，不污染通用 detect_reversal_kline）：
-       只在「已见顶下跌」阶段放行信号，挡掉上升途中提前抄顶的伪信号。
-       放行条件 = 信号收盘 < MA50，或（头肩顶已识别 且 收盘 < 颈线）。
+       只在「主跌浪 / 已见顶下跌」阶段放行信号，挡掉上升途中提前抄顶的伪信号。
+       判据见 _in_decline（颈线已破 / 低于头部 / 近端回撤≥6%），**MA50 非强制**。
        纯通用反转K线识别请设 trend_gate=False（或 CLI --no-trend-gate）。
+
+    ⚑ RR 只作参考排序指标，**不作闸门**：计算值不保证实际能达成，禁止用 RR 拦截信号。
+       凡「主跌浪 + 形态符合(4模板×3过滤)」即视为可参与候选，RR 仅用于同档排序。
 
     返回 (signals, hs, suppressed)：signals 仅含 passed 且过闸的真信号（按日期升序）；
     suppressed = 因趋势背景不符被闸门拦下的合格信号数。
@@ -216,7 +239,6 @@ def scan_reversal_kline(bars, from_date=None, lv=None, hs=None, atr=None,
         hs = detect_head_shoulders_top(bars, ma50=lv.get("ma50"))
     closes = [b["c"] for b in bars]
     ma20_series = _roll_ma(closes, 20)
-    ma50_series = _roll_ma(closes, 50)
     mets = _metrics(bars)
     n = len(bars)
     start = 0
@@ -227,17 +249,15 @@ def scan_reversal_kline(bars, from_date=None, lv=None, hs=None, atr=None,
                 break
     signals = []
     suppressed = 0
-    neck = hs.get("neckline") if hs.get("detected") else None
     for i in range(max(21, start), n):
         resists, _ = build_resists(bars, i, ma20_series, lv, hs)
         r = detect_reversal_kline(bars, i, mets, ma20_series, resists, atr)
         if r is None or not r["passed"]:
             continue
-        # ── 趋势背景闸门（仅 T0头肩顶战法组合层）──
+        # ── 趋势背景闸门（仅 T0头肩顶战法组合层；MA50 非强制）──
         if trend_gate:
-            below_ma50 = (ma50_series[i] is not None) and (bars[i]["c"] < ma50_series[i])
-            below_neck = (neck is not None) and (bars[i]["c"] < neck)
-            if not (below_ma50 or below_neck):
+            ok, _ = _in_decline(bars[i]["c"], hs, bars, i)
+            if not ok:
                 suppressed += 1
                 continue
         # 目标 = 信号入场价下方最近结构支撑（截断到信号日，无未来函数）
@@ -305,14 +325,15 @@ def main():
     if a.no_trend_gate:
         print("── 反转K线识别（纯通用，已关闭趋势闸门）· 裸K进场信号 ──")
     else:
-        print("── T0头肩顶战法（趋势闸门：跌破MA50 或 颈线已破 才放行）· 裸K进场信号 ──")
+        print("── T0头肩顶战法（趋势闸门：主跌浪/已见顶下跌 才放行；MA50 非强制）· 裸K进场信号 ──")
         if supp:
-            print(f"  （趋势背景不符被闸门拦下 {supp} 个合格信号——多为上升途中的提前抄顶伪信号）")
+            print(f"  （趋势背景不符被闸门拦下 {supp} 个合格信号——多为上升途中、近端未回撤的提前抄顶伪信号）")
     for line in fmt_reversal(signals, bars):
         print(f"  {line}")
     print()
     print("说明：反转K线识别本身不绑定头肩顶，只认「在阻力区出现反转K线」；"
-          "T0头肩顶战法 = 头肩顶阻力区 + 本识别 + 趋势背景闸门（仅见顶下跌段）。"
+          "T0头肩顶战法 = 头肩顶阻力区 + 本识别 + 趋势背景闸门（仅主跌浪/已见顶下跌段）。"
+          "⚠ RR 仅为参考排序指标，不代表实际能达成，**不作参与门槛**——主跌浪+形态符合即候选。"
           "纪律：① 到位等一根确认 ② 吞没/假破优先，PinBar/衰竭次之 "
           "③ 不见信号绝不动手 ④ 止损 = 信号棒高 +0.30×ATR，目标 = 当时结构支撑 T1")
 

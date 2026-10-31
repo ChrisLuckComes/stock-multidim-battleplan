@@ -386,13 +386,14 @@ def main():
         from reverse_kline_short import scan_reversal_kline, fmt_reversal  # 懒导入，避免循环
         _rfrom = bars[max(0, len(bars) - 90)]["d"]   # 近 ~90 日窗口看当前可触发信号
         _rsigs, _, _supp = scan_reversal_kline(bars, from_date=_rfrom, lv=lv, hs=hs, atr=atr)
-        print("── T0头肩顶战法 · 反转K线识别（裸K进场信号；近90日；趋势闸门=跌破MA50或颈线已破）──")
+        print("── T0头肩顶战法 · 反转K线识别（裸K进场信号；近90日；趋势闸门=主跌浪/已见顶下跌，MA50非强制）──")
         for _rl in fmt_reversal(_rsigs, bars):
             print(f"  {_rl}")
         if _supp:
-            print(f"  （另有 {_supp} 个合格信号因趋势背景不符被闸门拦下——上升途中提前抄顶伪信号）")
+            print(f"  （另有 {_supp} 个合格信号因趋势背景不符被闸门拦下——上升途中、近端未回撤的提前抄顶伪信号）")
         print("  说明：反转K线识别本身不绑定头肩顶，只认「阻力区出现反转K线」；"
-              "全区间(2026-06起)扫描请用 `python gates/reverse_kline_short.py %s`" % sym)
+              "⚠ RR 仅参考排序、不作门槛；全区间(2026-06起)扫描请用 "
+              "`python gates/reverse_kline_short.py %s`" % sym)
     except Exception as e:
         print(f"  （反转K线识别扫描异常：{type(e).__name__}: {e}）")
     print()
