@@ -136,6 +136,24 @@ class TestBearishContext(unittest.TestCase):
         self.assertIn("兜底", ctx["name"])
         self.assertEqual(ctx["start_i"], ctx["start_i"])   # 成立日存在
 
+    def test_fallback_branch_is_reachable(self):
+        """★ 强制走**兜底分支**（形态检测不出时）——该分支曾因 NameError 从未执行过。
+
+        做法：monkeypatch detect_top_shapes 返回空 ⇒ 只剩趋势破位兜底。
+        """
+        orig = TS.detect_top_shapes
+        try:
+            TS.detect_top_shapes = lambda bars, **kw: []
+            closes = legs_to_closes([(100, 10), (88, 12), (84, 8), (80, 6)])
+            bars = bars_from_closes(closes)
+            ctx = TS.bearish_context(bars)
+            self.assertIsNotNone(ctx, "兜底分支应给出背景")
+            self.assertTrue(ctx.get("fallback"))
+            self.assertIn("兜底", ctx["name"])
+            self.assertIsNotNone(ctx["break_level"])
+        finally:
+            TS.detect_top_shapes = orig
+
     def test_uptrend_no_context(self):
         """持续上涨 ⇒ 既无形态背景也无趋势兜底 ⇒ 无背景。"""
         closes = legs_to_closes([(140, 25)])

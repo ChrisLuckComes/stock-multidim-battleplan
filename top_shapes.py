@@ -119,6 +119,14 @@ def detect_pivots(bars, thr_mult=PIVOT_ATR_MULT, atr=None):
     return pivots
 
 
+def _roll_ma(closes, n):
+    """滚动均值序列（前 n-1 位为 None）。"""
+    out = [None] * len(closes)
+    for i in range(n - 1, len(closes)):
+        out[i] = sum(closes[i + 1 - n:i + 1]) / n
+    return out
+
+
 def _fit(pts):
     """最小二乘拟合 y = a·x + b（x=bar 索引）。返回 (a, b)。"""
     m = len(pts)
