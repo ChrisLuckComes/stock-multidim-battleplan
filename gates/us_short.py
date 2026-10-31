@@ -71,6 +71,8 @@ from levels import (NOISE_ATR, RSI_OB, RSI_OS,               # noqa: F401
                     flex_map, levels_from_bars, resistance_levels,
                     rsi14, rsi_stance, support_levels,
                     structural_levels)
+# 经典头肩顶做空形态（参考/排序器，非闸门）—— 2026-10-31 老罗给的经典模型图接入
+from top_patterns import detect_head_shoulders_top, fmt_hs   # noqa: E402
 
 # 已核实方向与名义杠杆的反向 ETF —— **配置化（2026-09-24）**：真实股池在
 # 同目录 `reverse_etf.json`（老罗自行扩充），此处仅留代码内置兜底（文件缺失/损坏时用，
@@ -274,6 +276,9 @@ def main():
         sys.exit(2)
     lv = levels_from_bars(bars)
     ref = lv["last_close"]
+    # ★ 2026-10-31：经典头肩顶形态参考（纯排序器，不参与能否空判定）。
+    #   与现有「纯裸K·均线不否决」铁律兼容：仅提供颈线/MA50 参考锚 + 提升反抽空优先级。
+    hs = detect_head_shoulders_top(bars, ma50=lv.get("ma50"))
     # ★ 全量裸K重构(2026-10-09)：触发/止损/目标全改裸K结构位。
     # 结构位 = 摆动高低点；破位 = 跌破最近结构支撑S_broken；止损 = 收回S_broken/R1上方+0.5ATR；
     # 目标 = 下一结构支撑(下方摆动低点)。不再把 MA 当目标/触发，消除滞后与虚假支撑。
@@ -314,10 +319,13 @@ def main():
     if spot:
         print(f"MA5 {lv['ma5']:.2f}（现价 {(spot / lv['ma5'] - 1) * 100:+.2f}%）"
               f"  MA10 {lv['ma10']:.2f}（{(spot / lv['ma10'] - 1) * 100:+.2f}%）  "
-              f"MA20 {lv['ma20']:.2f}（{(spot / lv['ma20'] - 1) * 100:+.2f}%）")
+              f"MA20 {lv['ma20']:.2f}（{(spot / lv['ma20'] - 1) * 100:+.2f}%）"
+              + (f"  MA50 {lv['ma50']:.2f}（{(spot / lv['ma50'] - 1) * 100:+.2f}%）"
+                 if lv.get("ma50") else ""))
     else:
         print(f"MA5 {lv['ma5']:.2f}  MA10 {lv['ma10']:.2f}  MA20 {lv['ma20']:.2f}"
-              f"  （均线仅展示，不作触发/过滤）")
+              + (f"  MA50 {lv['ma50']:.2f}" if lv.get("ma50") else "")
+              + "  （均线仅展示，不作触发/过滤）")
     print(f"昨高 {lv['prev_high']:.2f}  昨低 {lv['prev_low']:.2f}  "
           f"ATR14(Wilder·引擎口径) {lv['atr14']:.2f}  "
           f"RSI14 {lv['rsi14']:.1f}" if lv.get("rsi14") is not None else
@@ -362,6 +370,14 @@ def main():
     for kind, txt in flex_map(anchor, lv, ref):
         print(f"  {txt}" if kind in ("head", "res_title", "sup_title", "rule")
               else f"    {txt}")
+    print()
+    print("── 顶部形态上下文（经典头肩顶 · 参考，非闸门）──")
+    for _hsl in fmt_hs(hs, bars):
+        print(f"  {_hsl}")
+    if hs.get("detected"):
+        print("  用法：头肩顶确认后，等反弹至 颈线/MA50 附近不过（与「反抽结构位空」共振）才空；"
+              "禁止破位急跌中追空。最终能否空仍由原闸（结构破位+RR≥1.5+止损距离≥0.25×ATR）决定，"
+              "50日线仅作参考锚，不作否决依据。")
     print()
     print("── 反向 ETF 换算（买入 = 做空；sell short = 双倍做多）──")
     pair = load_reverse_etf().get(sym, {})
