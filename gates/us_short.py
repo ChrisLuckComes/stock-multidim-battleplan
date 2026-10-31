@@ -382,10 +382,12 @@ def main():
     # ★ 2026-10-31：T0头肩顶战法 的入场部分 = 反转K线识别（4模板 × 3过滤）。
     #   头肩顶只提供「顶部结构阻力区」（见上方上下文），本识别在阻力区扫描裸K反转进场。
     #   注意：这是「入场触发」展示，原「破位/反抽结构位空 + RR≥1.5」决策闸仍独立生效，互不替代。
+    _t0_sigs = []
     try:
         from reverse_kline_short import scan_reversal_kline, fmt_reversal  # 懒导入，避免循环
         _rfrom = bars[max(0, len(bars) - 90)]["d"]   # 近 ~90 日窗口看当前可触发信号
         _rsigs, _, _supp = scan_reversal_kline(bars, from_date=_rfrom, lv=lv, hs=hs, atr=atr)
+        _t0_sigs = _rsigs
         print("── T0头肩顶战法 · 反转K线识别（裸K进场信号；近90日；趋势闸门=不破MA20一律不做空）──")
         for _rl in fmt_reversal(_rsigs, bars):
             print(f"  {_rl}")
@@ -395,6 +397,7 @@ def main():
               "⚠ RR 仅参考排序、不作门槛；全区间(2026-06起)扫描请用 "
               "`python gates/reverse_kline_short.py %s`" % sym)
     except Exception as e:
+        _t0_sigs = []
         print(f"  （反转K线识别扫描异常：{type(e).__name__}: {e}）")
     # ★ 大背景层（老罗 2026-10-31 定的做空范式）：顶部形态破位 ⇒ 下跌波段成立，
     #   波段内**持续可做空**；「刚成立时进场」最优。
@@ -438,6 +441,30 @@ def main():
                       f"{etf_from_underlying(px, ref, etf_ref, lev):.4g}")
         except Exception as e:
             print(f"  [{etf_code}] 换算取数失败：{e}")
+        # ★★ 老罗的用法（2026-10-31）：看**正股**的背景与信号，用**反向ETF**入场。
+        #    例：SNDK 有背景下入场信号 ⇒ 买 SNDQ（2x 反向）= 空 SNDK。
+        #    下面把「背景下最近一笔反转K线入场」直接换算成 ETF 的可执行价。
+        _sigs = _t0_sigs or []
+        if _sigs and etf_code and lev:
+            print(f"  ── ★ 背景下入场信号 → {etf_code} 可执行价 ──")
+            _shown = 0
+            for _sg in reversed(_sigs):
+                if _shown >= 2:
+                    break
+                _bga = _sg.get("ctx_age")
+                _g = _sg.get("ctx_grade") or "-"
+                if _bga is None or _bga < 0:
+                    continue          # 抢跑（背景未成立）不在波段内，不给
+                _qe = etf_from_underlying(_sg["entry"], ref, etf_ref, lev)
+                _qs = etf_from_underlying(_sg["stop"], ref, etf_ref, lev)
+                _qt = etf_from_underlying(_sg["target"], ref, etf_ref, lev)
+                print(f"    {_sg['date']} {'/'.join(_sg.get('templates') or [])}"
+                      f"｜背景 {_sg.get('ctx_name')}(第{_bga}根/{_g})"
+                      f"｜正股 {_sg['entry']:.2f}→{etf_code} {_qe:.4g}"
+                      f"｜ETF止损 {_qs:.4g}｜ETF目标 {_qt:.4g}")
+                _shown += 1
+            if not _shown:
+                print("    （无「背景下」入场信号 —— 当前只有抢跑信号，不属波段内进场）")
     else:
         print(f"  （{sym} 无映射；往 reverse_etf.json 的 pairs 里加一行"
               f"\"{sym}\": {{\"etf\": \"…\", \"lev\": 2.0}}，"
