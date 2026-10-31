@@ -164,11 +164,30 @@ def test_降级必须写明来源_不许静默(monkeypatch):
     _em_down(monkeypatch)
     monkeypatch.setattr(S, "_tx_get",
                         lambda url, **k: _TX_KLINE_FIX if "fqkline" in url else _TX_QUOTE_FIX)
+    # ★ S3（2026-10-31）：资金流也有了新浪兜底。本用例测的是「所有源都拿不到」的
+    #   最坏情况，必须把新浪一并打挂 —— 否则测试会真联网请求新浪（违反测试不联网铁律，
+    #   且结果随外网可用性翻转 = flaky）。
+    monkeypatch.setattr(S, "fetch_fflow_sina", lambda *a, **k: {})
     _b, _n, _f, meta = S._fetch_raw("002317", n=2, allow_fallback=True)
     assert meta["kline"] == "tx"
     assert "腾讯" in meta["note"] and len(meta["note"]) > 20, "必须写明降级原因与精度损失"
     assert meta.get("em_err"), "必须保留东财失败原因，便于排查"
-    assert meta["fflow"] == "none"              # 腾讯无资金流 ⇒ 主力成本退低位带口径
+    assert meta["fflow"] == "none"              # 东财+新浪全挂 ⇒ 才退「低位带」口径
+
+
+def test_资金流东财挂了要切新浪_且保留负值(monkeypatch):
+    """★ S3 新契约：东财 fflow 被限流时切**新浪历史**，不许直接退「低位带替代」
+    （那样主力层整块失效）；且**净流出必须保留负号**（S1 关键修复，否则模型看不见派发）。
+    """
+    _em_down(monkeypatch)
+    monkeypatch.setattr(S, "_tx_get",
+                        lambda url, **k: _TX_KLINE_FIX if "fqkline" in url else _TX_QUOTE_FIX)
+    monkeypatch.setattr(S, "fetch_fflow_sina",
+                        lambda *a, **k: {"2026-10-14": -0.137, "2026-10-13": 0.052})
+    _b, _n, fflow, meta = S._fetch_raw("002317", n=2, allow_fallback=True)
+    assert meta["fflow"] == "sina", "东财挂了必须切新浪并标明来源"
+    assert fflow.get("2026-10-14") == pytest.approx(-0.137), "净流出必须保留负号（不许清零）"
+    assert fflow.get("2026-10-13") == pytest.approx(0.052)
 
 
 def test_东财正常时不许乱换源(monkeypatch):
@@ -208,14 +227,20 @@ def test_缓存必须保留来源标记(monkeypatch, tmp_path):
 
 
 def test_analyze_把来源带进结果(monkeypatch, tmp_path):
-    """报告层靠 kline_src 显示警告 ⇒ analyze 必须透传，不能只留在 meta 里。"""
+    """报告层靠 kline_src / fflow_src 显示警告 ⇒ analyze 必须透传，不能只留在 meta 里。
+
+    ★ S3：资金流走新浪兜底时，fflow_src 必须是 "sina"（而不是笼统的 "em" 或 "none"），
+    否则报告无法提示「主力成本来自备用口径」。
+    """
     _em_down(monkeypatch)
     monkeypatch.setattr(S, "_tx_get",
                         lambda url, **k: _TX_KLINE_FIX if "fqkline" in url else _TX_QUOTE_FIX)
+    monkeypatch.setattr(S, "fetch_fflow_sina",
+                        lambda *a, **k: {"2026-10-14": -0.137})
     monkeypatch.setattr(S, "CACHE_DIR", str(tmp_path))   # 干净目录：避免命中上轮残留缓存
     r = S.analyze("002317", n=120)
     assert r["kline_src"] == "tx"
-    assert r["fflow_src"] == "none"
+    assert r["fflow_src"] == "sina", "新浪兜底必须把来源透传到结果层"
     assert "腾讯" in r["src_note"]
 
 

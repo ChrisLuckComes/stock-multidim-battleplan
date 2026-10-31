@@ -1411,6 +1411,34 @@ def build_scr(a, n):
                    "<br><span>量峰＝成交战场位；成本峰与量峰同源（日线三角假设），"
                    "价值在二者背离读，非独立 L2 信号。</span></p>"
                    % (_vpc, esc(vp), esc(r.get("vprofile_note") or "")))
+    # ★ S4（2026-10-31）：主力行为（存量趋势）—— S1 保留净流出符号 + S2 按存量比例减仓
+    #   之后才可能存在的信息。旧版只有单点「主力成本」，看不到派发，会把主力已跑光读成锁仓。
+    #   ⚑ 只描述行为、不输出买法。S3 回测（400 只×10 截面、按票聚类）显示该信号与后续
+    #     10 日收益的相关是**反向**的（现价越远离主力成本、主力越加仓的高动量票越偏弱，
+    #     IC(gap_new)=−0.13、IC(chg5)=−0.09），且 chg5 的增量集中在高动量档 ⇒ 只作排序参考。
+    mp = r.get("main_phase")
+    mline = ""
+    if mp and mp != "无资金流":
+        _mpc = {"加仓中": "b-ok", "减仓中": "b-no", "已清仓": "b-no",
+                "锁仓/持平": "b-warn"}.get(mp, "b-warn")
+        segs = []
+        if r.get("main_keep_ratio") is not None:
+            segs.append("存量保留峰值 %d%%" % round(r["main_keep_ratio"] * 100))
+        if r.get("main_chg5") is not None:
+            segs.append("近 5 日 %+.1f%%" % (r["main_chg5"] * 100))
+        if r.get("main_pnl") is not None:
+            segs.append("主力浮盈 %+.1f%%" % r["main_pnl"])
+        segs.append("净买入 %d 日 / 净卖出 %d 日"
+                    % (r.get("main_days_in") or 0, r.get("main_days_out") or 0))
+        mline = ("<p class='note'><b>主力行为</b>：<span class='badge %s'>%s</span> %s"
+                 "<br><span>%s</span>"
+                 "<br><span>⚠ 颜色只表示主力<b>行为方向</b>，<b>不是买卖建议</b>：回测"
+                 "（400 只 × 10 截面、按票聚类）显示「现价越远离主力成本 / 主力越加仓的高动量票，"
+                 "后续 10 日越偏弱」（IC(gap) −0.13、IC(存量变化) −0.09，反转口径）"
+                 "⇒ 本项只作排序参考，<b>不作闸门</b>。主力成本 = 剩余存量重心；"
+                 "净流出保留符号 + 按存量比例减仓后，才看得到派发。</span></p>"
+                 % (_mpc, esc(mp), "｜".join(esc(x) for x in segs),
+                    esc(r.get("main_phase_note") or "")))
     # 现价 / 你的成本 vs 主力成本：三者是**不同的两件事**，分开说（老罗 2026-10-14 追问后定的口径）
     guard = ""
     if devi is not None:
@@ -1434,7 +1462,7 @@ def build_scr(a, n):
     return (
         "<div class='card'>%s"
         "<p><span class='badge %s'>筹码状态：%s</span> %s</p>"
-        "<div class='kpis'>%s</div>%s"
+        "<div class='kpis'>%s</div>%s%s"
         "<p class='note'><b>动作</b>：%s</p>"
         "%s"
         "%s"
@@ -1443,7 +1471,7 @@ def build_scr(a, n):
         "绝对值有偏差、方向性判读可用；只支持 A 股，解禁/股本变动未回溯修正。</p>"
         "</div>"
         % (head, cls, esc(st), esc(str(r.get("state_why") or r.get("why") or "")),
-           kp, vp_line, esc(str(r.get("state_action") or r.get("action") or "—")),
+           kp, vp_line, mline, esc(str(r.get("state_action") or r.get("action") or "—")),
            guard, note(n.get("scr_note"), ""),
            ("%.3f（按半衰期 %s 日自求）" % (r.get("decay_k") or 0, r.get("half_life"))
             if r.get("k_auto") else "%.3f（人工指定）" % (r.get("decay_k") or 0)))
