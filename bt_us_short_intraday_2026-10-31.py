@@ -51,6 +51,24 @@ PAIRS = {"SNDK": ("SNDQ", 2.0), "MU": ("MUZ", 2.0), "SKHY": ("SKDD", 2.0),
          "SOXX": ("SOXS", 3.0), "LITE": ("LITZ", 2.0)}
 
 
+# ★★ 老罗 2026-10-31 的执行约束：「我晚上要睡觉不能看盘，最晚 01:00 左右睡觉，
+#    **平仓是必须的**，反向 2 倍 ETF 杠杆不可能过夜，**少赚一点可以接受**」
+#    ⇒ 北京时间 01:00 = 美东 **13:00**（夏令时 EDT=UTC-4，北京=UTC+8，差 12h）
+#    ⇒ 平仓截止 = **13:00 ET**（离收盘还有 3 小时）；开仓也必须早于此（留缓冲）。
+#    ⚠ 之前所有「当日收盘了结」的统计**偏乐观**（多吃了 13:00→16:00 这 3 小时）。
+EXIT_ET = 13.0 / 16.0     # 平仓时点在日线 bar 里的相对位置（0=开盘, 1=收盘）
+ENTRY_CUTOFF_ET = 12.5   # 开仓截止（美东 12:30，留 30 分钟缓冲才来得及平）
+
+
+def price_at_exit(b, frac=EXIT_ET):
+    """估算 bar 内 frac 位置（0=开, 1=收）的价格（O→C 线性插值）。
+
+    ⚠ 日线只有 OHLC，无法精确知道 13:00 的成交价 ⇒ 用 O→C 线性插值近似
+      （假设开盘到收盘线性推进）；**这是本回测的已知近似**，报告里标注。
+    """
+    return b["o"] + (b["c"] - b["o"]) * frac
+
+
 # ───────────────────────── 取数 ─────────────────────────
 def fetch_etf(sym, timeout=40):
     """取反向ETF日线（带超时）。"""
@@ -246,10 +264,13 @@ def main():
                 drop = (nxt["o"] - entry_px) / nxt["o"]      # 正股从开盘跌了多少
                 etf_entry = ed["o"] * (1 + lev * drop / 100.0)
                 etf_entry = min(max(etf_entry, ed["l"]), ed["h"])
-                # 当日了结：ETF 当日最高（吃到的肉）或当日收盘
+                # 当日了结：ETF 当日最高（吃到的肉）／收盘／**13:00 ET 强制平仓**
                 etf_high = ed["h"]
                 ret_hi = (etf_high - etf_entry) / etf_entry * 100.0
                 ret_close = (ed["c"] - etf_entry) / etf_entry * 100.0
+                # ★ 13:00 ET 强制平仓（老罗 01:00 睡 ⇒ 必须在这个点之前了结）
+                px_exit = price_at_exit(ed)
+                ret_1300 = (px_exit - etf_entry) / etf_entry * 100.0
                 # 目标达成：正股当日最低 <= tgt ⇒ ETF 大约涨到 lev*(entry-tgt)/entry
                 tgt_etf = etf_entry * (1 + lev * (entry_px - tgt) / entry_px / 100.0)
                 hit_tgt = ed["l"] <= tgt_etf
@@ -265,6 +286,7 @@ def main():
                     "etf": code,
                     "ret": ret_close,             # 当日收盘了结收益(%)
                     "ret_hi": ret_hi,             # 当日最高（能吃到的肉，不受2R约束）
+                    "ret_1300": ret_1300,         # ★ 13:00 ET 平仓（老罗的执行约束）
                     "ret_tgt": ret_tgt,           # 按2R止盈纪律了结的收益
                     "xret": (ret_close - mret) if mret is not None else None,
                     "hit_tgt": hit_tgt,
@@ -275,9 +297,10 @@ def main():
     print("=" * 108)
     print("★ Q1：日内到底能吃到多少？（反向ETF真实涨幅；%d 笔日内交易）" % len(trades))
     print("=" * 108)
-    show("全部（日收盘了结）", stats(trades, "ret"))
-    show("全部（当日最高=能吃到的肉·不受2R约束）", stats(trades, "ret_hi"))
-    show("全部（按2R止盈纪律了结）", stats(trades, "ret_tgt"))
+    show("★ 13:00 ET 平仓（老罗 01:00 睡 ⇒ 必须）", stats(trades, "ret_1300"))
+    show("日收盘了结（偏乐观：多吃 13:00→16:00）", stats(trades, "ret"))
+    show("当日最高=能吃到的肉（不现实的最好情形）", stats(trades, "ret_hi"))
+    show("按2R止盈纪律了结", stats(trades, "ret_tgt"))
     print()
     print("  按入场方式拆（日收盘了结 / 当日最高价）：")
     for tag in ("A次日开盘", "B回踩1.0%", "B回踩1.5%", "B回踩2.0%", "C当日收盘"):
@@ -355,7 +378,7 @@ def main():
     #   **当日收盘了结**（日内不过夜）。这才是「每天跑作战方案照着做」的检验。
     print()
     print("=" * 108)
-    print("★ Q5：模拟实盘（每日重评估 · 当日现价算盈亏比 · 达标就空 · 当日收盘了结）")
+    print("★ Q5：模拟实盘（**无未来函数**：前一日数据算盈亏比 → 达标则次日开盘进 → 当日 13:00 ET 平）")
     print("=" * 108)
     MIN_RR = 1.5
     daily_rows = []
@@ -367,21 +390,25 @@ def main():
         atr_now = lv.get("atr14") or 0.0
         try:
             from levels import structural_levels
-            _i, s_highs = structural_levels(bars)
-            _i2, s_lows = structural_levels(bars)
         except Exception:
-            s_highs, s_lows = [], []
-        # 背景（当日口径）：当日之前是否有形态已破位
-        for k in range(30, len(bars)):
-            b = bars[k]
-            ed = etf_by_d.get(b["d"])
+            continue
+        # ★★ **无未来函数**：用**截至前一日**的数据算背景与结构位 ⇒ 判定"今天做不做"
+        #    ⇒ 达标则在**今日开盘**进 ETF，当日 13:00 ET 平仓。
+        #    ⚠ 早期版本用「当日收盘价」算 RR 却用「当日开盘价」成交 ⇒ 偷看未来，已修。
+        for k in range(30, len(bars) - 1):
+            prev = bars[:k]                      # 截至 k-1 日收盘
+            b_prev = prev[-1]
+            nxt = bars[k]                       # 今日
+            ed = etf_by_d.get(nxt["d"])
             if not ed:
                 continue
-            ctx = bearish_context(bars[:k + 1])
+            ctx = bearish_context(prev)
             if not ctx or not ctx.get("alive"):
                 continue
-            bg_age = k - ctx["start_i"]
-            entry = b["c"]
+            bg_age = (k - 1) - ctx["start_i"]
+            entry = b_prev["c"]                 # 前收 = 今日开盘的参考基准
+            _i, s_highs = structural_levels(prev)
+            _i2, s_lows = structural_levels(prev)
             up = sorted([px for (_i, px) in s_highs if px > entry * 1.001])
             down = sorted([px for (_i, px) in s_lows if px < entry * 0.999], reverse=True)
             if up:
@@ -397,25 +424,25 @@ def main():
             rr = (entry - target) / risk
             if rr < MIN_RR:
                 continue
-            # 日内可达性：2R 需要的跌幅 ≤ 1×ATR
             day_ok = (atr_now > 0 and 2.0 * risk <= atr_now)
-            # 进场：ETF 当日开盘（实盘只能开盘买）
-            etf_entry = ed["o"]
+            etf_entry = ed["o"]                 # 今日开盘进（实盘只能开盘买）
             if etf_entry <= 0:
                 continue
             ret_hi = (ed["h"] - etf_entry) / etf_entry * 100.0
             ret_close = (ed["c"] - etf_entry) / etf_entry * 100.0
-            mret = ((idx.get(b["d"], 1.0) and
-                     (idx.get(ed["d"], 1.0) / idx.get(b["d"], 1.0) - 1) * 100.0))
+            ret_1300 = (price_at_exit(ed) - etf_entry) / etf_entry * 100.0
+            mret = ((idx.get(nxt["d"], 1.0) and
+                     (idx.get(ed["d"], 1.0) / idx.get(nxt["d"], 1.0) - 1) * 100.0))
             daily_rows.append({
-                "sym": sym, "d": b["d"], "bg_age": bg_age,
+                "sym": sym, "d": nxt["d"], "bg_age": bg_age,
                 "rr": rr, "day_ok": day_ok, "risk_pct": risk / entry * 100.0,
-                "ret": ret_close, "ret_hi": ret_hi,
+                "ret": ret_close, "ret_hi": ret_hi, "ret_1300": ret_1300,
                 "xret": (ret_close - mret) if mret is not None else None,
                 "ctx": ctx.get("name"),
             })
-    show("全部（当日收盘了结）", stats(daily_rows, "ret"))
-    show("全部（当日最高=能吃到的肉）", stats(daily_rows, "ret_hi"))
+    show("★ 13:00 ET 平仓（老罗 01:00 睡 ⇒ 必须）", stats(daily_rows, "ret_1300"))
+    show("日收盘了结（偏乐观：多吃 13:00→16:00）", stats(daily_rows, "ret"))
+    show("当日最高=能吃到的肉（不现实的最好情形）", stats(daily_rows, "ret_hi"))
     print()
     print("  按票拆：")
     for sym in sorted(set(t["sym"] for t in daily_rows)):

@@ -351,7 +351,8 @@ def fmt_reversal(signals, bars, sort_by_ctx=False):
             f"{(s['rr'] or 0):6.2f} {s['close_pos']:5.2f}"
             + (f"  {s.get('ctx_name') or '-'}"
                + (f"({s.get('ctx_age')}根/{s.get('ctx_grade')})" if s.get("ctx_age") is not None else "")))
-    out.append("  ★ = 与头肩顶结构阻力（颈线/头/肩）共振（T0头肩顶战法排序器加分，非闸门）")
+    out.append("  ★ = 与头肩顶结构阻力（颈线/头/肩）共振（**参考标记**：与头肩顶同位，"
+               "形态上更可信；⚠ **未参与排序**，也不是闸门）")
     out.append("  背景 = 大背景层（顶部形态破位 ⇒ 下跌波段）：形态(年龄根/成熟度档)；"
                "「刚成立」= 入场最优；背景未成立 = 抢跑（--ctx-only 可只看背景下）")
     return out

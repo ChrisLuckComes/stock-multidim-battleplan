@@ -261,12 +261,17 @@ def main():
     ap.add_argument("--anchor", type=float,
                     help="结构位锚价（复盘历史单必填：填决策当时已知的价格，如昨收）。"
                          "默认用实时价——复盘时含今日已走完的行情，属未来函数")
+    ap.add_argument("--full", action="store_true",
+                    help="展开旁证面板（顶部形态/T0头肩顶/大背景/多空地图）；"
+                         "默认收成一行，保持一屏干净")
     ap.add_argument("--etf", help="反向 ETF 代码（默认按映射表）")
     ap.add_argument("--lev", type=float, help="名义杠杆（默认按映射表）")
     ap.add_argument("--beta", type=float, help="实测 beta（替代名义杠杆做换算）")
     ap.add_argument("--account", type=float, help="账户美元（默认 account_config）")
     ap.add_argument("--risk", type=float, help="单笔风险 %%（默认 account_config）")
     a = ap.parse_args()
+    # ★ 旁证面板默认**收成一行**（一屏干净）；--full 展开
+    verbose = bool(a.full)
 
     sym = a.symbol.upper()
     try:
@@ -301,6 +306,14 @@ def main():
     print("=" * 64)
     print(f"🩸 美股日内做空作战卡 · {sym} · {now_bj()}（北京）")
     print("=" * 64)
+    # ⚑⚑ **本卡只认三块**（2026-10-31 据外部审核意见 + 老罗定）：
+    #   ① 【破位结构空】/【反抽结构空】（类型）→ ② 空点候选（入场/止损/目标/RR）
+    #   → ③ RR 临界入场价（够不够 1.5）—— **主空点只在这里**。
+    #   ④ 反向ETF 换算 = 主决策的**落地价**（要下单的价）。
+    #   ⑤ 顶部形态 / T0头肩顶 / 大背景 / 多空转换地图 = **旁证，默认收成一行**，
+    #      表里也可能写出入场/RR，⚠ **别当成主空点**；用 --full 展开。
+    print("【只看这三块】① 类型(破位/反抽) → ② 空点候选(入场/止损/目标/RR) → ③ RR临界(够不够1.5)"
+          "｜ETF价=落地价｜形态·T0·大背景=旁证(默认收起, --full 展开)")
     # ★ 2026-10-22：按时段标签现价（夜盘/盘前/盘后/盘中），禁止再写「实时/盘前」一把梭
     if not isinstance(meta, dict):
         meta = {}
@@ -366,19 +379,21 @@ def main():
         grade = "放弃" if e >= stop else OP_GRADE(rr)
         print(f"  RR≥{rr:.1f}  ⇔  入场价 ≥ {e:.2f}  {grade}{tag}")
     print()
-    print("── 多空转换地图（压力做空 · 支撑平空 · 收盘站稳反多）──")
-    for kind, txt in flex_map(anchor, lv, ref):
-        print(f"  {txt}" if kind in ("head", "res_title", "sup_title", "rule")
-              else f"    {txt}")
-    print()
-    print("── 顶部形态上下文（经典头肩顶 · 参考，非闸门）──")
-    for _hsl in fmt_hs(hs, bars):
-        print(f"  {_hsl}")
-    if hs.get("detected"):
-        print("  用法：头肩顶确认后，等反弹至 颈线/MA50 附近不过（与「反抽结构位空」共振）才空；"
-              "禁止破位急跌中追空。最终能否空仍由原闸（结构破位+RR≥1.5+止损距离≥0.25×ATR）决定，"
-              "50日线仅作参考锚，不作否决依据。")
-    print()
+    if verbose:
+        print("── ② 【旁证】多空转换地图（压力做空 · 支撑平空 · 收盘站稳反多）──")
+        for kind, txt in flex_map(anchor, lv, ref):
+            print(f"  {txt}" if kind in ("head", "res_title", "sup_title", "rule")
+                  else f"    {txt}")
+        print()
+    if verbose:
+        print("── ② 【旁证】顶部形态上下文（经典头肩顶 · 仅参考，⚠ 别当主空点）──")
+        for _hsl in fmt_hs(hs, bars):
+            print(f"  {_hsl}")
+        if hs.get("detected"):
+            print("  用法：头肩顶确认后，等反弹至 颈线/MA50 附近不过（与「反抽结构位空」共振）才空；"
+                  "禁止破位急跌中追空。**能否空/点位/盈亏比一律看上面①②③主决策**"
+                  "（结构破位+RR≥1.5+止损距离≥0.25×ATR）；50日线仅参考锚，不作否决。")
+        print()
     # ★ 2026-10-31：T0头肩顶战法 的入场部分 = 反转K线识别（4模板 × 3过滤）。
     #   头肩顶只提供「顶部结构阻力区」（见上方上下文），本识别在阻力区扫描裸K反转进场。
     #   注意：这是「入场触发」展示，原「破位/反抽结构位空 + RR≥1.5」决策闸仍独立生效，互不替代。
@@ -390,14 +405,21 @@ def main():
         _rsigs, _, _supp = scan_reversal_kline(bars, from_date=_rfrom, lv=lv, hs=hs,
                                                 atr=atr, ctx_only=True)
         _t0_sigs = _rsigs
-        print("── T0头肩顶战法 · 反转K线识别（裸K进场信号；近90日；趋势闸门=不破MA20一律不做空）──")
-        for _rl in fmt_reversal(_rsigs, bars):
-            print(f"  {_rl}")
-        if _supp:
-            print(f"  （另有 {_supp} 个合格信号未破 MA20 被闸门拦下——价格仍在 MA20 之上，不做空）")
-        print("  说明：反转K线识别本身不绑定头肩顶，只认「阻力区出现反转K线」；"
-              "⚠ RR 仅参考排序、不作门槛；全区间(2026-06起)扫描请用 "
-              "`python gates/reverse_kline_short.py %s`" % sym)
+        if verbose:
+            print("── ② 【旁证】T0头肩顶战法 · 反转K线识别（近90日；⚠ 别当主空点）──")
+            for _rl in fmt_reversal(_rsigs, bars):
+                print(f"  {_rl}")
+            if _supp:
+                print(f"  （另有 {_supp} 个合格信号未破 MA20 被闸门拦下）")
+            print("  说明：反转K线识别只认「阻力区出现反转K线」；⚠ RR 仅参考排序、不作门槛；"
+                  "全区间扫描请用 `python gates/reverse_kline_short.py %s`" % sym)
+        else:
+            _ls = _rsigs[-1] if _rsigs else None
+            print("  ② 旁证·反转K线：%s" % (
+                ("%d 笔（最近 %s %s｜背景第%s根）" % (
+                    len(_rsigs), _ls["date"],
+                    "/".join(_ls.get("templates") or [])[:8],
+                    _ls.get("ctx_age"))) if _ls else "近90日无信号"))
     except Exception as e:
         _t0_sigs = []
         print(f"  （反转K线识别扫描异常：{type(e).__name__}: {e}）")
@@ -408,18 +430,22 @@ def main():
         _ctx = bearish_context(bars)
         if _ctx:
             _gn, _gs = ctx_grade(_ctx)
-            print("── ★ 大背景（做空范式）──")
-            print("  背景形态 : %s%s（触发位 %.2f%s）" % (
-                _ctx["name"], "　★兜底" if _ctx.get("fallback") else "",
-                _ctx["break_level"], " = 当时MA20" if _ctx.get("fallback") else ""))
-            print("  背景成立 : %s（收盘跌破触发位）｜至今第 %d 根｜%s"
-                  % (_ctx["start_d"], _ctx["age_bars"], _gn))
-            print("  背景状态 : %s%s" % ("仍有效（价格仍在触发位下方）" if _ctx["alive"]
-                                       else "⚠ 已失效（价格重回触发位上方）",
-                                       "　⇒ 波段内可继续做空，但越晚进场越差" if _ctx["alive"] else ""))
+            if verbose:
+                print("── ② 【旁证】大背景（做空范式）──")
+                print("  背景形态 : %s%s（触发位 %.2f%s）" % (
+                    _ctx["name"], "　★兜底" if _ctx.get("fallback") else "",
+                    _ctx["break_level"], " = 当时MA20" if _ctx.get("fallback") else ""))
+                print("  背景成立 : %s（收盘跌破触发位）｜至今第 %d 根｜%s"
+                      % (_ctx["start_d"], _ctx["age_bars"], _gn))
+                print("  背景状态 : %s%s" % ("仍有效（价格仍在触发位下方）" if _ctx["alive"]
+                                           else "⚠ 已失效（价格重回触发位上方）",
+                                           "　⇒ 波段内可继续做空，但越晚进场越差" if _ctx["alive"] else ""))
+            else:
+                print("  ② 旁证·大背景：%s（%s破位·至今第%s根·%s）%s"
+                      % (_ctx["name"], (_ctx["start_d"] or "")[:10], _ctx["age_bars"], _gn,
+                         "" if _ctx["alive"] else "　⚠已失效"))
         else:
-            print("── ★ 大背景（做空范式）──")
-            print("  尚未出现「顶部形态已破位」的背景 ⇒ 当前信号属**抢跑**，不属波段内进场")
+            print("  ② 旁证·大背景：无（尚未见顶；面板口径属抢跑，**不影响主决策**）")
     except Exception as _e:
         print("  （大背景计算异常：%s: %s）" % (type(_e).__name__, _e))
     print()
@@ -450,7 +476,7 @@ def main():
         #    下面把「背景下最近一笔反转K线入场」直接换算成 ETF 的可执行价。
         _sigs = _t0_sigs or []
         if _sigs and etf_code and lev:
-            print(f"  ── ★ 背景下入场信号 → {etf_code} 可执行价 ──")
+            print(f"  ── ② 旁证·历史背景下入场信号（**信号当时的价格，不是当前可执行价**）──")
             _shown = 0
             for _sg in reversed(_sigs):
                 if _shown >= 2:

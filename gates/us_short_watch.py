@@ -481,6 +481,9 @@ def main():
         print("【美股做空作战方案】%s（数据 %s）" % (" ".join(syms),
                                                  cards[0].get("date", "")[:10] if cards else ""))
         print("⚠ A股无融券、美股无融资 ⇒ 做空只走反向ETF；背景=顶部形态破位（下跌波段）")
+        print("⚠ 本卡是**旁证口径**（形态/背景/反转K + 现价重算盈亏比）；"
+              "**裸K主决策价**（结构位入场/止损/目标/RR≥1.5门槛）在 "
+              "`python gates/us_short.py <TICKER>` —— 下单以主决策为准")
         fresh = [c for c in cards if (c.get("sig_age") == 0)]
         print("★ 今日新信号（当日可入场）：%s"
               % ("、".join("%s(%s)" % (c["sym"], "/".join((c.get("signal") or {}).get("templates") or [])[:8])
