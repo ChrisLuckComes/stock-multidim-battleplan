@@ -537,6 +537,68 @@ def detect_top_shapes(bars, window=SHAPE_WINDOW, atr=None):
     return out
 
 
+def bearish_context(bars, window=SHAPE_WINDOW):
+    """★ **大背景层**（老罗 2026-10-31 定的做空范式）：顶部形态已识别且**已破位**
+    ⇒ 这只票进入**下跌波段**，该波段内**持续可以做空**（不是只做一次）。
+
+    背景成立日 = **形态完成之后**首次「收盘跌破形态触发位（颈线/下轨）」那根。
+    ⚠ 必须限定在形态完成之后找破位日——否则会找到远古的旧跌破，
+      把背景成立日推到几个月前，导致所有信号都算"背景晚期"。
+    返回 dict(name, break_level, start_i, start_d, age_bars, alive, shape)；
+    无可用背景时返回 None。
+    """
+    if not bars or len(bars) < 30:
+        return None
+    shapes = detect_top_shapes(bars)
+    best = None
+    for x in shapes:
+        if not (x.get("bias") == "bearish" or x.get("pattern") == "菱形"):
+            continue
+        bl = x.get("break_level")
+        if bl is None:
+            continue
+        frm = x.get("signal_i") or 0
+        st = None
+        for i in range(frm, len(bars)):
+            if bars[i]["c"] < bl:
+                st = i
+                break
+        if st is None:
+            continue
+        if best is None or st > best["start_i"]:
+            best = {"name": x["pattern"], "break_level": bl, "start_i": st,
+                    "start_d": bars[st]["d"], "shape": x}
+    if best is None:
+        return None
+    last = bars[-1]["c"]
+    best["alive"] = bool(last < best["break_level"])
+    best["age_bars"] = len(bars) - 1 - best["start_i"]
+    best["bars"] = bars
+    return best
+
+
+def ctx_grade(ctx, age=None):
+    """背景成熟度分档（对应老罗「刚形成入场最好」）。
+
+    `age` = 信号日相对背景成立日的位置（负=抢跑，背景尚未成立）；
+    不传则用 ctx["age_bars"]（背景至今的年龄）。
+    """
+    if not ctx:
+        return "无背景", 0
+    a = age if age is not None else ctx.get("age_bars")
+    if a is None:
+        return "无背景", 0
+    if a < 0:
+        return "抢跑(背景未成立)", 0
+    if a <= 3:
+        return "背景刚成立(优先)", 3
+    if a <= 10:
+        return "背景早期", 2
+    if a <= 25:
+        return "背景中段", 1
+    return "背景晚期(降档)", 0
+
+
 BIAS_CN = {"bearish": "偏空(顶部反转)", "bullish": "偏多",
            "neutral": "中性/需看突破方向", "continuation": "中继形态(非顶部反转)"}
 

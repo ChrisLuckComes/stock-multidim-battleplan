@@ -396,6 +396,25 @@ def main():
               "`python gates/reverse_kline_short.py %s`" % sym)
     except Exception as e:
         print(f"  （反转K线识别扫描异常：{type(e).__name__}: {e}）")
+    # ★ 大背景层（老罗 2026-10-31 定的做空范式）：顶部形态破位 ⇒ 下跌波段成立，
+    #   波段内**持续可做空**；「刚成立时进场」最优。
+    try:
+        from top_shapes import bearish_context, ctx_grade
+        _ctx = bearish_context(bars)
+        if _ctx:
+            _gn, _gs = ctx_grade(_ctx)
+            print("── ★ 大背景（做空范式）──")
+            print("  背景形态 : %s（触发位 %.2f）" % (_ctx["name"], _ctx["break_level"]))
+            print("  背景成立 : %s（收盘跌破触发位）｜至今第 %d 根｜%s"
+                  % (_ctx["start_d"], _ctx["age_bars"], _gn))
+            print("  背景状态 : %s%s" % ("仍有效（价格仍在触发位下方）" if _ctx["alive"]
+                                       else "⚠ 已失效（价格重回触发位上方）",
+                                       "　⇒ 波段内可继续做空，但越晚进场越差" if _ctx["alive"] else ""))
+        else:
+            print("── ★ 大背景（做空范式）──")
+            print("  尚未出现「顶部形态已破位」的背景 ⇒ 当前信号属**抢跑**，不属波段内进场")
+    except Exception as _e:
+        print("  （大背景计算异常：%s: %s）" % (type(_e).__name__, _e))
     print()
     print("── 反向 ETF 换算（买入 = 做空；sell short = 双倍做多）──")
     pair = load_reverse_etf().get(sym, {})

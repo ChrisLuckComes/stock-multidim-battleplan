@@ -49,6 +49,7 @@ except Exception:
 # 复用 us_short 的纯函数口径（plan_levels / 常量），保证与作战卡一致
 from us_short import plan_levels, STRUCT_STOP_ATR, NOISE_ATR   # noqa: E402
 from top_patterns import detect_head_shoulders_top, fmt_hs      # noqa: E402
+from top_shapes import bearish_context, ctx_grade               # noqa: E402  大背景层
 from levels import levels_from_bars, structural_levels          # noqa: E402
 import rule123 as R                                             # noqa: E402
 
@@ -211,7 +212,7 @@ def _ma20_broken(close_i, ma20_i):
 
 
 def scan_reversal_kline(bars, from_date=None, lv=None, hs=None, atr=None,
-                        trend_gate=True):
+                        trend_gate=True, ctx_only=False):
     """扫描 from_date 起至今的反转K线识别信号（T0头肩顶战法 = 用 HST 阻力区做组合）。
 
     ⚑ 趋势闸门（trend_gate=True，T0头肩顶战法专用，不污染通用 detect_reversal_kline）：
@@ -220,6 +221,11 @@ def scan_reversal_kline(bars, from_date=None, lv=None, hs=None, atr=None,
 
     ⚑ RR 只作参考排序指标，**不作闸门**：计算值不保证实际能达成，禁止用 RR 拦截信号。
        凡「破 MA20 + 形态符合(4模板×3过滤)」即视为可参与候选，RR 仅用于同档排序。
+
+    ⚑ **大背景层**（老罗 2026-10-31 定的做空范式）：顶部形态破位 ⇒ 该票进入下跌波段，
+       波段内**持续可做空**。每个信号都带背景字段（形态名/成立日/年龄/成熟度档），
+       「刚成立(0~3根)」= 入场最优（老罗：「刚刚形成入场当然是最好」）。
+       ctx_only=True ⇒ 只报**背景下**的信号（背景未成立 = 抢跑，不报）。
 
     返回 (signals, hs, suppressed)：signals 仅含 passed 且过闸的真信号（按日期升序）；
     suppressed = 因趋势背景不符被闸门拦下的合格信号数。
@@ -240,6 +246,7 @@ def scan_reversal_kline(bars, from_date=None, lv=None, hs=None, atr=None,
             if b["d"] >= from_date:
                 start = k
                 break
+    ctx = bearish_context(bars)
     signals = []
     suppressed = 0
     for i in range(max(21, start), n):
@@ -253,6 +260,18 @@ def scan_reversal_kline(bars, from_date=None, lv=None, hs=None, atr=None,
             if not ok:
                 suppressed += 1
                 continue
+        # ── 大背景层：形态破位 ⇒ 下跌波段（波段内持续可做空）──
+        bg_age = (i - ctx["start_i"]) if ctx else None
+        if ctx_only and (ctx is None or bg_age is None or bg_age < 0):
+            suppressed += 1
+            continue
+        r["ctx_name"] = ctx["name"] if ctx else None
+        r["ctx_break"] = ctx["break_level"] if ctx else None
+        r["ctx_start_d"] = ctx["start_d"] if ctx else None
+        r["ctx_age"] = bg_age
+        _gn, _gs = ctx_grade(ctx, bg_age)
+        r["ctx_grade"] = _gn
+        r["ctx_score"] = _gs
         # 目标 = 信号入场价下方最近结构支撑（截断到信号日，无未来函数）
         _, s_lows = structural_levels(bars[:i + 1])
         sup_below = sorted([px for (_, px) in s_lows if px < r["entry"]], reverse=True)
@@ -270,7 +289,7 @@ def fmt_reversal(signals, bars):
     out = []
     out.append(f"共识别 {len(signals)} 个合格信号（按日期）：")
     out.append(f"  {'日期':12} {'模板':28} {'到位阻力':14} "
-               f"{'入场':>9} {'止损':>9} {'目标T1':>9} {'RR':>6} {'收位':>5}")
+               f"{'入场':>9} {'止损':>9} {'目标T1':>9} {'RR':>6} {'收位':>5}  背景")
     for s in signals:
         tmpl = "/".join(s["templates"])
         rlbl = s["resist"][0] if s["resist"] else "-"
@@ -279,8 +298,12 @@ def fmt_reversal(signals, bars):
         out.append(
             f"  {s['date']:12} {star}{tmpl:27} {rlbl}:{rpx:7.2f} "
             f"{s['entry']:9.2f} {s['stop']:9.2f} {s['target']:9.2f} "
-            f"{(s['rr'] or 0):6.2f} {s['close_pos']:5.2f}")
+            f"{(s['rr'] or 0):6.2f} {s['close_pos']:5.2f}"
+            + (f"  {s.get('ctx_name') or '-'}"
+               + (f"({s.get('ctx_age')}根/{s.get('ctx_grade')})" if s.get("ctx_age") is not None else "")))
     out.append("  ★ = 与头肩顶结构阻力（颈线/头/肩）共振（T0头肩顶战法排序器加分，非闸门）")
+    out.append("  背景 = 大背景层（顶部形态破位 ⇒ 下跌波段）：形态(年龄根/成熟度档)；"
+               "「刚成立」= 入场最优；背景未成立 = 抢跑（--ctx-only 可只看背景下）")
     return out
 
 
@@ -290,6 +313,8 @@ def main():
     ap.add_argument("symbol", help="正股 ticker（如 SNDK / MU / SKHY / SOXX）")
     ap.add_argument("--from", dest="from_date", default="2026-06-01",
                     help="扫描起始日（默认 2026-06-01，对应本轮存储/半导体见顶）")
+    ap.add_argument("--ctx-only", dest="ctx_only", action="store_true",
+                    help="只报「顶部形态已破位（下跌波段成立）」背景下的信号（不报抢跑）")
     ap.add_argument("--no-trend-gate", dest="no_trend_gate", action="store_true",
                     help="关闭趋势背景闸门，跑纯通用反转K线识别（含上升途中的提前抄顶信号）")
     a = ap.parse_args()
@@ -303,7 +328,8 @@ def main():
     hs = detect_head_shoulders_top(bars, ma50=lv.get("ma50"))
     signals, hs, supp = scan_reversal_kline(bars, from_date=a.from_date, lv=lv, hs=hs,
                                             atr=lv["atr14"],
-                                            trend_gate=not a.no_trend_gate)
+                                            trend_gate=not a.no_trend_gate,
+                                            ctx_only=a.ctx_only)
 
     print("=" * 72)
     print(f"🩸 反转K线识别 · 裸K进场扫描 · {sym} · 区间 {a.from_date} ~ {lv['last_date']}")
