@@ -386,7 +386,9 @@ def main():
     try:
         from reverse_kline_short import scan_reversal_kline, fmt_reversal  # 懒导入，避免循环
         _rfrom = bars[max(0, len(bars) - 90)]["d"]   # 近 ~90 日窗口看当前可触发信号
-        _rsigs, _, _supp = scan_reversal_kline(bars, from_date=_rfrom, lv=lv, hs=hs, atr=atr)
+        # ⚑ 默认走**校准固化口径**：波段内（背景已破位）+ 目标截2R + 同票冷却5根
+        _rsigs, _, _supp = scan_reversal_kline(bars, from_date=_rfrom, lv=lv, hs=hs,
+                                                atr=atr, ctx_only=True)
         _t0_sigs = _rsigs
         print("── T0头肩顶战法 · 反转K线识别（裸K进场信号；近90日；趋势闸门=不破MA20一律不做空）──")
         for _rl in fmt_reversal(_rsigs, bars):

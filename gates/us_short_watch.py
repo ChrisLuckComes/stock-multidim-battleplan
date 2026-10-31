@@ -70,8 +70,9 @@ def one_card(sym, pairs):
     grade, score = ctx_grade(ctx) if ctx else ("无背景", 0)
     # 背景下入场信号（最新一笔）
     from gates.reverse_kline_short import scan_reversal_kline
+    # ⚑ 走**校准固化口径**：波段内（背景已破位）+ 目标截2R + 同票冷却5根
     sigs, _h, _supp = scan_reversal_kline(bars, from_date=None, lv=lv, hs=hs,
-                                           atr=lv["atr14"])
+                                           atr=lv["atr14"], ctx_only=True)
     sig = None
     for s in reversed(sigs):
         if s.get("ctx_age") is not None and s["ctx_age"] >= 0:

@@ -211,8 +211,16 @@ def _ma20_broken(close_i, ma20_i):
     return False, "未破MA20"
 
 
+# ★★ 校准固化参数（老罗 2026-10-31 实证：17 只美股 135 笔，见顶后子集 72 笔）
+DEFAULT_CAP_R = 2.0        # 目标截断到 2R（结构支撑常远到不可达）
+DEFAULT_COOLDOWN = 5       # 同票冷却 5 根（同一下跌浪别反复做）
+DEFAULT_STOP_ATR = 0.30    # 止损 = 信号棒高 + 0.30×ATR（放宽反而更差）
+
+
 def scan_reversal_kline(bars, from_date=None, lv=None, hs=None, atr=None,
-                        trend_gate=True, ctx_only=False):
+                        trend_gate=True, ctx_only=False,
+                        max_bg_age=None, cap_r=DEFAULT_CAP_R,
+                        cooldown=DEFAULT_COOLDOWN):
     """扫描 from_date 起至今的反转K线识别信号（T0头肩顶战法 = 用 HST 阻力区做组合）。
 
     ⚑ 趋势闸门（trend_gate=True，T0头肩顶战法专用，不污染通用 detect_reversal_kline）：
@@ -227,8 +235,22 @@ def scan_reversal_kline(bars, from_date=None, lv=None, hs=None, atr=None,
        「刚成立(0~3根)」= 入场最优（老罗：「刚刚形成入场当然是最好」）。
        ctx_only=True ⇒ 只报**背景下**的信号（背景未成立 = 抢跑，不报）。
 
+    ⚑⚑ **波段内闸门（老罗 2026-10-31 校准实证，固化进默认）**：
+       17 只美股（核心5+同链12）× 全历史 135 笔回测，按**实际出场点 + 等权基准超额**：
+         · **见顶前**（<2026-06-22 存储链集体见顶）做空 ⇒ 超额 **-7.52%**（负期望）
+         · **见顶后**做空 ⇒ 超额 **+3.34%**，正收益率 59%
+       ⇒ **「已见顶下跌」是这套做空法的必要前提**，不是加分项。
+       ⇒ `ctx_only=True` 现在**默认开启**（只报背景已成立的信号）；
+         `max_bg_age` 可再限制「波段内前 N 根」（背景越老越差，见分层实证）。
+
+    ⚑⚑ **参数已按校准固化**（bt_us_short_calib_2026-10-31.py，见顶后子集 72 笔）：
+         · 目标**截断到 2R**（结构支撑 T1 常远到不可达 ⇒ 原样会让计划R虚高）
+         · 同票**冷却 5 根**（同一下跌浪里别反复做）
+         · 止损 **0.20~0.30×ATR**（放宽反而更差，别往止损宽度方向调）
+       ⚠ RR 仍是**参考排序指标**，不作参与门槛（老罗 2026-10-31 定）。
+
     返回 (signals, hs, suppressed)：signals 仅含 passed 且过闸的真信号（按日期升序）；
-    suppressed = 因趋势背景不符被闸门拦下的合格信号数。
+    suppressed = 因趋势/背景背景不符被闸门拦下的合格信号数。
     """
     if lv is None:
         lv = levels_from_bars(bars)
@@ -246,9 +268,10 @@ def scan_reversal_kline(bars, from_date=None, lv=None, hs=None, atr=None,
             if b["d"] >= from_date:
                 start = k
                 break
-    ctx = bearish_context(bars)
     signals = []
     suppressed = 0
+    _ctx_cache = {}
+    _last_entry_i = -99
     for i in range(max(21, start), n):
         resists, _ = build_resists(bars, i, ma20_series, lv, hs)
         r = detect_reversal_kline(bars, i, mets, ma20_series, resists, atr)
@@ -261,8 +284,16 @@ def scan_reversal_kline(bars, from_date=None, lv=None, hs=None, atr=None,
                 suppressed += 1
                 continue
         # ── 大背景层：形态破位 ⇒ 下跌波段（波段内持续可做空）──
+        # ⚑ **ctx 必须按信号时点计算**（bars[:i+1]）：用整段 bars 会拿到
+        #   「信号日之后才成立」的背景 ⇒ 背景分组偷看未来（校准实测踩过）。
+        if i not in _ctx_cache:
+            _ctx_cache[i] = bearish_context(bars[:i + 1])
+        ctx = _ctx_cache[i]
         bg_age = (i - ctx["start_i"]) if ctx else None
         if ctx_only and (ctx is None or bg_age is None or bg_age < 0):
+            suppressed += 1
+            continue
+        if max_bg_age is not None and (bg_age is None or bg_age > max_bg_age):
             suppressed += 1
             continue
         r["ctx_name"] = ctx["name"] if ctx else None
@@ -272,13 +303,26 @@ def scan_reversal_kline(bars, from_date=None, lv=None, hs=None, atr=None,
         _gn, _gs = ctx_grade(ctx, bg_age)
         r["ctx_grade"] = _gn
         r["ctx_score"] = _gs
+        # ⚑ **同票冷却**（校准固化）：同一下跌浪里 N 根内不再开新仓
+        if cooldown and (i - _last_entry_i) < cooldown:
+            suppressed += 1
+            continue
         # 目标 = 信号入场价下方最近结构支撑（截断到信号日，无未来函数）
         _, s_lows = structural_levels(bars[:i + 1])
         sup_below = sorted([px for (_, px) in s_lows if px < r["entry"]], reverse=True)
         t1 = sup_below[0] if sup_below else r["entry"] * 0.95
         r["target"] = t1
         r["rr"] = (r["entry"] - t1) / (r["stop"] - r["entry"]) if r["stop"] > r["entry"] else None
+        # ⚑ **目标截断到 cap_r**（校准固化：结构支撑 T1 常远到不可达 ⇒ 计划R虚高）
+        if cap_r and r["rr"] and r["rr"] > cap_r:
+            r["target_raw"] = t1
+            risk_pct = (r["stop"] - r["entry"]) / r["entry"] * 100.0
+            t1 = r["entry"] * (1 - cap_r * risk_pct / 100.0)
+            r["target"] = t1
+            r["rr"] = cap_r
+            r["rr_capped"] = True
         signals.append(r)
+        _last_entry_i = i
     return signals, hs, suppressed
 
 
@@ -321,8 +365,14 @@ def main():
                     help="扫描起始日（默认 2026-06-01，对应本轮存储/半导体见顶）")
     ap.add_argument("--sort", dest="sort_by", default="date", choices=["date", "ctx"],
                     help="排序：date=按日期（默认）/ ctx=按背景新鲜度（刚成立优先）")
-    ap.add_argument("--ctx-only", dest="ctx_only", action="store_true",
-                    help="只报「顶部形态已破位（下跌波段成立）」背景下的信号（不报抢跑）")
+    ap.add_argument("--all-signals", dest="all_signals", action="store_true",
+                    help="⚠ 报**全部**合格信号（含背景未成立的抢跑）——校准实证：抢跑是负期望")
+    ap.add_argument("--max-bg-age", dest="max_bg_age", type=int, default=None,
+                    help="只报背景年龄 ≤ N 根的信号（波段越老越差；不传=不限）")
+    ap.add_argument("--cap-r", dest="cap_r", type=float, default=DEFAULT_CAP_R,
+                    help=f"目标截断 R 上限（默认 {DEFAULT_CAP_R}；0=不截断）")
+    ap.add_argument("--cooldown", dest="cooldown", type=int, default=DEFAULT_COOLDOWN,
+                    help=f"同票冷却根数（默认 {DEFAULT_COOLDOWN}；0=不限）")
     ap.add_argument("--no-trend-gate", dest="no_trend_gate", action="store_true",
                     help="关闭趋势背景闸门，跑纯通用反转K线识别（含上升途中的提前抄顶信号）")
     a = ap.parse_args()
@@ -337,7 +387,10 @@ def main():
     signals, hs, supp = scan_reversal_kline(bars, from_date=a.from_date, lv=lv, hs=hs,
                                             atr=lv["atr14"],
                                             trend_gate=not a.no_trend_gate,
-                                            ctx_only=a.ctx_only)
+                                            ctx_only=not a.all_signals,
+                                            max_bg_age=a.max_bg_age,
+                                            cap_r=(a.cap_r or None),
+                                            cooldown=a.cooldown)
 
     print("=" * 72)
     print(f"🩸 反转K线识别 · 裸K进场扫描 · {sym} · 区间 {a.from_date} ~ {lv['last_date']}")
@@ -352,17 +405,23 @@ def main():
     if a.no_trend_gate:
         print("── 反转K线识别（纯通用，已关闭趋势闸门）· 裸K进场信号 ──")
     else:
-        print("── T0头肩顶战法（趋势闸门：不破MA20 一律不做空；破MA20后形态符合即可空）· 裸K进场信号 ──")
+        _mode = "全部信号（含抢跑·负期望）" if a.all_signals else "波段内（背景已破位）"
+        print("── T0头肩顶战法 · 裸K进场信号 ──")
+        print(f"  闸门：破MA20 + {_mode}"
+              + (f" + 背景年龄≤{a.max_bg_age}根" if a.max_bg_age else "")
+              + f"｜目标截{a.cap_r or '不'}R + 同票冷却{a.cooldown}根")
         if supp:
-            print(f"  （未破 MA20 被闸门拦下 {supp} 个合格信号——价格仍在 MA20 之上，不做空）")
+            print(f"  （被闸门/冷却拦下 {supp} 个合格信号——抢跑、未破MA20 或同浪重复）")
     for line in fmt_reversal(signals, bars, sort_by_ctx=(a.sort_by == "ctx")):
         print(f"  {line}")
     print()
     print("说明：反转K线识别本身不绑定头肩顶，只认「在阻力区出现反转K线」；"
-          "T0头肩顶战法 = 头肩顶阻力区 + 本识别 + 趋势闸门（收盘破MA20 才放行）。"
-          "⚠ RR 仅为参考排序指标，不代表实际能达成，**不作参与门槛**——破MA20+形态符合即候选。"
-          "纪律：① 到位等一根确认 ② 吞没/假破优先，PinBar/衰竭次之 "
-          "③ 不见信号绝不动手 ④ 止损 = 信号棒高 +0.30×ATR，目标 = 当时结构支撑 T1")
+          "T0头肩顶战法 = 头肩顶阻力区 + 本识别 + 闸门（收盘破MA20 **且** 顶部形态已破位）。")
+    print("⚑ 校准实证（17只美股135笔，2026-10-31）：见顶前做空超额 -7.52%（负期望），"
+          "见顶后 +3.34% ⇒ **「已见顶下跌」是必要前提**。")
+    print("⚠ RR 仅为参考排序指标，不代表实际能达成，**不作参与门槛**。")
+    print("纪律：① 到位等一根确认 ② 吞没/假破优先，PinBar/衰竭次之 "
+          "③ 不见信号绝不动手 ④ 止损 = 信号棒高 +0.30×ATR，目标 = 结构支撑T1 并截断到 2R")
 
 
 if __name__ == "__main__":
