@@ -1026,7 +1026,7 @@ def probe(code, qty=None, account=None, asof=None, min_scale=5, replay=False,
     _ts0 = plan.get("top_signal") or {}
     if _ts0.get("block"):
         _b0 = _ts0.get("best") or {}
-        _wait_src.append("顶部K线：已确认 %s %s（%s）→ 避雷"
+        _wait_src.append("顶部形态：已确认 %s %s（%s）→ 避雷"
                          % (_b0.get("d") or "", _b0.get("pattern_cn") or "",
                             _ts0.get("block_reason") or ""))
 

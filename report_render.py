@@ -164,10 +164,10 @@ def build_kpis(a, n):
     # ★ 顶部标志 K 线硬指标（2026-09-25）：跑个股必看的一项，首屏就要看得见。
     _tv = a.get("top_verdict") or {}
     if _tv.get("level") == "block":
-        badges.append('<span class="badge b-no">顶部标志K线已确认 → 否决买点（%s %s）</span>'
+        badges.append('<span class="badge b-no">顶部形态已确认 → 否决买点（%s %s）</span>'
                       % (esc(_tv.get("date")), esc(_tv.get("pattern_cn"))))
     elif _tv.get("level") == "alert":
-        badges.append('<span class="badge b-warn">顶部标志K线待确认（预警 · 仓位×%s）</span>'
+        badges.append('<span class="badge b-warn">顶部形态待确认（预警 · 仓位×%s）</span>'
                       % num(_tv.get("size_factor"), 2))
     if p.get("regime"):
         badges.append('<span class="badge b-warn">regime = %s</span>' % esc(p["regime"]))
@@ -907,7 +907,7 @@ def build_summary(a, n):
         _tv_txt = ("预警 · 未确认（仓位 ×%s）— 形态当日不是判据，等次日走弱/反包"
                    % num(_tv.get("size_factor"), 2))
     else:
-        _tv_txt = "无顶部标志 K 线"
+        _tv_txt = "无顶部形态"
     # 一页汇总里的成交口径（2026-09-26）：只有出现时才写一行，避免常态噪音。
     _fills = []
     if z.get("fills_policy") == "limit_reclaim":
@@ -950,14 +950,14 @@ def build_summary(a, n):
 
 
 def build_top_signal(a, n):
-    """顶部标志 K 线「硬指标」区块（2026-09-25 老罗：单独提取，跑个股时避雷）。
+    """顶部形态「硬指标」区块（2026-10-31 起：单根K线形态 → 12 种几何顶部形态）。
 
     三态：`block` 红框否决 / `alert` 橙框预警（**仍可买，缩仓**）/ `ok` 灰字不构成限制。
     数据来自 analysis.json 的 `top_verdict`（battle_analyze 已算好，渲染器不重算）。
     """
     tv = a.get("top_verdict") or {}
     if not tv:
-        return ("<div class='card'><h3>顶部标志 K 线（硬指标 · 跑个股必看）</h3>"
+        return ("<div class='card'><h3>顶部形态（硬指标 · 跑个股必看）</h3>"
                 "<p class='note'>本次 analysis.json 未携带顶部硬指标"
                 "（旧版 battle_analyze 生成的？重跑即可）。</p></div>")
     lv = tv.get("level")
@@ -970,7 +970,7 @@ def build_top_signal(a, n):
 
     def _wrap(inner):
         return ('<div class="card" style="border-left:5px solid %s">'
-                '<h3>顶部标志 K 线（硬指标 · 跑个股必看）</h3>%s</div>'
+                '<h3>顶部形态（硬指标 · 跑个股必看）</h3>%s</div>'
                 % (_bc, inner))
 
     ht = tv.get("higher_top") or {}
@@ -980,15 +980,16 @@ def build_top_signal(a, n):
     elif ht.get("note"):
         ht_html = ("<p class='note'><b>%s</b>。日线买点不因此否决。</p>"
                    % esc(ht.get("note")))
-    tail = ("<p class='note'>本项只回答「有没有顶部标志 K 线」。形态当日无预测力"
-            "（回测 t=1.64、同位置对照超额 +0.70 不显著）；真正被回测支持的是"
-            "「次日走弱」（−6.64% / 胜率 12.1%），反包即推翻 ⇒ "
+    tail = ("<p class='note'>本项只回答「有没有顶部形态」。形态层用 12 种几何顶部形态"
+            "（头肩顶/双重顶/三重顶/V顶/圆顶/对称三角形/上升·下降·扩散三角形/菱形/楔形/矩形，"
+            "A股与美股同一套算法）；真正被回测支持的是「次日走弱」"
+            "（−6.64% / 胜率 12.1%），反包即推翻 ⇒ "
             "<b>alert 不否决买点，只缩仓</b>。</p>")
     b = tv.get("signal") or {}
     if not tv.get("hit") or not b:
         extra = ""
         if tv.get("state") == "invalidated":
-            extra = ("<p class='note'>窗口内曾有顶部标志 K 线，但已被反包推翻"
+            extra = ("<p class='note'>窗口内曾有顶部形态，但已被反包推翻"
                      "（上影抛压被吃掉）—— 形态失效，本项不构成限制。</p>")
         extra += ("<p class='note'>本次扫描：命中形态 %s 个，因「不是这一波高点」"
                   "排除 %s 个（低位同形态属看涨反转，不算顶部信号）。</p>"
@@ -1000,12 +1001,12 @@ def build_top_signal(a, n):
             return "%d%%" % round(float(x) * 100)
         except (TypeError, ValueError):
             return "—"
-    pos_txt = ("是这一波（近 %s 根）最高点 ⇒ 才算「顶部标志 K 线」"
+    pos_txt = ("是这一波（近 %s 根）最高点 ⇒ 才算「顶部形态」"
                % num(b.get("wave_span"), 0)) if b.get("is_top") else \
               ("非波峰（左侧有更高高点）—— 同形态在本位置属<b>看涨反转</b>，"
                "不算顶部信号")
     rows_l = [
-        ("形态 K 线", "%s <b>%s</b>（%s）"
+        ("形态 · 信号棒", "%s <b>%s</b>（%s）"
          % (esc(b.get("d")), esc(b.get("pattern_cn")), esc(b.get("variant_cn")))),
         ("K 线", "开 %s / 高 %s / 低 %s / 收 %s"
          % (num(b.get("o")), num(b.get("h")), num(b.get("l")), num(b.get("c")))),
@@ -1552,7 +1553,7 @@ def build_confluence(a, n):
     if conf.get("veto"):
         v = conf["veto"]
         veto_html = ("<p class='note'><b>硬约束（不计入七层）</b>："
-                     "<span style='color:%s;font-weight:600'>顶部%s</span> —— %s"
+                     "<span style='color:%s;font-weight:600'>%s</span> —— %s"
                      "%s</p>"
                      % ("#b3261e" if v["hard"] else "#8a5a00",
                         esc(v["level_cn"]), esc(v["note"]),

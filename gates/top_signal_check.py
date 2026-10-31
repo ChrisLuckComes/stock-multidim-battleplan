@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""top_signal_check.py — 顶部标志 K 线 · 单票「硬指标」体检（独立 CLI）。
+"""top_signal_check.py — 顶部形态 · 单票「硬指标」体检（独立 CLI）。
 
 老罗 2026-09-25：「这个判断顶部的逻辑可以单独提取作为硬指标，我在跑个股的时候，
 如果出现这种要避雷」。⇒ 本脚本就是那个独立入口：**一条命令回答**
@@ -20,7 +20,7 @@
     0 = 无顶部信号    1 = 预警（未确认，不否决买点）    2 = 顶部已确认（避雷）
 多票时取最大值；取数失败 = 3。
 
-判定口径见 `top_signals.top_verdict` 的 docstring（四道闸门 + 13 条避雷 + 回测边界）。
+判定口径见 `top_judgment.top_verdict` 的 docstring（三道闸门 + 8 条避雷 + 回测边界）。
 本脚本**只读**，不写任何文件、不下单。
 """
 
@@ -33,7 +33,7 @@ _HERE = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-import top_signals as TS          # noqa: E402
+import top_judgment as TS           # noqa: E402  顶部形态判断（几何形态版）
 
 RC_OK, RC_ALERT, RC_BLOCK, RC_FAIL = 0, 1, 2, 3
 _WIDTH = 72
@@ -106,7 +106,7 @@ def _render(code, name, src, bars, v, verbose=False):
     L = []
     last = bars[-1]
     L.append("=" * _WIDTH)
-    L.append(" %s %s · 顶部标志 K 线硬指标" % (code, name))
+    L.append(" %s %s · 顶部形态硬指标（几何形态版）" % (code, name))
     L.append(" 基准 %s 收 %s（%s · %d 根 %s → %s）%s"
              % (last.get("d"), _num(last.get("c")), src, len(bars),
                 bars[0].get("d"), last.get("d"),
@@ -130,7 +130,7 @@ def _render(code, name, src, bars, v, verbose=False):
                  % (_pctf(b.get("body_r")), _pctf(b.get("upper_r")),
                     _pctf(b.get("lower_r")), _num(b.get("pos"), 3)))
         if b.get("is_top"):
-            L.append(" 位置    : 是这一波（近 %s 根）最高点 ⇒ 才算「顶部标志 K 线」"
+            L.append(" 位置    : 是这一波（近 %s 根）最高点 ⇒ 才算「顶部形态」"
                      % b.get("wave_span"))
         else:
             L.append(" 位置    : 非波峰（左侧有更高高点）—— 同形态在本位置属**看涨反转**")
@@ -169,10 +169,11 @@ def _render(code, name, src, bars, v, verbose=False):
             L.append("   %d) %s" % (i, p))
 
     L.append("-" * _WIDTH)
-    L.append(" 本项只回答「有没有顶部标志 K 线」。五根形态（墓碑/射击之星/上吊/大阴线/")
-    L.append(" 顶部十字星）**当日都无预测力**（对照超额 +0.70、t=1.64 不显著；两新形态同理）；")
-    L.append(" 真正被回测支持的是「次日走弱」（−6.64% / 胜率 12.1%）；反包即推翻。")
-    L.append(" ⇒「顶级/次级」只是显示标签；alert 不否决买点，只缩仓。")
+    L.append(" 本项只回答「有没有顶部形态」。形态层用 12 种几何顶部形态（头肩顶/双重顶/")
+    L.append(" 三重顶/V顶/圆顶/对称三角形/上升·下降·扩散三角形/菱形/楔形/矩形，")
+    L.append(" A股与美股同一套算法）；单根K线形态（墓碑/上吊/射击之星/十字星/大阴线）")
+    L.append(" 已于 2026-10-31 废弃。真正被回测支持的是「次日走弱」（−6.64% / 胜率 12.1%），")
+    L.append(" 反包即推翻 ⇒ alert 不否决买点，只缩仓。")
     L.append(" 退出码 0=无 / 1=预警（不否决） / 2=已确认（避雷） / 3=取数失败。")
     L.append("=" * _WIDTH)
     return L

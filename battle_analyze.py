@@ -42,7 +42,7 @@ import rule123 as R                     # noqa: E402
 import probe_intraday as P              # noqa: E402
 import bars_source as BS                # noqa: E402
 import fetch_market as FM               # noqa: E402
-import top_signals as TS_TOP            # noqa: E402  顶部标志 K 线硬指标
+import top_judgment as TS_TOP             # noqa: E402  顶部形态判断（几何形态版）
 import confluence as CF                 # noqa: E402  叠加概率七层计数（只汇总，不否决）
 
 VERSION = "1.0"
@@ -1787,7 +1787,7 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
             pass
     _tv_d = out.get("top_verdict") or {}
     if _tv_d.get("level") in ("block", "alert"):
-        _vsrc.append("顶部K线：%s %s" % (_tv_d.get("level"),
+        _vsrc.append("顶部形态：%s %s" % (_tv_d.get("level"),
                                         _tv_d.get("pattern_cn") or ""))
     out["verdict_source"] = _vsrc
     # ★ 盘中先手仓结构化字段（report_render 首屏结论用）：预案 wait 时
@@ -1990,7 +1990,7 @@ def summarize(r):
         L.append(" ★★ 顶部硬指标 %s（退出码 %d）：%s"
                  % (_mk, _tv.get("exit_code", 0), _tv.get("advice")))
     elif _tv.get("state") == "invalidated":
-        L.append(" 顶部硬指标：曾有顶部标志K线但已被反包推翻（形态失效），不构成限制")
+        L.append(" 顶部硬指标：曾有顶部形态但已被反包推翻（形态失效），不构成限制")
     _ht = _tv.get("higher_top")
     if _ht and _ht.get("horizon") == "拉黑":
         L.append(" ★★ %s" % _ht.get("note"))

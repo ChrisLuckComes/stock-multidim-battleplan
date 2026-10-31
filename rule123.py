@@ -59,7 +59,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 # 顶部标志 K 线（墓碑/上吊/射击之星/十字星/大阴线 + 次日确认制）。
 # 只做**否决**：`apply_top_signal_gate` 挂在 plan_entry 出口，不回写任何买区/止损口径。
-import top_signals as TS_TOP  # noqa: E402
+import top_judgment as TS_TOP    # noqa: E402  顶部形态判断（几何形态版）
 import ash_market  # noqa: E402  涨跌幅唯一真源：北交所 30% / 双创 20% / 主板 10%
 
 
@@ -5724,7 +5724,7 @@ def _top_for(bars, ev):
     cached = (ev or {}).get("top_signals")
     if isinstance(cached, dict):
         return cached
-    return TS_TOP.analyze_top_signals(bars, atr_v=(ev or {}).get("atr_v"),
+    return TS_TOP.analyze_top_shapes(bars, atr_v=(ev or {}).get("atr_v"),
                                       live_last=bool((ev or {}).get("bars_live")))
 
 
@@ -5764,18 +5764,18 @@ def apply_top_signal_gate(result, bars, ev=None, veto=None):
 
     result["recommend"] = False
     result["top_signal_veto"] = True
-    reason = top.get("block_reason") or top.get("summary") or "顶部标志K线已确认"
+    reason = top.get("block_reason") or top.get("summary") or "顶部形态已确认"
     result["verdict"] = f"顶部确认·否决｜{result.get('verdict') or ''}"
-    result["note"] = f"【顶部标志K线已确认】{reason}。当日不出买点。｜{result.get('note') or ''}"
+    result["note"] = f"【顶部形态已确认】{reason}。当日不出买点。｜{result.get('note') or ''}"
     pb = result.get("pre_breakout")
     if isinstance(pb, dict):
         pb["suppressed_by"] = "top_signal"
-        pb["status"] = "已作废（顶部标志K线确认）"
-        pb["note"] = "【已作废·顶部标志K线确认】" + str(pb.get("note") or "")
+        pb["status"] = "已作废（顶部形态确认）"
+        pb["note"] = "【已作废·顶部形态确认】" + str(pb.get("note") or "")
     ke = result.get("knife_edge")
     if isinstance(ke, dict):                 # 「贴线待突破」同属买点预告，一并作废
         ke["suppressed_by"] = "top_signal"
-        ke["status"] = "已作废（顶部标志K线确认）"
+        ke["status"] = "已作废（顶部形态确认）"
     return result
 
 
@@ -6202,7 +6202,7 @@ def build_ev(bars, drop_live=False, ticker=None):
         _bars_live = bool(is_live_bar(bars, market=_mkt))
     except Exception:
         _bars_live = False
-    top_sig = TS_TOP.analyze_top_signals(bars, atr_v=atr_v, live_last=_bars_live)
+    top_sig = TS_TOP.analyze_top_shapes(bars, atr_v=atr_v, live_last=_bars_live)
     ev = {
         "regime": regime,
         "passed": passed,

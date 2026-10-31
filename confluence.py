@@ -500,7 +500,8 @@ def format_lines(conf, indent=" "):
         L.append("%s%s %-6s %s" % (indent, mark, x["cn"], x["detail"]))
     if conf.get("veto"):
         v = conf["veto"]
-        L.append("%s[!] 硬约束（不计入七层）：顶部%s —— %s" % (
+        # ⚠ level_cn 自带「顶部」前缀（与旧 top_signals 文案对齐），这里不要再拼
+        L.append("%s[!] 硬约束（不计入七层）：%s —— %s" % (
             indent, v["level_cn"], v["note"]))
     L.append(indent + "⚠ " + conf["note"])
     return L
