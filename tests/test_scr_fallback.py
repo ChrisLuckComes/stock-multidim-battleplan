@@ -142,12 +142,94 @@ def test_腾讯日线为空要抛错_不许返回空列表(monkeypatch):
         S.fetch_bars_tx("002317", n=10)
 
 
+# ─────────────────── ②b 同花顺备用源（2026-10-31 新增，排在腾讯之前） ───────────────────
+def _ths_kline_fix(n=65, turnover=4.1, last_close=10.60):
+    """造同花顺 v6 line 的假响应（字段序：日期,开,高,低,收,量股,额元,换手率）。"""
+    rows = []
+    for i in range(n):
+        d = "2026%02d%02d" % (7 + (i // 28) % 2, 1 + i % 28)
+        px = 10.0 + i * 0.01
+        rows.append("%s,%.2f,%.2f,%.2f,%.2f,%.0f,%.2f,%.3f"
+                    % (d, px, px + 0.2, px - 0.2,
+                       last_close if i == n - 1 else px,
+                       1_200_000, 12_600_000.0, turnover))
+    payload = {"num": n, "total": 200, "name": "众生药业", "data": ";".join(rows)}
+    return "quotebridge_v6_line_hs_002317_01_last(%s)" % json.dumps(payload)
+
+
+def _ths_fix(monkeypatch, n=65, turnover=4.1):
+    monkeypatch.setattr(S, "_ths_get", lambda url, **k: _ths_kline_fix(n=n, turnover=turnover))
+
+
+def test_同花顺日线解析_成交额换手率取原生字段(monkeypatch):
+    """同花顺与腾讯的关键差别：**amt 与 turnover 是原生字段，不是自算/填 0**。
+
+    腾讯源 amt 恒为 0 ⇒ chip_model 的 VWAP 退化 ⇒ 实测使平均成本偏低 1.1~1.2%，
+    所以再往下降级时顺序必须是「东财 → 同花顺 → 腾讯」。
+    """
+    _ths_fix(monkeypatch)
+    bars, name = S.fetch_bars_ths("002317", n=120)
+    assert len(bars) == 65 and name == "众生药业"
+    b = bars[-1]
+    assert b["c"] == 10.60
+    assert b["v"] == 12000.0, "成交量必须由「股」转「手」（÷100），否则换手率全错"
+    assert b["amt"] == 12_600_000.0, "必须取原生成交额（腾讯在此处是 0）"
+    assert abs(b["turnover"] - 4.1) < 1e-9, "换手率必须取原生值，不再自算"
+
+
+def test_同花顺换手率离谱要拒绝_不许输出错数(monkeypatch):
+    """同花顺改版/字段错位时换手率会失控（如 1728%）⇒ 宁可放弃该源，也不用错数。
+
+    换手率直接决定筹码衰减率，错了整个 SCR 都是假的（2026-10-26 视涯 688781 踩过）。
+    """
+    _ths_fix(monkeypatch, turnover=1728.0)
+    with pytest.raises(RuntimeError):
+        S.fetch_bars_ths("002317", n=120)
+
+
+def test_东财挂了优先降级同花顺_而不是腾讯(monkeypatch, tmp_path):
+    """降级顺序铁律：同花顺精度高于腾讯（原生 amt+turnover），必须排在前面。"""
+    _em_down(monkeypatch, ths_ok=True)
+    _ths_fix(monkeypatch)
+    monkeypatch.setattr(S, "fetch_fflow_sina", lambda *a, **k: {})
+    monkeypatch.setattr(S, "CACHE_DIR", str(tmp_path))
+    bars, _n, _f, meta = S._fetch_raw("002317", n=120, allow_fallback=True)
+    assert meta["kline"] == "ths", "东财挂且同花顺可用时，不许落到腾讯"
+    assert len(bars) == 65
+    assert bars[-1]["amt"] > 0
+    assert "同花顺" in meta["note"] and len(meta["note"]) > 20, "降级必须写明来源与精度"
+
+
+def test_同花顺也不可用才落到腾讯(monkeypatch, tmp_path):
+    """三级降级链的最后一环：东财挂 + 同花顺挂 ⇒ 才走腾讯。"""
+    _em_down(monkeypatch)                       # 默认已把同花顺打挂
+    monkeypatch.setattr(S, "_tx_get",
+                        lambda url, **k: _TX_KLINE_FIX if "fqkline" in url else _TX_QUOTE_FIX)
+    monkeypatch.setattr(S, "fetch_fflow_sina", lambda *a, **k: {})
+    monkeypatch.setattr(S, "CACHE_DIR", str(tmp_path))
+    _b, _n, _f, meta = S._fetch_raw("002317", n=120, allow_fallback=True)
+    assert meta["kline"] == "tx"
+    assert meta.get("ths_err"), "同花顺失败原因必须留痕，便于排查"
+
+
 # ─────────────────────────── ③ 降级编排（不许静默） ───────────────────────────
-def _em_down(monkeypatch):
-    """把东财整条打挂（http+https 都断）。"""
+def _em_down(monkeypatch, ths_ok=False):
+    """把东财整条打挂（http+https 都断）。
+
+    ★ 2026-10-31：日线降级链改为「东财 → **同花顺** → 腾讯」，同花顺排在腾讯**之前**。
+      原有用例测的是**腾讯**路径，若不一并把同花顺打挂，测试会**真联网**请求
+      `d.10jqka.com.cn`（违反「测试不许联网」铁律，结果随外网可用性翻转 = flaky；
+      实测已复现：`kline_src` 变成 'ths'、断言 'tx' 失败）。
+      ⇒ 默认连同同花顺一起打挂；要测同花顺路径时传 `ths_ok=True` 并另用
+        `_ths_fix(monkeypatch)` 灌假数据。
+    """
     monkeypatch.setattr(S, "_get_json",
                         lambda *a, **k: (_ for _ in ()).throw(
                             RuntimeError("Remote end closed connection without response")))
+    if not ths_ok:
+        monkeypatch.setattr(S, "fetch_bars_ths",
+                            lambda *a, **k: (_ for _ in ()).throw(
+                                RuntimeError("同花顺打挂（测试隔离，勿联网）")))
 
 
 def test_东财挂了自动降级腾讯(monkeypatch):

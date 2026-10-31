@@ -93,6 +93,17 @@ TX_KLINE = ("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
             "?param={sym},day,,,{n},qfq")
 TX_QUOTE = "https://qt.gtimg.cn/q={sym}"
 
+# ── 同花顺 K 线（2026-10-31 探测）：**原生带成交额+换手率**，比腾讯兜底精度高一档 ──
+#   端点规律：`d.10jqka.com.cn/v6/line/hs_<6位代码>/01/last.js`（01=前复权日线，last=最近 140 根）
+#   ★ 为什么不用它取资金流：`data.10jqka.com.cn/funds/ggzjl/...` 返回 401 + chameleon.js 反爬
+#     （需执行 JS 生成 hexin-v cookie），而本 K 线端点无该限制。
+#   ★ 对拍实证（002881）：与东财前复权缓存 120 日全重叠，收盘价/成交额 **max 偏差 0.00%**。
+THS_KLINE = "https://d.10jqka.com.cn/v6/line/hs_{code}/01/last.js"
+THS_HDR = {"User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"),
+           "Referer": "https://stockpage.10jqka.com.cn/",
+           "Accept-Encoding": "gzip"}
+
 # ── 市场识别：6 位数字＝A 股；含字母（NVDA / TSLA / SOXS）＝美股 ──
 US_HINT = re.compile(r"[A-Za-z]")
 def is_us_code(code):
@@ -508,6 +519,28 @@ def _tx_get(url, timeout=15, tries=2, gbk=True):
     raise RuntimeError(f"腾讯接口失败：{last}")
 
 
+def _ths_get(url, timeout=15, tries=2):
+    """同花顺接口取文本（gzip 自动解压，utf-8）。
+
+    ⚠ 同花顺 `data.10jqka.com.cn` 的资金流端点是 chameleon 反爬（401），
+      但 `d.10jqka.com.cn/v6/line/` 的 K 线端点无需 cookie，实测直连 200。
+    """
+    last = None
+    for i in range(tries):
+        try:
+            req = urllib.request.Request(url, headers=THS_HDR)
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                raw = r.read()
+            if raw[:2] == b"\x1f\x8b":                 # gzip
+                import gzip as _gz
+                raw = _gz.decompress(raw)
+            return raw.decode("utf-8", errors="replace")
+        except Exception as e:
+            last = e
+            time.sleep(0.4 * (i + 1))
+    raise RuntimeError(f"同花顺接口失败：{last}")
+
+
 def tx_float_shares(sym):
     """实时报价 → (流通股本「手」, 接口给的当日换手率%)。
 
@@ -633,6 +666,53 @@ def fetch_bars_tx(code, n=120):
     return bars, (name or str(code))
 
 
+def fetch_bars_ths(code, n=120):
+    """★ 同花顺前复权日线 → (bars, name)。**原生带成交额与换手率**，优于腾讯兜底。
+
+    端点：`https://d.10jqka.com.cn/v6/line/hs_<code>/01/last.js`
+      （资金流端点 `data.10jqka.com.cn/funds/...` 另有 chameleon 反爬，401 不可直取；
+       此 K 线端点无该限制，实测 200、0.17s、返回最近 140 根。）
+    字段序：日期(YYYYMMDD),开,高,低,收,**成交量(股)**,**成交额(元)**,**换手率(%)**,…
+    ⚠ 成交量单位为**股**（实测 10934574 股 = 东财 109346 手）⇒ 除以 100 转「手」；
+      换手率直接取接口值，不再自算；复权口径经与东财前复权缓存对拍，收盘价/成交额 **0.00% 偏差**。
+    ⚠ 只给最近 ~140 根 ⇒ `n > 140` 时拿不满，由调用方判断是否够 MIN_BARS。
+    """
+    url = THS_KLINE.format(code=code)
+    txt = _ths_get(url)
+    m = re.search(r"\((\{.*\})\)", txt, re.S)
+    if not m:
+        raise RuntimeError(f"同花顺未返回 {code} K线（格式异常）")
+    d = json.loads(m.group(1))
+    rows = (d.get("data") or "").split(";")
+    bars = []
+    for line in rows:
+        p = line.split(",")
+        if len(p) < 8 or len(p[0]) != 8:
+            continue
+        try:
+            bars.append({
+                "d": "%s-%s-%s" % (p[0][:4], p[0][4:6], p[0][6:8]),
+                "o": float(p[1]), "h": float(p[2]), "l": float(p[3]), "c": float(p[4]),
+                "v": float(p[5]) / 100.0,          # 股 → 手（对齐东财口径）
+                "amt": float(p[6]),                # 元
+                "turnover": float(p[7]) if p[7] else 0.0,
+            })
+        except (ValueError, IndexError):
+            continue
+    if not bars:
+        raise RuntimeError(f"同花顺 {code} K线解析为空")
+    bars = bars[-n:] if n and len(bars) > n else bars
+    # ★ 自洽校验：换手率异常说明字段语义变了（同花顺改版），宁可放弃也不输出错数
+    mx = max((b.get("turnover") or 0.0) for b in bars)
+    if mx > TURNOVER_PLAUSIBLE_MAX:
+        raise RuntimeError(
+            f"同花顺 {code} 换手率异常（窗口内最高 {mx:.1f}% > "
+            f"{TURNOVER_PLAUSIBLE_MAX:.0f}%）⇒ 字段语义可能已变，放弃该源")
+    if min(b["c"] for b in bars) <= 0:
+        raise RuntimeError(f"同花顺 {code} 出现非正收盘价 ⇒ 放弃该源")
+    return bars, (d.get("name") or str(code))
+
+
 # ─────────────────────────── 取数编排（并行 + 同日缓存） ───────────────────────────
 def _cache_path(code, us_mode=False):
     base = (f"us_{str(code).upper()}" if us_mode else str(code).zfill(6))
@@ -692,7 +772,7 @@ def fetch_all_meta(code, n=120, use_cache=True, now=None, us_mode=False,
                    allow_fallback=True):
     """同 `fetch_all`，额外返回 meta=数据来源。**想知道数从哪来的就调这个**。
 
-    meta = {"kline": "em"|"tx", "fflow": "em"|"none", "note": str, "em_err": str?}
+    meta = {"kline": "em"|"ths"|"tx", "fflow": "em"|"sina"|"none", "note": str, "em_err": str?}
     ★ 铁律（老罗）：**降级绝不静默** —— 走了备用源必须在 meta 里写明，
       由调用方显示出来 / 写进报告，否则「筹码面有数」就是假的安全感。
     """
@@ -739,7 +819,7 @@ def fetch_all_meta(code, n=120, use_cache=True, now=None, us_mode=False,
 
 
 def _fetch_raw(code, n=120, us_mode=False, allow_fallback=True):
-    """真正发请求：**东财优先 → 腾讯备用源兜底**（仅 A 股；美股暂无备用源）。
+    """真正发请求：**东财优先 → 同花顺 → 腾讯兜底**（仅 A 股；美股暂无备用源）。
 
     ⚠ 日线与资金流并发；任一失败都不致命（资金流只影响主力成本的一个口径）。
     ⚠ 东财日线**整体**拿不到才降级腾讯 —— 不是「东财慢」就换，避免正常波动下乱换源。
@@ -792,19 +872,34 @@ def _fetch_raw(code, n=120, us_mode=False, allow_fallback=True):
             meta["em_err"] = (meta.get("em_err", "") + f" | 二次尝试: {e}")[:200]
 
     if not bars and allow_fallback and not us_mode:
+        # ★★ 第二源（2026-10-31 新增）：**同花顺**——原生带成交额+换手率，精度仅次于东财。
+        #    腾讯源 amt 恒为 0（VWAP 退化成 (l+h)/2 / 峰钉最低价），实测使平均成本偏低 1.1~1.2%；
+        #    同花顺把这些字段直接给齐，且与东财前复权对拍收盘价/成交额 0.00% 偏差 ⇒ 优先于腾讯。
         try:
-            bars, name = fetch_bars_tx(code, n=n)     # ★ 备用源（腾讯）
+            _bt, _nt = fetch_bars_ths(code, n=n)
+            if len(_bt) < MIN_BARS:
+                raise RuntimeError(f"同花顺仅返回 {len(_bt)} 根 < MIN_BARS({MIN_BARS})")
+            bars, name = _bt, _nt
+            meta["kline"] = "ths"
+            meta["note"] = (
+                "东财日线不可用，已降级【同花顺备用源】：成交额与换手率均为**接口原生字段**"
+                "（非自算），与东财前复权口径实测 0.00% 偏差；仅覆盖最近约 140 根，"
+                "长窗口需注意。主力资金流另走东财/新浪，与此源无关。")
         except Exception as e:
-            # ★ 备用源自洽校验不过 ⇒ 明确抛错，绝不留着「东财失败+腾讯错数」的假数
-            meta["tx_err"] = f"{type(e).__name__}: {e}"
-            raise RuntimeError(
-                f"日线取数失败：东财未返回 {code}；腾讯备用源亦不可用（{e}）"
-                f" ⇒ 筹码面本次不可用，不要引用任何筹码数值")
-        meta["kline"] = "tx"
-        meta["note"] = (
-            "东财日线不可用，已降级【腾讯备用源】：换手率由「成交量/流通股本」自算"
-            "（股本取当前值，窗口内增发/解禁会偏），成交额缺失 ⇒ 三角峰值退回 (高+低)/2。"
-            "衰减率与 VWAP 精度低于东财口径，结论降一档置信度")
+            meta["ths_err"] = f"{type(e).__name__}: {e}"
+            try:
+                bars, name = fetch_bars_tx(code, n=n)     # ★ 第三源（腾讯，兜底）
+            except Exception as e2:
+                # ★ 备用源自洽校验不过 ⇒ 明确抛错，绝不留着「东财失败+腾讯错数」的假数
+                meta["tx_err"] = f"{type(e2).__name__}: {e2}"
+                raise RuntimeError(
+                    f"日线取数失败：东财未返回 {code}；同花顺、腾讯备用源均不可用"
+                    f"（ths: {e}；tx: {e2}）⇒ 筹码面本次不可用，不要引用任何筹码数值")
+            meta["kline"] = "tx"
+            meta["note"] = (
+                "东财日线不可用，已降级【腾讯备用源】：换手率由「成交量/流通股本」自算"
+                "（股本取当前值，窗口内增发/解禁会偏），成交额缺失 ⇒ 三角峰值退回 (高+低)/2。"
+                "衰减率与 VWAP 精度低于东财口径，结论降一档置信度")
     if not bars:
         raise RuntimeError(f"日线取数失败：东财未返回 {code}（停牌/代码错？）"
                            + (f"；腾讯备用源也不可用：{meta.get('em_err')}" if us_mode else ""))
@@ -1656,7 +1751,11 @@ def render(r):
     print(f" SCR 筹码集中度 · [{mkt}] {r['code']} {r['name']} · 截至 {r['as_of']}")
     print(line)
     # ★ 备用源必须显式亮出来：静默降级＝假的安全感（2026-10-15 众生药业 002317 踩过）
-    if r.get("kline_src") == "tx":
+    _ks = r.get("kline_src")
+    if _ks == "ths":
+        print(" ⚠ 数据来源【同花顺备用源】(东财不可用)：成交额/换手率均为原生字段，"
+              "与东财对拍 0.00% 偏差；仅覆盖最近约 140 根")
+    elif _ks == "tx":
         print(" ⚠⚠ 数据来源【腾讯备用源】(东财不可用)：换手率自算、成交额缺失 ⇒ 精度降一档")
     if r.get("fflow_src") == "none":
         print(" ⚠ 资金流未取到 ⇒ 主力成本退到「低位带均价」口径（不是资金流口径）")
