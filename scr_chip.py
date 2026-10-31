@@ -130,11 +130,20 @@ LOCK_TOL = 0.10           # 锁仓：底部峰带质量 N 日波动 < 10%
 LOOSE_MASS = 0.20         # 底部峰带质量 5 日缩水 > 20% = 锁仓破坏
 LOW_LO, LOW_HI = 5, 35     # 低位筹码带分位区间（庄的成本段＝图上「下方红色、几天不动」那段）
 MIN_BARS = 60             # 日线不足则不出结论（不编造）
-# ⚑⚑ 换手衰减系数：不要用**跨股票固定的常数**（老罗 2026-10-13 打回：那样等于让他去抄软件读数）。
-#    正确做法：给模型一个**统一口径的记忆**＝「筹码半衰期 H 个交易日」（经过 H 日，当日筹码权重剩一半），
-#    再按该股自己的换手水平**反解衰减系数 k**（上限 1.0＝不能超过真实换手）。
-#    ⇒ 高换手票自动得到更小的 k（记忆不被高频回转吃掉），低换手票 k 自然取满 ⇒ 不同票的 SCR 才可比。
-CHIP_HALF_LIFE = 60       # 默认：约一个季度 —— 当日筹码走过 60 个交易日权重减半
+# ⚑⚑ 换手衰减系数 k：**默认 1.0 ＝ 按该股真实换手率衰减**（老罗 2026-10-31 拍板改口径）。
+#    物理含义：当日筹码每过一天被换手吃掉 r_t×k 的比例；k=1.0 就是「换手多少就换掉多少」，
+#    即筹码半衰期 = 1/日均换手率（换手 8% 的票 → 半衰期 8.6 个交易日，不是 60 日）。
+#    ★ 为什么改成 1.0（2026-10-31 实证，勿再改回去）：
+#      ① 阈值 SCR_TIGHT=10 / SCR_BUY=15 / SCR_LOOSE=20 / SCR_SHIP=25 出自 Excel「公式与说明」，
+#         那张表本身是照通达信/同花顺 COST() 公式做的 ⇒ **阈值一直是「官方口径」下标的**，
+#         过去却用 k=auto 算 SCR90，口径与阈值错配；
+#      ② k=1.0 与东财官方筹码算法批量对拍（40 只）：集中度中位偏差 **+0.03pp**、MAE 0.59pp、
+#         38/40 落在 ±0.5pp 内 ⇒ 与同花顺/东财读数**同口径可直接核对**（脚本 bt_scr_vs_em_2026-10-31.py）；
+#      ③ 旧 k=auto（半衰期钉 60 日）把筹码记忆对高换手票拉长 7 倍 ⇒ 飙股 SCR90 虚高 2~2.5 倍，
+#         大量活跃票被误判「筹码发散」而禁开仓（百普赛斯 48.09% vs 官方 19.21%）。
+#    ⚑ CHIP_HALF_LIFE 只在**显式**传 --half-life / half_life=H 时启用（历史回测复现旧口径用），默认不启用。
+CHIP_DECAY_K = 1.0        # 默认衰减系数：按真实换手衰减（＝同花顺/东财 COST() 同口径）
+CHIP_HALF_LIFE = 60       # 仅在显式指定 half_life 时用作「半衰期 H 日」反解 k（默认不启用）
 
 # ── 筹码状态（老罗 2026-10-14 定：结论必须一眼看懂，只给这几个词）────────────────
 #   ① 吸筹中   ② 集中锁仓中   ③ 拉升脱离成本区中   ④ 筹码发散   ⑤ 派发出货中   ⑥ 破位下行中
@@ -193,15 +202,30 @@ PROFIT_RICH = 85.0        # 获利盘 ≥85% ＝ 全员获利区。
 PEAK_CONC_MIN = 55.0      # 主峰±10% 筹码占比下限：值得买 68.6%、天溯 54.5%、康龙 48.3%（真发散）
 ACCUM_RISE = 0.02         # 低位带份额 5 日 +2% 以上 ＝ 有人在低位收
 FALL_PROFIT = 50.0        # 跌破峰区下沿时：获利盘 ≥ 该值算派发后破位，低于则算破位下行（无人可派）
+# ★ 2026-10-31 加（恒玄 688608 实证）：破位的**第二条冗余判据**。
+#   原因：原判据只有「close < p15」一条几何线，贴着 p15 的票（收盘高 0.1~0.7%）会因口径/分布
+#   微差直接翻成「吸筹中」——这是**卖 vs 买**级别的误判。恒玄 k=1.0 后 p15 从 101.91 降到 100.08，
+#   收盘 101.53 就跨过那条线，判成「吸筹中·可开仓」，而它获利盘只有 17.5%、位置 7.5%
+#   ⇒ 92.5% 的筹码在现价上方，正是 ST_FALL 要描述的「上方全是套牢盘」。
+#   补判据：价格落在分布最底部 + 获利盘极低（二条同时成立）也认破位；但**低位带份额在增
+#   （rising＝真有人在低位收）时豁免**，留给吸筹分支，避免把真见底翻成破位。
+#   全样本影响面：518 只里仅 6 只（1.2%）为新增，全部是「收盘贴 p15 + 获利盘 15~18%」的临界票。
+FALL_POS_MAX = 0.15       # 峰区位置（dist_pos）≤ 15% ＝ 价格在筹码分布最底部
+FALL_PROFIT_MAX = 25.0    # 获利盘 ≤ 25% ＝ 上方 3/4 以上筹码全是套牢盘
 
 
 def solve_decay_k(bars, half_life=CHIP_HALF_LIFE):
     """按「筹码半衰期 H 个交易日」**自求**衰减系数 k ∈ (0, 1] —— 不用软件读数对拍。
 
+    ⚑ 2026-10-31 起**默认不再调用**（主流程直接用 CHIP_DECAY_K=1.0）。
+      保留本函数是为了：① 显式 --half-life H 时复现旧口径；② 历史回测脚本（bt_scr_*）复现；
+      ③ 诊断「某只票真实半衰期是多少」—— solve_decay_k 反解出的 k 越接近 1，说明它的筹码
+      换手本来就快，旧口径对它的歪曲越小。
+
     定义：把最近 H 个交易日的换手 r_t 依次作用后，当日筹码权重衰到一半：
           Π_t (1 − r_t × k) = 0.5
-    r_t 是该股自己的日换手 ⇒ **k 每只票自求**（不是拿来拍的常数）；k 上限 1.0，
-    因为衰减强度不可能超过真实换手本身（∏(1−r) 已经慢于目标时就直接取 1.0）。
+    k 上限 1.0（衰减强度不可能超过真实换手本身）；avg 换手 r 时 k ≈ ln2/(H·r)，
+    故 H=60、r=8% ⇒ k≈0.14（记忆被拉长 7 倍，正是旧口径歪曲飙股的来源）。
     """
     tail = bars[-half_life:] if len(bars) >= half_life else bars
     rs = [min(max(b.get("turnover", 0.0) / 100.0, 0.0), 1.0) for b in tail]
@@ -1274,10 +1298,21 @@ def chip_state_of(scr90, scr70, scr_hist, close, M, p15, p85, profit,
                          f"——高位筹码开始割肉{tail}")
     # ② 破位下行中（2026-10-14 补：原被兜底吞掉，会误导成「吸筹中」）
     #    与①的区别：获利盘已很低 ⇒ 上面全是套牢盘、无人可派，是单边下跌结构不是派发
-    if p15 is not None and close < p15:
-        return ST_FALL, (f"跌破筹码峰区下沿 {p15:.2f}、获利盘仅 {(profit or 0):.0f}%"
-                         f"——上方全是套牢盘，反弹到 {p15:.2f} 是<b>压力不是支撑</b>；"
-                         f"既无人可派也无人在吸，属破位下行结构{tail}")
+    #    ⚑ 2026-10-31 加冗余判据 sunk（见 FALL_POS_MAX 注释）：贴 p15 的票不许靠 1% 差距翻成吸筹。
+    #      但 rising（低位带份额在增＝真有人在收）时豁免，交回 ⑥ 吸筹分支判定。
+    _sunk = (pos is not None and pos <= FALL_POS_MAX and (profit or 0) <= FALL_PROFIT_MAX)
+    if p15 is not None and (close < p15 or (_sunk and not rising)):
+        if close < p15:
+            _why = (f"跌破筹码峰区下沿 {p15:.2f}、获利盘仅 {(profit or 0):.0f}%"
+                    f"——上方全是套牢盘，反弹到 {p15:.2f} 是<b>压力不是支撑</b>；"
+                    f"既无人可派也无人在吸，属破位下行结构")
+        else:
+            _why = (f"价格虽在峰区下沿 {p15:.2f} 附近（{(close / p15 - 1) * 100:+.1f}%），"
+                    f"但落在筹码分布最底部（位置 {(pos or 0) * 100:.0f}%）、获利盘仅 "
+                    f"{(profit or 0):.0f}% ⇒ <b>{(1 - (profit or 0) / 100) * 100:.0f}% 的筹码在现价上方</b>，"
+                    f"上方全是套牢盘、低位带也没在增（{(mass_chg or 0) * 100:+.1f}%）"
+                    f"——属贴线未破的破位结构，不是吸筹")
+        return ST_FALL, _why + f"{tail}"
     # ③ ★ 「底部成峰」修正（老罗 2026-10-14）——必须排在 loose 分支**之前**
     #    SCR90 只看 P5/P95 两端，会被「上方老套牢盘」绑架 ⇒ 把明显在吸筹的票误判成发散。
     #    两个正交证据同时成立才改判，避免把真发散翻成吸筹（阈值见 PEAK_CONC_MIN 注释）。
@@ -1305,7 +1340,7 @@ def chip_state_of(scr90, scr70, scr_hist, close, M, p15, p85, profit,
     #   ⚑ 用 not drain 而非 rising：主升浪中低位筹码缓慢兑现是**正常**的
     #     （301119 实测 −7.7%），只有 ≤ −LOOSE_MASS(−20%) 才算「庄在撤底仓」。
     if loose and jump < SCR_JUMP_STEADY and out_zone and not drain and n_peak < 2:
-        _m_txt = f"、较平均成本 {M:.2f} {(close / M - 1) * 100:+.1f}%" if M else ""
+        _m_txt = f"、较成本重心 {M:.2f} {(close / M - 1) * 100:+.1f}%" if M else ""
         return ST_PULL, (
             f"稳态发散＝<b>拉升中</b>：SCR90 {scr90:.1f}% 虽 ≥ {SCR_LOOSE:g}%，但较 5 日均值 "
             f"{base:.1f}% 仅 <b>{jump:.2f}×（没有跳升</b>，远未达派发阈值 {SCR_JUMP:g}×）、"
@@ -1331,7 +1366,7 @@ def chip_state_of(scr90, scr70, scr_hist, close, M, p15, p85, profit,
             #   只作中性描述，**不作风险提示、更不作止盈触发**。
             extra = f"，获利盘 {(profit or 0):.0f}% 已进全员获利区"
         return ST_PULL, (f"现价已站到成本区上方（峰区位置 {(pos or 0) * 100:.0f}%、"
-                         f"较平均成本 {M:.2f} {(close / M - 1) * 100:+.1f}%）"
+                         f"较成本重心 {M:.2f} {(close / M - 1) * 100:+.1f}%）"
                          f"，筹码尚未发散（SCR90 {scr90:.1f}%）、底仓未撤{extra}"
                          f"——脱离成本区＝没有成本优势，持有可、追高不可{tail}")
     # ④ 吸筹中
@@ -1347,7 +1382,7 @@ def chip_state_of(scr90, scr70, scr_hist, close, M, p15, p85, profit,
     if accum_ev and not drain and M and close <= M * 1.03 and pos is not None and pos <= 0.6:
         ev = (f"低位筹码带 {LOCK_DAYS} 日 {(mass_chg or 0) * 100:+.1f}%（在增）" if rising
               else f"SCR90 连降 {fall_days} 日（集中度快速收敛）")
-        return ST_ACCUM, (f"{ev}、现价贴近平均成本 {M:.2f}"
+        return ST_ACCUM, (f"{ev}、现价贴近成本重心 {M:.2f}"
                           f"（{(close / M - 1) * 100:+.1f}%、峰区位置 {pos * 100:.0f}%）"
                           f"——低位在收筹码{tail}")
     # ⑤ 集中锁仓中
@@ -1412,7 +1447,7 @@ def state_action_of(state, close, M, p15, p85, scr90, profit=None):
 _VERDICT_ORDER = {"卖": 0, "买": 1, "持": 2, "观察": 3}
 
 
-def run_batch(codes, n=120, half_life=CHIP_HALF_LIFE, decay_k=None, workers=6, force_us=None):
+def run_batch(codes, n=120, half_life=None, decay_k=None, workers=6, force_us=None):
     """并发分析多只，返回 [(code, result|None, err|None)]。
 
     force_us: True=全部按美股；False=全部按 A 股；None=逐码自动识别（含字母判美股）。
@@ -1520,7 +1555,7 @@ def bars_from_db(code, n=120, db_path=None):
 
 
 # ─────────────────────────── 主流程 ───────────────────────────
-def analyze(code, n=120, decay_k=None, half_life=CHIP_HALF_LIFE, us_mode=False,
+def analyze(code, n=120, decay_k=None, half_life=None, us_mode=False,
             bars=None, name=None):
     """主分析流程。
 
@@ -1545,10 +1580,11 @@ def analyze(code, n=120, decay_k=None, half_life=CHIP_HALF_LIFE, us_mode=False,
 
     # 模型只正向跑一遍，末端保留 KEEP 份快照：既得今日分布，也得近 12 日 SCR 趋势 + 近 5 日锁仓
     KEEP = 15
-    # 衰减系数自求：统一口径＝「筹码半衰期 H 日」⇒ 每只票按自己的换手反解 k（不再跨股票用同一常数）
-    k_auto = decay_k is None
+    # 衰减系数：默认 k=1.0（按真实换手衰减 ＝ 同花顺/东财 COST() 同口径，见文件头 CHIP_DECAY_K 注释）。
+    # 只有显式传 half_life=H 才走「半衰期 H 日反解 k」的旧口径（历史回测复现用）。
+    k_auto = decay_k is None and half_life is not None
     if decay_k is None:
-        decay_k = solve_decay_k(bars, half_life=half_life)
+        decay_k = solve_decay_k(bars, half_life=half_life) if half_life else CHIP_DECAY_K
     main_rho = main_rho_now                       # 逐日主力净买入占比（算主力成本用，已并行取到）
     prices, dist, snaps, w, miss, m_dist, m_meta = chip_model(
         bars, keep_last=KEEP, main_rho=main_rho, decay_k=decay_k,
@@ -1778,7 +1814,8 @@ def render(r):
     print(f"   动作：{r.get('state_action') or r['action']}")
     print("─" * 66)
     print(f" 现价 {cur}{r['close']:.2f}｜换手 {r['turnover']:.2f}%｜量比 {r['vol_ratio']:.2f}×"
-          f"｜衰减 k={r['decay_k']:.3f}（{'按半衰期 ' + str(r['half_life']) + ' 日自求' if r['k_auto'] else '手动'}）")
+          f"｜衰减 k={r['decay_k']:.3f}"
+          f"（{'按半衰期 ' + str(r['half_life']) + ' 日自求（旧口径）' if r['k_auto'] else ('按真实换手衰减' if abs(r['decay_k'] - CHIP_DECAY_K) < 1e-9 else '手动指定')}）")
     print(f" SCR90 {r['scr90']:.2f}%｜SCR70 {r['scr70']:.2f}%"
           f"｜近 5 日 SCR90 {'→'.join(f'{v:.1f}' for v in r['scr_hist'][-5:])}")
     print(f" 90% 筹码 {r['p5']:.2f}~{r['p95']:.2f}｜70% 筹码（峰区）{r['p15']:.2f}~{r['p85']:.2f}")
@@ -1807,7 +1844,9 @@ def render(r):
         print("｜".join(parts))
         if r.get("main_phase_note"):
             print(f"   ↳ {r['main_phase_note']}")
-    print(f" 平均成本 {cur}{r['M']:.2f}｜获利盘 {r['profit']:.1f}%｜主峰 {cur}{r['main_price']:.2f}"
+    _c50 = f"｜成本中位 C50 {cur}{r['cost50']:.2f}(与软件可对拍)" if r.get("cost50") else ""
+    print(f" 成本重心(M) {cur}{r['M']:.2f}{_c50}｜获利盘 {r['profit']:.1f}%"
+          f"｜主峰 {cur}{r['main_price']:.2f}"
           f"｜底部峰 {bp}｜{'单峰' if r['n_peak'] <= 1 else str(r['n_peak']) + ' 峰（分歧）'}")
     if r.get("vol_poc") is not None:
         div = r.get("poc_div_pct")
@@ -1826,7 +1865,7 @@ def render(r):
           if r["below_now"] else f" 底部锁仓：不适用（{detail[:-1]}，低位带已抬到现价之上）")
     print("─" * 66)
     print(f" 近 {len(r.get('series') or [])} 日筹码演进（「低位带份额」＝首日钉死的那段低价筹码，份额不掉＝锁仓）：")
-    print(f"   日期        收盘    SCR90   SCR70   平均成本  获利盘  低位带份额  换手")
+    print(f"   日期        收盘    SCR90   SCR70   成本重心  获利盘  低位带份额  换手")
     for row in (r.get("series") or []):
         print(f"   {row['d']}  {row['c']:>6.2f}  {row['scr90']:>5.1f}%  {row['scr70']:>5.1f}%"
               f"   {row['M']:>7.2f}  {row['profit']:>5.1f}%    {row['low_share'] * 100:>5.1f}%"
@@ -1870,9 +1909,10 @@ def main():
                     help="强制市场：1=按美股(字母代码也可省略)、0=按 A 股；省略则按代码自动识别")
     ap.add_argument("--json", default=None, help="结构化输出路径（建议 out_cn/scr_<code>.json）")
     ap.add_argument("--decay-k", type=float, default=None, dest="decay_k",
-                    help="手动指定换手衰减系数（默认 None＝按 --half-life 自求）")
-    ap.add_argument("--half-life", type=int, default=CHIP_HALF_LIFE, dest="half_life",
-                    help="筹码半衰期：多少交易日后当日筹码权重减半（默认 60 ≈ 一个季度）")
+                    help="手动指定换手衰减系数（默认 None＝k=1.0，按真实换手衰减）")
+    ap.add_argument("--half-life", type=int, default=None, dest="half_life",
+                    help="【旧口径·默认不启用】显式给 H 才按「筹码半衰期 H 日」反解 k，"
+                         "仅用于复现 2026-10-31 之前的数值")
     ap.add_argument("--selftest", action="store_true", help="用截图实测值回归 SCR 公式")
     a = ap.parse_args()
     if a.selftest:
