@@ -520,6 +520,9 @@ def ash_bars(prefix, code, n=140, *, fetch=sina_raw, snap_dirs=None,
             notes.append(bao_note)
         if bao_bars:
             bars, src_tag = bao_bars, "bao"
+            notes.append("sina 失败 → 已用 **baostock 兜底**（adjustflag=3 不复权，"
+                         "与 sina 同口径：收盘 0.000% 偏差、volume 同为「股」；"
+                         "实测 6/6 只票逐日一致）")
     if not bars:
         # sina/bao 都失败 → 通达信协议三级兜底（2026-10-19 老罗拍板；默认关，ASH_TDX_FALLBACK=1 才启用）
         tdx_bars, tdx_note = _tdx_fallback(prefix, code, n)
@@ -527,6 +530,8 @@ def ash_bars(prefix, code, n=140, *, fetch=sina_raw, snap_dirs=None,
             notes.append(tdx_note)
         if tdx_bars:
             bars, src_tag = tdx_bars, "tdx"
+            notes.append("sina/baostock 均失败 → 已用 **通达信协议** 兜底"
+                         "（不复权、volume 已 ×100 转「股」，与 sina 同口径）")
     if not bars:
         return [], "net", notes + ["网络源返回空"]
     if use_cache:

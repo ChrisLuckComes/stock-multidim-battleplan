@@ -33,14 +33,24 @@ import time
 # baostock 是单一官方端点，无服务器清单、无故障转移（服务挂了就是挂了，降级回现状）。
 ENV_ENABLE = "ASH_BAO_FALLBACK"
 
+# login 硬超时（秒）。baostock 的 login 无超时参数、是阻塞 socket，
+# 不设上限时网络不可达会把主引擎挂死 ⇒ 守护线程兜底（2026-10-31）。
+_LOGIN_TIMEOUT = float(os.environ.get("ASH_BAO_LOGIN_TIMEOUT", "20") or 20)
+
 # 取多少自然日：n 根日线 ≈ n×7/5 自然日，翻倍再 +30 缓冲（停牌/长假只少不多）。
 _DAYS_FACTOR = 2
 _DAYS_PAD = 30
 
 
 def enabled():
-    """默认关。未显式开启 →  False。"""
-    return os.environ.get(ENV_ENABLE) == "1"
+    """**默认开**（2026-10-31 老罗验收：后备源须与主引擎同口径，baostock `adjustflag=3`
+    满足「收盘 0.000% 偏差 + volume 同单位股」）。
+
+    `ASH_BAO_FALLBACK=0` 显式关闭；`=1` 亦开（兼容旧用法）。
+    成本：sina 正常时**一次都不走**（只在 `if not bars:` 分支里调用），零开销；
+         真失败时首次多付一次 login（实测约 30s，进程内复用）。
+    """
+    return os.environ.get(ENV_ENABLE, "1") != "0"
 
 
 def _market_of(prefix, code):
@@ -81,6 +91,34 @@ def _reset_session():
     _BS = None
 
 
+def _login_with_timeout(bs, secs=None):
+    """baostock 的 `login()` 是阻塞 socket、**无超时参数** ⇒ 用守护线程兜一层硬超时。
+
+    不这么做的话，网络不可达时主引擎会无限挂住（这正是此前"默认关"的顾虑）。
+    返回 (lg, note)；超时/异常时 lg=None。
+    """
+    import threading
+
+    secs = _LOGIN_TIMEOUT if secs is None else secs
+    box = {}
+
+    def _run():
+        try:
+            box["lg"] = bs.login()
+        except Exception as e:                       # noqa: BLE001
+            box["err"] = e
+
+    th = threading.Thread(target=_run, daemon=True)
+    th.start()
+    th.join(secs)
+    if th.is_alive():
+        return None, f"baostock login 超时（>{secs:.0f}s，网络不可达 ⇒ 本进程跳过兜底）"
+    if "err" in box:
+        e = box["err"]
+        return None, f"baostock login 异常（{e.__class__.__name__}: {e}）"
+    return box.get("lg"), None
+
+
 def _ensure_login():
     """进程内登录一次。成功返回 baostock 模块；失败返回 (None, note)。"""
     global _BS, _LOGIN_FAILED
@@ -93,11 +131,10 @@ def _ensure_login():
     except Exception:
         _LOGIN_FAILED = True
         return None, "baostock 未安装，兜底静默禁用"
-    try:
-        lg = bs.login()
-    except Exception as e:
+    lg, note = _login_with_timeout(bs)
+    if lg is None:
         _LOGIN_FAILED = True
-        return None, f"baostock login 异常（{e.__class__.__name__}: {e}）"
+        return None, note
     if getattr(lg, "error_code", "0") != "0":
         _LOGIN_FAILED = True
         return None, f"baostock login 失败（{getattr(lg, 'error_msg', '?')}）"

@@ -1561,7 +1561,14 @@ def analyze(code, n=120, decay_k=None, half_life=CHIP_HALF_LIFE, us_mode=False,
         p95 = cost_at(prices, d, 95)
         return {"p5": p5, "p15": p15, "p85": p85, "p95": p95,
                 "scr90": scr_of(p95, p5), "scr70": scr_of(p85, p15),
-                "M": avg_cost(prices, d), "profit": profit_ratio(prices, d, close)}
+                "M": avg_cost(prices, d), "C50": cost_at(prices, d, 50),
+                "profit": profit_ratio(prices, d, close)}
+
+    # ⚑ 「平均成本」两种定义，别混（2026-10-31 对拍定）：
+    #   `M`    = 加权均价 Σ(价格×筹码)/Σ筹码 —— 长尾高价带会把它拉高
+    #   `C50`  = **50% 筹码分位价**（中位筹码成本）—— **同花顺 / 东财官方口径就是它**
+    #   实测百普赛斯 301080：同花顺 100 ｜ 东财官方算法 100.60 ｜ 我们 C50 = 100.46（M = 101.66）
+    #   ⇒ 要与外部软件对得上，报 `C50`；`M` 只作内部对照，**不再当「平均成本」展示**。
 
     tail = bars[-len(snaps):]                    # 与 snaps 一一对应的日线
     # ⚑ 锁仓＝「一段**固定价格**上的筹码没走」⇒ 价格带必须钉死（取窗口首日的 P5~P35），
@@ -1584,6 +1591,7 @@ def analyze(code, n=120, decay_k=None, half_life=CHIP_HALF_LIFE, us_mode=False,
     close = last["c"]
     p5, p15, p85, p95 = today["p5"], today["p15"], today["p85"], today["p95"]
     scr90, scr70, M, profit = today["scr90"], today["scr70"], today["M"], today["profit"]
+    cost50 = today["C50"]
 
     pk_idx, main_i = peaks_of(prices, dist, w)
     n_peak = len(pk_idx)
@@ -1715,7 +1723,7 @@ def analyze(code, n=120, decay_k=None, half_life=CHIP_HALF_LIFE, us_mode=False,
         "name": name, "as_of": last["d"], "us_mode": us_mode,
         "cur": ("$" if us_mode else "¥"),
         "bars": len(bars), "close": close, "turnover": turnover, "vol_ratio": vol_ratio,
-        "scr90": scr90, "scr70": scr70, "M": M, "profit": profit,
+        "scr90": scr90, "scr70": scr70, "M": M, "cost50": cost50, "profit": profit,
         "p5": p5, "p15": p15, "p85": p85, "p95": p95,
         "peak_price": peak_price, "main_price": main_price,
         "vol_poc": vol_poc, "poc_div_pct": poc_div_pct,

@@ -61,3 +61,14 @@ def market_regime_neutral(request, monkeypatch):
 # ⚑ 基线在 import 期就装上：unittest 的 setUpClass（类级，跑在每个用例夹具之外）
 #   里算 plan 的用例也要吃到钉值（实测 tests/entry/test_ma_ride.py 两个用例因此白红）。
 _MR.fetch_index_bars = _neutral_fetch
+
+
+# ───────────── 兜底源默认关闭（2026-10-31 改默认开后必须收口，否则测试真联网） ─────────────
+# 背景：`fetch/bao_fallback.py` 的开关从「默认关」改成「默认开」后，任何模拟
+#   `sina_raw` 返回空 的用例都会**真去连 baostock**（实测：test_tdx_fallback 两项
+#   因此拿到真实 140 根日线而变红，同时把测试变成联网用例 ⇒ 违反「测试不许联网」铁律）。
+# 修法：conftest 统一把两个兜底开关钉成 "0"，需要测兜底链路的用例自己 setenv("1")。
+@pytest.fixture(autouse=True)
+def _fallback_off(monkeypatch):
+    monkeypatch.setenv("ASH_BAO_FALLBACK", "0")
+    monkeypatch.setenv("ASH_TDX_FALLBACK", "0")

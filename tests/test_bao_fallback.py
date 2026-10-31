@@ -77,7 +77,7 @@ def fake_bs(monkeypatch):
 
 @pytest.fixture
 def bao_off(monkeypatch):
-    monkeypatch.delenv("ASH_BAO_FALLBACK", raising=False)
+    monkeypatch.setenv("ASH_BAO_FALLBACK", "0")     # 2026-10-31 起默认开，关闭须显式 =0
     monkeypatch.setattr(BF, "_BS", None)
     monkeypatch.setattr(BF, "_LOGIN_FAILED", False)
 
@@ -101,9 +101,9 @@ def test_volume_unit_shares_no_scale(fake_bs):
     assert bars[-1]["v"] == 84091335.0
 
 
-# ───────────────────────── 铁律 2：默认关 ─────────────────────────
-def test_default_off_no_import(bao_off):
-    """未启用 → 不 import baostock、不联网、返回 ([], None)。"""
+# ─────────────── 铁律 2：默认开、可显式关闭（2026-10-31 改） ───────────────
+def test_explicit_off_no_import(bao_off):
+    """ASH_BAO_FALLBACK=0 → 不 import baostock、不联网、返回 ([], None)。"""
     sentinel = object()
     sys.modules.pop("baostock", None)
     sys.modules["baostock"] = sentinel      # 若被 import 到就是 bug
@@ -112,6 +112,16 @@ def test_default_off_no_import(bao_off):
         assert bars == [] and note is None
     finally:
         sys.modules.pop("baostock", None)
+
+
+def test_enabled_by_default(monkeypatch):
+    """不设环境变量 → 默认启用（老罗 2026-10-31 验收：后备源须可用且同口径）。"""
+    monkeypatch.delenv("ASH_BAO_FALLBACK", raising=False)
+    assert BF.enabled() is True
+    monkeypatch.setenv("ASH_BAO_FALLBACK", "0")
+    assert BF.enabled() is False
+    monkeypatch.setenv("ASH_BAO_FALLBACK", "1")
+    assert BF.enabled() is True
 
 
 def test_import_failure_disabled(monkeypatch):
@@ -283,3 +293,31 @@ def test_ash_bars_tdx_when_bao_empty(monkeypatch):
         fetch=lambda prefix, code, n=None: [], now=BS.now_bj())
     assert len(bars) == 1 and bars[0]["c"] == 2.0
     assert any("bao 空" in x for x in notes)
+
+
+# ─────────────── 铁律 3：login 不许把主引擎挂死（2026-10-31 新增） ───────────────
+def test_login_timeout_guard(monkeypatch):
+    """baostock login 是阻塞 socket 且无超时参数 ⇒ 必须有硬上限，否则网络不可达会挂死。"""
+    import time as _t
+
+    class _SlowBS:
+        def login(self):
+            _t.sleep(5)
+            return type("LG", (), {"error_code": "0", "error_msg": ""})()
+
+    t0 = _t.time()
+    lg, note = BF._login_with_timeout(_SlowBS(), secs=0.2)
+    cost = _t.time() - t0
+    assert lg is None
+    assert "超时" in (note or "")
+    assert cost < 2.0, f"超时保护失效，耗时 {cost:.1f}s"
+
+
+def test_login_error_note(monkeypatch):
+    """login 抛异常 → 返回 (None, note)，不向外抛。"""
+    class _BoomBS:
+        def login(self):
+            raise OSError("network unreachable")
+
+    lg, note = BF._login_with_timeout(_BoomBS(), secs=0.5)
+    assert lg is None and "异常" in (note or "")
