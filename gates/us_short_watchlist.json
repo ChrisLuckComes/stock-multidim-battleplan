@@ -1,0 +1,5 @@
+{
+  "_note": "美股固定标的 · 做空池（只做这些；A股无融券、美股无融资⇒做空只走反向ETF）",
+  "_pairs_hint": "反向ETF映射在 gates/us_short.py 的 DEFAULT_REVERSE_ETF 或 reverse_etf.json",
+  "symbols": ["SNDK", "MU", "SKHY", "SOXX", "LITE"]
+}
