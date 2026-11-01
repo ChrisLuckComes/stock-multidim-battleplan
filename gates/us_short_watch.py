@@ -314,69 +314,90 @@ def _verdict(c):
                      ("｜" + "；".join(tips)) if tips else ""))
 
 
+def _fmt_etf_cand(cd, e, ref, er, lev, t1_und=None):
+    """单候选：**ETF 执行价为主**（买/止损/目标），正股入场/止损仅作锚参考。
+
+    无 ETF 映射时退回正股价。目标默认取候选自身的 t2（远结构位），
+    t1（近支撑）若存在且不同则附 (T1≈…) 一并给出。
+    """
+    rr = cd.get("rr")
+    rr_s = ("%.2f" % rr) if rr is not None else "—"
+    e_u, s_u, t_u = cd["entry"], cd["stop"], cd["target"]
+    if not e.get("code"):
+        s = "%s 买%.2f 止损%.2f 目标%.2f RR%s" % (cd["name"], e_u, s_u, t_u, rr_s)
+        if t1_und is not None and abs(t1_und - t_u) > 1e-6:
+            s += " (T1≈%.2f)" % t1_und
+        return s
+    b = etf_from_underlying(e_u, ref, er, lev)
+    s = etf_from_underlying(s_u, ref, er, lev)
+    t = etf_from_underlying(t_u, ref, er, lev)
+    t1e = etf_from_underlying(t1_und, ref, er, lev) if t1_und is not None else None
+    st = "%s 买%.4g 止损%.4g 目标%.4g RR%s" % (cd["name"], b, s, t, rr_s)
+    if t1e is not None and abs(t1e - t) > 1e-6:
+        st += " (T1≈%.4g)" % t1e
+    st += "｜正股%.2f/%.2f" % (e_u, s_u)
+    return st
+
+
 def brief_line(c):
-    """★ 纯文本摘要（贴进对话）：**①主决策**（下单价）+ 追跌档 + 落地价 + 旁证一行。"""
+    """★ 纯文本摘要（贴进对话）：**①主决策=ETF执行价**（你实际下单的价）+ 正股锚 + 旁证。"""
     if c.get("error"):
         return "  %-6s ⚠ %s" % (c["sym"], c["error"])
     v = c.get("verdict") or "?"
+    e = c.get("etf") or {}
+    ref = c.get("ref_close") or c["close"]
+    lev = e.get("lev") or 2.0
+    er = e.get("ref") or ref
+    etf_now = etf_from_underlying(c["close"], ref, er, lev) if e.get("code") else None
+    if e.get("code"):
+        head = "%s→%s  正股%-9.2f / ETF%-8.4g  【%s】%s" % (
+            c["sym"], e["code"], c["close"], etf_now, v,
+            ("  " + c.get("mode", "")) if c.get("mode") else "")
+    else:
+        head = "%-6s %-9.2f  【%s】%s" % (c["sym"], c["close"], v,
+                                          ("  " + c.get("mode", "")) if c.get("mode") else "")
     out = []
-    head = "%-6s %-9.2f 【%s】%s" % (c["sym"], c["close"], v,
-                                     ("  " + c.get("mode", "")) if c.get("mode") else "")
-    # ① 主决策（裸K结构位，与 us_short.py 同源）—— **下单看这里**
     cands = c.get("main_cands") or []
+    t1_und = c.get("t1")
     if cands:
-        bits = []
-        for cd in cands:
-            rr = cd.get("rr")
-            bits.append("%s 入场%.2f 止损%.2f 目标%.2f RR%s"
-                        % (cd["name"], cd["entry"], cd["stop"], cd["target"],
-                           ("%.2f" % rr) if rr is not None else "—"))
-        out.append("%s  ① 主决策：%s" % (head, " ｜ ".join(bits)))
+        bits = [_fmt_etf_cand(cd, e, ref, er, lev, t1_und) for cd in cands]
+        out.append("%s\n           ① 主决策(ETF执行价)：%s" % (head, " ｜ ".join(bits)))
         lad = c.get("rr_ladder") or []
         gate = [x for x in lad if abs(x[0] - 1.5) < 1e-9]
         if gate:
-            out.append("            RR≥1.5 门槛：入场价 ≥ %.2f（当前 %.2f %s）"
-                       % (gate[0][1], c["close"],
-                          "够" if c["close"] >= gate[0][1] else "不够"))
+            ok = c["close"] >= gate[0][1]
+            if e.get("code"):
+                ge = etf_from_underlying(gate[0][1], ref, er, lev)
+                out.append("            RR≥1.5 门槛：ETF 买价 ≥ %.4g（正股 ≥ %.2f）｜当前 ETF %.4g / 正股 %.2f %s"
+                           % (ge, gate[0][1], etf_now, c["close"], "够" if ok else "不够"))
+            else:
+                out.append("            RR≥1.5 门槛：入场价 ≥ %.2f（当前 %.2f %s）"
+                           % (gate[0][1], c["close"], "够" if ok else "不够"))
     else:
-        out.append("%s  ① 主决策：—" % head)
-    # ② 执行位置（**不是信号**）：实证（无未来函数口径）触达即进 +1.94%/胜率64%，
-    #    同期「开盘就追」= −5.81%/胜率9% ⇒ 反抽是**更好的位置**，不是 alpha；
-    #    ⚠ 早期版本用收盘判断「被打回」⇒ 未来函数，胜率虚高到 92.8%，已修。
+        out.append("%s\n           ① 主决策(ETF执行价)：—" % head)
+    # ② 执行位置（**不是信号**）：反抽到位再进，比开盘追更安全
     ch = c.get("chase") or []
     if ch:
         cd = ch[0]
-        out.append("            ② 执行位置（非信号）：%s（回抽到 %.2f（+%.1f%%）就进｜止损 前低 %.2f）"
-                   % (cd["name"], cd["entry"],
-                      (cd["entry"] / c["close"] - 1) * 100 if c.get("close") else 0,
-                      cd["stop"]))
-    # ③ 落地：反向ETF 价
-    e = c.get("etf") or {}
-    if e.get("code") and cands:
-        ref = c.get("ref_close") or c["close"]
-        lev = e.get("lev") or 2.0
-        er = e.get("ref") or ref
-        cd = cands[0]
-        t1 = c.get("t1") or cd["target"]
-        t2 = c.get("t2")
-        out.append("            ③ 落地 %s(%sx)：买 %.4g ｜ 止损 %.4g ｜ 目标(T1) %.4g%s"
-                   % (e["code"], lev,
-                      etf_from_underlying(cd["entry"], ref, er, lev),
-                      etf_from_underlying(cd["stop"], ref, er, lev),
-                      etf_from_underlying(t1, ref, er, lev),
-                      ("｜T2 %.4g(远)" % etf_from_underlying(t2, ref, er, lev))
-                      if t2 else ""))
+        if e.get("code"):
+            be = etf_from_underlying(cd["entry"], ref, er, lev)
+            se = etf_from_underlying(cd["stop"], ref, er, lev)
+            out.append("            ② 执行位置(ETF)：%s 买%.4g 止损%.4g（正股回抽 %.2f(+%.1f%%)｜止损前低 %.2f）"
+                       % (cd["name"], be, se, cd["entry"],
+                          (cd["entry"] / c["close"] - 1) * 100 if c.get("close") else 0,
+                          cd["stop"]))
+        else:
+            out.append("            ② 执行位置（非信号）：%s（回抽到 %.2f(+%.1f%%)就进｜止损 前低 %.2f）"
+                       % (cd["name"], cd["entry"],
+                          (cd["entry"] / c["close"] - 1) * 100 if c.get("close") else 0,
+                          cd["stop"]))
     # ②b 深跌反抽实时档（执行位置提示，不是信号）
     dp = c.get("deep")
     if dp:
-        e2 = c.get("etf") or {}
         etx = ""
-        if e2.get("code"):
-            ref = c.get("ref_close") or c["close"]
+        if e.get("code"):
             etx = ("｜**%s 触发价 %.4g**｜止损参考 %.2f"
-                   % (e2["code"],
-                      etf_from_underlying(dp["trig_px"], ref, e2.get("ref") or ref,
-                                          e2.get("lev") or 2.0),
+                   % (e["code"], etf_from_underlying(dp["trig_px"], ref, er, lev),
                       dp["stop_ref"] or 0))
         out.append("            ②b 深跌反抽：%s%s" % (dp["note"], etx))
     # ④ 旁证一行
@@ -398,6 +419,9 @@ def line(c):
              "不推荐": "✗不推荐"}.get(v, ("⚠" + v if v.startswith("谨慎") else v))
     sg = c.get("signal")
     e = c.get("etf") or {}
+    ref = c.get("ref_close") or c["close"]
+    lev = e.get("lev") or 2.0
+    er = e.get("ref") or ref
     out.append("─" * 116)
     out.append("%-6s %-9.2f  (%s)   %s" % (c["sym"], c["close"], c.get("date", "")[:10], vmark))
     # ① 背景层（⚠ 统一用**信号时**的背景年龄 = 进场那一刻；另注当前年龄与信号距今）
@@ -414,22 +438,26 @@ def line(c):
                        "看盈亏比与当日可达性再决定" % (sa, (c.get("signal") or {}).get("date")))
     else:
         out.append("   ① 背景  : 无（尚未见顶）")
-    # ① 主决策（★ 裸K结构位空点候选：下单看这里，与 us_short.py 同源，唯一价格口径）
+    # ① 主决策（★ **ETF 执行价为主**，你实际下单的价；正股仅作锚参考）
     cands = c.get("main_cands") or []
+    t1_und = c.get("t1")
     if cands:
         for cd in cands:
-            rr = cd.get("rr")
-            out.append("   ① 主决策: %s ｜ 入场 %.2f ｜ 止损 %.2f ｜ 目标 %.2f ｜ RR %s"
-                       % (cd["name"], cd["entry"], cd["stop"], cd["target"],
-                          ("%.2f" % rr) if rr is not None else "—"))
+            out.append("   ① 主决策(ETF): %s" % _fmt_etf_cand(cd, e, ref, er, lev, t1_und))
         lad = c.get("rr_ladder") or []
         gate = [x for x in lad if abs(x[0] - 1.5) < 1e-9]
         if gate:
-            out.append("            RR≥1.5 门槛：入场价 ≥ %.2f（当前现价 %.2f %s）"
-                       % (gate[0][1], c["close"],
-                          "够" if c["close"] >= gate[0][1] else "不够"))
+            ok = c["close"] >= gate[0][1]
+            if e.get("code"):
+                ge = etf_from_underlying(gate[0][1], ref, er, lev)
+                out.append("            RR≥1.5 门槛：ETF 买价 ≥ %.4g（正股 ≥ %.2f）｜当前 ETF %.4g / 正股 %.2f %s"
+                           % (ge, gate[0][1], etf_from_underlying(c["close"], ref, er, lev),
+                              c["close"], "够" if ok else "不够"))
+            else:
+                out.append("            RR≥1.5 门槛：入场价 ≥ %.2f（当前 %.2f %s）"
+                           % (gate[0][1], c["close"], "够" if ok else "不够"))
     else:
-        out.append("   ① 主决策: —")
+        out.append("   ① 主决策(ETF): —")
     # ② 旁证·反转K线信号（**非主决策**：顶部形态/大背景/反转K 均为旁证，不否决）
     if sg:
         out.append("   ② 旁证·反转K: %s ｜ %s ｜ 阻力 %s" % (
@@ -441,30 +469,11 @@ def line(c):
                        % (sg.get("entry") or 0, c["chased_pct"]))
     else:
         out.append("   ② 旁证·反转K: 无（按主决策结构空点执行即可，不需等信号）")
-    # ③ 落地层（★ 反向ETF = 主决策空点的落地价）
-    if e.get("code"):
-        if e.get("error"):
-            out.append("   ③ 落地  : %s 取数失败（%s）" % (e["code"], e["error"]))
-        elif cands:
-            ref = c.get("ref_close") or c["close"]
-            lev = e.get("lev") or 2.0
-            cd0 = cands[0]
-            t1 = c.get("t1") or cd0["target"]
-            t2 = c.get("t2")
-            out.append("            **%s 买 %.4g ｜ 止损 %.4g ｜ 目标 %.4g**（%sx 反向）" % (
-                e["code"],
-                etf_from_underlying(cd0["entry"], ref, e.get("ref") or ref, lev),
-                etf_from_underlying(cd0["stop"], ref, e.get("ref") or ref, lev),
-                etf_from_underlying(t1, ref, e.get("ref") or ref, lev),
-                lev))
-            if t2 and abs(t2 - t1) > 1e-6:
-                out.append("            远目标T2 %.4g（%s）" % (
-                    etf_from_underlying(t2, ref, e.get("ref") or ref, lev), e["code"]))
-        else:
-            out.append("   ③ 落地  : %s（昨收 %.4g · %sx 反向）" % (
-                e["code"], e.get("ref") or 0, e.get("lev")))
-    else:
+    # ③ 落地（ETF 执行价已在①主决策给出；此处仅兜底无映射 / 取数失败）
+    if not e.get("code"):
         out.append("   ③ 落地  : 无反向ETF映射 ⇒ 无法落地")
+    elif e.get("error"):
+        out.append("   ③ 落地  : %s 取数失败（%s）" % (e["code"], e["error"]))
     # ④ 结论
     out.append("   ④ 结论  : %s — %s" % (v, c.get("verdict_reason") or ""))
     return "\n".join(out)
@@ -536,19 +545,12 @@ def main():
         lev = e.get("lev") or 2.0
         er = e.get("ref") or ref
         cands = c.get("main_cands") or []
-        bits = []
-        for cd in cands:
-            bits.append("%s 入场%.2f 止损%.2f 目标%.2f RR%.2f"
-                        % (cd["name"], cd["entry"], cd["stop"], cd["target"], cd["rr"] or 0))
+        t1_und = c.get("t1")
+        bits = [_fmt_etf_cand(cd, e, ref, er, lev, t1_und) for cd in cands]
         print("  %-6s %s" % (c["sym"], " ｜ ".join(bits)))
-        cd0 = cands[0] if cands else None
-        if cd0:
-            print("        └─ %s 买 %.4g｜止损 %.4g｜目标 %.4g（%sx）｜背景 %s 第%s根(%s)"
-                  % (e.get("code"),
-                     etf_from_underlying(cd0["entry"], ref, er, lev),
-                     etf_from_underlying(cd0["stop"], ref, er, lev),
-                     etf_from_underlying(cd0["target"], ref, er, lev), lev,
-                     c["ctx_name"], c["ctx_age"], c["ctx_grade"]))
+        if e.get("code"):
+            print("        └─ %s（%sx）｜背景 %s 第%s根(%s)"
+                  % (e["code"], lev, c["ctx_name"], c["ctx_age"], c["ctx_grade"]))
     if not ok:
         print("  （无：要么背景未成立/已失效，要么结构空点 RR<1.5 负期望）")
     print()
