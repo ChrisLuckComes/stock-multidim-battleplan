@@ -76,12 +76,14 @@ def one_card(sym, pairs):
     if len(bars) < 60:
         return {"sym": sym, "error": "日线不足 %d 根" % len(bars)}
     lv = levels_from_bars(bars)
+    ref_close = bars[-1]["c"]                       # 昨收：ETF 换算 und_ref 固定用昨收
+    live = spot if spot is not None else ref_close   # 现价（夜盘/盘前 spot；收盘=昨收）—— 与 us_short 锚价一致，消除同票数字漂移
     hs = detect_head_shoulders_top(bars, ma50=lv.get("ma50"))
     ctx = bearish_context(bars)
     # ── ★ ① 主决策（裸K结构位，**口径唯一真源** plan_levels，与 us_short.py 同源）──
     from gates.us_short import (NOISE_ATR, STRUCT_STOP_ATR, plan_levels,
                                 rr_ratio)
-    anchor = bars[-1]["c"]
+    anchor = live                                     # 结构位锚 = 现价（与 us_short 的 spot 一致）
     pl = plan_levels(bars, anchor, STRUCT_STOP_ATR, lv=lv)
     atr = pl["atr"]
     main_cands = []
@@ -105,8 +107,7 @@ def one_card(sym, pairs):
     #   ⇒ 本档只做**执行提示**：现价已跌透 ⇒ 给出「反抽到 X% 就进」的触发带 + ETF 价 + 止损参考。
     #   ⚠ 出场由老罗自己决定（「我什么时候平仓就是我自己看着办」）⇒ 系统不设平仓时点。
     deep = None
-    ref_close = bars[-1]["c"]
-    cur = spot or ref_close
+    cur = live                                       # 同票现价（spot 或昨收），与锚价一致
     cur_pct = (cur / ref_close - 1.0) * 100.0
     if cur_pct <= -DEEP_D:
         trig_pct = -DEEP_R
@@ -147,7 +148,8 @@ def one_card(sym, pairs):
         except Exception:
             sig_age = None
     card = {
-        "sym": sym, "date": last["d"], "close": last["c"],
+        "sym": sym, "date": last["d"], "close": live,
+        "ref_close": ref_close,                       # 昨收：ETF 换算 und_ref 固定用昨收（与 close=live 解耦）
         "sig_age": sig_age,
         "mode": "破位结构空" if pl["broken"] else "反抽结构空",
         "main_cands": [{"name": n, "entry": e, "stop": cs, "target": tg,
@@ -176,69 +178,33 @@ def one_card(sym, pairs):
             "rr_capped": bool(sig.get("rr_capped")),
             "target_raw": sig.get("target_raw"),
         }
-    # ── ★★ 当前价重算盈亏比（老罗 2026-10-31：「盈亏比到位就能做」的唯一门槛）──
-    #   ⚠ 关键：必须用**当下真实的结构位**，不能用几天前的信号棒高
-    #     （信号止损 1610 vs 现价 1150 ⇒ 止损在天上 40%，毫无意义）
-    #   入场 = 现价 ｜ 止损 = 现价上方最近结构阻力 + ATR 缓冲
-    #         目标 = 现价下方最近结构支撑 ｜ 盈亏比 = (入场-目标)/(止损-入场)
-    now_entry = now_stop = now_target = now_target_2r = None
-    rr_now = None
-    if sig:
-        atr_now = lv.get("atr14") or 0.0
-        now_entry = last["c"]
-        try:
-            from levels import structural_levels
-            _i, s_highs = structural_levels(bars)
-            _i2, s_lows = structural_levels(bars)
-        except Exception:
-            s_highs, s_lows = [], []
-        up = sorted([px for (_i, px) in s_highs if px > now_entry * 1.001])
-        down = sorted([px for (_i, px) in s_lows if px < now_entry * 0.999], reverse=True)
-        # 止损：上方最近结构阻力；若太远（>1.5×ATR）说明没有近阻力 ⇒ 用 ATR 兜底
-        if up:
-            cand = up[0]
-            now_stop = cand + 0.15 * atr_now if (cand - now_entry) <= 1.5 * atr_now \
-                else now_entry + 0.30 * atr_now
-        else:
-            now_stop = now_entry + 0.30 * atr_now
-        # ★ 目标 = **2R 纪律目标**（现价 − 2×风险）；「日内吃不吃得到」单独判。
-        #   ⚠ 教训（我自己踩的两次）：
-        #     ① 用「下方最近结构支撑」当目标 ⇒ RR 虚高到 6.19（远支撑，日内吃不到）；
-        #     ② 把 ATR 上限 min 进目标 ⇒ 逻辑取反，RR 恒 ≥2，门槛失效。
-        #   ⇒ 目标 = 2R；可达性用「2R 需要的跌幅 ≤ 1×ATR14」单独判（ATR 是尺度，
-        #     不是目标）；下方结构支撑作为**极限目标**另列（想博就博那个）。
-        risk = now_stop - now_entry
-        now_target = now_entry - 2.0 * risk if risk > 0 else now_entry
-        now_target_2r = now_target
-        target_far = down[0] if down else None     # 极限目标（下方结构支撑，仅参考）
-        # 日内可达性：2R 需要的跌幅 vs 1×ATR14（当日振幅通常 ≤1×ATR）
-        need = 2.0 * risk
-        day_ok = (atr_now > 0 and need <= atr_now)
-        day_max_drop = atr_now
-        # 风险占现价比例（用于仓位：单笔风险预算 1.5%）
-        risk_pct = (risk / now_entry * 100.0) if now_entry else None
-        if risk > 0 and now_entry > now_target:
-            rr_now = (now_entry - now_target) / risk
-        else:
-            rr_now = 0.0
+    # ── ★ 旁证字段（非主决策；主决策统一看上方 main_cands ①主决策）──
+    #   下列仅作仓位/极限目标参考提示，不进入推荐判定、不产生第二套价。
+    # ⚑ #5 修复：structural_levels 返回 (lows, highs)；原 `_i2, s_lows` 误把 highs 赋给
+    #    s_lows ⇒ 远目标 target_far 取到摆动高点（只伤远目标）。现改为正确解包。
+    try:
+        from levels import structural_levels
+        _lows, _highs = structural_levels(bars)
+        _down = sorted([px for (_, px) in _lows if px < anchor * 0.999], reverse=True)
+        target_far = _down[0] if _down else None      # 极限目标（下方最近结构支撑，仅参考）
+    except Exception:
+        target_far = None
+    # 风险占现价比例（来自主决策首档，用于仓位：单笔风险预算 1.5%）
+    _mc = card.get("main_cands") or []
+    _cd0 = _mc[0] if _mc else None
+    risk_pct = ((_cd0["stop"] - _cd0["entry"]) / _cd0["entry"] * 100.0
+                if _cd0 and _cd0["entry"] else None)
     # 追空提示（**不否决**，只提示）：现价相对信号入场价已跌多少
-    card["chased_pct"] = ((now_entry / sig["entry"] - 1.0) * 100.0
-                          if (sig and sig.get("entry") and now_entry) else None)
+    chased_pct = ((anchor / sig["entry"] - 1.0) * 100.0
+                  if (sig and sig.get("entry") and anchor) else None)
     # 日内振幅参考
-    card["day_range_pct"] = ((last["h"] - last["l"]) / last["c"] * 100.0
-                             if last.get("c") else None)
-    card["now_entry"] = now_entry
-    card["now_stop"] = now_stop
-    card["now_target"] = now_target
-    card["now_target_2r"] = now_target_2r
+    day_range_pct = ((last["h"] - last["l"]) / last["c"] * 100.0
+                     if last.get("c") else None)
     card["target_far"] = target_far
-    card["day_ok"] = day_ok
-    card["day_max_drop"] = day_max_drop
     card["risk_pct"] = risk_pct
-    card["rr_now"] = rr_now
+    card["chased_pct"] = chased_pct
+    card["day_range_pct"] = day_range_pct
 
-    # ── ★ 推荐 / 不推荐（口径按校准实证固化）──
-    card["verdict"], card["verdict_reason"] = _verdict(card)
     # 反向ETF 可执行价
     pair = pairs.get(sym, {})
     etf_code = (pair.get("etf") or "").upper()
@@ -259,66 +225,6 @@ def one_card(sym, pairs):
             card["etf"] = {"code": etf_code, "lev": lev, "error": str(e)[:40]}
     else:
         card["etf"] = None
-    # ── ★★ 当前价重算盈亏比（老罗 2026-10-31：「盈亏比到位就能做」的唯一门槛）──
-    #   ⚠ 关键：必须用**当下真实的结构位**，不能用几天前的信号棒高
-    #     （信号止损 1610 vs 现价 1150 ⇒ 止损在天上 40%，毫无意义）
-    #   入场 = 现价 ｜ 止损 = 现价上方最近结构阻力 + ATR 缓冲
-    #         目标 = 现价下方最近结构支撑 ｜ 盈亏比 = (入场-目标)/(止损-入场)
-    now_entry = now_stop = now_target = now_target_2r = None
-    rr_now = None
-    if sig:
-        atr_now = lv.get("atr14") or 0.0
-        now_entry = last["c"]
-        try:
-            from levels import structural_levels
-            _i, s_highs = structural_levels(bars)
-            _i2, s_lows = structural_levels(bars)
-        except Exception:
-            s_highs, s_lows = [], []
-        up = sorted([px for (_i, px) in s_highs if px > now_entry * 1.001])
-        down = sorted([px for (_i, px) in s_lows if px < now_entry * 0.999], reverse=True)
-        # 止损：上方最近结构阻力；若太远（>1.5×ATR）说明没有近阻力 ⇒ 用 ATR 兜底
-        if up:
-            cand = up[0]
-            now_stop = cand + 0.15 * atr_now if (cand - now_entry) <= 1.5 * atr_now \
-                else now_entry + 0.30 * atr_now
-        else:
-            now_stop = now_entry + 0.30 * atr_now
-        # ★ 目标 = **2R 纪律目标**（现价 − 2×风险）；「日内吃不吃得到」单独判。
-        #   ⚠ 教训（我自己踩的两次）：
-        #     ① 用「下方最近结构支撑」当目标 ⇒ RR 虚高到 6.19（远支撑，日内吃不到）；
-        #     ② 把 ATR 上限 min 进目标 ⇒ 逻辑取反，RR 恒 ≥2，门槛失效。
-        #   ⇒ 目标 = 2R；可达性用「2R 需要的跌幅 ≤ 1×ATR14」单独判（ATR 是尺度，
-        #     不是目标）；下方结构支撑作为**极限目标**另列（想博就博那个）。
-        risk = now_stop - now_entry
-        now_target = now_entry - 2.0 * risk if risk > 0 else now_entry
-        now_target_2r = now_target
-        target_far = down[0] if down else None     # 极限目标（下方结构支撑，仅参考）
-        # 日内可达性：2R 需要的跌幅 vs 1×ATR14（当日振幅通常 ≤1×ATR）
-        need = 2.0 * risk
-        day_ok = (atr_now > 0 and need <= atr_now)
-        day_max_drop = atr_now
-        # 风险占现价比例（用于仓位：单笔风险预算 1.5%）
-        risk_pct = (risk / now_entry * 100.0) if now_entry else None
-        if risk > 0 and now_entry > now_target:
-            rr_now = (now_entry - now_target) / risk
-        else:
-            rr_now = 0.0
-    # 追空提示（**不否决**，只提示）：现价相对信号入场价已跌多少
-    card["chased_pct"] = ((now_entry / sig["entry"] - 1.0) * 100.0
-                          if (sig and sig.get("entry") and now_entry) else None)
-    # 日内振幅参考
-    card["day_range_pct"] = ((last["h"] - last["l"]) / last["c"] * 100.0
-                             if last.get("c") else None)
-    card["now_entry"] = now_entry
-    card["now_stop"] = now_stop
-    card["now_target"] = now_target
-    card["now_target_2r"] = now_target_2r
-    card["target_far"] = target_far
-    card["day_ok"] = day_ok
-    card["day_max_drop"] = day_max_drop
-    card["risk_pct"] = risk_pct
-    card["rr_now"] = rr_now
 
     # ── ★ 推荐 / 不推荐（口径按校准实证固化）──
     # ⚑ 必须在**ETF 换算之后**判定：早期版本在这里算，导致「有ETF价却判无ETF可执行价」
@@ -351,63 +257,60 @@ def _verdict(c):
          （日内回测 124 笔：晚期26~60 最差 +0.02%，但**超晚期>60 又回到 +6.26%**
            ⇒ 年龄**不是单调排序器**；那个负收益是 SOXX 一只票的锅，不是年龄的锅）。
 
-    ⇒ 现在的判定：
-       **硬否决（只保留结构性理由）**：背景未成立（还没见顶）/ 背景已失效 /
-         现价已跌破止损位（结构失效）/ 无反向ETF可执行价。
-       **分档（不否决，只提示）**：2R 日内吃不吃得到、止损占现价多少%（决定仓位）、
-         较信号价追了多少、背景年龄（越新越优先，排序用）。
+    ⇒ 2026-11-01 Grok 复核修正 #2：推荐徽章改由**主决策结构空点 RR≥1.5** 驱动，
+       **顶部形态 / 大背景 / 反转K线 全是旁证，不得当硬闸**。
+       **硬否决（标的级/硬约束）**：① 无顶部破位背景（抢跑）② 背景已失效（波段结束）
+         ③ 结构空点最佳 RR < 1.5（③ RR临界未达）④ 无反向ETF映射（无法落地）。
+       **排序器（只分档/提示，不否决）**：背景年龄（越新越优先）、极限目标、止损占现价、
+         较信号价追空幅度；反转K线信号只作旁证提示，不否决。
     """
     if c.get("error"):
         return "不推荐", "取数/数据问题：" + c["error"]
+    # 硬闸①：顶部确认（下跌波段成立）—— 否则做空=抢跑（校准：见顶前超额 -7.55%）
     if not c.get("ctx_name"):
         return "不推荐", "无顶部形态破位背景 ⇒ 尚未见顶，做空是抢跑（校准：见顶前超额 -7.55%）"
+    # 硬闸②：背景已失效（价格重回触发位上方）—— 波段可能已结束
     if not c.get("ctx_alive"):
         return "不推荐", "背景已失效（价格重回颈线/触发位上方）⇒ 下跌波段可能已结束"
-    sg = c.get("signal")
-    if not sg:
-        return "盯盘", ("背景成立(%s·第%s根)但尚无「阻力区反转K线」触发 ⇒ 等信号，"
-                        "不主动开仓" % (c.get("ctx_grade"), c.get("ctx_age")))
-    # 结构性硬否决：现价已跌破止损位 ⇒ 这张单的结构已失效
-    if c.get("rr_now") is not None and c.get("rr_now") <= 0:
-        return "不推荐", ("现价 %.2f 已跌穿止损位 %.2f ⇒ 结构失效，这张单作废"
-                          % (c.get("now_entry") or 0, c.get("now_stop") or 0))
+    # 硬闸③：结构空点盈亏比（③ RR临界 ≥1.5）—— 唯一价格门槛
+    cands = c.get("main_cands") or []
+    rrs = [x["rr"] for x in cands if x.get("rr") is not None]
+    best_rr = max(rrs) if rrs else 0.0
+    if best_rr < 1.5:
+        return "不推荐", ("结构空点盈亏比不足（最佳 RR %.2f < 1.5 门槛）⇒ 负期望区"
+                          % best_rr)
+    # 硬闸④：可执行（只做反向ETF）
     if not (c.get("etf") or {}).get("code"):
         return "不推荐", "无反向ETF映射 ⇒ 无法落地（只做反向ETF）"
-    # 分档提示（不否决）
+    # ── 排序器：背景年龄（越新越好，只分档不否决；用**当前**背景年龄，信号年龄仅兜底）──
+    #   ⚑ 必须用当前背景年龄（波段已成立的时长），不能用信号当时的年龄——
+    #     信号是 30+ 天前发的，不等于现在"早"，否则会把老波段误判成"优先"。
+    sg = c.get("signal")
+    age = c.get("ctx_age")
+    if age is None:
+        age = (sg or {}).get("ctx_age")
+    if age is not None and age <= 10:
+        tier = "推荐(优先)"
+    else:
+        tier = "推荐"
+    # ── 旁证提示（不否决）──
     tips = []
-    if c.get("day_ok") is False:
-        tips.append("2R日内吃不到（需跌%.1f%%＞当日1×ATR %.1f%%）"
-                    % ((c.get("now_entry") or 0) - (c.get("now_target") or 0)
-                       / (c.get("now_entry") or 1) * 100.0,
-                       (c.get("day_max_drop") or 0) / (c.get("now_entry") or 1) * 100.0))
     rp = c.get("risk_pct")
     if rp:
         tips.append("止损占现价%.1f%%（单笔风险预算1.5%% ⇒ 仓位≤%.0f%%）"
                     % (rp, min(100.0, 1.5 / rp * 100.0)))
-    ch = c.get("chased_pct")
-    if ch is not None and ch < -0.5:
-        tips.append("较信号价已跌%.1f%%（追空幅度，只提示）" % ch)
     tf = c.get("target_far")
     if tf:
         tips.append("极限目标(下方结构支撑) %.2f" % tf)
-    # ★ 结论**分档**（老罗：晚期不是不能做，只是没早期进好 ⇒ 排序不是否决）
-    #   模拟实盘 413 笔：刚成立0~3 胜率 69.2%／中晚期 ≈ 46~59%，
-    #   同票内配对 晚期−早期 −1.62pp ⇒ **有区分度但不否决**。
-    age = sg.get("ctx_age")
-    if age is not None and age <= 10:
-        tier = "推荐(优先)"
-    elif age is not None and age <= 25:
-        tier = "推荐"
-    else:
-        tier = "谨慎(波段偏老)"
-    if c.get("day_ok") is False:
-        tier = "谨慎(2R日内吃不到)"
-    return tier, ("波段内(%s·第%s根·%s) + %s 触发｜**现价入场 %.2f 止损 %.2f 目标 %.2f"
-                  "（2R）｜日内不过夜**%s"
+    ch = c.get("chased_pct")
+    if ch is not None and ch < -0.5:
+        tips.append("较信号价已跌%.1f%%（追空幅度，只提示）" % ch)
+    if age is not None and age > 25:
+        tips.append("波段偏老(第%s根)·排序靠后，只提示" % age)
+    nm = "/".join((sg or {}).get("templates") or [])[:14]
+    return tier, ("波段内(%s·第%s根·%s)%s ｜ **主决策空点 RR≥1.5 达标**｜日内不过夜%s"
                   % (c.get("ctx_name"), age, c.get("ctx_grade"),
-                     "/".join(sg.get("templates") or [])[:14],
-                     c.get("now_entry") or 0, c.get("now_stop") or 0,
-                     c.get("now_target") or 0,
+                     (" + %s 触发" % nm) if nm else "",
                      ("｜" + "；".join(tips)) if tips else ""))
 
 
@@ -450,7 +353,7 @@ def brief_line(c):
     # ③ 落地：反向ETF 价
     e = c.get("etf") or {}
     if e.get("code") and cands:
-        ref = c["close"]
+        ref = c.get("ref_close") or c["close"]
         lev = e.get("lev") or 2.0
         er = e.get("ref") or ref
         cd = cands[0]
@@ -469,7 +372,7 @@ def brief_line(c):
         e2 = c.get("etf") or {}
         etx = ""
         if e2.get("code"):
-            ref = c["close"]
+            ref = c.get("ref_close") or c["close"]
             etx = ("｜**%s 触发价 %.4g**｜止损参考 %.2f"
                    % (e2["code"],
                       etf_from_underlying(dp["trig_px"], ref, e2.get("ref") or ref,
@@ -511,36 +414,52 @@ def line(c):
                        "看盈亏比与当日可达性再决定" % (sa, (c.get("signal") or {}).get("date")))
     else:
         out.append("   ① 背景  : 无（尚未见顶）")
-    # ② 进场层（★ 当下口径：入场=现价，止损/目标=当前结构位）
-    if sg and c.get("rr_now") is not None:
-        out.append("   ② 进场  : %s ｜ %s ｜ 阻力 %s ｜ **当前价重算**" % (
-            sg["date"], "/".join(sg.get("templates") or []), sg.get("resist")))
-        out.append("            点位  **现价入场 %.2f ｜ 止损 %.2f ｜ 目标 %.2f ｜ 盈亏比 %.2f**"
-                   % (c.get("now_entry") or 0, c.get("now_stop") or 0,
-                      c.get("now_target") or 0, c.get("rr_now") or 0))
-        if c.get("chased_pct") is not None and c["chased_pct"] < -0.5:
-            out.append("            ⚠ 较信号入场价(%.2f)已跌 %.1f%% ⇒ 追空提示（不否决，看盈亏比）"
-                       % (sg.get("entry") or 0, c["chased_pct"]))
-    elif sg:
-        out.append("   ② 进场  : %s ｜ %s ｜ 阻力 %s" % (
-            sg["date"], "/".join(sg.get("templates") or []), sg.get("resist")))
-        out.append("            点位  信号入场 %.2f ｜ 止损 %.2f ｜ 目标 %.2f ｜ 信号盈亏比 %.2f"
-                   % (sg["entry"], sg["stop"], sg["target"], sg.get("rr") or 0))
+    # ① 主决策（★ 裸K结构位空点候选：下单看这里，与 us_short.py 同源，唯一价格口径）
+    cands = c.get("main_cands") or []
+    if cands:
+        for cd in cands:
+            rr = cd.get("rr")
+            out.append("   ① 主决策: %s ｜ 入场 %.2f ｜ 止损 %.2f ｜ 目标 %.2f ｜ RR %s"
+                       % (cd["name"], cd["entry"], cd["stop"], cd["target"],
+                          ("%.2f" % rr) if rr is not None else "—"))
+        lad = c.get("rr_ladder") or []
+        gate = [x for x in lad if abs(x[0] - 1.5) < 1e-9]
+        if gate:
+            out.append("            RR≥1.5 门槛：入场价 ≥ %.2f（当前现价 %.2f %s）"
+                       % (gate[0][1], c["close"],
+                          "够" if c["close"] >= gate[0][1] else "不够"))
     else:
-        out.append("   ② 进场  : 无（等「阻力区反转K线」触发，不主动开仓）")
-    # ③ 落地层
+        out.append("   ① 主决策: —")
+    # ② 旁证·反转K线信号（**非主决策**：顶部形态/大背景/反转K 均为旁证，不否决）
+    if sg:
+        out.append("   ② 旁证·反转K: %s ｜ %s ｜ 阻力 %s" % (
+            sg["date"], "/".join(sg.get("templates") or []), sg.get("resist")))
+        out.append("            信号点位  入场 %.2f ｜ 止损 %.2f ｜ 目标 %.2f ｜ 信号盈亏比 %.2f"
+                   % (sg["entry"], sg["stop"], sg["target"], sg.get("rr") or 0))
+        if c.get("chased_pct") is not None and c["chased_pct"] < -0.5:
+            out.append("            ⚠ 较信号入场价(%.2f)已跌 %.1f%% ⇒ 追空提示（不否决，看主决策盈亏比）"
+                       % (sg.get("entry") or 0, c["chased_pct"]))
+    else:
+        out.append("   ② 旁证·反转K: 无（按主决策结构空点执行即可，不需等信号）")
+    # ③ 落地层（★ 反向ETF = 主决策空点的落地价）
     if e.get("code"):
         if e.get("error"):
             out.append("   ③ 落地  : %s 取数失败（%s）" % (e["code"], e["error"]))
-        elif sg and c.get("now_entry"):
-            ref = c["close"]
+        elif cands:
+            ref = c.get("ref_close") or c["close"]
             lev = e.get("lev") or 2.0
+            cd0 = cands[0]
+            t1 = c.get("t1") or cd0["target"]
+            t2 = c.get("t2")
             out.append("            **%s 买 %.4g ｜ 止损 %.4g ｜ 目标 %.4g**（%sx 反向）" % (
                 e["code"],
-                etf_from_underlying(c["now_entry"], ref, e.get("ref") or ref, lev),
-                etf_from_underlying(c.get("now_stop") or c["now_entry"], ref, e.get("ref") or ref, lev),
-                etf_from_underlying(c.get("now_target") or c["now_entry"], ref, e.get("ref") or ref, lev),
+                etf_from_underlying(cd0["entry"], ref, e.get("ref") or ref, lev),
+                etf_from_underlying(cd0["stop"], ref, e.get("ref") or ref, lev),
+                etf_from_underlying(t1, ref, e.get("ref") or ref, lev),
                 lev))
+            if t2 and abs(t2 - t1) > 1e-6:
+                out.append("            远目标T2 %.4g（%s）" % (
+                    etf_from_underlying(t2, ref, e.get("ref") or ref, lev), e["code"]))
         else:
             out.append("   ③ 落地  : %s（昨收 %.4g · %sx 反向）" % (
                 e["code"], e.get("ref") or 0, e.get("lev")))
@@ -581,10 +500,9 @@ def main():
         # ★ 纯文本摘要模式：老罗 2026-10-31 定「只推文本摘要到对话」
         print("【美股做空作战方案】%s（数据 %s）" % (" ".join(syms),
                                                  cards[0].get("date", "")[:10] if cards else ""))
-        print("⚠ A股无融券、美股无融资 ⇒ 做空只走反向ETF；背景=顶部形态破位（下跌波段）")
-        print("⚠ 本卡是**旁证口径**（形态/背景/反转K + 现价重算盈亏比）；"
-              "**裸K主决策价**（结构位入场/止损/目标/RR≥1.5门槛）在 "
-              "`python gates/us_short.py <TICKER>` —— 下单以主决策为准")
+        print("⚠ A股无融券、美股无融资 ⇒ 做空只走反向ETF；顶部破位=下跌波段成立（背景）")
+        print("⚠ **主决策价=①主决策（结构位空点 / RR≥1.5 门槛）直接在此给出**；"
+              "形态 / 大背景 / 反转K 均为旁证，只排序不否决")
         fresh = [c for c in cards if (c.get("sig_age") == 0)]
         print("★ 今日新信号（当日可入场）：%s"
               % ("、".join("%s(%s)" % (c["sym"], "/".join((c.get("signal") or {}).get("templates") or [])[:8])
@@ -601,38 +519,50 @@ def main():
     ok = [c for c in cards if actionable(c)]
     # ★ 排序键：**背景年龄升序**（刚成立优先）—— 模拟实盘 413 笔：刚成立档
     #   胜率 69.2%、中晚期 46~59% ⇒ 早的先做，这比任何硬闸门都实用。
-    ok.sort(key=lambda c: (c.get("signal", {}).get("ctx_age")
-                           if c.get("signal") else 9999))
-    watch = [c for c in cards if c.get("verdict") == "盯盘"]
+    def _age_key(c):
+        # ★ 与 _verdict 一致：排序用**当前**背景年龄（波段已成立时长），信号年龄仅兜底。
+        #   否则老信号（信号时第5根）会把已第28根的老波段误排到"刚成立"前面。
+        a = c.get("ctx_age")
+        if a is None:
+            a = (c.get("signal") or {}).get("ctx_age")
+        return a if a is not None else 9999
+    ok.sort(key=_age_key)
+    # 今日盯盘：背景仍有效（下跌波段中）但结构空点 RR 暂未达标 ⇒ 等更好入场位
+    watch = [c for c in cards if c.get("ctx_alive") and c.get("verdict") == "不推荐"]
     print("=" * 118)
     print("【今日可做空】%s" % ("、".join(
         "%s→%s" % (c["sym"], (c.get("etf") or {}).get("code")) for c in ok)
         if ok else "（无）"))
     for c in ok:
         e = c.get("etf") or {}
-        ref = c["close"]
+        ref = c.get("ref_close") or c["close"]
         lev = e.get("lev") or 2.0
         er = e.get("ref") or ref
-        print("  %-6s %-8s｜**现价入场 %.2f 止损 %.2f 目标 %.2f｜盈亏比 %.2f**"
-              % (c["sym"], "/".join(c["signal"]["templates"] or [])[:8],
-                 c.get("now_entry") or 0, c.get("now_stop") or 0,
-                 c.get("now_target") or 0, c.get("rr_now") or 0))
-        print("        └─ %s 买 %.4g｜止损 %.4g｜目标 %.4g（%sx 反向）｜背景 %s 第%s根(%s)"
-              % (e.get("code"), etf_from_underlying(c.get("now_entry") or 0, ref, er, lev),
-                 etf_from_underlying(c.get("now_stop") or 0, ref, er, lev),
-                 etf_from_underlying(c.get("now_target") or 0, ref, er, lev), lev,
-                 c["ctx_name"], c["ctx_age"], c["ctx_grade"]))
+        cands = c.get("main_cands") or []
+        bits = []
+        for cd in cands:
+            bits.append("%s 入场%.2f 止损%.2f 目标%.2f RR%.2f"
+                        % (cd["name"], cd["entry"], cd["stop"], cd["target"], cd["rr"] or 0))
+        print("  %-6s %s" % (c["sym"], " ｜ ".join(bits)))
+        cd0 = cands[0] if cands else None
+        if cd0:
+            print("        └─ %s 买 %.4g｜止损 %.4g｜目标 %.4g（%sx）｜背景 %s 第%s根(%s)"
+                  % (e.get("code"),
+                     etf_from_underlying(cd0["entry"], ref, er, lev),
+                     etf_from_underlying(cd0["stop"], ref, er, lev),
+                     etf_from_underlying(cd0["target"], ref, er, lev), lev,
+                     c["ctx_name"], c["ctx_age"], c["ctx_grade"]))
     if not ok:
-        print("  （无：要么背景未成立/已失效，要么还没到入场触发，要么 RR 不足）")
+        print("  （无：要么背景未成立/已失效，要么结构空点 RR<1.5 负期望）")
     print()
     print("【今日盯盘】%s" % ("、".join("%s(%s第%s根)" % (c["sym"], c["ctx_name"], c["ctx_age"])
                                        for c in watch) if watch else "（无）"))
     for c in watch:
-        print("  %-6s %s｜%s｜等「阻力区反转K线」触发再进（背景越新越优先）"
+        print("  %-6s %s｜%s｜背景成立但结构空点 RR 暂不足，等更好入场位（背景越新越优先）"
               % (c["sym"], c["ctx_name"], c["ctx_grade"]))
     print()
     print("纪律：① 先看背景（形态破位⇒下跌波段成立）② 背景越新越好（刚成立>早期>中段>晚期）")
-    print("      ③ 只在波段内做空、不追跌 ④ 目标截 2R、同票冷却 5 根 ⑤ RR 仅参考排序，不作门槛")
+    print("      ③ 只在波段内做空、不追跌 ④ 目标截 2R、同票冷却 5 根 ⑤ 结构空点 RR≥1.5 是门槛（③ RR临界）")
     print("      ⑥ 2倍/3倍反向ETF 当日了结（不留隔夜仓）")
 
 if __name__ == "__main__":
