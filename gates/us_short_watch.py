@@ -500,9 +500,6 @@ def main():
         # ★ 纯文本摘要模式：老罗 2026-10-31 定「只推文本摘要到对话」
         print("【美股做空作战方案】%s（数据 %s）" % (" ".join(syms),
                                                  cards[0].get("date", "")[:10] if cards else ""))
-        print("⚠ A股无融券、美股无融资 ⇒ 做空只走反向ETF；顶部破位=下跌波段成立（背景）")
-        print("⚠ **主决策价=①主决策（结构位空点 / RR≥1.5 门槛）直接在此给出**；"
-              "形态 / 大背景 / 反转K 均为旁证，只排序不否决")
         fresh = [c for c in cards if (c.get("sig_age") == 0)]
         print("★ 今日新信号（当日可入场）：%s"
               % ("、".join("%s(%s)" % (c["sym"], "/".join((c.get("signal") or {}).get("templates") or [])[:8])
@@ -560,10 +557,11 @@ def main():
     for c in watch:
         print("  %-6s %s｜%s｜背景成立但结构空点 RR 暂不足，等更好入场位（背景越新越优先）"
               % (c["sym"], c["ctx_name"], c["ctx_grade"]))
-    print()
-    print("纪律：① 先看背景（形态破位⇒下跌波段成立）② 背景越新越好（刚成立>早期>中段>晚期）")
-    print("      ③ 只在波段内做空、不追跌 ④ 目标截 2R、同票冷却 5 根 ⑤ 结构空点 RR≥1.5 是门槛（③ RR临界）")
-    print("      ⑥ 2倍/3倍反向ETF 当日了结（不留隔夜仓）")
+    if not a.brief:
+        print()
+        print("纪律：① 先看背景（形态破位⇒下跌波段成立）② 背景越新越好（刚成立>早期>中段>晚期）")
+        print("      ③ 只在波段内做空、不追跌 ④ 目标截 2R、同票冷却 5 根 ⑤ 结构空点 RR≥1.5 是门槛（③ RR临界）")
+        print("      ⑥ 2倍/3倍反向ETF 当日了结（不留隔夜仓）")
 
 if __name__ == "__main__":
     main()
