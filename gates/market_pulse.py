@@ -68,6 +68,7 @@
 from __future__ import print_function
 
 import argparse
+import datetime
 import json
 import os
 import sys
@@ -630,6 +631,8 @@ def _main(argv=None):
     ap.add_argument("--code", default=None, help="按标的代码自动分流市场")
     ap.add_argument("--elapsed-minutes", type=int, default=None,
                     help="今日已交易分钟（盘中量能折算用；不给则不折算）")
+    ap.add_argument("--out-dir", default=None,
+                    help="落盘目录（与情绪分同口径：<dir>/pulse_<market>_<date>.json）")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
@@ -639,6 +642,19 @@ def _main(argv=None):
     else:
         p = pulse_for(code=args.code, market=args.market,
                       elapsed_minutes=args.elapsed_minutes)
+
+    if args.out_dir:
+        # 文件名带市场与日期，避免 A股/美股互相覆盖
+        stamp = datetime.date.today().strftime("%Y%m%d")
+        path = os.path.join(args.out_dir, "pulse_%s_%s.json" % (p.get("market") or
+                                                               (args.market or "cn"),
+                                                               stamp))
+        d = os.path.dirname(path)
+        if d and not os.path.isdir(d):
+            os.makedirs(d)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(p, f, ensure_ascii=False, indent=2, default=str)
+        print("已落盘 %s" % path)
 
     if args.json:
         print(json.dumps(p, ensure_ascii=False, indent=2, default=str))

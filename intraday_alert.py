@@ -251,6 +251,7 @@ def print_gate(top=12):
                         sector_selfcalc.HIGH_L2_MA20_DEV,
                         sector_selfcalc.HIGH_L2_DIST_D0,
                         "是" if weak else "否"))
+    _print_pulse()
     print("  %-20s %-8s %-4s %7s %7s %7s %5s  %s" % (
         "板块", "闸门", "开仓", "等权涨", "距低点", "乖离", "D0次", "触发原因"))
     print("  " + "-" * 104)
@@ -260,6 +261,41 @@ def print_gate(top=12):
             r["chg"], r["dist_low"], r["ma20_dev"], r["d0_count"],
             "；".join(r["reasons"]) or "-"))
     return rows
+
+
+def _print_pulse():
+    """打印市场脉搏（择时层）—— 盘中真正会下手的地方要有它。
+
+    ⚑ **只缩放仓位，不否决开仓**（gates/market_pulse.py 铁律①）。
+       板块 D0 才是开仓方向闸；这里是补充的「大盘环境」提示。
+    ⚠ 取数失败不静默吞掉：明说「未知·放行」，不让老罗以为查过了。
+    """
+    try:
+        from gates.market_pulse import pulse_for
+        p = pulse_for(market="cn")
+    except Exception as e:
+        print("【市场脉搏】不可用（%s）· 按放行处理" % type(e).__name__)
+        return
+    if not isinstance(p, dict) or not p.get("ok"):
+        print("【市场脉搏】未知（指数取数失败）· 按放行处理")
+        return
+    print("【市场脉搏】%s ｜ 仓位系数 ×%.2f ｜ %s"
+          % (p.get("state_cn") or "—", p.get("scale") or 1.0, p.get("why") or "—"))
+    for r in p.get("indices") or []:
+        if not r.get("ok"):
+            print("    %s：取数失败（放行）" % r.get("index"))
+            continue
+        at = r.get("attempt") or {}
+        ftd = r.get("ftd") or {}
+        print("    %s [%s] attempt Day%s 低点%.2f(%s) ｜ FTD %s ｜ 派发日%s ｜ 回撤%s%%" % (
+            r.get("index"), r.get("state_cn"), at.get("day"), at.get("low") or 0.0,
+            at.get("low_date") or "-",
+            ("%s Day%s +%.2f%% 量比%.2f" % (ftd.get("date"), ftd.get("day"),
+                                            ftd.get("gain_pct") or 0.0,
+                                            ftd.get("vol_ratio") or 0.0))
+            if ftd.get("ok") else ("未成立(%s)" % (ftd.get("reason") or "-")),
+            r.get("dist_days") or 0, r.get("drawdown")))
+    print("    ⚠ 只缩放仓位、不否决开仓（板块 D0 才是方向闸）")
 
 
 def print_boards(top=12):
