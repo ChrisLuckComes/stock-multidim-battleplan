@@ -159,48 +159,33 @@ def test_ambig_state_registered():
 
 
 # ── ★ 2026-11-02 第二轮：7088 样本回测驱动的新增判据 ──────────────────────────
-def test_pull_early_state_registered():
-    """第八态「拉升·刚脱离成本区（上方有套牢）」必须进三张映射表。"""
-    assert S.ST_PULL_EARLY in S.STATE_TRADE
-    assert S.STATE_TRADE[S.ST_PULL_EARLY] == "观察"
-    assert S.STATE_ALLOW_NEW[S.ST_PULL_EARLY] is False
-    assert S.ST_PULL_EARLY in S.STATE_NOTE
-    assert S.ST_PULL_EARLY in S.CHIP_STATES
+def test_pull_early_state_removed():
+    """⛔ 第八态「拉升·刚脱离成本区（上方有套牢）」已撤销（老罗 2026-11-02 否决）。
+
+    原话：「有套牢盘又如何，这个本来就不是核心参考点。」
+    回测证实是过拟合：获利盘**不是**跨状态共同因子（全样本分档非单调、状态内 corr≈0），
+    拉升子集仅 299 条撑不住再切。这条测试防它被重新加回来。
+    """
+    assert not hasattr(S, "ST_PULL_EARLY"), "第八态已由老罗否决，不许重新引入"
+    assert not hasattr(S, "PULL_EARLY_PROFIT")
+    assert not hasattr(S, "PULL_EARLY_POS")
+    assert len(S.CHIP_STATES) == 6, "状态数须回到 6（+ 结构未定 = 7 个可输出值）"
+    assert S.ST_AMBIG not in S.CHIP_STATES, "「未定」是短路态，不进由好到坏的排序"
 
 
-def test_pull_early_when_profit_and_pos_both_low():
-    """获利盘 86% **且** 峰区位置 1.05 ⇒ 上方还有套牢盘压着 ⇒ 观察、禁新开仓。
+def test_low_profit_blocked_above_does_not_veto_entry():
+    """获利盘仅 86%、峰区位置 1.05（上方还压着 14% 套牢盘）⇒ **仍判拉升、仍允许开仓**。
 
-    回测：该组 n=130 超额 −0.90%/胜率 41.5%，对照「突破彻底」+1.80%/52.9%（跨度 2.70pp）。
+    ⚑ 这是老罗 2026-11-02 的口径：上方有套牢盘不是核心参考点，**不许拿它当否决理由**。
+      统计上该组确实偏弱（−0.90%），但那属于仓位缩放的事，不属于开仓闸门。
     """
     kw = _base_kwargs()
     kw.update(profit=86.0, dist_pos=1.05)
     st, why = S.chip_state_of(drain=False, rising=False, conflict=[], votes=[],
                               mass_retention=0.0, flow_rho_today=0.0, **kw)
-    assert st == S.ST_PULL_EARLY, why
-    assert "观察" in why or "新开仓" in why
-
-
-def test_pull_not_early_when_profit_high():
-    """301101 实测（获利盘 93%、峰区 1.064）⇒ 不在「遇阻」组，仍判拉升可开仓。
-
-    ⚑ 这条是**防误杀**测试：若把判据写成 `或`（profit<92 or pos<1.10），
-      301101 会被误关，但它在二维网格里实测 +1.0%。
-    """
-    kw = _base_kwargs()          # profit=93.0, dist_pos=1.064
-    st, why = S.chip_state_of(drain=False, rising=False, conflict=[], votes=[],
-                              mass_retention=0.0, flow_rho_today=0.0, **kw)
     assert st == S.ST_PULL, why
-    assert S.STATE_ALLOW_NEW[st] is True
-
-
-def test_pull_not_early_when_walked_far():
-    """获利盘 88% 但峰区位置 1.40（已走出来）⇒ 不判遇阻，仍算拉升。"""
-    kw = _base_kwargs()
-    kw.update(profit=88.0, dist_pos=1.40, close=40.0, p85=36.33)
-    st, why = S.chip_state_of(drain=False, rising=False, conflict=[], votes=[],
-                              mass_retention=0.0, flow_rho_today=0.0, **kw)
-    assert st == S.ST_PULL, why
+    assert S.STATE_ALLOW_NEW[st] is True, "不许因上方有套牢盘而关闭开仓闸门"
+    assert "套牢" not in S.STATE_NOTE[st] or "禁止" not in S.STATE_NOTE[st]
 
 
 def test_bt_pullback_blocks_accum_label():
@@ -235,5 +220,3 @@ def test_constants_present():
     assert S.MAIN_BASE_MIN_RATIO > 0
     assert S.MASS_RET_DRAIN < 0 < S.MASS_RET_ACCUM
     assert S.VOTE_MIN >= 2, "一条证据不足以定性（旧代码的病根就是一个指标=一个结论）"
-    assert 80 < S.PULL_EARLY_PROFIT < 100
-    assert 1.0 < S.PULL_EARLY_POS < 1.5
