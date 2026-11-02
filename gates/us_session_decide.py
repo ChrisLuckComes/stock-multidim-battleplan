@@ -301,6 +301,27 @@ def plan_from_us(plan_path):
 
 
 # ───────────────────────── 规则层（美股适配） ─────────────────────────
+def _us_pulse_scale(symbol, pulse=None, enabled=True):
+    """取市场脉搏的仓位系数（**与 A股共用 gates/market_pulse**）。
+
+    ⚑ 软约束：取数失败 ⇒ 1.0 放行；只缩放仓位，不否决开仓。
+    """
+    if not enabled:
+        return 1.0, None
+    p = pulse
+    if p is None:
+        try:
+            from gates.market_pulse import pulse_for
+            p = pulse_for(symbol)
+        except Exception:
+            return 1.0, None
+    try:
+        from gates.market_pulse import pulse_scale
+        return float(pulse_scale(p)), p
+    except Exception:
+        return 1.0, None
+
+
 def size_for_us(entry, stop, account=None, risk_scale=1.0):
     """美股仓位：1 股起，单笔风险 = 账户 ×1.5%×risk_scale。"""
     if account is None:
@@ -1177,12 +1198,18 @@ def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
               account=None, risk_scale=1.0,
               zone_lo=None, zone_hi=None, mode=None, ride_state=None,
               daily_bars=None, channel_expired=False, reaches_deep=None,
-              day_low_final=False, structure_plan=None):
+              day_low_final=False, structure_plan=None,
+              pulse=None, pulse_enabled=True):
     """美股核心判定。结构对齐 A股 decide()，去掉涨跌停/主力资金流/整手/昨收+2% 闸。
 
     挂单由 select_us_hang 分浅档 / 深档。现价高于选出的档，不追，盯那一档。
     分钟线是当前分时，不是收盘全日低点。structure_plan.recommend 为 False 时，
     突破/回踩走 apply_us_hang，不静默吞单。
+
+    ★ 市场脉搏（2026-11-02，与 A股**同一模块同一套逻辑**）：
+      美股此前**完全不接市场状态**（本文件原无 market_regime / regime 字样）。
+      脉搏只缩放仓位系数（与情绪分取更严者），**不改 recommend / 买区 / 止损**；
+      缩到 qty 归零时回退最小申报单位，避免软约束变成硬否决 → 踏空。
     """
     entry, stop = float(entry), float(stop)
     target = float(target) if target is not None else None
@@ -1190,6 +1217,13 @@ def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
     price = float(last["c"])
     vwap = float(last.get("avg", last["c"]))
     pre = day.get("pre")
+
+    # ★ 脉搏缩仓（A股同款）：取更严者，不相乘
+    risk_scale_user = float(risk_scale)
+    _pulse_scale, _pulse = _us_pulse_scale(day.get("code"), pulse=pulse,
+                                            enabled=pulse_enabled)
+    risk_scale = (min(risk_scale_user, _pulse_scale)
+                  if risk_scale_user > 0 else risk_scale_user)
 
     buy_cap = resolve_cap_us(entry, stop, target, cap, pre, atr)
     rr = long_rr(price, target, stop) if target is not None else None
@@ -1215,6 +1249,10 @@ def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
         "hang_why": "", "hang_structure": None,
         "rerun_note": RERUN_NOTE,
         "tape": {"label": "美股无主力资金流", "text": "仅看量价，不读主力净买卖。"},
+        "risk_scale": risk_scale,
+        "pulse_scale": _pulse_scale,
+        "pulse_state": (_pulse or {}).get("state"),
+        "pulse_state_cn": (_pulse or {}).get("state_cn"),
     }
 
     def _reject(reason):
@@ -1297,6 +1335,18 @@ def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
         tier_txt = "%s·%s。" % (sel["tier"], sel["anchor"] or "")
 
     size = size_for_us(limit_buy, stop, account=account, risk_scale=risk_scale)
+    if not size["qty"] and _pulse_scale < 1.0:
+        # ★ 脉搏缩仓把 qty 压没了 ⇒ 回退最小单位（软约束不得变成硬否决）
+        base_size = size_for_us(limit_buy, stop, account=account,
+                                 risk_scale=risk_scale_user)
+        if base_size.get("qty"):
+            size = base_size
+            size["pulse_fallback"] = True
+            out["pulse_note"] = (
+                "市场脉搏系数×%.2f（%s）缩仓后不足 1 股，已回退为 %d 股 —— "
+                "脉搏只缩仓、不否决开仓。"
+                % (_pulse_scale, (_pulse or {}).get("state_cn") or "—",
+                   size["qty"]))
     if not size["qty"]:
         out["reason"] = size.get("warn") or "买得起的手数算不出来。"
         out["size"] = size
@@ -1367,6 +1417,11 @@ def render_us(d):
     if d.get("rerun_note"):
         lines.append("再跑  %s" % d["rerun_note"])
     lines.append("结论  %s。%s" % (d["action"], d["reason"]))
+    if d.get("pulse_state_cn"):
+        lines.append("大盘  %s（脉搏系数×%.2f·只缩放仓位不否决开仓）"
+                     % (d["pulse_state_cn"], d.get("pulse_scale") or 1.0))
+    if d.get("pulse_note"):
+        lines.append("◆ %s" % d["pulse_note"])
     if d["action"] != "能买" and d.get("arm_price") is not None:
         lines.append("盯价  %.2f  %s" % (d["arm_price"], d.get("arm_note") or ""))
     if d["action"] == "能买" and d["size"]:
@@ -1392,6 +1447,8 @@ def main(argv=None):
     ap.add_argument("--atr", type=float, default=None, help="日 ATR14；不给则用 sina 日线算")
     ap.add_argument("--account", type=float, default=DEFAULT_ACCOUNT)
     ap.add_argument("--risk-scale", type=float, default=1.0)
+    ap.add_argument("--no-pulse", action="store_true",
+                    help="关闭市场脉搏缩仓（默认开：只缩放仓位、不否决开仓）")
     ap.add_argument("--asof", default=None, help="回放时刻 HH:MM（截断分钟线）")
     ap.add_argument("--source", choices=["nasdaq", "eastmoney"], default="nasdaq",
                    help="分钟线数据源（默认 nasdaq，含盘前；eastmoney 走东财 trends2）")
@@ -1473,7 +1530,8 @@ def main(argv=None):
                   cap=cap, atr=atr, account=args.account,
                   risk_scale=args.risk_scale,
                   zone_lo=zone_lo, zone_hi=zone_hi, mode=mode,
-                  ride_state=ride, structure_plan=structure_plan)
+                  ride_state=ride, structure_plan=structure_plan,
+                  pulse_enabled=not args.no_pulse)
     d["plan_src"] = plan_src
     d["intraday_source"] = args.source
     decide_ms = (time.perf_counter() - t1) * 1000.0

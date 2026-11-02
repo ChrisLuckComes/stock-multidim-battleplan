@@ -356,8 +356,43 @@ def build(date_tag, scr_path=None, sector_map=None, use_gate=True, quotes=None):
         "miss": sum(1 for r in rows if r["cat"] == C_MISS),
         "sectors_open": sorted({r["sector"] for r in rows if r["cat"] == C_OPEN}),
         "watch": watch,
+        "pulse": _pulse_stat(),
     })
     return rows, summary, stat
+
+
+def _pulse_stat():
+    """市场脉搏（择时层）快照 —— 报告头「大盘环境」段用。
+
+    ⚑ **只作仓位缩放提示，不改六档分类**（老罗口径：情绪分/脉搏只缩放仓位，
+       不下开仓结论 —— 见 `gates/market_pulse.py` 铁律①）。
+    取数失败 ⇒ 返回 None（不静默填一个乐观值）。
+    """
+    try:
+        from gates.market_pulse import pulse_for
+        p = pulse_for(market="cn")
+    except Exception:
+        return None
+    if not isinstance(p, dict) or not p.get("ok"):
+        return {"ok": False, "state_cn": "未知（取数失败·放行）", "scale": 1.0}
+    return {
+        "ok": True,
+        "state": p.get("state"),
+        "state_cn": p.get("state_cn"),
+        "scale": p.get("scale"),
+        "why": p.get("why"),
+        "binding_index": p.get("binding_index"),
+        "detail": [
+            {"index": r.get("index"), "state_cn": r.get("state_cn"),
+             "ftd": (r.get("ftd") or {}).get("ok"),
+             "ftd_date": (r.get("ftd") or {}).get("date"),
+             "attempt_day": (r.get("attempt") or {}).get("day"),
+             "dist_days": r.get("dist_days"),
+             "drawdown": r.get("drawdown")}
+            for r in (p.get("indices") or []) if r.get("ok")
+        ],
+        "note": "只缩放仓位·不下开仓结论（软约束）",
+    }
 
 
 def _vt(r):
@@ -389,6 +424,24 @@ def render_md(rows, summary, stat, date_tag, session, scr_path):
     L.append("- 数据源：双通过 `%s`（%s）；板块层为实时/当日快照"
              % (os.path.basename(scr_path) if scr_path else "无",
                 "昨收口径" if session == "midday" else "当日收盘"))
+    _p = stat.get("pulse")
+    if isinstance(_p, dict) and _p.get("ok"):
+        L.append("- **大盘环境（市场脉搏）：%s ｜ 仓位系数 ×%.2f** —— %s"
+                 % (_p.get("state_cn") or "—", _p.get("scale") or 1.0,
+                    _p.get("why") or "—"))
+        L.append("  > ⚠ 脉搏是**软约束：只缩放仓位，不下开仓结论**。"
+                 "本表六档分类不受脉搏影响 —— 板块 D0 才是开仓方向闸。"
+                 "明细：%s"
+                 % "；".join(
+                     "%s %s（FTD %s｜attempt Day%s｜派发日%s｜回撤%s%%）"
+                     % (d.get("index"), d.get("state_cn"),
+                        d.get("ftd_date") if d.get("ftd") else "无",
+                        d.get("attempt_day"), d.get("dist_days"),
+                        d.get("drawdown"))
+                     for d in (_p.get("detail") or [])))
+    elif isinstance(_p, dict):
+        L.append("- **大盘环境（市场脉搏）：%s**（取数失败·放行，不误杀）"
+                 % (_p.get("state_cn") or "未知"))
     L.append("")
 
     L.append("## 一、可开：强势板块内（%d 只）" % stat["open"])
@@ -556,6 +609,23 @@ def render_html(rows, summary, stat, date_tag, session, scr_path):
                       "按纪律今天不该新开仓。</div>")
 
     body = []
+    _p = stat.get("pulse")
+    if isinstance(_p, dict) and _p.get("ok"):
+        body.append("<div class='warn'><b>大盘环境（市场脉搏）：%s ｜ 仓位系数 ×%.2f</b><br>%s<br>"
+                    "<span class='sub'>⚠ 脉搏是<b>软约束：只缩放仓位，不下开仓结论</b> —— "
+                    "本表六档分类不受脉搏影响，板块 D0 才是开仓方向闸。明细：%s</span></div>"
+                    % (_p.get("state_cn") or "—", _p.get("scale") or 1.0,
+                       _p.get("why") or "—",
+                       "；".join(
+                           "%s %s（FTD %s｜attempt Day%s｜派发日%s｜回撤%s%%）"
+                           % (d.get("index"), d.get("state_cn"),
+                              d.get("ftd_date") if d.get("ftd") else "无",
+                              d.get("attempt_day"), d.get("dist_days"),
+                              d.get("drawdown"))
+                           for d in (_p.get("detail") or []))))
+    elif isinstance(_p, dict):
+        body.append("<div class='warn'><b>大盘环境（市场脉搏）：%s</b>（取数失败·放行，不误杀）</div>"
+                    % (_p.get("state_cn") or "未知"))
     body.append("<div class='sec g'>一、可开：强势板块内（%d 只）</div>" % len(opens))
     body.append(open_block)
     if opens:

@@ -363,6 +363,55 @@ def size_for(code, entry, stop, account=None, risk_scale=1.0):
     }
 
 
+def _pulse_scale_for(code, pulse=None, enabled=True):
+    """取市场脉搏的仓位系数（两市通用，A股走本函数）。
+
+    ⚑ **脉搏是软约束，只缩不放**（gates/market_pulse.py 铁律①）：
+    取数失败 ⇒ 系数 1.0（放行），绝不因拿不到指数就误杀。
+    """
+    if not enabled:
+        return 1.0, None
+    p = pulse
+    if p is None:
+        try:
+            from gates.market_pulse import pulse_for
+            p = pulse_for(code)
+        except Exception:
+            return 1.0, None
+    try:
+        from gates.market_pulse import pulse_scale
+        return float(pulse_scale(p)), p
+    except Exception:
+        return 1.0, None
+
+
+def _sized_by_pulse(size, base_scale, pulse_scale, code):
+    """脉搏缩仓后 qty 归零 ⇒ **回退到最小申报单位**（软约束不得变成硬否决）。
+
+    老罗 2026-10-16：「我要的效果就是 A 股盘中决策可以真正用起来，
+    而不是每次都说不买，导致我踏空。」
+    ⇒ 脉搏只该让仓位变小，**不该让这笔单消失**。
+
+    返回 (size, note)。note 非空表示发生过回退。
+    """
+    if size.get("qty"):
+        return size, ""
+    if not pulse_scale or pulse_scale >= 1.0:
+        return size, ""
+    # 脉搏缩到 0 ⇒ 用未缩放的系数重算一次，取最小单位
+    try:
+        alt = size_for(code, size.get("_entry") or 0, size.get("_stop") or 0,
+                       account=size.get("account"), risk_scale=base_scale)
+    except Exception:
+        return size, ""
+    if alt.get("qty"):
+        note = ("市场脉搏系数×%.2f 缩仓后不足最小申报单位，"
+                "已回退为 %d 股（软约束不否决开仓）" % (pulse_scale, alt["qty"]))
+        alt["pulse_fallback"] = True
+        return alt, note
+    return size, ""
+
+
 def arm_price(entry, stop, target, buy_cap, limit_px, limit_dn=None):
     """现价还不能买时：涨到哪一档开始能按计划买。优先挂单价。"""
     floor = round_px(stop + 0.01)
@@ -621,7 +670,8 @@ def chase_risk(minutes, lookback=20, ratio=6.0, gap_min=1.0, dev_max=6.0):
 
 
 def decide(day, summary, entry, stop, target, cap=None, account=None,
-            risk_scale=1.0, quality=None, cap_tol_pct=None, atr=None):
+            risk_scale=1.0, quality=None, cap_tol_pct=None, atr=None,
+            pulse=None, pulse_enabled=True):
     """核心判定。返回结构化结果，供 CLI 与测试用。
 
     ★ 盘中口径（老罗 2026-10-09 14:26 定调）：
@@ -631,6 +681,11 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
     quality: gates.quality_gate.assess() 的返回值，**默认不传（CLI 需显式 --quality）**。
         level=="block" ⇒ 硬否决（仅 --quality-strict 才可能出现）
         level=="warn"  ⇒ risk_scale 乘以质量系数（降权不否决）
+    pulse: 市场脉搏返回值（gates/market_pulse.pulse_for）。默认 None ⇒ 自动取一次。
+        ⚑ 脉搏**只缩放仓位**，不改 recommend / mode / 买区 / 止损（软约束，铁律①）。
+        ⚑ 脉搏缩到 qty 归零时**回退到最小申报单位**（见 _sized_by_pulse），
+           避免软约束变成硬否决 → 踏空。
+    pulse_enabled: False ⇒ 完全不启用脉搏（CLI --no-pulse）。
     """
     entry = float(entry)
     stop = float(stop)
@@ -659,6 +714,11 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
     rr_at_entry = long_rr(entry, target, stop) if target is not None else None
     if quality and quality.get("level") == "warn":
         risk_scale = risk_scale * float(quality.get("scale") or 1.0)
+    # ★ 市场脉搏（2026-11-02，两市通用软约束）：只缩放仓位，不否决开仓。
+    #   与情绪分系数**取更严的**（min），不是相乘 —— 相乘会过度缩仓 → 踏空。
+    risk_scale_user = float(risk_scale)
+    _pulse_scale, _pulse = _pulse_scale_for(code, pulse=pulse, enabled=pulse_enabled)
+    risk_scale = min(risk_scale_user, _pulse_scale) if risk_scale_user > 0 else risk_scale_user
     pct_pre, in_dip = zone_vs_pre(price, pre)
     tape = tape_so_far(day, summary)
     rally = rally_state(day["minutes"])
@@ -707,6 +767,9 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
         "cap_gates": gates,
         "handoff": False,
         "risk_scale": risk_scale,
+        "pulse_scale": _pulse_scale,
+        "pulse_state": (_pulse or {}).get("state"),
+        "pulse_state_cn": (_pulse or {}).get("state_cn"),
     }
 
     def _reject(reason):
@@ -821,6 +884,19 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
         tag = "计划上限内"
 
     size = size_for(code, limit_buy, stop, account=account, risk_scale=risk_scale)
+    if not size["qty"] and _pulse_scale < 1.0:
+        # ★ 脉搏缩仓把 qty 压没了 ⇒ 回退到最小申报单位（软约束不得变成硬否决）。
+        #   只在「未缩放时买得起」的前提下回退；本来就买不起的不给放宽。
+        base_size = size_for(code, limit_buy, stop, account=account,
+                             risk_scale=risk_scale_user)
+        if base_size.get("qty"):
+            size = base_size
+            size["pulse_fallback"] = True
+            out["pulse_note"] = (
+                "市场脉搏系数×%.2f（%s）缩仓后不足最小申报单位，"
+                "已回退为 %d 股 —— 脉搏只缩仓、不否决开仓。"
+                % (_pulse_scale, (_pulse or {}).get("state_cn") or "—",
+                   size["qty"]))
     if not size["qty"]:
         out["reason"] = "买得起的手数算不出来（钱不够或价高于硬顶）。"
         out["size"] = size
@@ -870,6 +946,11 @@ def render(d):
     lines.append("分时  %s  %s" % (d["tape"]["label"], d["tape"]["text"]))
     lines.append("窗口  全天已出现 %d 根落在昨收 0%%～2%%" % d["dip_minutes"])
     lines.append("结论  %s。%s" % (d["action"], d["reason"]))
+    if d.get("pulse_state_cn"):
+        lines.append("大盘  %s（脉搏系数×%.2f·只缩放仓位不否决开仓）"
+                     % (d["pulse_state_cn"], d.get("pulse_scale") or 1.0))
+    if d.get("pulse_note"):
+        lines.append("◆ %s" % d["pulse_note"])
     if d.get("high_pos_note"):
         lines.append("位置  ⚠ %s" % d["high_pos_note"])
     if d.get("channel_source"):
@@ -1054,6 +1135,8 @@ def main(argv=None):
     ap.add_argument("--account", type=float, default=None)
     ap.add_argument("--risk-scale", type=float, default=1.0,
                     help="情绪缩放，极弱可传 0.25")
+    ap.add_argument("--no-pulse", action="store_true",
+                    help="关闭市场脉搏缩仓（默认开：只缩放仓位、不否决开仓）")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--quality", action="store_true",
                     help="接入标的质量闸（默认关！老罗 2026-10-09 14:26 定调："
@@ -1129,6 +1212,7 @@ def main(argv=None):
         day, summary, entry, stop, target,
         cap=cap, account=args.account, risk_scale=args.risk_scale,
         quality=quality, cap_tol_pct=cap_tol_pct, atr=atr_v,
+        pulse_enabled=not args.no_pulse,
     )
     if d.get("handoff"):
         try:
