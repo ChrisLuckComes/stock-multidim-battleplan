@@ -215,6 +215,38 @@ def test_bt_pullback_with_drain_is_ship():
     assert st == S.ST_SHIP, why
 
 
+# ── ★ 2026-11-02 兜底分支补上 SCR_BUY 线 ──────────────────────────────────
+def test_fallback_never_locks_above_scr_buy():
+    """SCR90 ≥ SCR_BUY(15) 的漏网样本**不许**判「集中锁仓」。
+
+    ⚑ 病灶：`locked` 只是 ST_LOCK 的三个入口之一，聚峰分支守着 SCR_BUY=15，
+      兜底却越过它 ⇒ 把 scr90 15~20 这条最差的带（实测 134 条 −1.59%/胜率 34.3%，
+      比已判「发散·禁止开仓」的 20~22 还差）判成了「锁仓 + ✅ 允许开仓」。
+    ⚑ 顺带证伪了另一种改法：`LOCK_TOL` 0.10→0.05 对状态判定**零影响**（574 条一条未变），
+      因为漏下来的样本会被另两条入口原样捞回 ⇒ 它是死参数，别再试。
+    """
+    kw = _base_kwargs()
+    kw.update(scr90=18.0, scr70=14.0, scr_hist=[15.0] * 12, close=34.00,
+              M=32.31, p15=28.99, p85=36.33, profit=70.0,
+              dist_pos=0.75, mass_chg=-0.05, locked=False)
+    st, why = S.chip_state_of(drain=False, rising=False, conflict=[], votes=[],
+                              mass_retention=0.0, flow_rho_today=0.0, **kw)
+    assert st == S.ST_LOOSE, why
+    assert S.STATE_ALLOW_NEW[st] is False, "超过收敛线就不许再叫锁仓、不许开仓"
+
+
+def test_fallback_still_locks_below_scr_buy():
+    """同样的样本，scr90 压到 13% ⇒ 仍判集中锁仓（不许把整个兜底一刀切关掉）。"""
+    kw = _base_kwargs()
+    kw.update(scr90=13.0, scr70=10.0, scr_hist=[13.0] * 12, close=34.00,
+              M=32.31, p15=28.99, p85=36.33, profit=70.0,
+              dist_pos=0.75, mass_chg=-0.05, locked=False)
+    st, why = S.chip_state_of(drain=False, rising=False, conflict=[], votes=[],
+                              mass_retention=0.0, flow_rho_today=0.0, **kw)
+    assert st == S.ST_LOCK, why
+    assert S.STATE_ALLOW_NEW[st] is True
+
+
 # ── 静态口径守卫 ──────────────────────────────────────────────────────────────
 def test_constants_present():
     assert S.MAIN_BASE_MIN_RATIO > 0
