@@ -258,8 +258,6 @@ FALL_PROFIT_MAX = 25.0    # 获利盘 ≤ 25% ＝ 上方 3/4 以上筹码全是�
 #    ⇒ 丢弃行为层，只用状态量（成本分布／获利盘／集中度／位置）判态，并显式标 confidence=low**。
 #    「筹码面只回答成本在哪、谁有获利动机、上方套牢多不多；不回答今天谁在买谁在卖。」
 MAIN_BASE_MIN_RATIO = 0.05   # 主力存量比率的分母下限（相对峰值）。低于此 ⇒ 比率无意义 ⇒ None
-MASS_RET_DRAIN = -0.10   # 带内**留存率**低于理论衰减 10% ＝ 确有额外汇出（真派发证据）
-MASS_RET_ACCUM = +0.10   # 高于理论衰减 10% ＝ 确有额外注入（真吸筹证据）
 FLOW_RHO_DRAIN = -0.05   # 当日/近5日主力净占比 ≤ −5% ＝ 资金流出证据
 FLOW_RHO_ACCUM = +0.05   # ≥ +5% ＝ 资金流入证据
 PXVWAP_TOL = 0.01        # 量价结构：收盘偏离当日 VWAP 的判定阈值
@@ -269,9 +267,19 @@ BEHAVIOR_DRAIN = "drain"       # 派发/出货
 BEHAVIOR_ACCUM = "accum"       # 收集/加仓
 BEHAVIOR_NONE = "none"         # 证据不足或自相矛盾 ⇒ 丢弃行为层
 DEMOTE_NOT_RICH = 0.15   # 距 60 日低点 < 15% ⇒ 不算「高位」，派发判定要更严
-# ★ 2026-11-02 7088 样本回测：带内留存率**不计票**（依据见 behavior_votes ③ 注释）。
-#   置 True 可恢复旧口径（回测/复现用），生产环境保持 False。
-RETENTION_VOTES = os.environ.get("SCR_RET_VOTE", "0") == "1"
+# ⛔⛔ 2026-11-02 已**彻底删除**「带内留存率」指标（原 mass_retention / MASS_RET_DRAIN
+#     / MASS_RET_ACCUM / RETENTION_VOTES / SCR_RET_VOTE 全部移除）。老罗：「一次性清掉。」
+#
+#   删它的理由**不是「区分度不够」，而是公式只剩正半轴 —— 结构上不可能为负**：
+#     分母 = 带内 N 日前量 × 这 N 天的纯换手衰减  ← 已把「卖出」全部算进去了
+#     分子 = 实际带内量 = 衰减后的余量 **+ 带内新生成的筹码**
+#     ⇒ 差值只剩「带内新增」一项 ⇒ **恒 ≥ 0**，永远投不出「流出」票。
+#   7088 样本实测：负值 457 条**全部**是 −4.4e−16 级浮点噪声（< −1e−6 的 0 条）；
+#     命中 −10% 阈值的 **0 / 7088**；band_overlap=True 组 100% 正值、False 组 100% 精确 0。
+#   ⇒ 它实际度量的是「现价离低位带多近」，不是「筹码搬进搬出」。
+#   ⚑ 曾经写的「非对称采信：负值恒可信、正值须无重叠」是错的——**负值从来不存在**，
+#     那句设计是在给一个不存在的分支加保护。301101 打印「留存率 +0.0%」就是这个恒等式。
+#   ⚑ 任何想重新引入它的尝试，先用 `mass_chg`（低位带份额变化）即可，别再造一个空半轴的指标。
 
 
 def solve_decay_k(bars, half_life=CHIP_HALF_LIFE):
@@ -1041,7 +1049,7 @@ def chip_model(bars, keep_last=8, main_rho=None, decay_k=1.0, us_mode=False,
     m_dist = [0.0] * n_bins
     snaps = []
     m_trace = []                                  # 每日主力存量（S2 存量趋势用）
-    d_trace = []                                  # 每日衰减系数（2026-11-02：留存率口径要用）
+    d_trace = []                                  # 每日衰减系数（供诊断/回测核对，主流程已不消费）
     m_peak = 0.0
     for b in bars:
         r = min(max(b["turnover"] / 100.0, 0.0), 1.0) if b["turnover"] > 0 else med_r
@@ -1351,8 +1359,8 @@ def _pct(v, dash="—"):
     return dash if v is None else f"{v * 100:+.1f}%"
 
 
-def behavior_votes(flow_rho_today=None, flow_rho_5d=None, mass_retention=None,
-                   close=None, vwap=None, close_pos=None, ret_pos_valid=True):
+def behavior_votes(flow_rho_today=None, flow_rho_5d=None,
+                   close=None, vwap=None, close_pos=None):
     """行为层证据计票（2026-11-02 新增）。→ (方向, votes, conflict, note)
 
     ⚑ 设计原则：**行为层只能当「证据」，不能当「结论」**。
@@ -1363,8 +1371,10 @@ def behavior_votes(flow_rho_today=None, flow_rho_5d=None, mass_retention=None,
       这里把四条**互相独立**的证据并列，每条一票：
         ① 当日主力净占比 ρ_today（东财/新浪资金流，带符号；ρ = 净额/成交额）
         ② 近 5 日主力净占比 ρ_5d（同口径，抹平单日噪声）
-        ③ 带内**留存率**（相对纯换手衰减的偏离，已剔除「新筹在带外注入」的稀释）
-        ④ 当日量价结构（收盘 vs VWAP + 收盘在当日区间的位置）
+        ③ 当日量价结构（收盘 vs VWAP + 收盘在当日区间的位置）
+
+      ⛔ 原第 ③ 条「带内留存率」已删除（2026-11-02）：公式恒 ≥ 0，投不出流出票，
+         详情见常量区标死注释。现只剩三条独立证据，VOTE_MIN=2 不变。
 
       裁决：同向 ≥ VOTE_MIN 且反向为 0 ⇒ 出标签；反向也存在 ⇒ conflict（交 chip_state_of 判「未定」）；
             两边都不够 ⇒ BEHAVIOR_NONE（证据不足，退回状态量判态，这是正常情况，不报错）。
@@ -1385,29 +1395,7 @@ def behavior_votes(flow_rho_today=None, flow_rho_5d=None, mass_retention=None,
             votes.append(("近5日资金流", BEHAVIOR_DRAIN, f"净占比 {flow_rho_5d * 100:+.1f}%"))
         elif flow_rho_5d >= FLOW_RHO_ACCUM:
             votes.append(("近5日资金流", BEHAVIOR_ACCUM, f"净占比 {flow_rho_5d * 100:+.1f}%"))
-    # ③ 带内留存率（剔除稀释后的真实搬进搬出）
-    # ⚑⚑ 2026-11-02 7088 样本回测：**该指标实测无区分度，默认不计票**。
-    #   证据：① 允许触发 drain 的阈值 MASS_RET_DRAIN=−10%，全样本命中 **0 / 7088 条**
-    #            （分布 min≈−0.0000、p1≈0、中位 +9.2%、p90 +47.3%）⇒ 它**从不投出流出票**；
-    #         ② 分位单调性只有 67%，Q4−Q1 跨度 +0.36pp（噪声水平）；
-    #         ③ 正值主要由「当日成交区间与低位带重叠 ⇒ 新筹生成在带内」驱动，
-    #            而 band_overlap=False 组整体超额 −0.55%，反而差于 overlap=True 的 +0.20%。
-    #   ⇒ 保留计算与展示（老罗要能看见原始数），但**不再参与计票**，
-    #     避免用一条系统性正偏的指标去凑 VOTE_MIN。
-    #   ⚑ 开关留给回测（`SCR_RET_VOTE=1` 可恢复旧口径），默认关。
-    if mass_retention is not None:
-        if not RETENTION_VOTES:
-            votes.append(("带内存留率", BEHAVIOR_NONE,
-                          f"{mass_retention * 100:+.1f}%（口径系统性正偏，实测无区分度 ⇒ 不计票）"))
-        elif mass_retention <= MASS_RET_DRAIN:
-            votes.append(("带内存留率", BEHAVIOR_DRAIN, f"{mass_retention * 100:+.1f}%（额外汇出）"))
-        elif mass_retention >= MASS_RET_ACCUM:
-            if ret_pos_valid:
-                votes.append(("带内存留率", BEHAVIOR_ACCUM, f"{mass_retention * 100:+.1f}%（额外注入）"))
-            else:
-                votes.append(("带内存留率", BEHAVIOR_NONE,
-                              f"{mass_retention * 100:+.1f}% 但近 {LOCK_DAYS} 日成交区间与低位带重叠 ⇒ 正偏不可采信"))
-    # ④ 量价结构
+    # ③ 量价结构（原 ③「带内留存率」已删除，见常量区标死注释）
     if close is not None and vwap and close_pos is not None:
         if close < vwap * (1 - PXVWAP_TOL) and close_pos < 0.4:
             votes.append(("量价结构", BEHAVIOR_DRAIN,
@@ -1434,7 +1422,7 @@ def chip_state_of(scr90, scr70, scr_hist, close, M, p15, p85, profit,
                   vol_ratio, turnover, dist_pos, mass_chg, locked, n_peak=1,
                   peak_conc=None, peak_price=None,
                   drain=None, rising=None, conflict=None, votes=None,
-                  mass_retention=None, flow_rho_today=None, vwap=None,
+                  flow_rho_today=None, vwap=None,
                   high_risk=False, bt_pullback=False):
     """★ 筹码状态（老罗 2026-10-14 定）：一句话看懂筹码现在在干什么。
 
@@ -1478,7 +1466,6 @@ def chip_state_of(scr90, scr70, scr_hist, close, M, p15, p85, profit,
             f"此时按优先级裁决必错（同类错误：301101 当日主力净流入 +3,480 万仍被判派发）。"
             f"故<b>丢弃整层行为判断</b>，只用状态量：峰区位置 {(pos if pos is not None else 0) * 100:.0f}%、"
             f"获利盘 {(profit or 0):.0f}%、SCR90 {scr90:.1f}%、"
-            f"带内留存率 {_pct(mass_retention)}、"
             f"当日主力净占比 {_pct(flow_rho_today)}。"
             f"<b>须人工按「资金流 + 分时 VWAP + 量比」复核，机器不给结论</b>{tail}")
 
@@ -1489,9 +1476,8 @@ def chip_state_of(scr90, scr70, scr_hist, close, M, p15, p85, profit,
                          f"——低位筹码正被搬向高位，出货为主{tail}")
     if drain and pos is not None and pos > 0.6:
         _ev = "、".join(f"{n}{d}" for n, d, _ in (votes or []) if d == BEHAVIOR_DRAIN)
-        _r = (f"、带内存留率 {_pct(mass_retention)}" if mass_retention is not None else "")
         return ST_SHIP, (
-            f"<b>低位筹码占比快速被稀释</b>：低位带 {LOCK_DAYS} 日份额 {mass_chg * 100:+.0f}%{_r}"
+            f"<b>低位筹码占比快速被稀释</b>：低位带 {LOCK_DAYS} 日份额 {mass_chg * 100:+.0f}%"
             f"（价格在峰区上方 {pos * 100:.0f}%）"
             f"——含义是「低成本筹码正被更高成本的筹码替换」，成本结构在快速上移。"
             f"⚠ 机制上**不能反推是谁在卖**（换手本身也会稀释份额），但统计上前向 5 日显著偏弱"
@@ -1525,8 +1511,8 @@ def chip_state_of(scr90, scr70, scr_hist, close, M, p15, p85, profit,
             f"底部已聚峰：SCR90 {scr90:.1f}% 虽 ≥ {SCR_LOOSE:g}%，但那是"
             f"<b>P95 被上方老套牢盘撑高</b>（公式只看两端、不看中间分布）——"
             f"主峰 {peak_price:.2f} 附近 ±10% 内筹码占 <b>{peak_conc:.0f}%</b>"
-            f"（筹码确实聚成了一个峰），带内存留率 "
-            f"{_pct(mass_retention)}（<b>在收不是在撤</b>）"
+            f"（筹码确实聚成了一个峰），低位带 {LOCK_DAYS} 日份额 "
+            f"{(mass_chg or 0) * 100:+.1f}%（<b>在收不是在撤</b>）"
             f"⇒ 实为底部吸筹，不是多空无共识{tail}")
     # ③-b ★★ 「稳态发散 ≠ 多空无共识」（老罗 2026-10-20 指出并批准）
     #   缺陷：SCR90 是**静态截面**指标，只判「成本区间宽不宽」，不看它是怎么变宽的。
@@ -1545,12 +1531,9 @@ def chip_state_of(scr90, scr70, scr_hist, close, M, p15, p85, profit,
     #     （301119 实测 −7.7%），只有 ≤ −LOOSE_MASS(−20%) 才算「庄在撤底仓」。
     if loose and jump < SCR_JUMP_STEADY and out_zone and not drain and n_peak < 2:
         _m_txt = f"、较成本重心 {M:.2f} {(close / M - 1) * 100:+.1f}%" if M else ""
-        # ★ 2026-11-02：改报「留存率」（已剔除新筹在带外注入的稀释）；无留存率时退回份额口径并注明
-        _ret = (f"带内存留率 <b>{mass_retention * 100:+.1f}%</b>（相对纯换手衰减，"
-                f"{'<b>确有额外汇出</b>' if mass_retention <= MASS_RET_DRAIN else '未见额外撤出'}"
-                f"）" if mass_retention is not None else
-                f"低位筹码带 {LOCK_DAYS} 日 {(mass_chg or 0) * 100:+.1f}%（份额口径、"
-                f"含新筹注入稀释，仅参考）")
+        # ⛔ 2026-11-02：留存率已删除（公式只剩正半轴）⇒ 回到份额口径并注明稀释
+        _ret = (f"低位筹码带 {LOCK_DAYS} 日 {(mass_chg or 0) * 100:+.1f}%"
+                f"（份额口径、含新筹注入稀释，仅参考）")
         _body = (f"稳态发散＝<b>拉升中</b>：SCR90 {scr90:.1f}% 虽 ≥ {SCR_LOOSE:g}%，但较 5 日均值 "
                  f"{base:.1f}% 仅 <b>{jump:.2f}×（没有跳升</b>，远未达派发阈值 {SCR_JUMP:g}×）、"
                  f"峰区位置 {(pos or 0) * 100:.0f}%（已在成本区上方{_m_txt}）、"
@@ -1594,7 +1577,7 @@ def chip_state_of(scr90, scr70, scr_hist, close, M, p15, p85, profit,
     #   因为机器看到的是低位在收（状态量），而主力存量正在快速回落（行为量），两者对立。
     #   ⇒ 不许在这种状态下贴「吸筹中」，往后掉到锁仓/兜底分支（该子集为 −0.31%）。
     if accum_ev and not drain and not bt_pullback and M and close <= M * 1.03 and pos is not None and pos <= 0.6:
-        ev = (f"带内存留率 {_pct(mass_retention)}（低于纯换手衰减＝确有额外注入）" if rising
+        ev = (f"低位带 {LOCK_DAYS} 日份额 {(mass_chg or 0) * 100:+.1f}%（在收）" if rising
               else f"SCR90 连降 {fall_days} 日（集中度快速收敛）")
         return ST_ACCUM, (f"{ev}、现价贴近成本重心 {M:.2f}"
                           f"（{(close / M - 1) * 100:+.1f}%、峰区位置 {pos * 100:.0f}%）"
@@ -2024,35 +2007,21 @@ def analyze(code, n=120, decay_k=None, half_life=None, us_mode=False,
     else:
         spread = mass_chg = None
         locked = False
-    # ★ 2026-11-02 **留存率口径**（P1）：剔除「新筹在带外注入」对份额的机械稀释。
-    #   份额口径的致命缺陷：dist 每天按换手衰减、新筹码按当日价生成 ⇒ **只要现价在带上沿之上，
-    #   带内份额必然单调下降**，与买卖方向无关。铁证：301101 在 10-27~10-30 价格跌 10.86%
-    #   期间该份额照样跌 21.5%（缩量回调也在「派发」＝自相矛盾）。
-    #   留存率 = 带内今日绝对量 ÷（带内 5 日前绝对量 × 这 5 天的纯换手衰减）− 1
-    #     ≈ 0    ⇒ 只是换手衰减，没有额外搬进搬出（**没有派发证据**）
-    #     ≤ −10% ⇒ 确有额外汇出 ＝ 真搬出（派发证据）
-    #     ≥ +10% ⇒ 确有额外注入 ＝ 真在收（吸筹证据）
-    #   ⚠ 已知局限：现价落在低位带**之内**时，当日新筹就生成在带内，该值会被推正，
-    #     此时应读作「低位仍在换手」而不是吸筹——所以它只是一票，不能单独定论。
-    _decays = m_meta.get("decay") or []
-    mass_retention = None
-    if len(snaps) >= LOCK_DAYS + 1 and len(_decays) >= len(snaps):
-        _seg = [sum(s[lo_i:hi_i + 1]) for s in snaps]
-        _exp = _seg[-1 - LOCK_DAYS]
-        for _dd in _decays[-LOCK_DAYS:]:
-            _exp *= _dd
-        if _exp > 0:
-            mass_retention = _seg[-1] / _exp - 1.0
+    # ⛔ 2026-11-02：「带内留存率」计算已整体删除（公式恒 ≥ 0，见常量区标死注释）。
+    #   份额口径（mass_chg）的已知局限仍然成立、仍须在文案里注明：
+    #   dist 每天按换手衰减、新筹码按当日价生成 ⇒ **只要现价在带上沿之上，带内份额必然
+    #   单调下降，与买卖方向无关**（铁证：301101 在 10-27~10-30 价格跌 10.86% 期间该份额
+    #   照样跌 21.5%，缩量回调也在「派发」＝自相矛盾）⇒ 只能读「成本结构上移速度」。
     dist_pos = (close - p15) / (p85 - p15) if (p85 and p15 and p85 > p15) else None
     # ── 行为层证据计票（2026-11-02）：≥ VOTE_MIN 条同向才出标签；互斥 ⇒ 判「未定」 ──
-    # 近 LOCK_DAYS 日成交区间是否与「5 日前钉死的低价带」重叠（决定留存率正值能否采信）
+    # 近 LOCK_DAYS 日成交区间是否与「5 日前钉死的低价带」重叠
+    # （仅作描述性输出：判断「份额变化里有多少是新筹生在带内造成的稀释」）
     _band_lo_p, _band_hi_p = prices[lo_i], prices[hi_i]
     band_overlap = any((b["l"] <= _band_hi_p and b["h"] >= _band_lo_p)
                        for b in bars[-LOCK_DAYS:])
     behavior, votes, conflict, behavior_note = behavior_votes(
-        flow_rho_today=rho_today, flow_rho_5d=rho5, mass_retention=mass_retention,
-        close=close, vwap=vwap_today, close_pos=close_pos,
-        ret_pos_valid=not band_overlap)
+        flow_rho_today=rho_today, flow_rho_5d=rho5,
+        close=close, vwap=vwap_today, close_pos=close_pos)
     # ── 派发判据（★ 2026-11-02 回测定稿，勿凭直觉改）───────────────────────────
     #   回测(228 样本,58 只×4 时点)结论：
     #     ① mass_chg ≤ −20% 单独就有 **−7.50pp** 的前向 5 日超额（n=13, 均值 −9.04% vs −1.53%）
@@ -2103,7 +2072,7 @@ def analyze(code, n=120, decay_k=None, half_life=None, us_mode=False,
                                      dist_pos, mass_chg, locked, n_peak,
                                      peak_conc=peak_conc, peak_price=main_price,
                                      drain=drain, rising=rising, conflict=conflict,
-                                     votes=votes, mass_retention=mass_retention,
+                                     votes=votes,
                                      flow_rho_today=rho_today, vwap=vwap_today,
                                      high_risk=(chip_risk == "high"),
                                      bt_pullback=bt_pullback)
@@ -2122,7 +2091,6 @@ def analyze(code, n=120, decay_k=None, half_life=None, us_mode=False,
         "low_lo": low_lo, "low_hi": low_hi, "below_now": below_now, "n_peak": n_peak,
         "peak_conc": peak_conc,
         "lock": locked, "lock_spread": spread, "mass_chg": mass_chg,
-        "mass_retention": mass_retention,
         "low_cost": low_cost, "main_cost": main_cost, "main_src": main_src,
         # ★ 2026-11-02 行为层证据（资金流直接口径 + 量价）
         "flow_today": flow_today, "flow_5d": flow_5d,
@@ -2276,14 +2244,13 @@ def render(r):
             "峰区下方" if r["dist_pos"] < 0 else "峰区内 %.0f%%" % (r["dist_pos"] * 100))
         print(f" 价格位置：{pos}")
     lock_txt = ("是" if r["lock"] else "否")
-    # ★ 2026-11-02：份额变化（mass_chg）是换手衰减的恒等式，必须与留存率并列显示，
+    # ★ 2026-11-02：份额变化（mass_chg）是换手衰减的恒等式 ⇒ **必须标注「含新筹稀释」**，
     #   否则「-17.4% ⇒ 底仓在撤」这种误读还会再犯（301101 反例）。
-    _ret = r.get("mass_retention")
-    _ret_txt = (f"{_ret * 100:+.1f}%" if _ret is not None else "未知")
+    #   ⛔ 原「留存率」一栏已删除：公式恒 ≥ 0、只能测流入 ⇒ 留着会被读成「资金没动」。
     detail = (f"低位带 {LOCK_DAYS} 日质量"
               f"{'波动 %.1f%%' % (r['lock_spread'] * 100) if r['lock_spread'] is not None else '未知'}"
               f"、份额变化 {('%+.1f%%（含新筹稀释，仅参考）' % (r['mass_chg'] * 100)) if r['mass_chg'] is not None else '未知'}"
-              f"、留存率 {_ret_txt}（相对纯换手衰减））")
+              f"）")
     print(f" 底部锁仓：{lock_txt}（{detail}"
           if r["below_now"] else f" 底部锁仓：不适用（{detail[:-1]}，低位带已抬到现价之上）")
     print("─" * 66)

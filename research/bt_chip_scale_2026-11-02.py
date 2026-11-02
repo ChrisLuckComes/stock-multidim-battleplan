@@ -6,7 +6,10 @@
   ② 把「拉升脱离成本区中」（上轮超额仅 +0.74%，与「吸筹中」+2.48% 差距大）**内部切开**，
      找出能分的干净特征；
   ③ 专项验证 `STATE_ALLOW_NEW[ST_AMBIG]=True`（上轮未验证）；
-  ④ 单特征 IC 分层，判断 `mass_retention` 这个新指标是否单独有效。
+  ④ 单特征 IC 分层。
+     ⛔ `mass_retention`（带内留存率）已于 2026-11-02 从生产代码删除——实测其公式恒 ≥ 0
+        （只是换手衰减恒等式，只能测流入、不能测流出，命中 −10% 阈值 0/7088），
+        本脚本对它的分析段保留仅为**历史留痕**，取值恒为 None。
 
 方法（无未来函数）：
   - 日线取 120 根，对 offset ∈ OFFSETS 截断后再跑 analyze ⇒ 模型看不到任何未来数据；
@@ -119,7 +122,7 @@ def warm(codes):
 
 
 # ───────────────────────────── 单样本 ─────────────────────────────
-KEEP_NUM = ("mass_chg", "mass_retention", "main_chg5", "main_chg10", "dist_pos",
+KEEP_NUM = ("mass_chg", "main_chg5", "main_chg10", "dist_pos",
             "profit", "scr90", "scr70", "peak_conc", "poc_div_pct", "vol_ratio",
             "turnover", "main_keep_ratio", "main_pnl", "rho_today", "rho5",
             "close_pos", "band_lo_p", "band_hi_p", "drain_votes", "accum_votes")
@@ -340,7 +343,6 @@ def analyze(rows, deep=True):
           % (len(pull), (sum(r["exc"] for r in pull) / len(pull) * 100) if pull else 0))
     if len(pull) >= 30:
         for f, lbl in (("profit", "获利盘%"), ("dist_pos", "峰区位置"),
-                       ("mass_retention", "带内留存率"),
                        ("main_keep_ratio", "主力保留率"),
                        ("scr90", "SCR90"), ("vol_ratio", "量比"),
                        ("poc_div_pct", "量峰偏离"), ("main_pnl", "主力浮盈")):
@@ -355,15 +357,11 @@ def analyze(rows, deep=True):
             if len(seg) >= 5:
                 print("     %-12s %s" % (pl, summ([r["exc"] for r in seg])))
 
-    # ⑧ mass_retention 单指标有效性（全样本）
+    # ⑧ 带内留存率 —— 已作废，仅留痕
     print("\n" + "-" * 68)
-    print("⑧ mass_retention 单指标（新指标，目前只作一票）")
-    quintile(rows, "mass_retention", "全样本 · 带内留存率", q=4)
-    ret_rows = [r for r in rows if r.get("mass_retention") is not None]
-    neg = [r["exc"] for r in ret_rows if r["mass_retention"] <= -0.10 and r.get("exc") is not None]
-    pos = [r["exc"] for r in ret_rows if r["mass_retention"] >= 0.10 and r.get("exc") is not None]
-    print("   留存率 ≤ −10%%：%s" % summ(neg))
-    print("   留存率 ≥ +10%%：%s" % summ(pos))
+    print("⑧ 带内留存率 mass_retention —— ⛔ 已于 2026-11-02 从生产代码删除")
+    print("   公式恒 ≥ 0（只是换手衰减恒等式，只测流入、不测流出），命中 −10% 阈值 0/7088。")
+    print("   此段停用；若需复核请用 mass_chg（低位带份额变化）。")
 
     # ⑨ 按 offset 看稳定性
     print("\n" + "-" * 68)

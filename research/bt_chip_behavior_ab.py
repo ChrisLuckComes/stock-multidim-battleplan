@@ -128,6 +128,8 @@ def eval_one(mod, code, name, all_bars, off):
         "scr90": r.get("scr90"),
     }
     # 新版独有字段（旧版没有）
+    # ⛔ mass_retention 已于 2026-11-02 从生产代码删除（公式恒 ≥ 0，只测流入不测流出），
+    #    此处保留键名仅为兼容历史基线 json，新版取值恒为 None ⇒ 对比表该列应忽略。
     for k in ("mass_retention", "behavior", "conflict", "confidence", "band_overlap",
               "chip_risk", "dilute_conflict"):
         if k in r:
