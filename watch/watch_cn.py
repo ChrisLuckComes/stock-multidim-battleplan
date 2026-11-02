@@ -139,7 +139,7 @@ def analyze_one(item):
     if ev is None:
         r["err"] = "build_ev 返回空"
         return r
-    plan = plan_entry(bars2, ev)
+    plan = plan_entry(bars2, ev, sym=code)
     z = plan.get("buy_zone") or {}
     sp = plan.get("stop_plan") or {}
     tg = plan.get("targets") or {}

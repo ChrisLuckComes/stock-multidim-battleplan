@@ -187,7 +187,7 @@ def bull_flag_verdict(bars, *, ticker=None, held=None, fresh_max=FRESH_MAX,
     if flag is None:
         # 诊断版永不返回 None：`invalid_reason` 决定这是「避雷(4)」还是「本来就不是旗(0)」。
         diag = R.detect_bull_flag(bars, Hs, atr_v, diagnostic=True) or {}
-    plan = R.plan_entry(bars, ev)
+    plan = R.plan_entry(bars, ev, sym=ticker)
 
     out["plan_mode"] = plan.get("mode")
     out["plan_verdict"] = plan.get("verdict")

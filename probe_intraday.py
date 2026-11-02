@@ -997,7 +997,7 @@ def probe(code, qty=None, account=None, asof=None, min_scale=5, replay=False,
     if ev is None:
         print(f"[{code}] 结构不可判：{meta.get('reason')}")
         return None
-    plan = plan_entry(b2, ev)
+    plan = plan_entry(b2, ev, sym=code)
     z = plan.get("buy_zone") or {}
     atr_v = atr14(b2)
     # 必须在这里先算：room_and_cap 会执行 stop_plan 的「铁律二」并回写买区
@@ -1013,7 +1013,7 @@ def probe(code, qty=None, account=None, asof=None, min_scale=5, replay=False,
         if _live_bar:
             _ev_i, _b2_i, _mi = build_ev(basis + [_live_bar], ticker=code)
             if _ev_i is not None:
-                _plan_i = plan_entry(_b2_i, _ev_i)
+                _plan_i = plan_entry(_b2_i, _ev_i, sym=code)
                 _z_i = _plan_i.get("buy_zone") or {}
                 _atr_i = atr14(_b2_i)
 
@@ -2210,14 +2210,14 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None,
     if ev is None:
         print(f"[{sym}] 结构不可判：{(_m or {}).get('reason')}")
         return None
-    plan = plan_entry(b2, ev)
+    plan = plan_entry(b2, ev, sym=sym)
     z = plan.get("buy_zone") or {}
     # 昨收口径的埋伏单：用来回答「盘前挂的那张单今天成交了没有」
     pb_closed = None
     if live_bar is not None:
         ev_c, b_c, _mc = build_ev(bars[:-1])
         if ev_c is not None:
-            pb_closed = plan_entry(b_c, ev_c).get("pre_breakout")
+            pb_closed = plan_entry(b_c, ev_c, sym=sym).get("pre_breakout")
     # 同 A 股：先跑 room_and_cap，让 stop_plan 的「铁律二」修正落进 z 再打印。
     # 必须排在 plan/z 之后 —— 放前面会直接 UnboundLocalError，整条美股路径跑不通。
     rc_us = room_and_cap(bars, z, plan["mode"], atr_v, last_c=last["c"])
