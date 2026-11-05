@@ -83,7 +83,8 @@ UPDN_DISTRIB = 1.0 / 1.15
 # 量能：当日量 / 20 日均量 ≥ 1.0（skill 量能档「平量」及以上）
 RVOL_ON = 1.0
 # 执行：买入上限闸门 P_max 的口径 —— 盈亏比跌破 1.5:1 即不合格
-RR_ON = 1.5
+# ★ 全修①：收敛到 rr_core 单一真源（不再自己写 1.5）
+from rr_core import MIN_RR as RR_ON  # noqa: E402
 # 执行：突破类「硬止损贴噪声带」阈值（<0.25×ATR 等于没有止损）
 RISK_ATR_ON = 0.25
 

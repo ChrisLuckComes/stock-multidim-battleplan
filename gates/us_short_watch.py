@@ -152,8 +152,13 @@ def one_card(sym, pairs):
         "ref_close": ref_close,                       # 昨收：ETF 换算 und_ref 固定用昨收（与 close=live 解耦）
         "sig_age": sig_age,
         "mode": "破位结构空" if pl["broken"] else "反抽结构空",
+        # ★ 全修①：主 RR 一律 T1 口径（与 rr_ladder / verdict 硬闸同尺）；
+        #   候选展示目标仍是 T2（远支撑，ETF 换算用），其 RR 单列 rr_far 只作参考。
+        #   改前用 T2 算主 RR ⇒ 虚高，且与 T1 反解的门槛价不是同一个价。
         "main_cands": [{"name": n, "entry": e, "stop": cs, "target": tg,
-                         "rr": rr_ratio(e, tg, cs)}
+                         "rr": rr_ratio(e, t1, cs),
+                         "rr_far": rr_ratio(e, tg, cs) if tg != t1 else None,
+                         "rr_basis": "T1", "target_basis": ("T2" if tg != t1 else "T1")}
                         for (n, e, cs, tg) in main_cands],
         "rr_ladder": rr_ladder,
         "s_broken": pl["s_broken"], "r1": pl["r1"], "t1": pl["t1"], "t2": pl["t2"],
@@ -239,11 +244,14 @@ def one_card(sym, pairs):
 #   MAX_SIG_AGE = 3    —— 信号新鲜度硬闸。老罗：「盈亏比到位就能做」「难道下跌只能
 #                         跌这么多天吗？有的无底洞呢」⇒ 改用**价格口径**判定（见下）。
 # ★ 现在的唯一门槛：**用当前价格重算盈亏比，到位就能做**（老罗原则）。
-MIN_RR_NOW = 1.5       # 当前价重算的盈亏比门槛（目标=现实可达 / 止损=当前结构位）
+from rr_core import MIN_RR as MIN_RR_NOW  # noqa: E402  ★ 全修① 单一真源
 # ★ 深跌反抽档（老罗 2026-10-31：「夜盘开盘 -3%，反抽到 -1% 买进去」）
 DEEP_D = 3.0           # 跌深门槛：现价较昨收跌 ≥3%（老罗的 -3%）
 DEEP_R = 1.0           # 反抽触发：反抽回到 -1% 就进（老罗的 -1%）
-MIN_RR = 1.0           # ⚠ RR 只作参考排序门槛（老罗 2026-10-31：RR 不代表能达成）
+# ⚑ 全修① 清理：此处原有一个 `MIN_RR = 1.0`（「RR 只作参考排序门槛」），
+#   全文件无人使用，却与 rr_core.MIN_RR=1.5 同名不同值 —— 正是「两套口径混回一屏」
+#   的隐患。现在门槛只有一个：MIN_RR_NOW（= rr_core.MIN_RR）；排序由 RR 大小直接比，
+#   不需要另设 1.0 下限。
 
 
 def _verdict(c):
@@ -276,9 +284,9 @@ def _verdict(c):
     cands = c.get("main_cands") or []
     rrs = [x["rr"] for x in cands if x.get("rr") is not None]
     best_rr = max(rrs) if rrs else 0.0
-    if best_rr < 1.5:
-        return "不推荐", ("结构空点盈亏比不足（最佳 RR %.2f < 1.5 门槛）⇒ 负期望区"
-                          % best_rr)
+    if best_rr < MIN_RR_NOW:
+        return "不推荐", ("结构空点盈亏比不足（最佳 RR(T1) %.2f < %g 门槛）⇒ 负期望区"
+                          % (best_rr, MIN_RR_NOW))
     # 硬闸④：可执行（只做反向ETF）
     if not (c.get("etf") or {}).get("code"):
         return "不推荐", "无反向ETF映射 ⇒ 无法落地（只做反向ETF）"
@@ -320,11 +328,14 @@ def _fmt_etf_cand(cd, e, ref, er, lev, t1_und=None):
     无 ETF 映射时退回正股价。目标默认取候选自身的 t2（远结构位），
     t1（近支撑）若存在且不同则附 (T1≈…) 一并给出。
     """
-    rr = cd.get("rr")
+    rr = cd.get("rr")                      # T1 口径（主 RR，与门槛同尺）
     rr_s = ("%.2f" % rr) if rr is not None else "—"
+    rr_far = cd.get("rr_far")              # T2 远目标口径（仅参考）
+    far_s = ("｜远目标RR %.2f(仅参考)" % rr_far) if rr_far is not None else ""
     e_u, s_u, t_u = cd["entry"], cd["stop"], cd["target"]
     if not e.get("code"):
-        s = "%s 买%.2f 止损%.2f 目标%.2f RR%s" % (cd["name"], e_u, s_u, t_u, rr_s)
+        s = "%s 买%.2f 止损%.2f 目标%.2f RR(T1)%s%s" % (
+            cd["name"], e_u, s_u, t_u, rr_s, far_s)
         if t1_und is not None and abs(t1_und - t_u) > 1e-6:
             s += " (T1≈%.2f)" % t1_und
         return s
@@ -332,7 +343,8 @@ def _fmt_etf_cand(cd, e, ref, er, lev, t1_und=None):
     s = etf_from_underlying(s_u, ref, er, lev)
     t = etf_from_underlying(t_u, ref, er, lev)
     t1e = etf_from_underlying(t1_und, ref, er, lev) if t1_und is not None else None
-    st = "%s 买%.4g 止损%.4g 目标%.4g RR%s" % (cd["name"], b, s, t, rr_s)
+    st = "%s 买%.4g 止损%.4g 目标%.4g RR(T1)%s%s" % (
+        cd["name"], b, s, t, rr_s, far_s)
     if t1e is not None and abs(t1e - t) > 1e-6:
         st += " (T1≈%.4g)" % t1e
     st += "｜正股%.2f/%.2f" % (e_u, s_u)
@@ -363,15 +375,15 @@ def brief_line(c):
         bits = [_fmt_etf_cand(cd, e, ref, er, lev, t1_und) for cd in cands]
         out.append("%s\n           ① 主决策(ETF执行价)：%s" % (head, " ｜ ".join(bits)))
         lad = c.get("rr_ladder") or []
-        gate = [x for x in lad if abs(x[0] - 1.5) < 1e-9]
+        gate = [x for x in lad if abs(x[0] - MIN_RR_NOW) < 1e-9]
         if gate:
             ok = c["close"] >= gate[0][1]
             if e.get("code"):
                 ge = etf_from_underlying(gate[0][1], ref, er, lev)
-                out.append("            RR≥1.5 门槛：ETF 买价 ≥ %.4g（正股 ≥ %.2f）｜当前 ETF %.4g / 正股 %.2f %s"
+                out.append("            RR(T1)≥1.5 门槛：ETF 买价 ≥ %.4g（正股 ≥ %.2f）｜当前 ETF %.4g / 正股 %.2f %s"
                            % (ge, gate[0][1], etf_now, c["close"], "够" if ok else "不够"))
             else:
-                out.append("            RR≥1.5 门槛：入场价 ≥ %.2f（当前 %.2f %s）"
+                out.append("            RR(T1)≥1.5 门槛：入场价 ≥ %.2f（当前 %.2f %s）"
                            % (gate[0][1], c["close"], "够" if ok else "不够"))
     else:
         out.append("%s\n           ① 主决策(ETF执行价)：—" % head)
@@ -445,16 +457,16 @@ def line(c):
         for cd in cands:
             out.append("   ① 主决策(ETF): %s" % _fmt_etf_cand(cd, e, ref, er, lev, t1_und))
         lad = c.get("rr_ladder") or []
-        gate = [x for x in lad if abs(x[0] - 1.5) < 1e-9]
+        gate = [x for x in lad if abs(x[0] - MIN_RR_NOW) < 1e-9]
         if gate:
             ok = c["close"] >= gate[0][1]
             if e.get("code"):
                 ge = etf_from_underlying(gate[0][1], ref, er, lev)
-                out.append("            RR≥1.5 门槛：ETF 买价 ≥ %.4g（正股 ≥ %.2f）｜当前 ETF %.4g / 正股 %.2f %s"
+                out.append("            RR(T1)≥1.5 门槛：ETF 买价 ≥ %.4g（正股 ≥ %.2f）｜当前 ETF %.4g / 正股 %.2f %s"
                            % (ge, gate[0][1], etf_from_underlying(c["close"], ref, er, lev),
                               c["close"], "够" if ok else "不够"))
             else:
-                out.append("            RR≥1.5 门槛：入场价 ≥ %.2f（当前 %.2f %s）"
+                out.append("            RR(T1)≥1.5 门槛：入场价 ≥ %.2f（当前 %.2f %s）"
                            % (gate[0][1], c["close"], "够" if ok else "不够"))
     else:
         out.append("   ① 主决策(ETF): —")

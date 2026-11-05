@@ -51,7 +51,7 @@ VERSION = "1.0"
 MIN_RISK_ATR = 0.25          # 风险低于 0.25×ATR 的组合 = 纸面赔率，剔除
 # ★ 2026-10-18 老罗拍板 A 方案：流星砸坑专用推荐档的赔率门槛。
 #   沿用全局「R≥1.5 才做」的执行铁律（与 RR_GATE / us_session_decide 同一把尺）。
-METEOR_RR_GATE = 1.5
+from rr_core import MIN_RR, MIN_RR as METEOR_RR_GATE  # noqa: E402  ★ 全修① 单一真源
 BIG_YANG_BODY_ATR = 0.80     # 大阳判定：实体 ≥ 0.8×ATR
 TIE_LINE_LOOK = 8            # 贴线命中统计回看根数（output-pitfalls #21：±1% ≥2/8）
 PEER_WORKERS = 12            # 同行日线是网络 I/O；与 scan_all/enum.py 同上限，口径不变
@@ -372,7 +372,8 @@ def entry_candidates(bars, plan, probe_out, atr_v, odds_from_probe=None):
     return uniq
 
 
-def odds_matrix(entries, anchors, atr_v, t1, t2, last_c, walls=None):
+def odds_matrix(entries, anchors, atr_v, t1, t2, last_c, walls=None,
+                engine_t1=None):
     """全档赔率枚举。返回按 R→t1 降序的列表（已剔除纸面档）。
 
     R = (目标 − 买入) ÷ (买入 − 止损)。
@@ -418,12 +419,23 @@ def odds_matrix(entries, anchors, atr_v, t1, t2, last_c, walls=None):
                           ("t2·远端墙（t1 缺失回落）" if t2 else None))
             else:                                       # 新口径：按本档买价求墙
                 need = buy + 0.5 * atr_v if atr_v else buy
-                tgt1 = next((p for p in wall_list if p >= need), None)
+                # ★ 全修⑤：引擎 targets.t1 已过 POKE_ATR(0.5ATR) + RR_GATE(1.5)
+                #   两道过滤，是「能给合格赔率的最近真阻力」。改前报告层只按
+                #   「买价+0.5ATR 之上最近的墙」求，walls 里混进近墙 ⇒ 现价贴阻力
+                #   时 t1 被压到贴脸，R<1.5 系统性拒掉突破票（与引擎结论相反）。
+                #   ⇒ 引擎 t1 若满足本档 need，优先采用，报告与引擎同一把尺。
+                _et1 = float(engine_t1) if engine_t1 is not None else None
+                if _et1 is not None and _et1 >= need:
+                    tgt1 = _et1
+                else:
+                    tgt1 = next((p for p in wall_list if p >= need), None)
                 tgt2 = wall_list[-1] if wall_list else None
                 if tgt2 is not None and tgt1 is not None and tgt2 <= tgt1:
                     tgt2 = None
                 if tgt1 is None:
                     basis1 = "海阔天空·不设目标"
+                elif _et1 is not None and abs(tgt1 - _et1) < 1e-9:
+                    basis1 = "引擎targets.t1（已过RR闸）"
                 elif t1 and abs(tgt1 - t1) < max(0.01, atr_v * 0.05):
                     basis1 = "t1"
                 else:
@@ -786,10 +798,10 @@ def _pick_recommend_cn(rows, z, bars=None):
     best = _top(primary)
     # 结构位那一档 R<1.5 时，改用仍在结构位之上的更紧技术锚。
     # 不回落到结构位以下的宽止损 —— 那是仓位口径，不是作战 R。
-    if best is None or (best[3].get("r1") or 0) < 1.5:
+    if best is None or (best[3].get("r1") or 0) < MIN_RR:
         # 薄止损（<0.35×ATR，与 annotate_odds 同一档）不能拿来把 R 做上去。
         tight = [r for r in tactical
-                 if (r.get("r1") or 0) >= 1.5
+                 if (r.get("r1") or 0) >= MIN_RR
                  and (r.get("risk_atr") or 0) >= 0.35]
         alt = _top(tight)
         if alt is not None:
@@ -869,7 +881,7 @@ def _pick_recommend_us(rows, z, bars=None):
     def _split(pool):
         chase, pull = [], []
         for r in pool:
-            if r.get("r1") is None or r["r1"] < 1.5:
+            if r.get("r1") is None or r["r1"] < MIN_RR:
                 continue
             if struct_stop is not None and r["entry"] <= struct_stop:
                 continue
@@ -1482,7 +1494,7 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
     anchors = stop_anchor_candidates(bars, plan, atr_v)
     entries = entry_candidates(bars, plan, probe_out, atr_v)
     odds = odds_matrix(entries, anchors, atr_v, t1, wall_far if wall_far else t2_engine,
-                       last_c, walls=walls)
+                       last_c, walls=walls, engine_t1=t1)   # ★ 全修⑤ 报告与引擎同尺
     odds = annotate_odds(odds, z, atr_v, last_c)
     rec = pick_recommend(odds, z, bars=bars, us=is_us)
     touch_px = None

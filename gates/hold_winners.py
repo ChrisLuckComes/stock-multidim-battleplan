@@ -36,7 +36,15 @@ import sys
 RULE_ID = "hold_winners"
 RULE_DATE = "2026-10-27"
 CITE = "%s · %s" % (RULE_ID, RULE_DATE)
-RR_MIN = 1.5
+# ★ 全修①：R 门槛收敛到 rr_core 单一真源，不再在本模块硬编码 1.5。
+#   本模块刻意不 import session stack（见 docstring），但 rr_core 是纯常量/公式模块，
+#   无副作用、无 I/O ⇒ 直接接不会引入耦合。
+try:
+    from rr_core import MIN_RR as RR_MIN
+except ImportError:  # 允许 `python gates/hold_winners.py --sold ...` 独立运行
+    import os as _os
+    sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+    from rr_core import MIN_RR as RR_MIN
 # Same 1% dip as gates/us_session_decide.SHALLOW_DIP_PCT.
 SHALLOW_DIP = 0.01
 # Same cost-stop cap as rule123.STOP_MAX_PCT / us_session_decide.SHALLOW_STOP_MAX_PCT.

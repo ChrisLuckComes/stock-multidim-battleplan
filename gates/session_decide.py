@@ -83,6 +83,12 @@ def auto_plan_cn(minutes, code, pre):
     stop = low if low < cur else cur - 1.5 * a
     if cur - stop > 3.0 * a:          # 风险距过宽 → 收紧到 3×ATR（买在高位时自然触发）
         stop = cur - 3.0 * a
+    # ★ 全修①附：最小止损距（与美股 auto_plan_us / 做空 NOISE_ATR 同口径）。
+    #   开盘前 5 分钟 low≈cur ⇒ 分母极小 ⇒ R 虚高 ⇒ 假「能买」。
+    from levels import NOISE_ATR
+    _min_risk = NOISE_ATR * a
+    if cur - stop < _min_risk:
+        stop = cur - _min_risk
     # ★ 真实阻力 = 涨停价（A股硬顶）。不用「近 HIGH_N 分高点」——上涨途中近高≈现价
     #   ⇒ R 坍缩 ⇒ 误杀（杭氧 002430 10-13 13:30 实例：价26.57、近高≈26.6 ⇒ R0.25 被否）。
     #   涨停价是天然上限，价格贴着均线往上走时 R 保持稳定，框架才不会被「涨」误杀。
@@ -110,6 +116,10 @@ CHASE_DEV_PCT = 6.0
 CAP_TOL_PCT = 0.02
 # 计划目标距现价 ≤ 此倍数 × ATR，视为目标已贴脸、盈亏比失真，改问盘中通道。
 NEAR_TARGET_ATR = 0.5
+# ★ 全修③ 日内结构重算参数：
+MIN_STRUCT_RISK_ATR = 0.25   # 迁移后止损距现价的最小 ATR 倍数（防毛刺扫损 / R 虚高）
+STALE_TARGET_TOL = 0.005     # 目标已被现价贴脸（≤0.5%）⇒ 不硬凑 R
+MIN_STRUCT_MINUTES = 30      # 启用日内结构重算所需的最少分时根数
 
 
 def target_is_stale(price, target, atr):
@@ -169,6 +179,17 @@ def plan_from_files(analysis_path, notes_path=None):
         t = a.get("targets") or {}
         target = t.get("t1") or t.get("wall_far") or t.get("ath")
     cap = ov.get("cap") or n.get("buy_cap")
+    # ★ 全修②：把 rule123 的「次日追价授权」接进盘中决策。
+    #   改前 plan_from_files 不读它 ⇒ 授权只写进报告、盘中一律按静态 cap 判「等回踩」，
+    #   等于死字段（老罗踏空来源之一）。授权语义：现价 ≤ limit 可半仓执行，止损收紧到 stop。
+    chase = None
+    _zc = ((a.get("plan") or {}).get("buy_zone") or {}).get("next_day_chase")
+    if isinstance(_zc, dict) and _zc.get("limit") is not None:
+        chase = {"limit": float(_zc["limit"]),
+                 "stop": _zc.get("stop"),
+                 "size_ratio": float(_zc.get("size_ratio") or 0.5),
+                 "src": _zc.get("src") or "次日追价授权",
+                 "valid_for": _zc.get("valid_for") or "仅次日"}
     return {
         "code": (a.get("meta") or {}).get("code"),
         "name": (a.get("meta") or {}).get("name"),
@@ -177,6 +198,9 @@ def plan_from_files(analysis_path, notes_path=None):
         "target": target,
         "cap": cap,
         "shares": ov.get("shares") or rec.get("qty"),
+        "chase": chase,
+        "zone_hi": z.get("primary_hi"),
+        "zone_lo": z.get("primary_lo"),
     }
 
 
@@ -277,7 +301,68 @@ def count_dip_minutes(minutes, pre):
     return n
 
 
-def resolve_cap(entry, stop, target, cap, pre, day_open=None):
+def dynamic_structure(day, price, entry, stop, target, atr, struct, rally):
+    """★ 全修③：现价越过昨晚挂单价时，用**当日已形成的分时结构**重算止损 / cap 基准。
+
+    根因（踏空）：旧 decide 拿「现价」代进「昨晚静态 target/stop」算 R ——
+      价格越涨，分子 (target−price) 缩、分母 (price−stop) 涨 ⇒ R 单调降，
+      强势票必然 R<1.5 被拒；cap 又锚死昨收+2%，六道闸全在回答「能否按昨晚的价买」。
+
+    口径（不编造目标、只迁移止损与基准，遵守老罗「结构迁移」既有纪律）：
+      · 触发：price > entry（计划价已过）且当日分时结构健康
+              （trend_structure 双高双低抬升，或 rally_state 拉升成立）。
+      · 止损：上移到「当日最新一段结构低点」，但不得低于昨晚止损、且必须留
+              MIN_STRUCT_RISK_ATR×ATR 的风控距；这是**收紧**不是放宽。
+      · 目标：沿用昨晚目标，不凭空造；若目标已被现价贴脸 ⇒ applied=False，
+              交回原 handoff 路径（不硬凑 R）。
+      · cap 基准：从昨收迁移到 max(昨收, 今开, 计划挂单价) ⇒ 突破位成为新参照。
+
+    返回 {applied, stop, target, cap_base, why}。默认路径（回踩 / 结构不健康）一律
+    applied=False，decide 保持旧行为 ⇒ 既有回归不受影响。
+    """
+    out = {"applied": False, "stop": stop, "target": target,
+           "cap_base": None, "why": ""}
+    if price <= entry:
+        return out
+    # 数据充分性门槛：分钟线不足 30 根（开盘早期 / 回放夹具）不启用，
+    # 这时「日内结构」尚未形成，重算等于拿几根毛刺当结构 ⇒ 会造出假突破。
+    if len(day.get("minutes") or []) < MIN_STRUCT_MINUTES:
+        out["why"] = "分时数据不足 %d 根，不重算结构" % MIN_STRUCT_MINUTES
+        return out
+    healthy = bool((struct or {}).get("ok")) or bool((rally or {}).get("ok"))
+    if not healthy:
+        return out
+    if target is None or target <= price * (1.0 + STALE_TARGET_TOL):
+        out["why"] = "计划目标已被现价贴脸/击穿，不硬凑 R"
+        return out
+    minutes = day.get("minutes") or []
+    lo_recent = None
+    # 优先用 trend_structure 已算好的「最新一段结构低点」，语义 = 突破后新结构的底
+    seg_lo = (struct or {}).get("lo") or []
+    if seg_lo:
+        lo_recent = float(seg_lo[-1])
+    elif minutes:
+        lo_recent = min(float(m["l"]) for m in minutes[-20:])
+    if lo_recent is None:
+        return out
+    new_stop = max(float(stop), lo_recent)
+    # 风控距：止损不能贴到现价（否则 R 虚高 / 毛刺即扫）
+    min_risk = (MIN_STRUCT_RISK_ATR * float(atr)) if atr else 0.0
+    if price - new_stop < max(min_risk, 0.01):
+        new_stop = price - max(min_risk, 0.01)
+    if new_stop <= float(stop) + 1e-9:
+        return out                      # 结构没抬升 ⇒ 不触发
+    day_open = float(minutes[0]["o"]) if minutes else None
+    pre = day.get("pre")
+    cap_base = max([v for v in (pre, day_open, entry, price * 0.99) if v is not None])
+    out.update({"applied": True, "stop": new_stop, "target": target,
+                "cap_base": cap_base,
+                "why": "日内结构上移止损 %.2f→%.2f，cap 基准迁到 %.2f" % (
+                    float(stop), new_stop, cap_base)})
+    return out
+
+
+def resolve_cap(entry, stop, target, cap, pre, day_open=None, structure_base=None):
     """买入上限：显式 cap、R≥1.5 门槛、昨收+2% 三选严。
 
     ⚠️ 闸归属必须说清（2026-10-09 金石亚药 300434 教训）：
@@ -301,6 +386,9 @@ def resolve_cap(entry, stop, target, cap, pre, day_open=None):
         base = float(pre)
         if day_open is not None and float(day_open) > base * (1.0 + GAP_UP_MAX):
             base = float(day_open)
+        # ★ 全修③：cap 基准随突破位迁移（只在日内结构确认时由 decide 传入）
+        if structure_base is not None:
+            base = max(base, float(structure_base))
         gap_cap = base * (1.0 + GAP_UP_MAX)
         if gap_cap > entry:
             caps.append(gap_cap)
@@ -309,7 +397,7 @@ def resolve_cap(entry, stop, target, cap, pre, day_open=None):
     return round_px(min(caps))
 
 
-def cap_gates(entry, stop, target, cap, pre, day_open=None):
+def cap_gates(entry, stop, target, cap, pre, day_open=None, structure_base=None):
     """逐闸返回各闸给出的上限 + 最终 cap，用于**如实报告是哪一闸在收紧**。
 
     ★ 纪律第 22 条（2026-10-09 立）：cap 被拒时必须先调本函数打印三闸，
@@ -330,12 +418,15 @@ def cap_gates(entry, stop, target, cap, pre, day_open=None):
         if day_open is not None and float(day_open) > base * (1.0 + GAP_UP_MAX):
             base = float(day_open)
             src = "开盘价（昨收基准失效）"
+        if structure_base is not None and float(structure_base) > base:
+            base = float(structure_base)
+            src = "日内突破位（结构迁移）"
         out["gap_base"] = base
         out["gap_base_src"] = src
         gap_cap = base * (1.0 + GAP_UP_MAX)
         if gap_cap > entry:
             out["gap_gate"] = round_px(gap_cap)
-    out["final"] = resolve_cap(entry, stop, target, cap, pre, day_open)
+    out["final"] = resolve_cap(entry, stop, target, cap, pre, day_open, structure_base)
     cands = [(k, v) for k, v in (("显式cap", out["explicit"]),
                                   ("R闸", out["rr_gate"]),
                                   ("昨收+2%闸", out["gap_gate"])) if v is not None]
@@ -671,7 +762,7 @@ def chase_risk(minutes, lookback=20, ratio=6.0, gap_min=1.0, dev_max=6.0):
 
 def decide(day, summary, entry, stop, target, cap=None, account=None,
             risk_scale=1.0, quality=None, cap_tol_pct=None, atr=None,
-            pulse=None, pulse_enabled=True):
+            pulse=None, pulse_enabled=True, chase=None, zone_hi=None):
     """核心判定。返回结构化结果，供 CLI 与测试用。
 
     ★ 盘中口径（老罗 2026-10-09 14:26 定调）：
@@ -697,8 +788,38 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
     pre = day.get("pre")
     code = day["code"]
     day_open = float(day["minutes"][0]["o"]) if day.get("minutes") else None
-    buy_cap = resolve_cap(entry, stop, target, cap, pre, day_open)
-    gates = cap_gates(entry, stop, target, cap, pre, day_open)
+    limit_px = limit_up_price(pre, code)
+    limit_dn = limit_down_price(pre, code)
+    # ★ 全修③：现价越过昨晚挂单价且日内结构确认 ⇒ 止损随新结构上移、cap 基准迁到突破位。
+    #   默认（回踩 / 结构未确认 / 数据不足）完全走旧路径，不影响既有回归。
+    dyn = dynamic_structure(
+        day, price, entry, stop, target, atr,
+        trend_structure(day["minutes"]), rally_state(day["minutes"]))
+    stop_eff = dyn["stop"] if dyn["applied"] else stop
+    structure_base = dyn["cap_base"] if dyn["applied"] else None
+    # ★ 全修②：追价授权命中（现价越过买区上沿、但未顶穿授权价）⇒
+    #   ① cap 上界抬到授权 limit（否则静态 cap 必拒）
+    #   ② 执行止损换成授权的收紧 stop
+    #   ③ 仓位减半（size_ratio）
+    #   R 闸仍照常生效（用收紧后的 stop 重算，通常更容易达标），不放宽赔率。
+    chase_hit = None
+    if chase and isinstance(chase, dict) and chase.get("limit") is not None:
+        _lim = float(chase["limit"])
+        _cstop = chase.get("stop")
+        if (price <= _lim + 1e-9 and price > entry
+                and _cstop is not None and float(_cstop) < price):
+            chase_hit = dict(chase)
+            stop_eff = max(stop_eff, float(_cstop))
+            structure_base = max(structure_base or 0.0, _lim)
+    buy_cap = resolve_cap(entry, stop_eff, target, cap, pre, day_open, structure_base)
+    gates = cap_gates(entry, stop_eff, target, cap, pre, day_open, structure_base)
+    if chase_hit:
+        # 授权价本身即为上限（不再叠加 +2%），且不得顶穿涨停
+        buy_cap = round_px(max(buy_cap or 0.0, float(chase_hit["limit"])))
+        if limit_px is not None:
+            buy_cap = min(buy_cap, round_px(limit_px * (1.0 - LIMIT_NEAR) - 0.01))
+        gates["final"] = buy_cap
+        gates["chase_applied"] = chase_hit
     # ★ 浮动买区：cap 上方容差带内视为「计划内」（2026-10-12 老罗反馈）。
     #   固定点 cap 会差 0.45~0.67 元就放跑合法买点（天溯 -4% 实证）。
     #   near_zone=True 时仍按实际价重算 R（下方 R 闸照常卡 ≥1.5），仅放宽「价格上限」这一道。
@@ -708,9 +829,7 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
         buy_cap is not None and price > buy_cap + 1e-9
         and soft_cap is not None and price <= soft_cap + 1e-9
     )
-    limit_px = limit_up_price(pre, code)
-    limit_dn = limit_down_price(pre, code)
-    rr = long_rr(price, target, stop) if target is not None else None
+    rr = long_rr(price, target, stop_eff) if target is not None else None
     rr_at_entry = long_rr(entry, target, stop) if target is not None else None
     if quality and quality.get("level") == "warn":
         risk_scale = risk_scale * float(quality.get("scale") or 1.0)
@@ -742,6 +861,7 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
         "dip_minutes": dip_n,
         "entry": entry,
         "stop": stop,
+        "stop_exec": stop_eff,      # ★ 实际执行止损（结构迁移后与计划止损不同）
         "target": target,
         "cap": buy_cap,
         "cap_band": soft_cap,
@@ -765,6 +885,15 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
         "burst": burst,
         "chase": chase,
         "cap_gates": gates,
+        # ★ 全修③：日内结构重算的可审计字段（报告层据此明示"止损已随结构上移"）
+        "stop_eff": stop_eff,
+        "structure_recalc": bool(dyn["applied"]),
+        "structure_recalc_why": dyn["why"],
+        "structure_cap_base": structure_base,
+        # ★ 全修②：追价授权 + 并列向上档（谁先到做谁，不再只给向下回踩档）
+        "chase_applied": chase_hit,
+        "chase_size_ratio": (chase_hit or {}).get("size_ratio"),
+        "above_entry": (chase_hit or {}).get("limit") or zone_hi,
         "handoff": False,
         "risk_scale": risk_scale,
         "pulse_scale": _pulse_scale,
@@ -805,8 +934,9 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
     tight = (gates or {}).get("tightest")
     stale_tgt = target_is_stale(price, target, atr)
 
-    if price <= stop:
-        return _reject("现价已在止损下方，不接飞刀。")
+    if price <= stop_eff:
+        return _reject("现价已在%s止损下方，不接飞刀。" %
+                       ("日内结构" if dyn["applied"] else ""))
     # ★ 跌停板硬拦（2026-10-09 老罗纠正后新增）：跌停价是可成交的，所以 R 算得出来，
     #   但那不是买点——次日大概率继续低开、卖盘排队，实际卖不出。
     #   口径与涨停对称，且优先于 R 与 cap：跌停板上的 R 再高也不买。
@@ -883,12 +1013,17 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
         limit_buy = round_px(price)
         tag = "计划上限内"
 
-    size = size_for(code, limit_buy, stop, account=account, risk_scale=risk_scale)
+    # ★ 全修③：仓位按**实际执行止损**算（结构迁移后止损上移 ⇒ 风险距收窄 ⇒ 股数变化），
+    #   否则会出现「R 用新止损、仓位用旧止损」的新不一致。
+    # ★ 全修②：授权命中 ⇒ 半仓（size_ratio），与 rule123 的授权口径一致
+    _size_ratio = float((chase_hit or {}).get("size_ratio") or 1.0)
+    size = size_for(code, limit_buy, stop_eff, account=account,
+                    risk_scale=risk_scale * _size_ratio)
     if not size["qty"] and _pulse_scale < 1.0:
         # ★ 脉搏缩仓把 qty 压没了 ⇒ 回退到最小申报单位（软约束不得变成硬否决）。
         #   只在「未缩放时买得起」的前提下回退；本来就买不起的不给放宽。
-        base_size = size_for(code, limit_buy, stop, account=account,
-                             risk_scale=risk_scale_user)
+        base_size = size_for(code, limit_buy, stop_eff, account=account,
+                             risk_scale=risk_scale_user * _size_ratio)
         if base_size.get("qty"):
             size = base_size
             size["pulse_fallback"] = True
@@ -909,10 +1044,16 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
     out["arm_note"] = ""
     out["reason"] = (
         "%s。限价 %.2f，止损 %.2f，目标 %s，现价 R %s。"
-        % (tag, limit_buy, stop,
+        % (tag, limit_buy, stop_eff,
            ("%.2f" % target) if target is not None else "—",
            ("%.2f" % rr) if rr is not None else "—")
     )
+    if dyn["applied"]:
+        out["reason"] += " ◆ 止损已随日内结构上移 %.2f→%.2f（非放宽风控）。" % (stop, stop_eff)
+    if chase_hit:
+        out["reason"] += (" ◆ 追价授权命中（≤%.2f），执行止损收紧到 %.2f、"
+                          "仓位 %.0f%%。" % (float(chase_hit["limit"]),
+                                            stop_eff, _size_ratio * 100))
     if out["caution"]:
         out["reason"] += " ⚠ " + out["caution"] + "（资金读数偏弱，建议减半仓）"
     return out
@@ -943,6 +1084,10 @@ def render(d):
     rr_s = ("%.2f" % d["rr"]) if d["rr"] is not None else "—"
     rr_e = ("%.2f" % d["rr_at_entry"]) if d["rr_at_entry"] is not None else "—"
     lines.append("盈亏比  现价 R %s  挂单价 R %s" % (rr_s, rr_e))
+    if d.get("structure_recalc"):
+        lines.append("结构  ◆ 日内结构重算：%s｜执行止损 %.2f（计划 %.2f）"
+                     % (d.get("structure_recalc_why") or "—",
+                        d.get("stop_exec") or d["stop"], d["stop"]))
     lines.append("分时  %s  %s" % (d["tape"]["label"], d["tape"]["text"]))
     lines.append("窗口  全天已出现 %d 根落在昨收 0%%～2%%" % d["dip_minutes"])
     lines.append("结论  %s。%s" % (d["action"], d["reason"]))
@@ -960,6 +1105,13 @@ def render(d):
         lines.append("◆ 浮动买区：现价 %.2f 落在 cap %.2f 上方容差带（≤%.2f，+%.1f%%）内，"
                      "按实际价重算 R 仍合格 ⇒ 视为计划内。"
                      % (d["price"], d["cap"], d["cap_band"], (d["cap_tol_pct"] or 0) * 100))
+    # ★ 全修②：向上档与回踩档并列给价（谁先到做谁），不再只给向下档
+    _above = d.get("above_entry")
+    if _above is not None:
+        lines.append("档位  向下回踩 %.2f ｜ 向上突破/追价 %.2f%s（现价 %.2f）"
+                     % (d["entry"], float(_above),
+                        " ·授权半仓" if d.get("chase_applied") else "",
+                        d["price"]))
     if d["action"] != "能买" and d.get("arm_price") is not None:
         lines.append("盯价  %.2f  %s" % (d["arm_price"], d.get("arm_note") or ""))
     if d["action"] == "能买" and d["size"]:
@@ -1163,12 +1315,14 @@ def main(argv=None):
 
     # 2) 解析 entry/stop/target（--plan < --entry/--stop 显式 < 自动计划）
     plan_src = ""
+    chase, zone_hi = None, None          # ★ 全修②：追价授权 / 并列向上档
     if args.plan:
         p = plan_from_files(args.plan, args.notes)
         entry = args.entry if args.entry is not None else p["entry"]
         stop = args.stop if args.stop is not None else p["stop"]
         target = args.target if args.target is not None else p["target"]
         cap = args.cap if args.cap is not None else p["cap"]
+        chase, zone_hi = p.get("chase"), p.get("zone_hi")
         plan_src = "计划文件 %s" % args.plan
     elif args.entry is not None and args.stop is not None:
         entry, stop, target, cap = args.entry, args.stop, args.target, args.cap
@@ -1213,6 +1367,7 @@ def main(argv=None):
         cap=cap, account=args.account, risk_scale=args.risk_scale,
         quality=quality, cap_tol_pct=cap_tol_pct, atr=atr_v,
         pulse_enabled=not args.no_pulse,
+        chase=chase, zone_hi=zone_hi,       # ★ 全修②
     )
     if d.get("handoff"):
         try:

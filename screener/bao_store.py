@@ -491,8 +491,8 @@ def synth_today_bar_txday(code, target=None, db_bars=None):
     return {"d": target, "o": o, "c": c, "h": h, "l": l, "v": v}
 
 
-def synth_today_bar_tencent(code, target=None, ref_v=None, ref_max_v=None, db_bars=None):
-    """合成「今日(收盘)日 K」→ {d,o,h,l,c,v} 或 None。
+def _synth_today_bar_raw(code, target=None, ref_v=None, ref_max_v=None, db_bars=None):
+    """合成「今日(收盘)日 K」→ {d,o,h,l,c,v} 或 None（未过占位守卫的原始层）。
 
     ⚑ 2026-10-21（老罗「彻底修复」· 数据时效）源优先级 **新浪日K（主）→ 腾讯分钟线（兜底）**：
       · 新浪 `fetch_ashare`：官方日K、volume 已是「股」（实拍量比=1.0 vs baostock），
@@ -570,6 +570,45 @@ def synth_today_bar_tencent(code, target=None, ref_v=None, ref_max_v=None, db_ba
             if v and v > 0:
                 return {"d": target, "o": o, "c": c, "h": h, "l": l, "v": v}
     return None
+
+
+def is_flat_placeholder_bar(bar):
+    """★ 全修⑥：识别数据源对「停牌/退市/无成交」票返回的**平盘占位行**。
+
+    实测（2026-11-05 补一周日线）：新浪日K 对停牌、退市或长期无成交的票，
+    会返回一根 `o == h == l == c == 前收, v == 0` 的占位行，日期却写成 target。
+    写进日线库的后果：
+      ① MA / ATR / RVOL 被零波动、零成交的假 bar 污染（ATR 被压小 ⇒ 止损距失真）；
+      ② 更致命 —— 末根日期「看起来」已到 target，**骗过扫描层 fail-closed**，
+         让一只停牌票带着陈旧价格继续参与选股。
+    ⇒ 判据：零成交（v<=0）即视为非交易日占位；OHLC 全等只是它的典型长相，
+      一并记在 why 里便于排查。宁可让该票 fail-closed 拦下，也不写假 bar。
+    """
+    if not bar:
+        return False
+    try:
+        v = float(bar.get("v") or 0)
+        o, h, l, c = (float(bar[k]) for k in ("o", "h", "l", "c"))
+    except (TypeError, ValueError, KeyError):
+        return True                       # 字段残缺/非数值 ⇒ 同样不可落库
+    if v > 0:
+        return False                      # 有成交 ⇒ 真交易日（含一字板 v>0）
+    # v<=0 一律拒；OHLC 全等（平盘）只是它最常见的长相，不是必要条件。
+    return True
+
+
+def synth_today_bar_tencent(code, target=None, ref_v=None, ref_max_v=None, db_bars=None):
+    """合成「今日(收盘)日 K」→ {d,o,h,l,c,v} 或 None（**对外入口，带占位守卫**）。
+
+    ⚑ 全修⑥：把守卫收口在这一层，所有调用点（ensure_today_bars 并发/串行/burst
+      三条补数路径、append_today_bar_if_missing、refresh 尾部补拉）自动生效，
+      不用在每个 save_bars 前各写一遍，也不会漏掉将来新增的写入点。
+    """
+    tb = _synth_today_bar_raw(code, target=target, ref_v=ref_v,
+                              ref_max_v=ref_max_v, db_bars=db_bars)
+    if is_flat_placeholder_bar(tb):
+        return None
+    return tb
 
 
 def append_today_bar_if_missing(conn, code, bars, target=None):

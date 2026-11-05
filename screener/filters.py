@@ -33,8 +33,8 @@ try:
     HIGH_DEV_LIMIT = float(os.environ.get("STOCK_HIGH_DEV_LIMIT", "") or 35.0)
 except (TypeError, ValueError):
     HIGH_DEV_LIMIT = 35.0
-# 赔率闸：R(→t1) < 1.5 ⇒ 赔率不成立（与 battle_analyze METEOR_RR_GATE / us_session_decide 同尺）
-MIN_RR = 1.5
+# 赔率闸：R(→t1) < 1.5 ⇒ 赔率不成立（★ 全修①：收敛到 rr_core 单一真源）
+from rr_core import MIN_RR  # noqa: E402
 
 VERDICT_CN = {
     "ok": "可上",

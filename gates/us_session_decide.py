@@ -47,7 +47,9 @@
     python gates/us_session_decide.py CIEN --entry 430 --stop 425 --target 460
     python gates/us_session_decide.py CIEN --entry 430 --stop 425 --target 460 --atr 24
     python gates/us_session_decide.py CIEN --plan watch/plan_cien.json
-    python gates/us_session_decide.py CIEN --entry 430 --stop 425 --target 460 --asof 22:30
+    python gates/us_session_decide.py CIEN --entry 430 --stop 425 --target 460 --asof 09:30
+    # ⚑ --asof 默认按 **ET（美东）时钟** 解读（分钟线 t 就是 ET）；
+    #   若按北京时间给，须显式 `--asof 21:30 --asof-tz BJ`（夏令时自动换算）。
 
 回答三件事：现在能不能买（回踩到价 / 拉升中）、推荐限价、仓位；并判定拉升类型。
 
@@ -190,6 +192,47 @@ def summarize(day):
 
 
 # ───────────────────────── 自动计划 / 计划文件 ─────────────────────────
+def normalize_asof(asof, tz="ET", et_date=None):
+    """★ 全修④：把 --asof 归一成 **ET 的 HH:MM**，再与分钟线 t 比较。
+
+    根因：分钟线 t 是 ET 时钟（_parse_et 产 ET），而旧实现直接拿用户给的
+    「22:30（北京时间）」做字符串比较 ⇒ ET 04:00~16:00 全部 >= 22:30 为假 / 或
+    整天都不截断，回放窗口完全错位。
+
+    tz="ET" → 原样补零；tz="BJ" → 用 zoneinfo 按美东当日夏令时/冬令时精确换算，
+    不写死 -12/-13 小时。跨日会在返回值里标注（调用方据此提示）。
+    """
+    if not asof:
+        return None
+    t = str(asof).strip()
+    if len(t) == 4 and t[1] == ":":
+        t = "0" + t
+    if len(t) < 5 or t[2] != ":":
+        raise ValueError("--asof 需为 HH:MM（ET 或配 --asof-tz BJ）")
+    hh, mm = int(t[:2]), int(t[3:5])
+    # ★ 全修④ 补漏：格式过了不代表时钟有效。缺了这道范围校验，「25:99」会被
+    #   原样返回成 ET 时刻，后续与分钟线 t 字符串比较时整天错位（静默踏空/回放错窗）。
+    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+        raise ValueError("--asof 需为有效时刻 HH:MM，小时 0~23 / 分钟 0~59（收到 %s）" % asof)
+    if tz.upper() != "BJ":
+        return "%02d:%02d" % (hh, mm), False
+    try:
+        from zoneinfo import ZoneInfo
+        import datetime as _dt
+        d = (et_date or _dt.date.today())
+        bj = _dt.datetime(d.year, d.month, d.day, hh, mm,
+                          tzinfo=ZoneInfo("Asia/Shanghai"))
+        et = bj.astimezone(ZoneInfo("America/New_York"))
+        crossed = et.date() != bj.date()
+        return "%02d:%02d" % (et.hour, et.minute), crossed
+    except Exception:
+        # zoneinfo 不可用（老 Python / 缺 tzdata）⇒ 退回冬令时固定 13h 差并标注
+        total = hh * 60 + mm - 13 * 60
+        crossed = total < 0
+        total %= 24 * 60
+        return "%02d:%02d" % (total // 60, total % 60), crossed
+
+
 def _parse_et(txt):
     """'4:01 AM ET' / '9:59 AM ET' → 当日分钟数（Nasdaq /chart 时间标签）。"""
     try:
@@ -263,6 +306,14 @@ def auto_plan_us(minutes, atr, pre):
     stop = low if low < cur else cur - 1.5 * a
     if cur - stop > 3.0 * a:          # 风险距过宽 → 收紧到 3×ATR（买在高位时自然触发）
         stop = cur - 3.0 * a
+    # ★ 全修④：最小止损距（与做空侧 us_short.NOISE_ATR=0.25 同口径）。
+    #   盘前/夜盘分钟稀疏时 low≈cur ⇒ 分母→0 ⇒ R→∞ 假信号，
+    #   size_for_us 的 qty=int(budget/risk_ps) 会爆表。这里兜住下限，
+    #   宁可 R 变低判「不买」，也不许报出 Infinity 赔率。
+    from levels import NOISE_ATR
+    min_risk = NOISE_ATR * a
+    if cur - stop < min_risk:
+        stop = cur - min_risk
     # ★ 真实阻力 = max(近 HIGH_N 高, cur+2.5×ATR)。不用「近高」单锚——美股直线拉升时
     #   近高≈现价 ⇒ R 坍缩 ⇒ 误杀（老罗 2026-10-13：直线拉升根本追不上，禁了就买不进）。
     #   cur+2.5×ATR 给一个前瞻阻力，保证 R 不退化；风险由硬止损(T+0)兜底。
@@ -290,6 +341,14 @@ def plan_from_us(plan_path):
     ride = None
     if isinstance(p.get("ma_ride"), dict):
         ride = p["ma_ride"].get("state")
+    # ★ 全修②：美股计划同样读「次日追价授权」（改前只有 A 股读，美股是死字段）
+    chase = None
+    zc = zone.get("next_day_chase") or (p.get("next_day_chase") or {})
+    if isinstance(zc, dict) and zc.get("limit") is not None:
+        chase = {"limit": float(zc["limit"]), "stop": zc.get("stop"),
+                 "size_ratio": float(zc.get("size_ratio") or 0.5),
+                 "src": zc.get("src") or "次日追价授权",
+                 "valid_for": zc.get("valid_for") or "仅次日"}
     return {"entry": entry, "stop": stop, "target": target,
             "cap": cap, "name": name,
             "mode": p.get("mode") or zone.get("mode"),
@@ -297,6 +356,7 @@ def plan_from_us(plan_path):
             "zone_hi": zone.get("primary_hi"),
             "ride_state": ride,
             "recommend": p.get("recommend"),
+            "chase": chase,
             "raw": p}
 
 
@@ -332,6 +392,13 @@ def size_for_us(entry, stop, account=None, risk_scale=1.0):
         return {"qty": 0, "amount": 0.0, "risk_amt": 0.0,
                 "risk_pct_budget": 0.0, "warn": "止损不低于挂单价"}
     qty = int(budget / risk_ps)
+    # ★ 全修④：名义上限守卫。risk_ps 极小时 qty 会爆表（盘前 low≈cur 已由
+    #   auto_plan_us 的 NOISE_ATR 下限堵住，这里是第二道防线，防止外部显式
+    #   --entry/--stop 传入过窄止损）。上限 = 账户总额 / 入场价（全现金、不融资）。
+    max_qty = max(1, int(float(account) / entry)) if entry > 0 else 1
+    qty_cap_hit = qty > max_qty
+    if qty_cap_hit:
+        qty = max_qty
     if qty < 1:
         return {"qty": 0, "amount": 0.0, "risk_amt": 0.0,
                 "risk_pct_budget": 0.0,
@@ -339,7 +406,10 @@ def size_for_us(entry, stop, account=None, risk_scale=1.0):
     amt = qty * entry
     r_amt = qty * risk_ps
     return {"qty": qty, "amount": amt, "risk_amt": r_amt,
-            "risk_pct_budget": r_amt / budget, "warn": ""}
+            "risk_pct_budget": r_amt / budget,
+            "qty_cap_hit": qty_cap_hit,
+            "warn": ("⚠ 仓位被名义上限截到 %d 股（账户 $%.0f 全现金，止损距过窄）"
+                     % (qty, float(account))) if qty_cap_hit else ""}
 
 
 def resolve_cap_us(entry, stop, target, cap, pre, atr):
@@ -1206,7 +1276,7 @@ def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
               zone_lo=None, zone_hi=None, mode=None, ride_state=None,
               daily_bars=None, channel_expired=False, reaches_deep=None,
               day_low_final=False, structure_plan=None,
-              pulse=None, pulse_enabled=True):
+              pulse=None, pulse_enabled=True, chase_auth=None):
     """美股核心判定。结构对齐 A股 decide()，去掉涨跌停/主力资金流/整手/昨收+2% 闸。
 
     挂单由 select_us_hang 分浅档 / 深档。现价高于选出的档，不追，盯那一档。
@@ -1232,7 +1302,21 @@ def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
     risk_scale = (min(risk_scale_user, _pulse_scale)
                   if risk_scale_user > 0 else risk_scale_user)
 
+    # ★ 全修②：美股消费 rule123 追价授权（改前是死字段，与 A 股不对称）。
+    #   命中 ⇒ cap 抬到授权 limit、执行止损换成授权收紧 stop、仓位减半。
+    chase_hit = None
+    _size_ratio = 1.0
+    if chase_auth and isinstance(chase_auth, dict) and chase_auth.get("limit") is not None:
+        _lim = float(chase_auth["limit"])
+        _cstop = chase_auth.get("stop")
+        if (price <= _lim + 1e-9 and price > entry
+                and _cstop is not None and float(_cstop) < price):
+            chase_hit = dict(chase_auth)
+            stop = max(stop, float(_cstop))       # 收紧（不是放宽）
+            _size_ratio = float(chase_auth.get("size_ratio") or 0.5)
     buy_cap = resolve_cap_us(entry, stop, target, cap, pre, atr)
+    if chase_hit:
+        buy_cap = round_px(max(buy_cap or 0.0, float(chase_hit["limit"])))
     rr = long_rr(price, target, stop) if target is not None else None
     rr_at_entry = long_rr(entry, target, stop) if target is not None else None
 
@@ -1248,6 +1332,10 @@ def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
         "price": price, "vwap": round_px(vwap), "pre": pre,
         "entry": entry, "stop": stop, "target": target, "cap": buy_cap,
         "rr": rr, "rr_at_entry": rr_at_entry,
+        # ★ 全修②：授权 + 并列向上档
+        "chase_applied": chase_hit,
+        "chase_size_ratio": _size_ratio,
+        "above_entry": (chase_hit or {}).get("limit") or zone_hi,
         "action": "不买", "limit_buy": None, "reason": "",
         "size": None, "caution": "", "arm_price": None, "arm_note": "",
         "rally": rally, "structure": struct, "shape": shape,
@@ -1341,11 +1429,12 @@ def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
     if sel["tier"] in (HANG_SHALLOW, HANG_DEEP):
         tier_txt = "%s·%s。" % (sel["tier"], sel["anchor"] or "")
 
-    size = size_for_us(limit_buy, stop, account=account, risk_scale=risk_scale)
+    size = size_for_us(limit_buy, stop, account=account,
+                       risk_scale=risk_scale * _size_ratio)
     if not size["qty"] and _pulse_scale < 1.0:
         # ★ 脉搏缩仓把 qty 压没了 ⇒ 回退最小单位（软约束不得变成硬否决）
         base_size = size_for_us(limit_buy, stop, account=account,
-                                 risk_scale=risk_scale_user)
+                                 risk_scale=risk_scale_user * _size_ratio)
         if base_size.get("qty"):
             size = base_size
             size["pulse_fallback"] = True
@@ -1421,6 +1510,13 @@ def render_us(d):
         lines.append("档位  %s  %s  %s" % (d["hang_tier"], hp_txt, d.get("hang_anchor") or "—"))
         if d.get("hang_why"):
             lines.append("  %s" % d["hang_why"])
+    # ★ 全修②：向上档与回踩档并列给价（谁先到做谁）
+    _above = d.get("above_entry")
+    if _above is not None:
+        lines.append("并列  向下回踩 %.2f ｜ 向上突破/追价 %.2f%s（现价 %.2f）"
+                     % (d["entry"], float(_above),
+                        " ·授权半仓" if d.get("chase_applied") else "",
+                        d["price"]))
     if d.get("rerun_note"):
         lines.append("再跑  %s" % d["rerun_note"])
     lines.append("结论  %s。%s" % (d["action"], d["reason"]))
@@ -1456,7 +1552,10 @@ def main(argv=None):
     ap.add_argument("--risk-scale", type=float, default=1.0)
     ap.add_argument("--no-pulse", action="store_true",
                     help="关闭市场脉搏缩仓（默认开：只缩放仓位、不否决开仓）")
-    ap.add_argument("--asof", default=None, help="回放时刻 HH:MM（截断分钟线）")
+    ap.add_argument("--asof", default=None,
+                    help="回放时刻 HH:MM（默认按 ET 时钟；北京时间须配 --asof-tz BJ）")
+    ap.add_argument("--asof-tz", choices=["ET", "BJ"], default="ET",
+                    help="--asof 的时区（默认 ET = 美东，与分钟线 t 同尺度）")
     ap.add_argument("--source", choices=["nasdaq", "eastmoney"], default="nasdaq",
                    help="分钟线数据源（默认 nasdaq，含盘前；eastmoney 走东财 trends2）")
     ap.add_argument("--json", action="store_true")
@@ -1478,7 +1577,13 @@ def main(argv=None):
         t0 = time.perf_counter()
         day, pre = load_us_day(symbol, source=args.source)
         if args.asof:
-            day["minutes"] = [m for m in day["minutes"] if m["t"][-5:] <= args.asof]
+            # ★ 全修④：先归一成 ET 时钟再比较，杜绝 ET/BJ 裸比字符串错位
+            asof_et, crossed = normalize_asof(args.asof, args.asof_tz)
+            day["minutes"] = [m for m in day["minutes"] if m["t"][-5:] <= asof_et]
+            day["asof_et"] = asof_et
+            if crossed:
+                print("⚠ --asof 按北京时间换算后跨日，ET 序列只覆盖当日；"
+                      "跨日回放请用 ET 时钟直接给。")
         if not day["minutes"]:
             print("没有分时")
             return 3
@@ -1538,7 +1643,8 @@ def main(argv=None):
                   risk_scale=args.risk_scale,
                   zone_lo=zone_lo, zone_hi=zone_hi, mode=mode,
                   ride_state=ride, structure_plan=structure_plan,
-                  pulse_enabled=not args.no_pulse)
+                  pulse_enabled=not args.no_pulse,
+                  chase_auth=(plan or {}).get("chase"))  # ★ 全修②
     d["plan_src"] = plan_src
     d["intraday_source"] = args.source
     decide_ms = (time.perf_counter() - t1) * 1000.0

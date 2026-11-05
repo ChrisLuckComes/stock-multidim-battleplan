@@ -67,10 +67,12 @@ GAP_DN_VERIFY = 0.01
 # 观察窗：开盘后这段时间内不做买卖决定（波动最大、假信号最多）
 WATCH_MIN = 15
 # 美股做多价梯（与做空卡同一组门槛）。入场越高 R 越低。
-RR_LADDER = (3.0, 2.5, 2.0, 1.5, 1.0)
-RR_QUALIFIED = 1.5
-RR_RECOMMEND = 2.0
-RR_STRONG = 3.0
+# ★ 2026-11-05 全修①：RR 常量与公式收敛到 rr_core 单一真源。
+#   这里只做 re-export —— 既有 `from open_playbook import RR_QUALIFIED` 等调用点
+#   全部保持可用，但值/公式只此一份，杜绝「6 处 1.5 各写各的」。
+from rr_core import (RR_LADDER, MIN_RR, RR_RECOMMEND, RR_STRONG,   # noqa: F401
+                     long_rr, max_entry_for_rr, grade as long_grade)
+RR_QUALIFIED = MIN_RR
 
 NOTE_HEAD = (
     "本表只回答「开盘价落在哪、该做什么」，不回答「能不能买」"
@@ -108,29 +110,8 @@ def _round_px(p, board):
     return round(float(p) + 1e-9, 2)
 
 
-def long_rr(entry, target, stop):
-    """做多 R = (目标 − 入场) / (入场 − 止损)。入场不在止损与目标之间 → None。"""
-    if entry is None or target is None or stop is None:
-        return None
-    if not (stop < entry < target):
-        return None
-    return (target - entry) / (entry - stop)
-
-
-def max_entry_for_rr(target_rr, target, stop):
-    """止损与目标固定时，达到指定 R 的最高入场价。"""
-    return (target + target_rr * stop) / (1.0 + target_rr)
-
-
-def long_grade(rr):
-    """R≥3 强烈推荐，2≤R<3 推荐，1.5≤R<2 合格，低于 1.5 不推荐。"""
-    if rr is None or rr < RR_QUALIFIED:
-        return "不推荐"
-    if rr >= RR_STRONG:
-        return "强烈推荐"
-    if rr >= RR_RECOMMEND:
-        return "推荐"
-    return "合格"
+# long_rr / max_entry_for_rr / long_grade 已由上方 rr_core re-export 提供，
+# 不再重复定义（重复定义 = 同一公式两份实现，正是本次要修的病根）。
 
 
 def price_grade(price, target, stop):

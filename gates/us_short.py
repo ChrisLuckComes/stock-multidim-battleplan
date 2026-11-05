@@ -117,7 +117,7 @@ def load_reverse_etf(path=None, refresh=False):
     _MAP_CACHE = (p, merged)
     return merged
 
-RR_LADDER = (3.0, 2.5, 2.0, 1.5, 1.0)   # 门槛 = 1.5
+# RR_LADDER / MIN_RR / rr_ratio / min_entry_for_rr 由下方 rr_core re-export 提供
 # ★ 裸K重构：结构止损缓冲 = 收回破位区/阻力上方 + N×ATR
 # ⚑ 2026-10-10 老罗定：0.50 → **0.30**。根因 = 0.5×ATR 缓冲系统性太宽，凭空把 risk 撑大，
 #   把 RR 压到门槛下 ⇒ 天天判「不给过」＝**系统性踏空**（美股盘中做空最大的抱怨）。
@@ -131,18 +131,11 @@ STRUCT_STOP_ATR = 0.30
 
 
 # ────────────────────────────── 纯函数（回归覆盖） ──────────────────────────────
-def rr_ratio(entry, t1, stop):
-    """做空盈亏比 = (entry − T1) / (stop − entry)。entry≥stop 或 ≤T1 → None。"""
-    if entry is None or t1 is None or stop is None:
-        return None
-    if stop <= entry or entry <= t1:
-        return None
-    return (entry - t1) / (stop - entry)
-
-
-def min_entry_for_rr(target_rr, t1, stop):
-    """止损锚 S、目标 T1 固定时，达到指定 RR 的最低入场价。"""
-    return (target_rr * stop + t1) / (1.0 + target_rr)
+# ★ 全修①：公式/常量收敛到 rr_core 单一真源。
+#   做空 rr_ratio 的第二个参数是**目标价**，不再写死 t1 —— 调用方传 T1 就是 T1 口径、
+#   传 T2 就是 T2 口径，杜绝「展示用 T2、门槛用 T1」的混用。
+from rr_core import (MIN_RR, RR_LADDER, short_rr as rr_ratio,  # noqa: E402,F401
+                     min_entry_for_rr, grade as short_grade)
 
 
 def etf_from_underlying(und_px, und_ref, etf_ref, lev):
@@ -159,9 +152,9 @@ def warnings_for(entry, stop, t1, atr):
     """数字失真 / 负期望告警。返回 [str]。"""
     ws = []
     r = rr_ratio(entry, t1, stop)
-    if r is not None and r < 1.5:
-        floor = min_entry_for_rr(1.5, t1, stop)
-        ws.append(f"⚠ 盈亏比 {r:.2f} < 1.5 门槛（该结构负期望区，临界入场价 {floor:.2f}）")
+    if r is not None and r < MIN_RR:
+        floor = min_entry_for_rr(MIN_RR, t1, stop)
+        ws.append(f"⚠ 盈亏比 {r:.2f} < {MIN_RR:g} 门槛（该结构负期望区，临界入场价 {floor:.2f}）")
     if entry is not None and stop is not None and atr:
         # ⚑ 相对容差：止损最小距离兜底把 stop 恰好推到 entry+0.25×ATR 时，
         #   浮点误差会让「11.66 < 11.66」成立 → 兜底成功了却仍在告警（误导）。
@@ -365,17 +358,24 @@ def main():
         _cands.append((f"反抽S_broken({S_broken:.2f})不过空", S_broken, S_broken + a.stop_atr * atr, t2))
     else:
         _cands.append((f"反抽R1({R1:.2f})不过空", R1, R1 + a.stop_atr * atr, t1))
+    # ★ 全修①：主 RR 一律按 **T1（现实可达第一目标）** 算，与下面的 RR 临界表、
+    #   warnings_for、watch 的 verdict 硬闸同尺；候选展示的 T2 目标另列「远目标 RR」，
+    #   只作参考、不参与门槛。改前候选 RR 用 T2（虚高，SNDK 5.75/21.78 即此），
+    #   门槛却用 T1 反解 ⇒ 展示的 RR 与展示的门槛不是同一个价。
     for name, e, cs, tg in _cands:
-        r = rr_ratio(e, tg, cs)
+        r = rr_ratio(e, t1, cs)                       # 主 RR：T1 口径
+        r_far = rr_ratio(e, tg, cs) if tg != t1 else None
         noise = (cs - e) < NOISE_ATR * atr
         tag = "  ⚠ 噪声带（止损距离 <0.25×ATR，假赔率）" if noise else ""
-        print(f"  {name}: 入场 {e:.2f}  止损 {cs:.2f}  目标 {tg:.2f}  RR {r:.2f}{tag}"
-              if r is not None else f"  {name}: 入场 {e:.2f}  止损 {cs:.2f}  （结构无效，跳过）")
+        far_txt = ("｜远目标RR %.2f（目标 %.2f·仅参考）" % (r_far, tg)
+                   if r_far is not None else "")
+        print(f"  {name}: 入场 {e:.2f}  止损 {cs:.2f}  目标 {tg:.2f}  "
+              f"RR(T1) {('%.2f' % r) if r is not None else '—'}{far_txt}{tag}")
     print()
-    print("── RR 临界入场价（止损锚固定时入场越低 RR 单调递减）──")
+    print("── RR 临界入场价（★ T1 口径：与主 RR / 门槛 / 判决同尺）──")
     for rr in RR_LADDER:
         e = min_entry_for_rr(rr, t1, stop)
-        tag = " ← 门槛线" if rr == 1.5 else (" ← 强烈推荐线" if rr == 3.0 else "")
+        tag = " ← 门槛线" if rr == MIN_RR else (" ← 强烈推荐线" if rr == 3.0 else "")
         grade = "放弃" if e >= stop else OP_GRADE(rr)
         print(f"  RR≥{rr:.1f}  ⇔  入场价 ≥ {e:.2f}  {grade}{tag}")
     print()
