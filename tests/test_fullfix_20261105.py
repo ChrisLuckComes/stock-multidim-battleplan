@@ -205,7 +205,9 @@ def test_us_chase_auth_is_consumed():
     day = {"code": "CIEN", "name": "Ciena", "date": "2026-11-05",
            "pre": 10.0, "minutes": mins}
     summary = us_summarize(day)
-    auth = {"limit": 11.2, "stop": 10.3, "size_ratio": 0.5, "valid_for": "仅次日"}
+    # ★ 深度 review 二次修：美股接入时效闸后，缺 issued 会 fail-closed 停用。
+    auth = {"limit": 11.2, "stop": 10.3, "size_ratio": 0.5,
+            "valid_for": "仅次日", "issued": "2026-11-04"}
 
     with_auth = decide_us(day, summary, entry=10.2, stop=9.8, target=13.0,
                           atr=1.0, account=4694.80,
@@ -217,7 +219,11 @@ def test_us_chase_auth_is_consumed():
     assert with_auth["chase_size_ratio"] == 0.5
     assert with_auth["above_entry"] == 11.2
     assert with_auth["stop"] == 10.3            # 收紧（不是放宽）
-    assert with_auth["cap"] >= without["cap"]   # 静态 cap 不再是踏空瓶颈
+    # ★ 深度 review 二次修 P0：授权只能作为**额外上界**，不得掀翻两闸取严。
+    #   改前 cap=max(rr_cap, limit)，limit < rr_cap 时会越过授权价下单；
+    #   原断言 cap>=without 反而把越权行为固化进回归（美股漏网根因）。
+    assert with_auth["cap"] <= float(auth["limit"]) + 1e-9
+    assert with_auth["cap_tightest"] in ("显式cap", "R闸", "追价授权limit")
     assert without["chase_applied"] is None
 
 

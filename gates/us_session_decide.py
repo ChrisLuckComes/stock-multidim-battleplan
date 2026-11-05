@@ -192,6 +192,22 @@ def summarize(day):
 
 
 # ───────────────────────── 自动计划 / 计划文件 ─────────────────────────
+def _us_dst(d):
+    """美东夏令时粗判（仅 zoneinfo 不可用时兜底）。
+
+    规则：3 月第 2 个周日 02:00 ~ 11 月第 1 个周日 02:00 为 DST（BJ−ET = 12h），
+    其余 13h。按日期粗判足够覆盖「回放历史日期」与「夏令时切换周」两个坑。
+    """
+    import datetime as _dt
+
+    def _nth_sunday(month, n):
+        first = _dt.date(d.year, month, 1)
+        off = (6 - first.weekday()) % 7
+        return _dt.date(d.year, month, 1 + off + 7 * (n - 1))
+
+    return _nth_sunday(3, 2) <= d < _nth_sunday(11, 1)
+
+
 def normalize_asof(asof, tz="ET", et_date=None):
     """★ 全修④：把 --asof 归一成 **ET 的 HH:MM**，再与分钟线 t 比较。
 
@@ -226,8 +242,12 @@ def normalize_asof(asof, tz="ET", et_date=None):
         crossed = et.date() != bj.date()
         return "%02d:%02d" % (et.hour, et.minute), crossed
     except Exception:
-        # zoneinfo 不可用（老 Python / 缺 tzdata）⇒ 退回冬令时固定 13h 差并标注
-        total = hh * 60 + mm - 13 * 60
+        # ★ 深度 review 二次修（2026-11-05）：改前写死 13h，夏令时整段错 1 小时。
+        #   zoneinfo 不可用时按美国 DST 规则（3月第2个周日 ~ 11月第1个周日 = 12h）估算。
+        import datetime as _dt
+        d = et_date or _dt.date.today()
+        offset = 12 if _us_dst(d) else 13
+        total = hh * 60 + mm - offset * 60
         crossed = total < 0
         total %= 24 * 60
         return "%02d:%02d" % (total // 60, total % 60), crossed
@@ -345,10 +365,15 @@ def plan_from_us(plan_path):
     chase = None
     zc = zone.get("next_day_chase") or (p.get("next_day_chase") or {})
     if isinstance(zc, dict) and zc.get("limit") is not None:
+        # ★ 深度 review 二次修（2026-11-05）：美股改前不读 issued / 不校验时效，
+        #   同一张过期授权无限期生效。缺 issued 时 chase_guard 会 fail-closed 停用。
+        _issued = (zc.get("issued") or (p.get("meta") or {}).get("date")
+                   or p.get("as_of") or p.get("date"))
         chase = {"limit": float(zc["limit"]), "stop": zc.get("stop"),
                  "size_ratio": float(zc.get("size_ratio") or 0.5),
                  "src": zc.get("src") or "次日追价授权",
-                 "valid_for": zc.get("valid_for") or "仅次日"}
+                 "valid_for": zc.get("valid_for") or "仅次日",
+                 "issued": str(_issued)[:10] if _issued else None}
     return {"entry": entry, "stop": stop, "target": target,
             "cap": cap, "name": name,
             "mode": p.get("mode") or zone.get("mode"),
@@ -1306,7 +1331,11 @@ def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
     #   命中 ⇒ cap 抬到授权 limit、执行止损换成授权收紧 stop、仓位减半。
     chase_hit = None
     _size_ratio = 1.0
-    if chase_auth and isinstance(chase_auth, dict) and chase_auth.get("limit") is not None:
+    # ★ 深度 review 二次修 P0（2026-11-05）：美股与 A 股共用时效闸单一真源。
+    from chase_guard import still_valid as _chase_valid
+    _chase_fresh, chase_expired = _chase_valid(chase_auth, day.get("date"))
+    if (_chase_fresh and chase_auth and isinstance(chase_auth, dict)
+            and chase_auth.get("limit") is not None):
         _lim = float(chase_auth["limit"])
         _cstop = chase_auth.get("stop")
         if (price <= _lim + 1e-9 and price > entry
@@ -1316,7 +1345,23 @@ def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
             _size_ratio = float(chase_auth.get("size_ratio") or 0.5)
     buy_cap = resolve_cap_us(entry, stop, target, cap, pre, atr)
     if chase_hit:
-        buy_cap = round_px(max(buy_cap or 0.0, float(chase_hit["limit"])))
+        # ★ 深度 review 二次修 P0：改前 `max(buy_cap, limit)` 一次性掀翻
+        #   resolve_cap_us 的「显式 cap + R≥1.5 闸」取严 ⇒ 授权变成无条件越权下单
+        #   （A 股 0ef3387 已修，美股是同一处漏网的半边）。
+        #   授权 limit 只是**额外一道上界**，与两闸结果取 min；授权收紧的 stop
+        #   已让 R 闸自然抬高，无需放宽；显式 --cap 是用户硬约束，任何授权不得越过。
+        _lim_cap = round_px(float(chase_hit["limit"]))
+        _combined = [v for v in (buy_cap, _lim_cap,
+                                 float(cap) if cap is not None else None)
+                     if v is not None]
+        buy_cap = round_px(min(_combined)) if _combined else _lim_cap
+        cap_tightest = min(
+            [(k, v) for k, v in (("显式cap", float(cap) if cap is not None else None),
+                                 ("R闸", resolve_cap_us(entry, stop, target, None, pre, atr)),
+                                 ("追价授权limit", _lim_cap)) if v is not None],
+            key=lambda kv: kv[1])[0]
+    else:
+        cap_tightest = None
     rr = long_rr(price, target, stop) if target is not None else None
     rr_at_entry = long_rr(entry, target, stop) if target is not None else None
 
@@ -1335,6 +1380,10 @@ def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
         # ★ 全修②：授权 + 并列向上档
         "chase_applied": chase_hit,
         "chase_size_ratio": _size_ratio,
+        "chase_expired": chase_expired,
+        "chase_limit": (chase_auth or {}).get("limit") if isinstance(chase_auth, dict) else None,
+        "chase_issued": (chase_auth or {}).get("issued") if isinstance(chase_auth, dict) else None,
+        "cap_tightest": cap_tightest,
         "above_entry": (chase_hit or {}).get("limit") or zone_hi,
         "action": "不买", "limit_buy": None, "reason": "",
         "size": None, "caution": "", "arm_price": None, "arm_note": "",
@@ -1517,6 +1566,16 @@ def render_us(d):
                      % (d["entry"], float(_above),
                         " ·授权半仓" if d.get("chase_applied") else "",
                         d["price"]))
+    # ★ 深度 review 二次修（2026-11-05）：授权时效 / cap 归因 / 美股执行约束上屏。
+    if d.get("chase_expired"):
+        lines.append("授权  ⚠ 已停用：%s" % d["chase_expired"])
+    if d.get("chase_applied"):
+        lines.append("授权  命中上限 %.2f（仓位 ×%s）｜买入上限由「%s」收紧"
+                     % (float(d["chase_applied"]["limit"]),
+                        d.get("chase_size_ratio") or 0.5,
+                        d.get("cap_tightest") or "追价授权limit"))
+    lines.append("执行  致富证券无原生止损单/条件单 ⇒ 收盘轨自查（晨起核对）"
+                 "或买价替代止损；T+0 可当日了结，24h 限价单可预挂")
     if d.get("rerun_note"):
         lines.append("再跑  %s" % d["rerun_note"])
     lines.append("结论  %s。%s" % (d["action"], d["reason"]))
@@ -1556,6 +1615,8 @@ def main(argv=None):
                     help="回放时刻 HH:MM（默认按 ET 时钟；北京时间须配 --asof-tz BJ）")
     ap.add_argument("--asof-tz", choices=["ET", "BJ"], default="ET",
                     help="--asof 的时区（默认 ET = 美东，与分钟线 t 同尺度）")
+    ap.add_argument("--asof-date", default=None,
+                    help="回放目标日期 YYYY-MM-DD（钉死 DST 判定，历史回放必填）")
     ap.add_argument("--source", choices=["nasdaq", "eastmoney"], default="nasdaq",
                    help="分钟线数据源（默认 nasdaq，含盘前；eastmoney 走东财 trends2）")
     ap.add_argument("--json", action="store_true")
@@ -1572,18 +1633,27 @@ def main(argv=None):
             print("读计划文件失败: %s" % e)
             return 3
 
+    # ★ 深度 review 二次修（2026-11-05）：--asof-date 可钉死回放日期，
+    #   避免 normalize_asof 用 date.today() 定 DST 导致历史回放偏 1 小时。
+    _asof_date = None
+    if args.asof_date:
+        import datetime as _dt
+        _asof_date = _dt.date.fromisoformat(args.asof_date)
+
     # 2) 取数（自动计划也需要 atr / 分钟序列）
     try:
         t0 = time.perf_counter()
         day, pre = load_us_day(symbol, source=args.source)
         if args.asof:
             # ★ 全修④：先归一成 ET 时钟再比较，杜绝 ET/BJ 裸比字符串错位
-            asof_et, crossed = normalize_asof(args.asof, args.asof_tz)
+            asof_et, crossed = normalize_asof(args.asof, args.asof_tz,
+                                              et_date=_asof_date)
             day["minutes"] = [m for m in day["minutes"] if m["t"][-5:] <= asof_et]
             day["asof_et"] = asof_et
             if crossed:
-                print("⚠ --asof 按北京时间换算后跨日，ET 序列只覆盖当日；"
-                      "跨日回放请用 ET 时钟直接给。")
+                day["asof_crossed_et_date"] = True
+                print("⚠ --asof 按北京时间换算后跨日，ET 序列只覆盖前一日；"
+                      "跨日回放请用 ET 时钟直接给或补 --asof-date。")
         if not day["minutes"]:
             print("没有分时")
             return 3
@@ -1599,6 +1669,16 @@ def main(argv=None):
             atr = (max(ps) - min(ps)) / 2.0 or 1.0
         if day["pre"] is None and stats:
             day["pre"] = stats["prev_close"]
+        if day["pre"] is None and day["minutes"]:
+            # ★ 深度 review 二次修 P1（2026-11-05）：pre 缺失改前让
+            #   「当日涨幅 ≥5% 不追」整闸静默放行（chg=None）。用当日首根开盘
+            #   作近似基准 ⇒ 闸仍生效，且不误否决；render 会标注是近似值。
+            _o = day["minutes"][0].get("o")
+            if _o:
+                day["pre"] = float(_o)
+                day["pre_proxy"] = True
+                print("⚠ 昨收缺失：当日涨幅按首根开盘价近似，"
+                      "「涨 ≥5% 不追」闸仍生效（不静默放行）。")
         fetch_ms = (time.perf_counter() - t0) * 1000.0
     except Exception as e:
         print("取数失败: %s" % e)

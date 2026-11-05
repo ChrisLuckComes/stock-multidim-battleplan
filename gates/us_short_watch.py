@@ -446,7 +446,10 @@ def line(c):
         return "  %-6s ⚠ %s" % (c["sym"], c["error"])
     out = []
     v = c.get("verdict") or "?"
-    vmark = {"推荐": "★推荐", "推荐(优先)": "★★推荐(优先)", "盯盘": "◐盯盘",
+    vmark = {"推荐": "★推荐", "推荐(优先)": "★★推荐(优先)",
+             "推荐·等到位": "☆推荐·等到位",
+             "推荐(优先)·等到位": "☆推荐(优先)·等到位",
+             "盯盘": "◐盯盘",
              "不推荐": "✗不推荐"}.get(v, ("⚠" + v if v.startswith("谨慎") else v))
     sg = c.get("signal")
     e = c.get("etf") or {}
@@ -514,13 +517,18 @@ def line(c):
 
 
 def actionable(c):
-    """可做空判定：verdict 以「推荐」开头（含「推荐(优先)」）。
+    """可做空判定：只有**现价已到临界入场价**的推荐才进「今日可做空」。
 
     ⚠ 「谨慎(波段偏老)」/「谨慎(2R日内吃不到)」**不算可做**——但它们是
       **提示**不是**否决**：老罗「晚期肯定没有早期进好」是排序，不是不能做。
       若要放宽，用 --include-caution。
+    ★ 深度 review 二次修（2026-11-05）：_verdict 新增「推荐·等到位」表示
+      **候选反抽位 RR 达标、但现价还没到临界价**。改前 startswith("推荐")
+      把它也算进「今日可做空」，与门槛行「现价未到·需反抽」自相矛盾
+      （上一轮双价问题的残留）⇒ 等到位只进盯盘，不进可做空。
     """
-    return str(c.get("verdict") or "").startswith("推荐")
+    v = str(c.get("verdict") or "")
+    return v in ("推荐", "推荐(优先)")
 
 
 def main():
@@ -568,7 +576,9 @@ def main():
         return a if a is not None else 9999
     ok.sort(key=_age_key)
     # 今日盯盘：背景仍有效（下跌波段中）但结构空点 RR 暂未达标 ⇒ 等更好入场位
-    watch = [c for c in cards if c.get("ctx_alive") and c.get("verdict") == "不推荐"]
+    watch = [c for c in cards if c.get("ctx_alive") and
+             (c.get("verdict") == "不推荐"
+              or "等到位" in str(c.get("verdict") or ""))]
     print("=" * 118)
     print("【今日可做空】%s" % ("、".join(
         "%s→%s" % (c["sym"], (c.get("etf") or {}).get("code")) for c in ok)

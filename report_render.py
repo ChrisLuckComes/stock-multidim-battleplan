@@ -454,6 +454,57 @@ def target_display(a):
             bool(top.get("sea_sky")), bool(top.get("no_room_above")))
 
 
+def build_two_ways(a, n):
+    """★ 深度 review 二次修（2026-11-05）：向上档 / 向下档并列给价，谁先到做谁。
+
+    改前 HTML 只有静态单档（odds_recommend），而 CLI 决策层另有 two_ways / chase_*
+    ⇒ 同一份决策 CLI 与 HTML 两套口径。此处把两档与授权时效统一渲染，
+    数据源只取 analysis json 已落盘字段（decision.two_ways + plan.buy_zone.next_day_chase
+    + odds_recommend），**不重算价格**，避免再引入第三套价。
+    """
+    n = n or {}
+    dec = a.get("decision") or {}
+    tw = dec.get("two_ways") or {}
+    rec = a.get("odds_recommend") or {}
+    z = ((a.get("plan") or {}).get("buy_zone") or {})
+    ch = z.get("next_day_chase") if isinstance(z.get("next_day_chase"), dict) else {}
+    down = (tw.get("down") or {}).get("price")
+    if down is None:
+        down = rec.get("entry")
+    up = (tw.get("up") or {}).get("price")
+    if up is None and ch.get("limit") is not None:
+        up = ch.get("limit")
+    if down is None and up is None:
+        return "<p class='note'>双档：本次计划未给出上方触发档，仅下方回踩档可执行。</p>"
+    _mak = ((a.get("meta") or {}).get("market") or "CN").upper()
+    cur = "$" if _mak == "US" else "¥"
+    bits = []
+    if down is not None:
+        bits.append("<b>向下回踩 %s%.2f</b>（隔夜可预挂限价）" % (cur, float(down)))
+    if up is not None:
+        how = "限价单可预挂 · 24h" if _mak == "US" else "A股无 buy-stop · 需盯盘手动打"
+        bits.append("<b>向上突破/追价 %s%.2f</b>（%s）" % (cur, float(up), how))
+    extra = []
+    if ch:
+        _issued = ch.get("issued") or dec.get("chase_issued")
+        extra.append("追价授权 %s 有效（生成日 %s）"
+                     % (esc(ch.get("valid_for") or "仅次日"), esc(_issued or "未知")))
+        if ch.get("size_ratio"):
+            extra.append("授权仓位 ×%s" % esc(ch["size_ratio"]))
+        if ch.get("stop") is not None:
+            extra.append("授权收紧止损 %s%.2f" % (cur, float(ch["stop"])))
+    if dec.get("chase_expired"):
+        extra.append("<b>⚠ 授权已停用：%s</b>" % esc(dec["chase_expired"]))
+    if dec.get("chase_applied"):
+        extra.append("本次盘中决策已命中授权（半仓）")
+    if dec.get("cap_tightest"):
+        extra.append("买入上限由「%s」收紧" % esc(dec["cap_tightest"]))
+    return ("<div class='twoways'><p><b>双档并列 · 谁先到做谁</b>：%s</p>"
+            "<p class='note'>%s</p></div>"
+            % (" ｜ ".join(bits), "；".join(extra) if extra
+               else "无追价授权，按下方回踩档执行；上方档触发需重跑计划。"))
+
+
 def build_plan_rows(a):
     p, s = a["plan"], a["struct"]
     z = p.get("buy_zone") or {}
@@ -1726,6 +1777,7 @@ def render(a, n, tmpl_path=DEFAULT_TMPL, vp_from=None, vp_to=None):
         "MODE_NOTE": note(n.get("mode_note"), ""),
         "PLAN_ROWS": build_plan_rows(a),
         "PLAN_NOTE": note(n.get("plan_note"), ""),
+        "TWO_WAYS_BLOCK": build_two_ways(a, n),
         "CALIBER_NOTES": "".join("<p>%s</p>" % _caliber_html(x) for x in caliber),
         "SCR_BLOCK": build_scr(a, n) + build_activity(a, n),
         "TOP_SIGNAL_BLOCK": build_top_signal(a, n),
@@ -1816,10 +1868,17 @@ def main():
     ap.add_argument("--template", default=DEFAULT_TMPL)
     ap.add_argument("--vp-from", default=None, help="量价结论起始日。不传则用近 20 日")
     ap.add_argument("--vp-to", default=None, help="量价结论结束日。不传则用基准日")
+    ap.add_argument("--decision", default=None,
+                    help="盘中决策 JSON（session_decide / us_session_decide --json 输出），并入 decision 供双档渲染")
     a_ = ap.parse_args()
 
     with open(a_.data, encoding="utf-8") as f:
         data = json.load(f)
+    if a_.decision:
+        # ★ 深度 review 二次修（2026-11-05）：把盘中决策结果并入同一份 analysis，
+        #   HTML 才能与 CLI 共用 two_ways / chase_* 字段，消除三套口径。
+        with open(a_.decision, encoding="utf-8") as f:
+            data["decision"] = json.load(f)
     notes = {}
     if a_.notes:
         with open(a_.notes, encoding="utf-8") as f:

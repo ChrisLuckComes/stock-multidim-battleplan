@@ -352,12 +352,18 @@ def main():
     print()
     print("── 空点候选（裸K结构位：破位延续 / 反抽不过；禁闭眼追跌）──")
     # 候选：破位模式给「破位延续空」+「反抽S_broken不过空」；反抽模式给「反抽R1不过空」
+    def _cs(e):
+        # ★ 深度 review P1（2026-11-05）：候选止损必须与 plan_levels 的 NOISE_ATR
+        #   兜底同源。改前候选用 e + stop_atr×ATR，而临界表/本笔用 _p["stop"]
+        #   （已过 max(st, entry + 0.25ATR)）⇒ 同一屏两套止损、两套 R。
+        return max(e + a.stop_atr * atr, e + NOISE_ATR * atr)
+
     _cands = []
     if broken:
-        _cands.append(("破位延续空(目标S2)", anchor, S_broken + a.stop_atr * atr, t2))
-        _cands.append((f"反抽S_broken({S_broken:.2f})不过空", S_broken, S_broken + a.stop_atr * atr, t2))
+        _cands.append(("破位延续空(目标S2)", anchor, _cs(anchor), t2))
+        _cands.append((f"反抽S_broken({S_broken:.2f})不过空", S_broken, _cs(S_broken), t2))
     else:
-        _cands.append((f"反抽R1({R1:.2f})不过空", R1, R1 + a.stop_atr * atr, t1))
+        _cands.append((f"反抽R1({R1:.2f})不过空", R1, _cs(R1), t1))
     # ★ 全修①：主 RR 一律按 **T1（现实可达第一目标）** 算，与下面的 RR 临界表、
     #   warnings_for、watch 的 verdict 硬闸同尺；候选展示的 T2 目标另列「远目标 RR」，
     #   只作参考、不参与门槛。改前候选 RR 用 T2（虚高，SNDK 5.75/21.78 即此），

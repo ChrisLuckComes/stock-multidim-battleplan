@@ -134,22 +134,24 @@ def target_is_stale(price, target, atr):
     return False
 
 
-def board_limit_ratio(code):
+def board_limit_ratio(code, name=None):
     """涨跌幅上限。⚠ 统一走 ash_market（唯一真源）。
 
     2026-10-20 老罗纠错：旧代码只认 ``8``/``4`` 开头判 30%，**漏了 ``92``**
     ⇒ 北交所 920522 被当成主板 10% 算涨停价，把涨停/跌停价都判错。
+    ★ 深度 review 二次修（2026-11-05）：ash_market 的 ST 5% 判据依赖 name，
+      改前包装层不传 ⇒ ST 永远按 10%/20% 算。现全链透传 name。
     """
-    return ash_market.board_limit_ratio(code)
+    return ash_market.board_limit_ratio(code, name or "")
 
 
-def limit_up_price(pre, code):
+def limit_up_price(pre, code, name=None):
     if pre is None:
         return None
-    return round_px(pre * (1.0 + board_limit_ratio(code)))
+    return round_px(pre * (1.0 + board_limit_ratio(code, name)))
 
 
-def limit_down_price(pre, code):
+def limit_down_price(pre, code, name=None):
     """跌停价。与 limit_up_price 对称。
 
     2026-10-09 老罗实证：大金重工 002487 昨收 48.61，当日 43.75 = 跌停板
@@ -158,7 +160,7 @@ def limit_down_price(pre, code):
     """
     if pre is None:
         return None
-    return round_px(pre * (1.0 - board_limit_ratio(code)))
+    return round_px(pre * (1.0 - board_limit_ratio(code, name)))
 
 
 def plan_from_files(analysis_path, notes_path=None):
@@ -186,18 +188,11 @@ def plan_from_files(analysis_path, notes_path=None):
     chase = None
     _zc = ((a.get("plan") or {}).get("buy_zone") or {}).get("next_day_chase")
     if isinstance(_zc, dict) and _zc.get("limit") is not None:
-        # ★ 深度 review P1（2026-11-05）：授权必须能判时效。
-        #   生成端 rule123 写 issued；历史 analysis 无该字段 ⇒ 用文件生成日兜底；
-        #   两者都拿不到就留 None，由 chase_still_valid fail-closed 停用，
-        #   绝不让它「无限期有效」。
+        # ★ 深度 review 二次修（2026-11-05）：删掉文件 mtime 兜底。
+        #   复制/重写 analysis 会把 mtime 刷成今天 ⇒ 数天前的旧授权「续命」。
+        #   缺 issued 一律由 chase_guard fail-closed 停用，请重跑计划。
         _issued = (_zc.get("issued") or (a.get("meta") or {}).get("date")
                    or a.get("as_of") or a.get("date"))
-        if not _issued:
-            try:
-                _issued = datetime.date.fromtimestamp(
-                    os.path.getmtime(analysis_path)).isoformat()
-            except OSError:
-                _issued = None
         chase = {"limit": float(_zc["limit"]),
                  "stop": _zc.get("stop"),
                  "size_ratio": float(_zc.get("size_ratio") or 0.5),
@@ -218,37 +213,10 @@ def plan_from_files(analysis_path, notes_path=None):
     }
 
 
-def chase_still_valid(chase, day_date):
-    """「仅次日」追价授权的时效闸，返回 (是否有效, 停用理由)。
-
-    ★ 深度 review P1 修（2026-11-05）：改前 `valid_for:"仅次日"` 只是个字符串，
-      全链无人消费、授权块里也没有生成日期 ⇒ 数天前 analysis 里那张「抬 cap
-      基准 + 换收紧止损 + 半仓」的授权会无限期生效，属越权下单。
-
-    口径：issued = 计划生成日；允许 issued ~ issued+3 自然日（覆盖周末），
-      再往后判过期。缺 issued / 缺当日日期 / 日期非法 ⇒ **fail-closed 停用**
-      （放宽类授权不得无日期生效），并给出理由让使用者重跑计划，不静默踏空。
-    """
-    if not chase or not isinstance(chase, dict):
-        return True, ""
-    vf = str(chase.get("valid_for") or "仅次日")
-    if "次日" not in vf and "仅" not in vf:
-        return True, ""                       # 显式长期授权不在本闸范围
-    issued = chase.get("issued")
-    cur = (day_date or "")[:10]
-    if not issued or not cur:
-        return False, "追价授权缺生成日期/当日日期 ⇒ 已停用（请重跑计划）"
-    try:
-        d0 = datetime.date.fromisoformat(str(issued)[:10])
-        d1 = datetime.date.fromisoformat(cur)
-    except ValueError:
-        return False, "追价授权日期格式非法 ⇒ 已停用（请重跑计划）"
-    delta = (d1 - d0).days
-    if delta < 0:
-        return False, "追价授权尚未生效（计划 %s 晚于当日 %s）" % (d0, d1)
-    if delta > 3:
-        return False, "追价授权已过期（生成 %s，当日 %s，仅次日有效）" % (d0, d1)
-    return True, ""
+from chase_guard import still_valid as chase_still_valid  # noqa: E402
+# ↑ ★ 深度 review 二次修（2026-11-05）：时效闸抽到根模块 chase_guard，A 股 / 美股共用。
+#  改前美股 plan_from_us 不读 issued、decide_us 不校验时效 ⇒ 同一张过期授权在美股
+#  无限期生效。保留旧名 re-export，零破坏既有调用点与回归。
 
 
 def truncate_day(day, asof):
@@ -835,8 +803,8 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
     pre = day.get("pre")
     code = day["code"]
     day_open = float(day["minutes"][0]["o"]) if day.get("minutes") else None
-    limit_px = limit_up_price(pre, code)
-    limit_dn = limit_down_price(pre, code)
+    limit_px = limit_up_price(pre, code, day.get("name"))
+    limit_dn = limit_down_price(pre, code, day.get("name"))
     # ★ 全修③：现价越过昨晚挂单价且日内结构确认 ⇒ 止损随新结构上移、cap 基准迁到突破位。
     #   默认（回踩 / 结构未确认 / 数据不足）完全走旧路径，不影响既有回归。
     dyn = dynamic_structure(
@@ -859,6 +827,15 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
             chase_hit = dict(chase)
             stop_eff = max(stop_eff, float(_cstop))
             structure_base = max(structure_base or 0.0, _lim)
+    # ★ 深度 review 二次修 P0（2026-11-05）：最小止损距改前只做在 auto_plan_cn，
+    #   走 --plan / 显式 --stop 时贴脸止损 ⇒ R 虚高过闸、size_for 股数爆表。
+    #   铁律：担心止损太贴，唯一正确修法 = 止损端往下加缓冲带（不是剔除买点）。
+    from levels import NOISE_ATR
+    _min_risk = NOISE_ATR * float(atr or 0.0)
+    min_stop_applied = False
+    if _min_risk > 0 and (price - stop_eff) < _min_risk:
+        stop_eff = price - _min_risk
+        min_stop_applied = True
     buy_cap = resolve_cap(entry, stop_eff, target, cap, pre, day_open, structure_base)
     gates = cap_gates(entry, stop_eff, target, cap, pre, day_open, structure_base)
     if chase_hit:
@@ -962,6 +939,7 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
         "chase_applied": chase_hit,
         "chase_size_ratio": (chase_hit or {}).get("size_ratio"),
         "chase_expired": chase_expired,
+        "min_stop_applied": min_stop_applied,
         "above_entry": (chase_hit or {}).get("limit") or zone_hi,
         # ★ 深度 review P1：向下/向上两档各自给**真实可成交价 + 执行方式**，
         #   不再是一行「档位 X ｜ Y」的文案（limit_buy 恒=现价 ⇒ 只有一条路径）。
@@ -1301,6 +1279,34 @@ def apply_channel_handoff(d, channel, account=None):
         return d
     entry = float(act["entry"])
     stop = float(act["stop"])
+    # ★ 深度 review 二次修 P0（2026-11-05）：handoff 在 decide 已判「不买」之后
+    #   重开「能买」，改前只复核 R 与 qty ⇒ 跌停 / 近板 / cap / 现价破止损
+    #   四道闸全部被绕过。补齐后再谈赔率。
+    _price = float(d.get("price") or entry)
+    _pre, _name = d.get("pre"), d.get("name")
+    _lim_dn = limit_down_price(_pre, d.get("code"), _name)
+    _lim_up = limit_up_price(_pre, d.get("code"), _name)
+    if _lim_dn is not None and _price <= _lim_dn * 1.002:
+        d["reason"] = "盘中通道给出价位，但现价已贴/破跌停（接飞刀）⇒ 不买。"
+        d["action"] = "不买"
+        return d
+    if _lim_up is not None and _price >= _lim_up * (1.0 - LIMIT_NEAR):
+        d["reason"] = "盘中通道给出价位，但现价已贴涨停（买不到）⇒ 不买。"
+        d["action"] = "不买"
+        return d
+    if _price <= stop:
+        d["reason"] = "盘中通道给出价位，但现价已跌破该通道止损 ⇒ 不买。"
+        d["action"] = "不买"
+        return d
+    # ⚠ handoff 的语义就是「计划买区已过，用通道价重算」：自动 cap 是**旧计划**
+    #   的 R闸/昨收+2% 算出来的，拿它卡新通道价会让 handoff 永远不买（回归红灯）。
+    #   只有**用户显式硬顶** cap_gates.explicit 属不可越过的硬约束。
+    _explicit_cap = (d.get("cap_gates") or {}).get("explicit")
+    if _explicit_cap is not None and entry > float(_explicit_cap) + 1e-9:
+        d["reason"] = ("盘中通道价 %.2f 高于用户显式买入上限 %.2f ⇒ 不买。"
+                       % (entry, float(_explicit_cap)))
+        d["action"] = "不买"
+        return d
     target = act.get("target1")
     if target is None or float(target) <= entry:
         target = limit_up_price(d.get("pre"), d.get("code"))
@@ -1321,6 +1327,13 @@ def apply_channel_handoff(d, channel, account=None):
         return d
     d["action"] = "能买"
     d["limit_buy"] = round_px(entry)
+    # ★ 深度 review 二次修：通道价与现价的关系要上屏（改前 limit_buy 恒用通道价，
+    #   看不出这张单是「按现价成交」还是「等回踩」）。
+    d["channel_price"] = round_px(_price)
+    d["channel_fill_note"] = (
+        "通道价 %.2f 高于现价 %.2f ⇒ 限价单按现价成交" % (entry, _price)
+        if entry > _price else
+        "通道价 %.2f 低于现价 %.2f ⇒ 等回踩，需盯盘/预挂" % (entry, _price))
     d["channel_source"] = src
     d["channel_stop"] = round_px(stop)
     d["channel_target"] = round_px(target)
@@ -1336,8 +1349,16 @@ def apply_channel_handoff(d, channel, account=None):
     return d
 
 
-def channels_for_session(code, day, account=None):
-    """用当日 1 分钟合成 5 分钟，按昨收结构问三条盘中通道。取数失败写进 why。"""
+_CHANNEL_BARS_CACHE = {}
+
+
+def channels_for_session(code, day, account=None, bars_override=None):
+    """用当日 1 分钟合成 5 分钟，按昨收结构问三条盘中通道。取数失败写进 why。
+
+    ★ 深度 review 二次修 P1（2026-11-05）：改前每次调用都实时重拉日线重算 ATR，
+      同一分钟跑两次可能给不同结论、`--asof` 回放不可复现。改为按 (code, date)
+      缓存日线，并允许 bars_override 注入固定基准（回测 / 回放用）。
+    """
     import probe_intraday as P
     import rule123 as R
     import bars_source as BS
@@ -1347,7 +1368,14 @@ def channels_for_session(code, day, account=None):
     if len(mins5) < 3:
         return {"action": None, "source": None, "why": "5分钟线不足"}
     prefix = "sh" if str(code)[0] in "69" else "sz"
-    bars, _src, _notes = BS.ash_bars(prefix, str(code), n=80)
+    _key = (str(code), date)
+    if bars_override is not None:
+        bars = bars_override
+    elif _key in _CHANNEL_BARS_CACHE:
+        bars = _CHANNEL_BARS_CACHE[_key]
+    else:
+        bars, _src, _notes = BS.ash_bars(prefix, str(code), n=80)
+        _CHANNEL_BARS_CACHE[_key] = bars
     if not bars or len(bars) < 20:
         return {"action": None, "source": None, "why": "日线不足"}
     if date and str(bars[-1].get("d") or "")[:10] == date:
@@ -1358,7 +1386,10 @@ def channels_for_session(code, day, account=None):
         return {"action": None, "source": None, "why": "基准日线不足"}
     atr_v = R.atr14(basis)
     prev = basis[-1]["c"]
-    return P.eval_ash_intraday(mins5, code, atr_v, prev, basis, account=account)
+    res = P.eval_ash_intraday(mins5, code, atr_v, prev, basis, account=account)
+    if isinstance(res, dict):
+        res["channel_basis_date"] = str(basis[-1].get("d") or "")[:10]
+    return res
 
 
 def main(argv=None):
