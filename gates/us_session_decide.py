@@ -625,9 +625,16 @@ def _collect_shallow(price, stop, target, vwap, pre, day_open, zone_lo, zone_hi,
     out = []
     seen = []
     zone_hi_n = _num(zone_hi)
+    zone_lo_n = _num(zone_lo)
     for name, px0 in raw:
         px = round_px(px0)
         if not _shallow_visible(px, price, zone_lo, zone_hi_n):
+            continue
+        # ★ 2026-11-05（与 A 股 attach_zone_exec 的 B 同构）：浅档不得落到买区下沿
+        #   之下 —— 引擎口径是「跌破买区下沿 = 突破未成立，不接」，挂到那个价位
+        #   等于等一张自相矛盾的单（GH 2026-11-04：浅档 166.89 < 下沿 167.31）。
+        #   深档仍可用下沿（_deep_choice 的「平台下沿」就是买区下沿本身，不受影响）。
+        if zone_lo_n is not None and px < zone_lo_n - 0.01:
             continue
         use_stop = stop
         retargeted = False

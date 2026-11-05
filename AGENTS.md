@@ -165,6 +165,15 @@ python gates/us_session_decide.py <TICKER> --entry <价> --stop <止损> --targe
 - 实现 `rule123.attach_zone_exec()`，**必须在 `plan_entry` 最后调用**（T0/流星砸坑会整体替换 `buy_zone`）。
   回归 `tests/entry/test_zone_exec_chase.py`。细则见 `references/strategy-modes.md`「买区内 R 不足」。
 - ⚑ 口径纪律：这是**执行层**修正，不放宽任何止损、不改买区定义、不改 mode 链优先级。
+- **美股同构核对（2026-11-05，实测 36 只 `pool_us`）**：美股**不需要** A 那一条，机制上已经等价 ——
+  `us_session_decide._matched_stop` 在浅档 R 不足时**收紧止损到成本兜底再算 R**，把上沿「救」回来
+  （例：现价 100 / 上沿 104 / cap 103 ⇒ 仍给 104，+4.00%）；且 `_collect_shallow` 按**价格从高到低**
+  排序，优先挂上沿/追，不是优先压低。实测 12 只 `in_zone` 里 R 合格的 4 只**全部**拿到 ≥ 现价的档。
+- **美股只补了 B**：`_collect_shallow` 新增「浅档不得低于 `zone_lo`」（GH 2026-11-04：浅档 166.89 <
+  下沿 167.31，挂的是一张「跌破下沿还接」的自相矛盾单）；深档不受影响（「平台下沿」= 买区下沿本身）。
+  回归 `tests/gates/test_us_session_decide.py::test_shallow_not_below_zone_floor`。
+- ⚑ **A 的 `next_day_chase` 在美股是死字段**：美股开盘走 `_us_bands` 价梯（T+0、无集合竞价、无隔夜缺口档），
+  不读 `open_playbook` 六档，故不给「次日追价授权」—— 不是缺陷，是 T+1/T+0 的必然差异。
 
 ## 1e. 突破有效性闸门 → gates/breakout_hold（老罗 2026-10-14 定，301087 可孚医疗实例）
 

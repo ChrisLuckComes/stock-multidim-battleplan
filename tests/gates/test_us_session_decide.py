@@ -327,6 +327,29 @@ def test_trend_does_not_hard_wait_deep():
     chk("不给深档挂价", sel["hang"] is None, sel)
 
 
+def test_shallow_not_below_zone_floor():
+    """买区下沿之下的价不是浅档（与 A 股 attach_zone_exec 的 B 同构）。
+
+    GH 2026-11-04 实证：mode=wait、买区 167.31~176.33、现价 168.58，
+    浅档候选只剩「−1%」166.89（低于下沿 0.25%）⇒ 挂到买区外，
+    与引擎「跌破买区下沿 = 突破未成立，不接」自相矛盾。
+    """
+    # ① 唯一候选（−1% 103.95 / VWAP 103.5）全在下沿 104 之下 ⇒ 不挂
+    sel = select_us_hang(
+        105.0, 100.0, 125.0, vwap=103.50, pre=105.0,
+        zone_lo=104.0, zone_hi=None, mode="wait", reaches_deep=False)
+    chk("下沿之下不给浅档", sel["tier"] == "不追" and sel["hang"] is None, sel)
+
+    # ② VWAP 在区内（104.50）、−1% 在下沿之下 ⇒ 选 VWAP，不选更低的那口
+    sel2 = select_us_hang(
+        105.0, 100.0, 125.0, vwap=104.50, pre=105.0,
+        zone_lo=104.0, zone_hi=None, mode="wait", reaches_deep=False)
+    chk("浅档不落到下沿之下",
+        sel2["hang"] is not None and sel2["hang"] >= 104.0 - 1e-9, sel2)
+    chk("选区内 VWAP 而非区外 −1%",
+        sel2["anchor"] == "VWAP" and abs(sel2["hang"] - 104.50) < 0.001, sel2)
+
+
 def test_trend_premarket_does_not_become_range():
     """开盘未知的趋势模式，不许因为日低常摸到就改判深档。"""
     sel = select_us_hang(
@@ -646,6 +669,7 @@ if __name__ == "__main__":
     test_trend_names_hang_shallow()
     test_zs_deep_hang_fills()
     test_trend_does_not_hard_wait_deep()
+    test_shallow_not_below_zone_floor()
     test_trend_premarket_does_not_become_range()
     test_no_chase_extended_day()
     test_no_chase_above_cap()
