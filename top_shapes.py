@@ -238,10 +238,14 @@ def _det_v_top(bars, pivots, steep=0.12, fall_pct=0.10, max_bars=8):
         low_after = min(b["l"] for b in after)
         fall = (hi_p / low_after - 1.0) if low_after > 0 else 0.0
         if rise >= steep and fall >= fall_pct and n_up <= max_bars:
+            # ⚑ 修正（老罗 2026-11-05 拍板 A）：`break_level` 曾错写成 `hi_p`（峰价本身），
+            #   ⇒ 只要收盘在峰价下方就恒判「已破位(反转确认)」，实测 1,312/1,312 全为假确认。
+            #   真颈线 = 峰后回落低点 `low_after`：收盘**跌破**它才算 V 形反转成立。
             return _shape("V顶", "bearish", peak=hi_p, support=low_after,
-                          break_level=hi_p, pivots=[hi], signal_i=hi_i, peak_i=hi_i,
+                          break_level=low_after, pivots=[hi], signal_i=hi_i, peak_i=hi_i,
                           note=f"尖顶：{n_up}根内涨{rise * 100:.0f}%，"
-                               f"随后 ≤{max_bars}根回落 {fall * 100:.0f}%")
+                               f"随后 ≤{max_bars}根回落 {fall * 100:.0f}%，"
+                               f"颈线(峰后低点) {low_after:.2f}")
     return None
 
 
@@ -280,21 +284,34 @@ def _det_dome_top(bars, pivots, min_rise=0.10, fade=0.75, min_leg=4,
             continue   # 单根脉冲主导 ⇒ 旗杆式急拉，不是圆弧
         lo_piv = [p for p in pivots if p[2] == "L" and H1[0] <= p[0] <= H3[0]]
         support = min([p[1] for p in lo_piv], default=None)
+        # ⚑ 修正（老罗 2026-11-05 拍板 A）：`break_level` 曾错写成 `H3[1]`（峰价本身），
+        #   ⇒ 「已破位」恒真（实测 43/43 全为假确认）。真颈线 = 区间内最低摆动低点；
+        #   取不到摆动低点时退回「峰后回落最低价」（`bars[-1]` 之前的那段）。
+        if support is None:
+            after = bars[H3[0] + 1:]
+            support = min((b["l"] for b in after), default=None) if after else None
         return _shape("圆顶", "bearish", peak=H3[1], support=support,
-                      break_level=H3[1], pivots=[H1, H2, H3], signal_i=H3[0],
+                      break_level=support, pivots=[H1, H2, H3], signal_i=H3[0],
                       peak_i=H3[0],
                       note=f"三峰递增但动能衰竭（后段涨幅仅为前段 {inc2 / inc1:.0%}）、"
                            f"总涨 {tot / H1[1] * 100:.0f}% 跨 {len(seg)} 根（单根最大仅占 "
-                           f"{pulse / tot * 100:.0f}%），已回落破顶")
+                           f"{pulse / tot * 100:.0f}%），已回落破顶"
+                           + (f"，颈线 {support:.2f}" if support else ""))
     return None
 
 
-def _det_flag(bars, pivots, pole_gain=0.15, pole_bars=16, band_ratio=0.45,
-              flag_min=3, flag_max=8):
+def _det_flag(bars, pivots, pole_gain=0.15, pole_bars=16, band_ratio=0.50,
+              flag_min=3, flag_max=12):
     """旗形（上升中继）：陡峭**旗杆** + 窄幅下倾**旗面**。
 
     ⚑ 这是**中继形态**，不是顶部反转 ⇒ bias=continuation，**不进顶部候选池**
       （老罗 2026-10-31：明月镜头的"旗形"曾被误判成圆顶 → 顶部闸门误杀）。
+
+    ⚑ 门槛放宽（老罗 2026-11-05 拍板 B）：`band_ratio` 0.45→0.50、
+      `flag_max` 8→12。原因：实测 7,009 次顶部 block 里旗形豁免生效 **0 次**，
+      全被这两条卡死——明月 10-30~11-04「旗面带宽 48~52% > 45%」、
+      11-02「带宽 50% > 45%」、10-27「旗面只有 1 根 < 3」。
+      放宽后仍保留三条否决（旗面破旗杆底 / 超旗杆顶 / 上倾），不会把下跌当旗形。
     """
     n = len(bars)
     # ① 旗杆：最近 20 根内最强的一段上攻。
@@ -516,16 +533,31 @@ def detect_top_shapes(bars, window=SHAPE_WINDOW, atr=None):
     # ── 旗形覆盖：同一位置若同时存在「旗形(中继)」与偏空顶部形态，
     #    且旗面未破（旗形检测已保证）⇒ 该顶部形态改判为「旗面内，按中继处理」。
     #    依据：老罗 2026-10-31 —— 明月镜头的"旗形"曾被误判成圆顶/尖顶 → 顶部闸门误杀。
+    #    ⚑ 匹配口径修正（老罗 2026-11-05 拍板 B）：原判据「peak_i 与旗杆顶相距 ≤2 根」
+    #      实测 0/7,009 生效 ⇒ 改为「**顶部形态的峰落在旗杆区间内**」。
+    #      理由：峰值出现在旗杆段（l→e 这段急速上攻）上，说明那个「顶」本身就是
+    #      旗杆的一部分，是上涨途中的高点，不是反转 —— 这才是要覆盖的那一类。
+    #      保留原「≤2 根近邻」作为并集（只放宽、不收紧，不丢既有行为）。
     flags = [x for x in out if x["pattern"] == "旗形"]
     if flags:
         for x in out:
             if x is flags[0] or x["bias"] != "bearish":
                 continue
+            pk_i = x.get("peak_i")
             for fg in flags:
-                if abs((x.get("peak_i") or -99) - (fg.get("signal_i") or -99)) <= 2:
+                pole_lo_i = (fg.get("pivots") or [(None,)])[0][0]
+                pole_hi_i = fg.get("signal_i")
+                in_pole = (pk_i is not None and pole_lo_i is not None
+                           and pole_hi_i is not None and pole_lo_i <= pk_i <= pole_hi_i)
+                near_peak = abs((pk_i if pk_i is not None else -99)
+                                - (pole_hi_i if pole_hi_i is not None else -99)) <= 2
+                if in_pole or near_peak:
                     x["bias"] = "continuation"
                     x["covered_by_flag"] = True
-                    x["note"] = (x.get("note") or "") + "｜⚑ 与旗形同位 ⇒ 旗面未破，按**中继**处理"
+                    x["note"] = ((x.get("note") or "")
+                                 + "｜⚑ 与旗形同位"
+                                 + ("（峰在旗杆区间内）" if in_pole else "（峰距旗杆顶≤2根）")
+                                 + " ⇒ 旗面未破，按**中继**处理")
                     break
     # ── 索引还原成绝对索引 ──
     for s in out:

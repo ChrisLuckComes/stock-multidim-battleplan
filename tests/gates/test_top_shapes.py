@@ -202,5 +202,93 @@ class TestNoFalsePositive(unittest.TestCase):
         self.assertNotIn("圆顶", got, f"单根脉冲主导不得判成圆顶，实际 {got}")
 
 
+def _long_seq(legs, base=40, start=100.0):
+    """前置 base 根水平基线，再按 (目标价, 根数) 腿展开。
+
+    基线要够长（detect_top_shapes 回看 SHAPE_WINDOW=140、pivots 需要摆动点），
+    短线序列根本产不出摆动点 ⇒ 任何形态都检不出（踩过）。
+    """
+    closes = [start] * base
+    cur = start
+    for target, n in legs:
+        step = (target - cur) / n
+        for _ in range(n):
+            cur += step
+            closes.append(cur)
+    return closes
+
+
+class TestBreakLevelNeckline(unittest.TestCase):
+    """⚑ 老罗 2026-11-05 拍板「改法 A」：V顶/圆顶的 break_level 必须是**真颈线**。
+
+    bug 原状：`_det_v_top` 传 `break_level=hi_p`、`_det_dome_top` 传 `break_level=H3[1]`，
+    都是**峰价本身** ⇒ 只要收盘在峰价下方就恒判「已破位(反转确认)」。
+    全市场实测：V顶 1,312/1,312、圆顶 43/43 全是假确认，
+    并连带让 `bearish_context`（做空背景）在「刚从峰价回落」就成立。
+    """
+
+    def test_v_top_break_level_is_true_neckline(self):
+        bars = bars_from_closes(_long_seq([(132, 8), (118, 5)]))
+        vts = [s for s in TS.detect_top_shapes(bars) if s["pattern"] == "V顶"]
+        self.assertTrue(vts, "应识别出 V顶")
+        vt = vts[0]
+        self.assertLess(vt["break_level"], vt["peak"],
+                        f"V顶 break_level({vt['break_level']}) 必须低于峰价({vt['peak']})，"
+                        "否则「已破位」恒真")
+        # 真颈线 = 峰后回落最低价
+        after = bars[vt["peak_i"] + 1:vt["peak_i"] + 1 + 8]
+        self.assertAlmostEqual(vt["break_level"], min(b["l"] for b in after), places=4,
+                              msg="V顶 break_level 应等于峰后回落最低价")
+
+    def test_dome_break_level_is_true_neckline(self):
+        bars = bars_from_closes(legs_to_closes([(112, 8), (108, 4), (120, 8), (116, 4),
+                                               (125, 8), (118, 6)]))
+        domes = [s for s in TS.detect_top_shapes(bars) if s["pattern"] == "圆顶"]
+        self.assertTrue(domes, "应识别出圆顶（本用例的构造见 test_dome_needs_gradual_arc）")
+        d = domes[0]
+        self.assertIsNotNone(d["break_level"], "圆顶必须给出可用的颈线，不能是 None")
+        self.assertLess(d["break_level"], d["peak"],
+                        f"圆顶 break_level({d['break_level']}) 必须低于峰价({d['peak']})")
+
+    def test_v_top_not_confirmed_until_neckline_breaks(self):
+        """价格从峰价回落但**未跌破峰后低点** ⇒ 不得标 confirmed（原 bug 会标 True）。"""
+        bars = bars_from_closes(_long_seq([(132, 8), (118, 5)]))
+        vts = [s for s in TS.detect_top_shapes(bars) if s["pattern"] == "V顶"]
+        self.assertTrue(vts)
+        vt = vts[0]
+        # 末根收在峰价下方（118 < 132）但颈线之上（117.29），应是「未完成」
+        self.assertLess(bars[-1]["c"], vt["peak"], "本用例末根应低于峰价")
+        self.assertGreater(bars[-1]["c"], vt["break_level"], "本用例末根应仍在颈线之上")
+        self.assertFalse(vt["confirmed"],
+                         "收盘未跌破真颈线就不得判「已破位」，原 bug 这里恒为 True")
+
+
+class TestFlagCoversTop(unittest.TestCase):
+    """⚑ 老罗 2026-11-05 拍板「改法 B」：旗形豁免的匹配口径。
+
+    原判据「顶部形态 peak_i 与旗杆顶相距 ≤2 根」——在真实数据里只覆盖到 7%
+    的豁免；改为「**顶部形态的峰落在旗杆区间 [l, e] 内**」后覆盖到 93%。
+    语义：峰值出现在急速上攻那一段上，说明那个「顶」本身就是旗杆的一部分。
+    """
+
+    def test_v_top_covered_when_peak_inside_pole(self):
+        bars = bars_from_closes(_long_seq([(132, 8), (118, 5)]))
+        shapes = TS.detect_top_shapes(bars)
+        self.assertIn("旗形", names(shapes), "应识别出旗形（旗杆 32% / 旗面 5 根窄幅下倾）")
+        vts = [s for s in shapes if s["pattern"] == "V顶"]
+        self.assertTrue(vts, "应识别出 V顶（与旗形同位）")
+        vt = vts[0]
+        self.assertTrue(vt.get("covered_by_flag"),
+                        "V顶 的峰落在旗杆区间内 ⇒ 必须被旗形覆盖，改判中继")
+        self.assertEqual(vt["bias"], "continuation",
+                         "被覆盖后 bias 必须改成 continuation，否则仍会进顶部候选池")
+
+    def test_flag_not_detected_when_band_too_wide(self):
+        """旗面回撤超过旗杆 50% ⇒ 不是旗形（不能把下跌当整理）。"""
+        bars = bars_from_closes(_long_seq([(132, 8), (90, 6)]))   # 回撤 32% vs 旗杆 32%
+        got = names(TS.detect_top_shapes(bars))
+        self.assertNotIn("旗形", got, f"旗面破掉旗杆一半以上不得算旗形，实际 {got}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
