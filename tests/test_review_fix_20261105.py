@@ -178,11 +178,11 @@ def test_p0b_empty_walls_equals_none():
 
 
 def test_p0b_walls_none_also_reads_engine_t1():
-    """engine_t1 判定提到分支外：walls=None 也必须认引擎目标。"""
-    entries = [{"name": "追高档", "price": 11.9, "kind": "breakout", "dist_pct": 0.0}]
-    anchors = [{"name": "结构止损", "price": 10.9}]
+    """engine_t1 判定提到分支外：walls=None 也必须认引擎目标（与 walls=[] 同结论）。"""
+    entries = [{"name": "追高档", "price": 11.0, "kind": "breakout", "dist_pct": 0.0}]
+    anchors = [{"name": "结构止损", "price": 10.0}]   # 风险 1.0 ≥ 0.25×ATR，避薄止损闸
     kw = dict(entries=entries, anchors=anchors, atr_v=1.0,
-              t1=12.0, t2=15.0, last_c=11.9)
+              t1=12.0, t2=15.0, last_c=11.0)
     r = odds_matrix(walls=None, engine_t1=12.0, **kw)
     assert r[0]["t1_used"] == 12.0
     assert "引擎targets.t1" in r[0]["r1_basis"]
@@ -190,15 +190,21 @@ def test_p0b_walls_none_also_reads_engine_t1():
 
 
 def test_p0b_engine_t1_not_rejected_by_need():
-    """买价贴 t1 时（need=买价+0.5ATR 已超 t1）不得丢弃引擎目标、回落远墙造虚高 R。"""
-    entries = [{"name": "追高档", "price": 11.9, "kind": "breakout", "dist_pct": 0.0}]
-    anchors = [{"name": "结构止损", "price": 10.9}]
-    rows = odds_matrix(entries, anchors, 1.0, 12.0, 15.0, 11.9,
+    """engine_t1 给出 ≥ buy+0.5ATR 余量时必须认；贴脸（余量不足）则回落墙/None，
+    不得用贴脸 t1 造 R≈0 的虚拟目标（深度 review P1 修 2026-11-05）。"""
+    entries = [{"name": "追高档", "price": 11.0, "kind": "breakout", "dist_pct": 0.0}]
+    anchors = [{"name": "结构止损", "price": 10.0}]
+    # 充足余量：buy=11.0, t1=12.0, atr=1.0 ⇒ need=11.5，12.0≥11.5 ⇒ 认引擎目标
+    rows = odds_matrix(entries, anchors, 1.0, 12.0, 15.0, 11.0,
                        walls=[11.0, 12.0, 15.0], engine_t1=12.0)
     assert rows[0]["t1_used"] == 12.0, rows[0]
     assert "引擎targets.t1" in rows[0]["r1_basis"]
-    assert rows[0]["r1"] < odds_matrix(entries, anchors, 1.0, 12.0, 15.0, 11.9,
-                                       walls=[11.0, 12.0, 15.0])[0]["r1"]
+    # 贴脸：buy=11.9 距 t1 仅 0.1 < 0.5ATR ⇒ 引擎目标被 margin 闸否决，回落墙逻辑
+    entries_tight = [{"name": "追高档", "price": 11.9, "kind": "breakout", "dist_pct": 0.0}]
+    rows2 = odds_matrix(entries_tight, anchors, 1.0, 12.0, 15.0, 11.9,
+                        walls=[11.0, 12.0, 15.0], engine_t1=12.0)
+    assert "引擎targets.t1" not in rows2[0]["r1_basis"], rows2[0]
+    assert rows2[0]["t1_used"] != 12.0, rows2[0]
 
 
 # ──────────────────────── P1-3 / P1-4 做空徽章口径 ────────────────────────

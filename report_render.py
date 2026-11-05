@@ -472,6 +472,10 @@ def build_two_ways(a, n):
     if down is None:
         down = rec.get("entry")
     up = (tw.get("up") or {}).get("price")
+    rec_up = a.get("rec_up")
+    # ★ 深度 review P0 修（2026-11-05）：优先用引擎算出的向上突破跟单档（含 R / 执行方式）。
+    if up is None and isinstance(rec_up, dict) and rec_up.get("entry") is not None:
+        up = rec_up.get("entry")
     if up is None and ch.get("limit") is not None:
         up = ch.get("limit")
     if down is None and up is None:
@@ -483,7 +487,15 @@ def build_two_ways(a, n):
         bits.append("<b>向下回踩 %s%.2f</b>（隔夜可预挂限价）" % (cur, float(down)))
     if up is not None:
         how = "限价单可预挂 · 24h" if _mak == "US" else "A股无 buy-stop · 需盯盘手动打"
-        bits.append("<b>向上突破/追价 %s%.2f</b>（%s）" % (cur, float(up), how))
+        _up_txt = "<b>向上突破/追价 %s%.2f</b>（%s）" % (cur, float(up), how)
+        # 向上档带 R 与「需盯盘手动打·不可隔夜预挂」标注（与向下档并列给价）
+        if isinstance(rec_up, dict) and rec_up.get("entry") is not None \
+                and abs(rec_up["entry"] - float(up)) < 0.005:
+            if rec_up.get("r1") is not None:
+                _up_txt += " · R→t1 <b>%s</b>" % num(rec_up["r1"])
+            if rec_up.get("exec_note"):
+                _up_txt += "（%s）" % esc(rec_up["exec_note"])
+        bits.append(_up_txt)
     extra = []
     if ch:
         _issued = ch.get("issued") or dec.get("chase_issued")
@@ -573,7 +585,7 @@ def build_plan_rows(a):
 
 
 def build_odds_rows(a):
-    rec = a.get("odds_top") or a.get("odds_recommend")
+    rec = pick_rec(a)
     out = []
     for o in (a.get("odds_primary") or a.get("odds") or []):
         hl = ' style="background:#fffdf0"' if (rec and o is rec) else ""
@@ -791,7 +803,7 @@ def build_peers(a, n):
 
 
 def build_exec(a, n):
-    rec = a.get("odds_top") or a.get("odds_recommend") or {}
+    rec = pick_rec(a) or {}
     m, z = a["meta"], a["plan"].get("buy_zone") or {}
     lot = m.get("lot") or 100
     account = m.get("account") or 50000
@@ -947,7 +959,7 @@ def build_summary(a, n):
     if n.get("summary_rows"):
         return rows([[k, v] for k, v in n["summary_rows"]])
     p, z = a["plan"], a["plan"].get("buy_zone") or {}
-    rec = a.get("odds_top") or a.get("odds_recommend")
+    rec = pick_rec(a)
     top = a.get("odds_top")
     _tv = a.get("top_verdict") or {}
     if _tv.get("level") == "block":
@@ -1167,14 +1179,36 @@ def build_tier_ranking(a, n):
     )
 
 
+def _sector_strict(a, n):
+    """★ 深度 review P1 修（2026-11-05）：板块风险取**最严**（avoid>watch>safe>unknown）。
+
+    引擎 auto 与 notes 任一为 avoid ⇒ avoid：**取严不取宽**，notes 不能把硬闸门降级。
+    """
+    _order = {"avoid": 3, "watch": 2, "safe": 1, "unknown": 0}
+    cand = []
+    for src in (a.get("sector_risk"), n.get("sector_risk")):
+        if isinstance(src, dict) and src.get("risk") in _order:
+            cand.append(src)
+    if not cand:
+        return {"risk": "unknown"}
+    best = max(cand, key=lambda x: _order.get(x.get("risk"), 0))
+    # 合并两条原因，避免任一被静默覆盖
+    _reasons = " ｜ ".join(str(c.get("reason", "")) for c in cand
+                          if isinstance(c, dict) and c.get("reason"))
+    if _reasons:
+        best = dict(best); best["reason"] = _reasons
+    return best
+
+
 def build_sector_risk(a, n):
     """板块状态风险区块（2026-10-11 老罗：板块龙头退潮 = 后排禁买/降级）。
 
-    数据来源：notes.sector_risk（人工强化，优先级高，如已知龙头严重异动→avoid）
+    数据来源：notes.sector_risk（人工强化，如已知龙头严重异动→avoid）
     或 analysis.sector_risk（引擎自动，仅用 peers d20 评级）。
-    取两者最严者渲染。不写就不渲染（不影响其他章节）。
+    ★ 深度 review P1 修（2026-11-05）：取两者**最严**者渲染（取严不取宽）。
+    不写就不渲染（不影响其他章节）。
     """
-    sr = (n.get("sector_risk") or a.get("sector_risk"))
+    sr = _sector_strict(a, n)
     if not sr or not isinstance(sr, dict):
         return ""
     risk = sr.get("risk", "unknown")
@@ -1663,12 +1697,22 @@ SLOT_RE = re.compile(r"\{\{([A-Z0-9_]+)\}\}")
 def render(a, n, tmpl_path=DEFAULT_TMPL, vp_from=None, vp_to=None):
     m, s, p = a["meta"], a["struct"], a["plan"]
     n = n or {}
+    # ★ 深度 review P1 修（2026-11-05）：板块退潮硬闸门取**最严**者；avoid ⇒ 全报告
+    #   不展示买点（取严不取宽：引擎 auto 或 notes.sector_risk=avoid 任一即为禁买）。
+    if _sector_strict(a, n).get("risk") == "avoid":
+        a = dict(a)
+        a["odds_recommend"] = None
+        a["rec_up"] = None
+        _bz = dict((a.get("plan") or {}).get("buy_zone") or {})
+        _bz.pop("next_day_chase", None)
+        a["plan"] = dict(a.get("plan") or {})
+        a["plan"]["buy_zone"] = _bz
     with open(tmpl_path, encoding="utf-8") as f:
         tmpl = f.read()
 
     kpi_items, kpi_badges = build_kpis(a, n)
     best_title, best_kpis, best_note = build_best(a, n)
-    rec = a.get("odds_top") or a.get("odds_recommend") or {}
+    rec = pick_rec(a) or {}
     # ★ 市场口径（2026-09-22 加）：美股报告过去根本出不来（battle_analyze 只收 A 股），
     #   现在分流后币种/交易制度文案必须跟着走，否则美股报告会写「元 / T+1 / 最小申报 100 股」。
     _mak = (m.get("market") or "CN").upper()

@@ -359,6 +359,14 @@ def entry_candidates(bars, plan, probe_out, atr_v, odds_from_probe=None):
     _zone_lo = z.get("primary_lo")
     if _deep is not None and (_zone_lo is None or _deep >= _zone_lo):
         add("结构止损上方 0.5×ATR", _deep, "below", "回踩深一档")
+    # ★ 深度 review P0 修（2026-11-05）：追价授权进 odds/推荐池（之前只告警、不进表）。
+    #   向上突破跟单档（entry > 现价；A 股无 buy-stop、不可隔夜预挂，须盯盘手动打）
+    #   必须与向下回踩档**并列给价**，否则主推档 0% 向上 = 系统性踏空（回测实证）。
+    #   「仅次日」时效：issued 必须等于基准日，过期授权不得再挂（避免越权半仓）。
+    _ch = (z or {}).get("next_day_chase") or {}
+    if _ch.get("limit") and bars and _ch.get("issued") == bars[-1]["d"]:
+        add("追价授权（次日突破跟单）", _ch["limit"], "above",
+            "突破跟单·需盯盘手动打·不可隔夜预挂")
     # 去重
     seen, uniq = set(), []
     for x in cands:
@@ -423,7 +431,10 @@ def odds_matrix(entries, anchors, atr_v, t1, t2, last_c, walls=None,
             #   认它、且还要求满足逐档 need = 买价+0.5ATR ⇒ 追高档（买价贴 t1）
             #   会把引擎已认可的目标丢掉，回落到近墙/None，R 凭空消失 ⇒ 判不买。
             #   现在判定提到分支外：只要 t1 高于本档买价（能给出正 R），一律优先采用。
-            if _et1 is not None and _et1 > buy:
+            # ★ 深度 review P1 修（2026-11-05）：engine_t1 也要满足 buy+0.5ATR 下界，
+            #   否则贴脸 t1（买价≈t1）会被认作有效目标、算出 R≈0 的档 ⇒ 判不买。
+            #   改前只在「新口径」分支认它且绕开 need=buy+0.5ATR ⇒ 追高档 R 凭空消失。
+            if _et1 is not None and atr_v and _et1 >= buy + 0.5 * atr_v:
                 tgt1 = _et1
                 tgt2 = (wall_list[-1] if wall_list else t2)
                 basis1 = "引擎targets.t1（已过RR闸）"
@@ -606,7 +617,13 @@ def single_cap_with_cash(account, cash=None):
     return cap
 
 
-def limit_touch_rate(bars, limit_px, horizon=5):
+def limit_touch_rate(bars, limit_px, horizon=1):
+    """挂单价的历史触达率：按同样的距收盘比例，后 horizon 日最低价碰到的占比。
+
+    ★ 深度 review P1 修（2026-11-05）：可预挂限价单是**隔夜 1 日单**，故默认 horizon=1
+    （取历史「次日最低是否跌破该价」）。旧默认 horizon=5 高估触达率，会把等不到的深档
+    抬进主推（无前视泄漏：last_i 已截断，不拿未来数据）。
+    """
     """挂单价的历史触达率：按同样的距收盘比例，后 horizon 日最低价碰到的占比。"""
     if not bars or limit_px is None or len(bars) < horizon + 30:
         return None
@@ -763,7 +780,10 @@ def _pick_recommend_cn(rows, z, bars=None):
                 continue
             if zone_hi is not None and r["entry"] > zone_hi:
                 continue
-            if r["risk_atr"] is None or r["risk_atr"] < MIN_RISK_ATR:
+            # ★ 深度 review P0 修（2026-11-05）：薄止损（<0.35×ATR）是真「假赔率」——
+            #   容不下日内波动必被毛刺扫掉（回测：薄止损组扫损 79.1%、PF 0.699）。
+            #   与 _top 处 tight 兜底（>=0.35）口径统一：薄止损档不许靠 R 排序上位。
+            if r["risk_atr"] is None or r["risk_atr"] < 0.35:
                 continue
             # ★ 2026-10-11 放宽：原 -4.0% 硬剔除会误删「最近均线回踩」档
             #   （如 301449 滚动MA5=42.83 需跌 -4.6%）；改为软因子交由达成率×赔率联合排序
@@ -823,6 +843,74 @@ def _pick_recommend_cn(rows, z, bars=None):
     return r
 
 
+def _pick_recommend_cn_up(rows, z, bars, last_c, t1, atr_v):
+    """★ 深度 review P0 修（2026-11-05）：A 股**向上突破跟单档**（与向下回踩档并列）。
+
+    回测实证：24.6% 计划带追价授权、79.9% 后续触及授权价，但主推档 95.5% 仍是向下，
+    推荐档选向上档 0.0% —— 根因是选档器把「A 股无 buy-stop、不可隔夜预挂」的向上档
+    全剔。向上档不是「不能做」，而是「须盯盘手动打、不可隔夜预挂」—— 与向下档
+    （可预挂）是并列的两组价位，谁先到做谁。
+
+    取价优先级：
+      ① 追价授权（next_day_chase）：带自身止损，R 最准，标注「需盯盘手动打」；
+      ② 回落到 odds 里 entry > 现价的向上行，按 r1 × 向上达成率 联合排序。
+    薄止损（<0.35×ATR）与 R<MIN_RR 的向上档一律不要（假赔率 / 等不到）。
+    """
+    if last_c is None:
+        return None
+    up = None
+    # ① 追价授权优先（带自身止损，R 与仓位同源）
+    ch = (z or {}).get("next_day_chase") or {}
+    ch_ok = (ch.get("limit") and ch.get("stop") and ch.get("issued") == (
+        bars[-1]["d"] if bars else None))
+    if ch_ok and ch["stop"] < ch["limit"]:
+        _limit = ch["limit"]; _stop = ch["stop"]
+        _risk = _limit - _stop
+        _risk_atr = (_risk / atr_v) if atr_v else 1
+        if _risk > 0 and _risk_atr >= 0.35:
+            _r1 = (t1 - _limit) / _risk if (t1 and t1 > _limit) else None
+            if _r1 is None or _r1 >= MIN_RR:
+                up = {
+                    "entry_name": "追价授权（次日突破跟单）",
+                    "entry": _f(_limit, 2), "entry_kind": "above",
+                    "stop_name": "追价授权止损", "stop": _f(_stop, 2),
+                    "risk": _f(_risk, 2),
+                    "risk_atr": _f(_risk_atr, 2),
+                    "risk_pct": _f(_risk / _limit * 100, 2),
+                    "r1": round(_r1, 2) if _r1 is not None else None,
+                    "r1_basis": ("t1" if (t1 and t1 > _limit) else "海阔天空·不设目标"),
+                    "t1_used": _f(t1, 2) if (t1 and t1 > _limit) else None,
+                    "t2_used": None, "open_sky": (t1 is None or t1 <= _limit),
+                    "prehang": False,
+                    "exec_stop": _f(_stop, 2),
+                    "exec_note": "需盯盘手动打·不可隔夜预挂",
+                    "track": "up",
+                }
+    # ② 回落到 odds 里 entry > 现价的向上行（按 r1 × 向上达成率 联合排序）
+    if up is None:
+        cands = [r for r in rows
+                 if not r.get("prehang") and r["entry"] > last_c
+                 and (r.get("risk_atr") or 0) >= 0.35
+                 and (r.get("r1") or 0) >= MIN_RR]
+        if cands:
+            scored = []
+            for r in cands:
+                ar, src = _attain_rate(r, bars)
+                # 向上达成率：距现价的正向缺口越小越易触发（启发式夹在 0.1~1.0）
+                gap = (r["entry"] - last_c) / last_c if last_c else 0
+                up_attain = max(0.1, min(1.0, 1.0 - gap / 0.08))
+                _score = round((r.get("r1") or 0) * up_attain, 3)
+                scored.append((_score, r))
+            scored.sort(key=lambda x: -x[0])
+            up = dict(scored[0][1])
+            up["exec_stop"] = up.get("stop")
+            up["exec_note"] = "需盯盘手动打·不可隔夜预挂"
+            up["track"] = "up"
+    if up is not None and up.get("entry") is not None:
+        return up
+    return None
+
+
 def _pick_recommend_meteor(rows, z, bars=None):
     """★ 流星砸坑专用推荐档（老罗 2026-10-18 拍板 A 方案）。
 
@@ -867,6 +955,11 @@ def _pick_recommend_meteor(rows, z, bars=None):
         return None
     best["r1"] = round(r1, 2)
     best["r1_basis"] = "坑顶（流星砸坑·主升浪目标，非近端墙）"
+    # ★ 深度 review P1 修（2026-11-05）：覆盖 r1 为坑顶口径时，同步 t1_used 与清 r2，
+    #   否则同一行 R / 目标 / r2 三套口径互斥（展示 R 用坑顶、t1_used 却是近端墙）。
+    best["t1_used"] = round(peak_hi, 2)
+    best["t2_used"] = None
+    best["r2"] = None
     ar, src = _attain_rate(best, bars)
     best["attain_rate"] = round(ar, 3)
     best["attain_src"] = src
@@ -906,10 +999,19 @@ def _pick_recommend_us(rows, z, bars=None):
             continue
         chase, pull = _split(pool)
         if chase:
-            chase.sort(key=lambda r: (-r["r1"], abs(r.get("need_pct") or 0)))
+            # ★ 深度 review P1 修（2026-11-05）：美股与 A 股同尺 —— 按 r1 × 达成率
+            #   联合排序，不再纯 r1（纯 r1 偏向「需深跌、等不到」的档，违「等不到的价=0」）。
+            for r in chase:
+                ar, _ = _attain_rate(r, bars)
+                r["_score"] = round((r.get("r1") or 0) * ar, 3)
+            chase.sort(key=lambda r: (-r.get("_score", 0),
+                                      abs(r.get("need_pct") or 0)))
             return chase[0]
         if pull:
-            pull.sort(key=lambda r: -r["r1"])
+            for r in pull:
+                ar, _ = _attain_rate(r, bars)
+                r["_score"] = round((r.get("r1") or 0) * ar, 3)
+            pull.sort(key=lambda r: -r.get("_score", 0))
             return pull[0]
     return None
 
@@ -1501,6 +1603,10 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
                        last_c, walls=walls, engine_t1=t1)   # ★ 全修⑤ 报告与引擎同尺
     odds = annotate_odds(odds, z, atr_v, last_c)
     rec = pick_recommend(odds, z, bars=bars, us=is_us)
+    # ★ 深度 review P0 修（2026-11-05）：A 股向上突破跟单档（与向下回踩档并列）。
+    #   美股无此拆分（_pick_recommend_us 已含 chase 分支），rec_up 仅 A 股。
+    rec_up = (None if is_us
+              else _pick_recommend_cn_up(odds, z, bars, last_c, t1, atr_v))
     touch_px = None
     if rec and rec.get("entry") is not None and rec["entry"] < last_c:
         touch_px = rec["entry"]
@@ -1587,6 +1693,20 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
                     % (round(_sz_stop, 2), z.get("hard_dist_atr"), round(_st, 2),
                        rec["qty"], "%d" % _loss,
                        (_loss / (account * _rp)) if account else 0, rec["qty_if_struct"]))
+    # ★ 深度 review P0 修（2026-11-05）：R 单一真源 —— 展示 R 用「实际执行止损腿」
+    #   （stop_sizing / risk_sizing，与仓位同源）重算，不再用矩阵账面止损撑出两套 R。
+    #   回测：34.8% 的推荐档 exec_stop 偏离 >5% ⇒ 同一份报告两套止损 / 两套 R（薄止损假赔率）。
+    #   原地改 rec（不复制），保持与 odds 共享对象的身份，表格高亮仍命中。
+    if rec and rec.get("stop_sizing") is not None and rec.get("risk_sizing"):
+        _sz = rec["stop_sizing"]; _rk = rec["risk_sizing"]
+        _t1u = rec.get("t1_used"); _t2u = rec.get("t2_used")
+        if _t1u and rec["entry"] > _sz:
+            rec["stop"] = round(_sz, 2)
+            rec["risk"] = round(_rk, 2)
+            rec["risk_atr"] = round(_rk / atr_v, 2) if atr_v else rec.get("risk_atr")
+            rec["r1"] = round((_t1u - rec["entry"]) / _rk, 2)
+            rec["r2"] = round((_t2u - rec["entry"]) / _rk, 2) if _t2u else None
+            rec["r1_basis"] = (rec.get("r1_basis") or "t1") + "·R按执行止损重算(同源)"
     # ★ 主表口径：止损统一取引擎结构锚（ma_reclaim_break 取 MA5、其他战法多为 EMA10，以 z["struct_stop"] 为准，不写死 EMA10）——
     #   全矩阵 70+ 行走附录，主表只留「一个入场一行」，否则表格没法读。
     struct_stop = z.get("struct_stop")
@@ -1726,17 +1846,32 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
         "odds": odds,
         "odds_primary": odds_primary,
         "odds_recommend": rec,
+        "rec_up": rec_up,
         "odds_top": odds[0] if odds else None,
         "intraday": intra,
         "peers": peer_rows,
         "probe_text": probe_txt,
     }
-    # ★ 2026-10-11 板块龙头退潮闸门（轻量）：自动识别后排风险，仅用已取 peers，不联网
+    # ★ 深度 review P1 修（2026-11-05）：板块龙头退潮硬闸门（虎口夺食）在**引擎层**落地 ——
+    #   之前 sector_risk 只写字段 + 报告红卡，决策链零消费者 ⇒ 闸门名存实亡。
+    #   avoid（板块大跌 / 龙头严重异动）→ 引擎直接把 recommend / rec_up 置空（后排禁买）。
+    #   与 notes.sector_risk 取**最严**者（notes 不能把硬闸门降级；取严不取宽）。
     try:
         from gates.sector_check import sector_risk_of as _sector_risk_of
-        out["sector_risk"] = _sector_risk_of(code, out)
+        _sector = _sector_risk_of(code, out)
     except Exception as e:                      # noqa: BLE001
-        out["sector_risk"] = {"risk": "unknown", "reason": "板块检查失败：%s" % e}
+        _sector = {"risk": "unknown", "reason": "板块检查失败：%s" % e}
+    _sector_avoid = (_sector.get("risk") == "avoid")
+    if _sector_avoid:
+        if rec is not None:
+            notes_all.append("⛔ 板块龙头退潮（虎口夺食）硬闸门：后排禁买，recommend 已置空")
+        rec = None
+        rec_up = None
+        out["odds_recommend"] = None
+        out["rec_up"] = None
+        # 清掉已写的「仓位口径不一致」提示（已不交易，提示无意义）
+        notes_all = [x for x in notes_all if "仓位口径不一致" not in x]
+    out["sector_risk"] = _sector
     # ★ 2026-10-14 筹码面（scr_chip.py）：SCR 集中度 / 底部锁仓 / 主力成本。
     #   老罗要求「完整报告必须带筹码面结论、且放最前」⇒ 在引擎层就落地，报告只负责渲染。
     #   ⚠ 只支持 A 股（东财换手率口径）；美股与 --no-scr 一律记 None，报告层据此出占位说明。

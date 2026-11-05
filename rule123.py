@@ -2765,8 +2765,15 @@ def targets(bars, mode, z, atr_v, entry, Hs, ev=None):
         above = [h for h in resist if h > t1 + 0.2 * atr_v]
         t2 = above[0] if above else round(t1 + 2.0 * atr_v, 2)
         rr = round((t1 - entry) / risk, 2) if risk and risk > 0 else None
+        # ★ 深度 review P1 修（2026-11-05）：所有 t1 出口统一过 need=entry+RR_GATE*risk。
+        #   测幅目标若给出 R<RR_GATE，如实标「无合格目标」，不拿它撑虚高盈亏比。
+        if rr is not None and rr < RR_GATE:
+            t1 = None
+            t2 = None
         return {
-            "target1": round(t1, 2), "target2": round(t2, 2), "rr_target1": rr,
+            "target1": round(t1, 2) if t1 is not None else None,
+            "target2": round(t2, 2) if t2 is not None else None,
+            "rr_target1": rr if t1 is not None else None,
             "measured_kind": mt["kind"], "measure": mt["measure"],
             "breakout": mt["breakout"],
             "upside_open": False, "space_open": False,
@@ -2830,6 +2837,18 @@ def targets(bars, mode, z, atr_v, entry, Hs, ev=None):
         "upside_open": False, "space_open": False,
         "sea_sky": False, "no_room_above": False,
         "last_chg_pct": _last_chg_pct(bars),
+    }
+
+
+def make_chase(limit, stop, src, note, issued, size_ratio=0.5):
+    """★ 深度 review P1 修（2026-11-05）：两处 next_day_chase 生成端共用同一信封，保证
+    「limit / stop / size_ratio / valid_for / issued / src / note」字段同源、格式一致
+    （之前两处各自写一份 dict，易漂移，且 issued 时效闸常被忘写）。anchors 的具体算法
+    仍各保留上下文（见两处调用点）。
+    """
+    return {
+        "limit": limit, "size_ratio": size_ratio, "stop": stop,
+        "valid_for": "仅次日", "issued": issued, "src": src, "note": note,
     }
 
 
@@ -3116,19 +3135,12 @@ def attach_zone_exec(plan, bars, atr_v):
     anchor = min(float(hi), round(float(last_c) * (1.0 + ZONE_CHASE_GAP), 2))
     cstop = max(float(hard), round(anchor - (float(t1) - anchor) / RR_GATE, 2))
     if anchor > cap + 1e-9 and cstop < anchor - 1e-9:
-        z["next_day_chase"] = {
-            "limit": anchor,
-            "size_ratio": 0.5,
-            "stop": cstop,
-            "valid_for": "仅次日",
-            # ★ 深度 review P1：授权必须带生成日，否则消费端无法判「仅次日」
-            #   ⇒ 几天前的计划里这张授权会无限期生效（抬 cap + 半仓 = 越权）。
-            "issued": (bars[-1]["d"] if bars else None),
-            "src": "买区内 R 不足·追价授权",
-            "note": (f"买区上沿 {round(float(hi), 2)} 处 R 不足（R≥{RR_GATE} 只能挂到 "
-                     f"{round(cap, 2)}）⇒ 次日开盘 ≤{anchor} 可**半仓**执行，"
-                     f"止损收紧到 {cstop}；只此一天，不成交即作废"),
-        }
+        z["next_day_chase"] = make_chase(
+            anchor, cstop, "买区内 R 不足·追价授权",
+            (f"买区上沿 {round(float(hi), 2)} 处 R 不足（R≥{RR_GATE} 只能挂到 "
+             f"{round(cap, 2)}）⇒ 次日开盘 ≤{anchor} 可**半仓**执行，"
+             f"止损收紧到 {cstop}；只此一天，不成交即作废"),
+            (bars[-1]["d"] if bars else None))
         plan["zone_chase_note"] = z["next_day_chase"]["note"]
     return plan
 
@@ -5140,18 +5152,12 @@ def _plan_entry_core(bars, ev):
                         chase_cap = round(float(_gate), 2)
                     why = (f"RVOL={rvol:.2f}≥2.5" if _vol_strong
                            else f"实体{(yang['c'] - yang['o']) / atr_v:.2f}ATR 宽幅强阳")
-                    z["next_day_chase"] = {
-                        "limit": chase_cap,
-                        "size_ratio": 0.5,
-                        "stop": chase_stop,
-                        "valid_for": "仅次日",
-                        "issued": (bars[-1]["d"] if bars else None),  # 时效闸，见 chase_still_valid
-                        "note": (
-                            f"强突破（{why}）次日多不回踩："
-                            f"若次日开盘 ≤{chase_cap}，可**半仓**限价执行，"
-                            f"止损收紧到突破阳中点 {chase_stop}；只此一天，不成交即作废"
-                        ),
-                    }
+                    z["next_day_chase"] = make_chase(
+                        chase_cap, chase_stop, "强突破·追价授权",
+                        (f"强突破（{why}）次日多不回踩："
+                         f"若次日开盘 ≤{chase_cap}，可**半仓**限价执行，"
+                         f"止损收紧到突破阳中点 {chase_stop}；只此一天，不成交即作废"),
+                        (bars[-1]["d"] if bars else None))
                     note += (
                         f"；**强突破例外**（{why}）：次日开盘 ≤{chase_cap} "
                         f"可半仓限价执行，止损收紧至突破阳中点 {chase_stop}，仅次日有效"
