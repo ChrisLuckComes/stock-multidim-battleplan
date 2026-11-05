@@ -68,7 +68,7 @@ def in_session(now):
     return any(s <= t <= e for s, e in SESSION)
 
 def get_realtime(code, mkt):
-    s = requests.Session(); s.proxies = {"http": None, "https": None}
+    s = requests.Session(); s.proxies = {"http": None, "https": None}; s.trust_env = False
     r = s.get(f"https://qt.gtimg.cn/q={mkt}{code}", timeout=10)
     r.encoding = "gbk"
     f = r.text.split('"')[1].split("~")
@@ -80,7 +80,7 @@ def get_realtime(code, mkt):
             "pct": fl(32), "amount": fl(37), "turnover": fl(38), "time": f[30]}
 
 def get_minute(code, mkt):
-    s = requests.Session(); s.proxies = {"http": None, "https": None}
+    s = requests.Session(); s.proxies = {"http": None, "https": None}; s.trust_env = False
     url = f"https://web.ifzq.gtimg.cn/appstock/app/minute/query?code={mkt}{code}"
     node = s.get(url, timeout=15).json()["data"][f"{mkt}{code}"]["data"]["data"]
     rows, cum_vol, cum_amt = [], 0.0, 0.0
