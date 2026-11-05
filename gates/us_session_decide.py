@@ -1343,6 +1343,17 @@ def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
             chase_hit = dict(chase_auth)
             stop = max(stop, float(_cstop))       # 收紧（不是放宽）
             _size_ratio = float(chase_auth.get("size_ratio") or 0.5)
+    # ★ 深度 review 二次修 P0（对称 A 股 decide 833-838，2026-11-05）：最小止损距
+    #   改前只做在 auto_plan_us，走显式 --entry/--stop（含收盘止损轨 / 手动打单）时
+    #   贴脸止损 ⇒ R 虚高过闸、size_for_us 股数爆表。美股是 A 股「同一处漏网的半边」，
+    #   必须同步补上。铁律：担心止损太贴，唯一正确修法 = 止损端往下加缓冲带
+    #   （用 levels.NOISE_ATR 下限，不是剔除买点）。
+    from levels import NOISE_ATR
+    _min_risk = NOISE_ATR * float(atr or 0.0)
+    min_stop_applied = False
+    if _min_risk > 0 and (price - stop) < _min_risk:
+        stop = price - _min_risk
+        min_stop_applied = True
     buy_cap = resolve_cap_us(entry, stop, target, cap, pre, atr)
     if chase_hit:
         # ★ 深度 review 二次修 P0：改前 `max(buy_cap, limit)` 一次性掀翻
@@ -1381,6 +1392,7 @@ def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
         "chase_applied": chase_hit,
         "chase_size_ratio": _size_ratio,
         "chase_expired": chase_expired,
+        "min_stop_applied": min_stop_applied,
         "chase_limit": (chase_auth or {}).get("limit") if isinstance(chase_auth, dict) else None,
         "chase_issued": (chase_auth or {}).get("issued") if isinstance(chase_auth, dict) else None,
         "cap_tightest": cap_tightest,

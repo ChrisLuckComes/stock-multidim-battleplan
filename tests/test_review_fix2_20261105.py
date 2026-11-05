@@ -240,6 +240,22 @@ def test_decide_applies_min_stop_distance():
     assert d["stop_exec"] <= 10.80 - 0.25 + 1e-9
 
 
+def test_decide_us_applies_min_stop_distance():
+    """美股显式 --entry/--stop 路径对称 A 股：贴脸止损同样加 0.25×ATR 缓冲带。
+
+    改前 decide_us 只在 auto_plan_us 里堵下限，显式止损距 < NOISE_ATR×ATR 时
+    R 虚高过闸、size_for_us 股数爆表（美股是 A 股「同一处漏网的半边」）。
+    """
+    day = _us_day()
+    d = decide_us(day, us_summarize(day), entry=10.0, stop=10.79, target=12.0,
+                  atr=1.0, account=4694.80, pulse_enabled=False)
+    assert d["min_stop_applied"] is True
+    assert d["stop"] <= 10.80 - 0.25 + 1e-9
+    # R 用缓冲后的止损重算，不得仍是贴脸的虚高 R（未缓冲时 (12-10.80)/(10.80-10.79)=120）
+    _rr_virtual = (12.0 - 10.80) / (10.80 - 10.79)
+    assert d["rr"] is not None and d["rr"] < _rr_virtual - 1e-9
+
+
 # ─────────────────────── B1 其它 ───────────────────────
 
 def test_st_limit_uses_name():

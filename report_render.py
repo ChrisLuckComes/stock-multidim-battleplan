@@ -308,6 +308,16 @@ def pick_rec(a):
     return top if _ok(top) else (rec or top)
 
 
+def _rec_identity_key(r):
+    """★ 深度 review P2 修（2026-11-05）：JSON 反序列化后 odds 行与推荐档是不同对象，
+    `o is rec` 恒 False ⇒ 推荐档高亮/「不再首选」判断全部失效。改用稳定键值
+    （买法名 + 买价 + 止损锚 + 止损价）判定「这一行是不是推荐/最高 R 档」。
+    """
+    if not isinstance(r, dict):
+        return None
+    return (r.get("entry_name"), r.get("entry"), r.get("stop_name"), r.get("stop"))
+
+
 def build_best(a, n):
     rec = pick_rec(a)
     if not rec:
@@ -376,13 +386,13 @@ def build_best(a, n):
     rows_primary = a.get("odds_primary") or rows_all
     worst = rows_primary[-1] if rows_primary else None
     parts = []
-    if top and top is not rec:
+    if top and _rec_identity_key(top) != _rec_identity_key(rec):
         parts.append("名义最高 R 是 <b>%s 买 %s / %s 止损 %s</b> → <b>R %s</b>，但它 %s，"
                      "不作为首选。"
                      % (esc(top["entry_name"]), num(top["entry"]), esc(top["stop_name"]),
                         num(top["stop"]), num(top["r1"]),
                         "；".join(top.get("warn") or []) or "需另行确认可执行性"))
-    if worst and worst is not rec:
+    if worst and _rec_identity_key(worst) != _rec_identity_key(rec):
         parts.append("最差档 <b>%s 买 %s</b> 的 R 只有 <b>%s</b> —— 同一张票，买哪一档差别巨大。"
                      % (esc(worst["entry_name"]), num(worst["entry"]), num(worst["r1"])))
     if n.get("best_note"):
@@ -588,9 +598,9 @@ def build_odds_rows(a):
     rec = pick_rec(a)
     out = []
     for o in (a.get("odds_primary") or a.get("odds") or []):
-        hl = ' style="background:#fffdf0"' if (rec and o is rec) else ""
+        hl = ' style="background:#fffdf0"' if (rec and _rec_identity_key(o) == _rec_identity_key(rec)) else ""
         marks = esc("; ".join(o.get("warn") or []))
-        if rec and o is rec:
+        if rec and _rec_identity_key(o) == _rec_identity_key(rec):
             verdict = "回踩最优·推荐等待" if o.get("weak") else "推荐"
         elif o.get("weak"):
             verdict = "赔率偏弱·不建议"

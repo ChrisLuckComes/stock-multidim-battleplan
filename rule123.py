@@ -2840,6 +2840,22 @@ def targets(bars, mode, z, atr_v, entry, Hs, ev=None):
     }
 
 
+def rr_target1_with_entry(tg, entry, hard):
+    """★ 深度 review P1 修（2026-11-05）：回踩/低吸类用实际挂单价 entry 当 RR 分母，
+    重算 rr_target1（避免计划 RR 与挂单 R 两套分母；lo<现价时两套 R 不一致）。
+
+    突破类（买价≈现价）不调用本函数，维持 targets() 用 last_c 的分母。
+    返回是否发生了重算（测试用）。只在 entry>hard（分母为正）时改 rr_target1。
+    """
+    if not isinstance(tg, dict) or tg.get("target1") is None:
+        return False
+    if entry is not None and hard is not None and entry > hard:
+        tg["rr_target1"] = round((tg["target1"] - entry) / (entry - hard), 2)
+        tg["rr_entry"] = round(entry, 2)
+        return True
+    return False
+
+
 def make_chase(limit, stop, src, note, issued, size_ratio=0.5):
     """★ 深度 review P1 修（2026-11-05）：两处 next_day_chase 生成端共用同一信封，保证
     「limit / stop / size_ratio / valid_for / issued / src / note」字段同源、格式一致
@@ -2970,6 +2986,18 @@ def attach_stops_targets(plan, bars, atr_v, Hs, ev=None):
                     )
                     plan["stop_warning"] = z["stop_warning"]
     tg = targets(bars, mode, z, atr_v, last_c, Hs or [], ev) if mode != "wait" else None
+    # ★ 深度 review P1 修（2026-11-05）：回踩/低吸类用买区下沿 primary_lo 当 RR 分母
+    #   （实际挂单价），不用 last_c；否则 lo<现价 ⇒ 计划 rr_target1 与挂单 R 两套分母。
+    #   突破类买价≈现价，维持 last_c（rr_target1_with_entry 不被调用）。
+    #   RR_GATE 闸已在 targets() 内统一过，此处只换分母，不动 t1/t2 价位与闸。
+    if tg and mode not in BREAKOUT_MODES:
+        _lo = z.get("primary_lo")
+        _hard = z.get("hard_stop")
+        if _hard is None:
+            _hard = z.get("hard")
+        if isinstance(_hard, dict):
+            _hard = _hard.get("hard")
+        rr_target1_with_entry(tg, _lo, _hard)
     if tg:
         z["target1"] = tg["target1"]
         z["target2"] = tg["target2"]

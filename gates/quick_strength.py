@@ -10,9 +10,10 @@
 - 相对强度 RS：个股收盘 / 宽基指数收盘 的 20 日斜率（跑赢大盘=正）；复用 market_regime.stock_rs。
 
 判定（先弱后强）：
-- WEAK（不跑报告）：收盘 < MA20 或 MA20 斜率 <= 0 或 (MA10 <= MA20 且 RS 斜率 < 0)
+- WEAK（不跑报告，硬否决只留绝对趋势信号）：收盘 < MA20 或 MA20 斜率 <= 0
 - STRONG（放行）：收盘 > MA20 且 MA20 斜率 > 0 且 MA10 > MA20 且 (RS 斜率 >= 0 或 RS 未知)
-- NEUTRAL（放行但标注）：其余
+- NEUTRAL（放行但标注）：其余（含 MA10<=MA20 且 RS<0 —— RS 是相对指标，只作软信号/理由注记，
+  不构成 WEAK 硬否决）
 - fresh_reclaim 豁免（老罗 2026-10-21 方案A）：当收盘站上 MA5/MA10/MA20 且 MA10>MA5
   （巨阳刚收复中期线、短期均线尚未多头排列）时，不因 MA20 斜率<=0（及下第三条）前置硬拒，
   放行到 rule123 的 fresh_reclaim/line_ride 判定反转质量；持续空头（收盘<MA20）不满足豁免仍判弱。
@@ -176,8 +177,12 @@ def quick_strength(code, bars, broad_bars=None, name=None):
         weak = True
     if s20 is not None and s20 <= 0:
         weak = True
-    if ma10_vs_ma20 is False and rs_slope is not None and rs_slope < 0:
-        weak = True
+    # ★ 深度 review P2 修（2026-11-05）：RS 斜率是**相对**指标（对宽基强弱），属排序/
+    #   软信号，不得作为 WEAK 硬否决成分 —— 「把排序器当否决器」是回测反复出现的反模式。
+    #   拆除后：MA10<=MA20 且 RS<0 不再硬判 WEAK，而是 NEUTRAL（RS<0 仍作理由注记，
+    #   且仍阻止 STRONG）。绝对弱势（破 MA20 / MA20 斜率<=0）仍是硬否决，WEAK 本体合规。
+    # if ma10_vs_ma20 is False and rs_slope is not None and rs_slope < 0:
+    #     weak = True
     # fresh_reclaim 豁免：巨阳刚收复中期线 → 兜底不判弱，放行到 rule123 判定反转质量
     if fresh_reclaim_exempt:
         weak = False

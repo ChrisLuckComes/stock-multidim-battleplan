@@ -81,11 +81,15 @@ def main():
     check("NEUTRAL: 收盘>MA20", r4["metrics"]["above_ma20"] is True)
     check("NEUTRAL: MA10<=MA20", r4["metrics"]["ma10_gt_ma20"] is False)
 
-    # 5) WEAK（短弱 + RS 负）：MA10<=MA20 且 RS 明显负（宽基快涨、个股跑输）
+    # 5) NEUTRAL（短弱 + RS 负）：MA10<=MA20 且 RS 明显负（宽基快涨、个股跑输）
+    #    ★ 深度 review P2 修（2026-11-05）：RS 是相对指标，不得作为 WEAK 硬否决成分
+    #      ⇒ 不再判 WEAK，而是 NEUTRAL（RS<0 仍作理由注记、仍阻止 STRONG）。
     broad5 = _broad(_rising(40, 1000, 60))              # 宽基 40 日 +234% ⇒ 个股显著跑输
     r5 = quick_strength("002317", _mk(_neutral_stock()), broad_bars=broad5)
-    check("WEAK(short weak + RS<0): verdict", r5["verdict"] == "WEAK")
-    check("WEAK(short weak + RS<0): RS斜率<0", r5["metrics"]["rs_slope"] < 0)
+    check("NEUTRAL(short weak + RS<0): verdict", r5["verdict"] == "NEUTRAL")
+    check("NEUTRAL(short weak + RS<0): RS斜率<0", r5["metrics"]["rs_slope"] < 0)
+    check("NEUTRAL(short weak + RS<0): RS<0 仍在理由中",
+          any("RS" in (x or "") for x in r5["reasons"]))
 
     # 6) fresh_reclaim 豁免（老罗 2026-10-21 方案A 回归）：鼎捷数智 2026-10-20 真实形态
     #    收盘 +10.23% 站上 MA5/MA10/MA20，但 MA20 斜率仍 -1.33%（滞后朝下）、MA10>MA5
