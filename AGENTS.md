@@ -151,6 +151,21 @@ python gates/us_session_decide.py <TICKER> --entry <价> --stop <止损> --targe
 - 结构化输出：`--json out_cn/scr_<code>.json`；公式回归：`python scr_chip.py --selftest`。
 - ⚑ 只支持 A 股（东财流通换手率口径）；缺数据在 output 里写「未知」并停手，不编造。
 
+## 1d-2. 买区可执行带 + 次日追价授权（老罗 2026-11-05 拍板 A+B）
+
+> **触发**：`in_zone=True` 的票却「挂单价低于现价」、开盘小高开就 0 股等回踩、或问「为什么在买区里还要等回踩」。
+
+- **病根**：`in_zone` 只按 `[lo,hi]` 判，赔率却要 `R≥1.5`；买区上沿 = `level+1.0×ATR` 比
+  「R≥1.5 的价」宽 ⇒ 现价落在买区上半部时挂单价被 `(t1+1.5×hard)/2.5` 压到现价之下
+  （实测 74 只池：**16/23**，中位 −3.22%、最深 −6.07%），次日落进开盘 ③ 档「0 股等回踩」，
+  而 `next_day_chase` 只发给 `in_zone=False` 的票（**0/23** 有授权）。
+- **A**：`in_zone=True` 且 `cap<hi` ⇒ 也发追价授权（锚 `min(hi, 前收×1.02)`、半仓、止损按 R 反推收紧）；
+  `open_playbook` 放开「授权价须宽于 +2% 线」的旧守卫。
+- **B**：挂单价**不得低于买区下沿**（钉 `lo` 并标 R）；只有 lo 处连 R=1.0 都不够才撤单。
+- 实现 `rule123.attach_zone_exec()`，**必须在 `plan_entry` 最后调用**（T0/流星砸坑会整体替换 `buy_zone`）。
+  回归 `tests/entry/test_zone_exec_chase.py`。细则见 `references/strategy-modes.md`「买区内 R 不足」。
+- ⚑ 口径纪律：这是**执行层**修正，不放宽任何止损、不改买区定义、不改 mode 链优先级。
+
 ## 1e. 突破有效性闸门 → gates/breakout_hold（老罗 2026-10-14 定，301087 可孚医疗实例）
 
 > **触发**：任何「突破买法」的持有期复核 —— 突破位守没守住、盘中刺破算不算坏、洗盘还是派发。

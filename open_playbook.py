@@ -344,8 +344,13 @@ def build(last, entry, stop, target=None, atr=None, board=None,
             _cstop = float(chase.get("stop"))
         except (TypeError, ValueError):
             _cstop = None
-        # 只在授权上限真的比默认 +2% 线更宽、且没顶穿涨停价时才迁移
-        if _l and _l > _gap and _l < up_limit:
+        # ★ 2026-11-05（老罗拍板 A 方案）：授权上限**不再要求宽于默认 +2% 线**。
+        #   买区内 R 不足的票，授权锚 = min(买区上沿, 前收×1.02)，本就在 +2% 线以内；
+        #   旧守卫 `_l > _gap` 会把它整条丢掉 ⇒ ③ 档退回「0 股等回踩」= 死区
+        #   （实测 20/23 有死区、中位 3.65%、最宽 8.60%）。
+        #   现在：授权价 > 挂单价且未顶穿涨停 ⇒ 生效，hi_gap 收到授权价；授权价以上
+        #   归 ② 档（那才是真的追高）。
+        if _l and _l < up_limit and _l > entry:
             _ct0 = px(_l)
             # ── ★★ 第二道闸：赔率闸（2026-09-28 老罗「追 ≤5.89 太草率」定）──
             #   chase.limit（锚点迁移后的新结构顶）只回答「结构上能不能追」，
@@ -412,21 +417,32 @@ def build(last, entry, stop, target=None, atr=None, board=None,
     # ── ③ 小高开 / 平开（高于挂单价）：默认不成交等回踩；有授权则改为追 ──
     if is_cn:
         if _ct:
+            # ★ 两种授权来源文案分开（2026-11-05 A 方案）：
+            #   · 锚点迁移（强突破次日不回踩）—— 原口径
+            #   · 买区内 R 不足（rule123 新发）—— 本次新增，说的是「买区上沿太贵」
+            _zone_auth = "买区内 R 不足" in str(_csrc)
+            _ctx = (
+                ("买区上沿的 <b>R 不足</b>（R≥%.1f 只能挂到更低价）⇒ 本档按<b>半仓追价授权</b>"
+                 "执行、止损同步收紧；死等回踩实测多数等不到（同类 5 日回踩触及率约 66%%，"
+                 "挂价被压低后更低）。" % RR_QUALIFIED)
+                if _zone_auth else
+                ("锚点迁移后 %.2f 以内属新结构、<b>不算追高</b>，死等回踩会系统性错过"
+                 "万向德农式剧本（次日 +3.8%%）。" % hi_gap)
+            )
             bands.append({
                 "key": "flat_up",
                 "title": "③ 小高开 / 平开（<b>含平开 %.2f</b> ⇒ 新结构顶以内）" % last,
                 "cond": "%.2f ＜ O ≤ %.2f" % (entry, hi_gap),
                 "act": ("<b>不等回踩 —— 按追价授权买入</b>（限价单挂 ≤ %.2f，"
                         "开盘价落在本档即以 O 成交）。<b>⚠ 这是定稿口径变更</b>："
-                        "锚点迁移后 %.2f 以内属新结构、<b>不算追高</b>，死等回踩会系统性错过"
-                        "万向德农式剧本（次日 +3.8%%）。<br>"
+                        "%s<br>"
                         "执行（一次性判定、与原回踩单<b>互斥</b>）：先看开盘价 —— "
                         "落在 %.2f 以下走 ④⑤ 档用原单 %d 股；落在本档则用授权 %d 股，"
                         "<b>当日不再依赖原回踩单</b>（避免同票双档成交）。<br>"
                         "止损收紧到 <b>%.2f</b>（追价档专用，≠ 原计划 %.2f）—— "
                         "追高的代价就是止损更近、<b>不允许再放宽</b>。<br>"
                         "⚠ 本档成交后<b>当日不能卖（T+1）</b>，且必须盯盘挂单（A 股无 buy-stop）。"
-                        % (hi_gap, hi_gap, entry,
+                        % (hi_gap, _ctx, entry,
                            int(shares) if shares else 0,
                            int(_csh) if _csh else 0,
                            _cstop if _cstop else stop, stop)),

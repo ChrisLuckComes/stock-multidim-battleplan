@@ -531,11 +531,18 @@ def room_and_cap(bars, z, mode, atr_v, rr=1.5, last_c=None):
             "rr": rr,
         }
     c = last_c if last_c is not None else bars[-1]["c"]
+    # ★ 2026-11-05：优先用 rule123 已算好的硬止损（z["hard_stop"]）。
+    #   旧实现无条件重跑 stop_plan —— 而 plan_entry 末段某些接管分支会替换 buy_zone，
+    #   重算拿到的 z 与 rule123 决策时用的不是同一份，hard 会分叉（汇顶 603160：
+    #   rule123 59.68 / probe 重算 56.98 ⇒ 两边 cap 打架、授权判据互相矛盾）。
     hard = None
+    _zh = z.get("hard_stop")
+    if isinstance(_zh, (int, float)):
+        hard = float(_zh)
     try:
         tmp = dict(z)
         sp = stop_plan(bars, mode, tmp, atr_v)
-        if sp:
+        if hard is None and sp:
             hard = sp.get("hard")
         # 铁律二回写：stop_plan 会把「硬止损落在买区下沿之上」的冲突修好
         # （上抬买区下沿 + stop_warning）。以前这里只传副本、改完就扔，
@@ -587,18 +594,35 @@ def room_and_cap(bars, z, mode, atr_v, rr=1.5, last_c=None):
     if hard is None and z.get("level") is not None:
         hard = round(z["level"] - 0.10 * atr_v, 2)
 
-    t1 = None
-    try:
-        Hs, _Ls = pivots(bars, 3)
-        resist = sorted({h for _, h in Hs if h > c + 0.05 * atr_v})
-        t1 = resist[0] if resist else None
-    except Exception:
-        pass
+    # ★ 2026-11-05（A+B 配套）：目标口径统一到 rule123.targets.target1。
+    #   旧实现取「最近一面枢轴高」当 t1 —— 而 rule123 的正式目标带 POKE_ATR(0.5)
+    #   与 RR_GATE(1.5) 两道过滤（贴脸阻力只算「要穿过的门」、突破档只取能给出
+    #   R≥1.5 的那面墙）。两套口径并存 ⇒ cap 被更近的墙压低，挂单价系统性落在
+    #   现价之下（实测 16/23，中位 −3.22%、最深 −6.07%）。
+    t1 = z.get("target1")
+    if not (isinstance(t1, (int, float)) and t1 > c + 0.05 * atr_v):
+        t1 = None
+    if t1 is None:
+        try:
+            Hs, _Ls = pivots(bars, 3)
+            resist = sorted({h for _, h in Hs if h > c + 0.05 * atr_v})
+            t1 = resist[0] if resist else None
+        except Exception:
+            pass
     if t1 is None:
         hi60 = max(x["h"] for x in bars[-60:])
         t1 = hi60 if hi60 > c + 0.05 * atr_v else None
 
     cap = None
+    if z.get("sea_sky"):
+        # ★ 2026-11-05：海阔天空（创新高、上方无历史阻力、无可量度形态）⇒ rule123
+        #   已明确「不预设目标价，用移动止损替代固定目标」。此时赔率闸**没有锚**，
+        #   拿兜底的「最近一面枢轴高」去反推 cap 会把挂单价压到现价之下
+        #   （视涯 688781 实测：现价 49.88 → 挂 46.85，−6.07%，纯踏空）。
+        #   无锚 ⇒ 不给 cap，按买区上沿挂。
+        return {"target1": None, "room_pct": None,
+                "hard": round(hard, 2) if hard else None,
+                "cap": None, "rr": rr, "sea_sky": True}
     if t1 and hard and t1 > c:
         cap = round((t1 + rr * hard) / (1.0 + rr), 2)
     return {
@@ -1119,7 +1143,15 @@ def probe(code, qty=None, account=None, asof=None, min_scale=5, replay=False,
         defend = z.get("invalidation")
         hard, cap, t1 = rc["hard"], rc["cap"], rc["target1"]
         capped = cap is not None and hi > cap
-        limit = round(cap, 2) if capped else hi
+        # ★ B（2026-11-05 老罗拍板）：挂单价**不得落到买区下沿之下** —— 那与
+        #   rule123「跌破买区下沿=突破未成立，不接」自相矛盾，也与 entry_candidates
+        #   把「(结构止损, 买区下沿) 之间的深档」判为畸变的既有纪律冲突。
+        #   故下压最多压到 lo（=买区下沿），并在下方文案如实标 R 不足；
+        #   若 rule123 已判「买区内无合格赔率价」（recommend=False），走上面分支、
+        #   不再打印任何可执行价。
+        _pinned = bool(cap is not None and cap < float(lo))
+        limit = round(min(float(hi), max(float(lo), float(cap))), 2) \
+            if cap is not None else hi
         cut = round(hi + CHASE_ATR * atr_v, 2)
         c0 = basis[-1]["c"]
         print(f"  价位关系: {zone_position_txt(c0, lo, hi)}")
@@ -1144,8 +1176,9 @@ def probe(code, qty=None, account=None, asof=None, min_scale=5, replay=False,
             print(f"  挂单    : 触发买 {hi:.2f}（过昨高 · 现价"
                   f"{'上方' if hi > c0 else '下方'} {abs(hi / c0 - 1) * 100:.1f}%）")
         else:
-            print(f"  挂单    : 限价买 {limit:.2f}（买区 {lo}-{hi} 上沿）"
-                  f"{'  ⚠ 已被盈亏比闸门下压' if capped else ''}")
+            _ltag = ("  ⚠ 已钉在买区下沿（赔率闸只给到 %.2f）" % cap if _pinned
+                     else ("  ⚠ 已被盈亏比闸门下压" if capped else ""))
+            print(f"  挂单    : 限价买 {limit:.2f}（买区 {lo}-{hi} 上沿）{_ltag}")
         if _is_t0:
             # T0 是「突破单」：真买点是「过昨高」（= 买区上沿），在现价**上方**；
             # 买区下沿只是止损位，不是可低吸的价位。若照买区口径判定（传 hi），
@@ -1166,7 +1199,11 @@ def probe(code, qty=None, account=None, asof=None, min_scale=5, replay=False,
             print(f"  有效买入区间: {hard} < 买入价 ≤ {limit:.2f} —— "
                   f"低于硬止损 {hard} 买入 = 开仓即止损，再便宜也不要")
         if cap is not None:
-            print(f"  买入上限: {cap:.2f}   ← 高于此价，盈亏比跌破 {rc['rr']:.1f}:1，不挂")
+            if _pinned:
+                print(f"  买入上限: {limit:.2f}（钉在买区下沿）—— 赔率闸只给到 {cap:.2f}，"
+                      f"低于买区下沿；此处 R<{rc['rr']:.1f}:1，按买区口径执行、风险已如实标注")
+            else:
+                print(f"  买入上限: {cap:.2f}   ← 高于此价，盈亏比跌破 {rc['rr']:.1f}:1，不挂")
         if n:
             print(f"  数量    : {n} 股（风险预算法 {ash_risk_pct() * 100:.1f}%，"
                   f"单笔硬顶 {ash_single_cap(account):,.0f} 元）")

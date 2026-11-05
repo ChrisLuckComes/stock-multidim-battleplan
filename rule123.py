@@ -2585,6 +2585,10 @@ OPEN_ATR = 6.0
 # 而不是算出一个根本买不上的安全牌）。目标要能给出这个 R，否则那道阻力
 # 只算「要穿过的门」、不算目标。与追价上限的赔率闸同一档 1.5。
 RR_GATE = 1.5
+# 买区内追价授权的前收盘容差（与 open_playbook.GAP_UP_MAX 同值，2026-11-05 A 方案）：
+# 买区上沿的 R 不足时，次日开盘落在「挂单价 ~ 前收×1.02」这段即按半仓授权执行，
+# 不再一律「0 股等回踩」。上限不超过买区上沿（那是结构闸，不放宽）。
+ZONE_CHASE_GAP = 0.02
 
 # ── 单日大涨后的空间衰减（2026-10-10，老罗「涨停了但报R 很高是虚假」实证）──
 # 问题：`targets` 的 `upside_open` 分支只看「entry ≥ 窗口前高」就判空间打开，
@@ -3022,6 +3026,107 @@ def attach_stops_targets(plan, bars, atr_v, Hs, ev=None):
     plan["buy_zone"] = z
     plan["stop_plan"] = sp
     plan["targets"] = tg
+    return plan
+
+
+def attach_zone_exec(plan, bars, atr_v):
+    """买区可执行带 + 次日追价授权（2026-11-05 老罗拍板 A+B）。
+
+    ⚠ 必须在 `plan_entry` **最后**调用，不能塞进 `attach_stops_targets`：
+      T0 / 流星砸坑 / 沿线改道等接管分支会**整体替换** `plan["buy_zone"]`，
+      attach 阶段写进去的字段会被静默丢掉（汇顶 603160 实测：attach 后
+      z 里 target1 / hard_stop / invalidation 全部消失，只剩 line_pullback 自己的键）。
+
+    实测（74 只 A 股池，2026-11-05 收盘）：
+      · in_zone 只按 [lo,hi] 判，赔率却要 R≥1.5；买区上沿 = level+1.0×ATR，
+        比「R≥1.5 的价」宽 ⇒ 现价落在上半部时挂单价被 (t1+1.5×hard)/2.5 压到
+        现价之下：16/23，中位 −3.22%、最深 −6.07%；
+      · 次日小高开即落进开盘 ③ 档，而 next_day_chase 只发给 in_zone=False 的票
+        （0/23 有授权）⇒ 最该追的买区内票反而只能「0 股等回踩」；
+      · 6/23 甚至被压到买区下沿之下，与「跌破买区下沿=突破未成立，不接」矛盾。
+
+    A：capped 时补次日追价授权（锚 = min(hi, 前收×1.02)，半仓，止损按 R 反推收紧）。
+    B：挂单价不得落到买区下沿之下 —— 钉在 lo 并如实标 R；只有 lo 处连 R=1.0 都
+       够不上才是「买区内无赔率价」，撤 recommend。
+       ⚠ 不无条件撤单：突破类「静态赔率失真」的既有口径优先（见上方 rr_target1<1.0 段）。
+    """
+    if not plan or not plan.get("recommend"):
+        return plan
+    z = plan.get("buy_zone") or {}
+    tg = plan.get("targets") or {}
+    sp = plan.get("stop_plan") or {}
+    # ⚠ 部分接管分支重建 result 时会丢掉 targets（视涯 688781 实测：mode=line_pullback、
+    #   recommend=True，但 plan["targets"] is None）⇒ 这里按同一口径补算一次，
+    #   否则「海阔天空」判不出来、probe 会拿兜底枢轴高反推 cap 把挂价压低。
+    if not (tg.get("target1") or tg.get("sea_sky") or tg.get("no_room_above")) and bars:
+        _Hs, _ = pivots(bars, 3)
+        tg = targets(bars, plan.get("mode") or "wait", z, atr_v,
+                     bars[-1]["c"], _Hs, None) or tg
+        plan["targets"] = tg
+    # 海阔天空 / 涨停封死要一路带到 buy_zone —— probe.room_and_cap 靠它判「赔率闸无锚」，
+    # 否则会拿兜底的最近枢轴高反推 cap、把挂单价压到现价之下（视涯 688781：−6.07%）。
+    if tg.get("sea_sky"):
+        z["sea_sky"] = True
+        return plan
+    if tg.get("no_room_above"):
+        z["no_room_above"] = True
+        return plan
+    if not z.get("in_zone"):
+        return plan
+    # T0（均线收复+过昨高）是趋势单，probe.room_and_cap 对它一律不设买入上限
+    # （目标空缺、靠移动止损管理）。这里必须同口径跳过，否则会生出一条
+    # 「授权价 = 买区上沿」的假追价，让 ③ 档误写「按授权买入」。
+    if (plan.get("mode") or "") == "ma_reclaim_break":
+        return plan
+    # 已有追价授权（强突破 next_day_chase / 流星砸坑自带）⇒ 不覆盖。
+    if (z.get("next_day_chase") or {}).get("limit"):
+        return plan
+    t1 = tg.get("target1")
+    hard = sp.get("hard") or z.get("hard_stop") or z.get("hard")
+    lo, hi = z.get("primary_lo"), z.get("primary_hi")
+    last_c = bars[-1]["c"] if bars else None
+    if not (t1 and hard and lo is not None and hi is not None and last_c
+            and t1 > hard and hi > hard):
+        return plan
+    # 把口径写回 buy_zone：probe.room_and_cap 用 z 里的 target1/hard_stop 复算，
+    # 否则它会自己重跑 stop_plan 得到另一个 hard（汇顶 603160：59.68 vs 56.98），
+    # 两边 cap 打架。
+    z["target1"] = t1
+    z["hard_stop"] = hard
+    cap = (float(t1) + RR_GATE * float(hard)) / (1.0 + RR_GATE)
+    if cap >= float(hi) - 0.005:
+        return plan                      # 买区内全部合格，不动
+    r_lo = ((float(t1) - float(lo)) / (float(lo) - float(hard))
+            if float(lo) > float(hard) else None)
+    if cap < float(lo) - 0.005 and (r_lo is None or r_lo < 1.0):
+        plan["recommend"] = False
+        plan["verdict"] = "买区内无合格赔率价·不接"
+        _pv = plan.get("note") or ""
+        plan["note"] = ((_pv + "；") if _pv else "") + (
+            f"买区 {round(float(lo), 2)}~{round(float(hi), 2)} 内最低价 "
+            f"{round(float(lo), 2)} 对应 R={r_lo:.2f}（<1.0），R≥{RR_GATE} 需回落到 "
+            f"{round(cap, 2)}（已出买区下沿）—— 当前无合格赔率价，本单撤销"
+            if r_lo is not None else
+            f"买区 {round(float(lo), 2)}~{round(float(hi), 2)} 内无合格赔率价"
+            f"（R≥{RR_GATE} 需 ≤{round(cap, 2)}），本单撤销")
+        z["no_odds_in_zone"] = round(cap, 2)
+        return plan
+    z["exec_lo"] = round(max(float(lo), min(cap, float(hi))), 2)
+    z["exec_hi"] = round(float(hi), 2)
+    anchor = min(float(hi), round(float(last_c) * (1.0 + ZONE_CHASE_GAP), 2))
+    cstop = max(float(hard), round(anchor - (float(t1) - anchor) / RR_GATE, 2))
+    if anchor > cap + 1e-9 and cstop < anchor - 1e-9:
+        z["next_day_chase"] = {
+            "limit": anchor,
+            "size_ratio": 0.5,
+            "stop": cstop,
+            "valid_for": "仅次日",
+            "src": "买区内 R 不足·追价授权",
+            "note": (f"买区上沿 {round(float(hi), 2)} 处 R 不足（R≥{RR_GATE} 只能挂到 "
+                     f"{round(cap, 2)}）⇒ 次日开盘 ≤{anchor} 可**半仓**执行，"
+                     f"止损收紧到 {cstop}；只此一天，不成交即作废"),
+        }
+        plan["zone_chase_note"] = z["next_day_chase"]["note"]
     return plan
 
 
@@ -5826,6 +5931,10 @@ def plan_entry(bars, ev, sym=None, *, market_regime_enabled=True, regime_index=N
         result = apply_market_regime_gate(result, mkt, enabled=market_regime_enabled)
     except Exception:
         pass
+    # ★ A+B（2026-11-05）：所有接管/改道/regime 闸门都跑完之后再挂可执行带与追价授权，
+    #   否则会被后续整体替换 buy_zone 的分支抹掉。
+    #   `plan_entry` 是薄壳，作用域里没有 atr_v（_plan_entry_core 内的局部量），故此处现算。
+    result = attach_zone_exec(result, bars, atr14(bars))
     return result
 
 

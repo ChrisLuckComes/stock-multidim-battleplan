@@ -143,12 +143,32 @@ def test_entry_above_no_chase_gap_makes_band_three_empty():
     assert b3["pos"] == "0 股（等回踩）"
 
 
-def test_chase_narrower_than_default_gap_is_ignored():
-    """授权上限比默认 +2% 线还窄 ⇒ 不迁移（不得把授权弄得更保守）。"""
+def test_chase_narrower_than_default_gap_now_active():
+    """★ 2026-11-05 口径变更（老罗拍板 A 方案）：授权上限比默认 +2% 线窄 ⇒ **仍生效**。
+
+    旧口径「窄于 +2% 线就忽略」会把「买区内 R 不足」的授权整条丢掉：
+    rule123 对 `in_zone=True` 且挂价被赔率闸下压的票，授权锚 = min(买区上沿,
+    前收×1.02)，必然 ≤ 前收+2% ⇒ 旧守卫一律忽略 ⇒ 开盘 ③ 档退回「0 股等回踩」。
+    实测（74 只 A 股池）20/23 有死区、中位 3.65%、最宽 8.60%。
+
+    新口径：授权价 > 挂单价且未顶穿涨停即生效，hi_gap 收到授权价；授权价以上
+    归 ② 档（那才是真的追高）。赔率闸照旧取严。
+    """
     a = _mk(chase={"limit": 5.55, "stop": 5.21, "size_ratio": 0.5})
     pb = OP.from_analysis(a, {})
-    assert pb["chase"] is None, "5.55 < 默认 5.61，应忽略该授权"
-    assert "5.61 ＜ O ＜ 6.05" in _band(pb, "gap_up")["cond"]
+    assert pb["chase"] is not None, "窄授权必须生效，否则③档退回等回踩"
+    assert pb["chase"]["top"] == 5.52, "仍受赔率闸取严（结构顶 5.55 → 门槛 5.52）"
+    b3 = _band(pb, "flat_up")
+    assert "5.30 ＜ O ≤ 5.52" in b3["cond"], "③ 档上界必须收到授权价"
+    assert "0 股（等回踩）" not in b3["pos"], "③ 档不得再是「0 股等回踩」"
+    assert "5.52 ＜ O ＜ 6.05" in _band(pb, "gap_up")["cond"], "授权价以上归②档不追"
+
+
+def test_chase_not_above_entry_is_ignored():
+    """授权价 ≤ 挂单价 ⇒ 仍忽略（③ 档区间会退化为空，属脏数据）。"""
+    a = _mk(chase={"limit": 5.30, "stop": 5.21, "size_ratio": 0.5})
+    pb = OP.from_analysis(a, {})
+    assert pb["chase"] is None, "授权价不高于挂单价，没有可追空间"
 
 
 def test_chase_above_limit_up_is_ignored():
