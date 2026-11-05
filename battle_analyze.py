@@ -392,7 +392,13 @@ def odds_matrix(entries, anchors, atr_v, t1, t2, last_c, walls=None,
     """
     # walls=None ⇒ 旧口径（全票共用 t1/t2），保证 tests/report/test_battle_report.py
     # 等既有用例的向后兼容；主流程显式传入阶梯 ⇒ 走「每档买价独立求目标」新口径。
-    wall_list = sorted({float(p) for p in walls if p}) if walls is not None else None
+    # ★ 深度 review P0-B 修（2026-11-05）：空 walls 与 walls=None 必须同结论。
+    #   改前 walls=[] 走「新口径」但没有任何墙 ⇒ tgt1=None 标「海阔天空」；
+    #   walls=None 走「旧口径」用 t1/t2 给出目标 —— 同一份输入两种相反结论。
+    #   「没给墙」是数据缺失，应退回旧口径，而不是宣称「上方无阻力」。
+    _et1 = float(engine_t1) if engine_t1 is not None else None   # 判定提到分支外
+    wall_list = (sorted({float(p) for p in walls if p})
+                 if walls is not None and len(walls) > 0 else None)
     rows = []
     for e in entries:
         buy = e["price"]
@@ -412,34 +418,32 @@ def odds_matrix(entries, anchors, atr_v, t1, t2, last_c, walls=None,
             #   回落时标记 r1_basis，报告端可据此说明「R 用的是远端墙而非 t1」。
             # ★ 2026-10-20 方案 A 覆盖：目标改按「本档买价 + 0.5×ATR 之上最近的墙」求。
             #   `need` = 目标至少要高出买价 0.5×ATR，否则这笔单不值得做（覆盖摩擦+噪声）。
-            if wall_list is None:                       # 旧口径（兼容既有测试）
+            # ★ 深度 review P0-B 修（2026-11-05）：engine_t1 是**全票同一把尺**
+            #   （引擎已用 last_c 过 POKE_ATR + RR_GATE）。改前只在「新口径」分支里
+            #   认它、且还要求满足逐档 need = 买价+0.5ATR ⇒ 追高档（买价贴 t1）
+            #   会把引擎已认可的目标丢掉，回落到近墙/None，R 凭空消失 ⇒ 判不买。
+            #   现在判定提到分支外：只要 t1 高于本档买价（能给出正 R），一律优先采用。
+            if _et1 is not None and _et1 > buy:
+                tgt1 = _et1
+                tgt2 = (wall_list[-1] if wall_list else t2)
+                basis1 = "引擎targets.t1（已过RR闸）"
+            elif wall_list is None:                     # 旧口径（兼容既有测试 / 无墙数据）
                 tgt1 = t1 if t1 else t2
                 tgt2 = t2
                 basis1 = ("t1" if t1 else
                           ("t2·远端墙（t1 缺失回落）" if t2 else None))
             else:                                       # 新口径：按本档买价求墙
                 need = buy + 0.5 * atr_v if atr_v else buy
-                # ★ 全修⑤：引擎 targets.t1 已过 POKE_ATR(0.5ATR) + RR_GATE(1.5)
-                #   两道过滤，是「能给合格赔率的最近真阻力」。改前报告层只按
-                #   「买价+0.5ATR 之上最近的墙」求，walls 里混进近墙 ⇒ 现价贴阻力
-                #   时 t1 被压到贴脸，R<1.5 系统性拒掉突破票（与引擎结论相反）。
-                #   ⇒ 引擎 t1 若满足本档 need，优先采用，报告与引擎同一把尺。
-                _et1 = float(engine_t1) if engine_t1 is not None else None
-                if _et1 is not None and _et1 >= need:
-                    tgt1 = _et1
-                else:
-                    tgt1 = next((p for p in wall_list if p >= need), None)
+                tgt1 = next((p for p in wall_list if p >= need), None)
                 tgt2 = wall_list[-1] if wall_list else None
-                if tgt2 is not None and tgt1 is not None and tgt2 <= tgt1:
-                    tgt2 = None
                 if tgt1 is None:
                     basis1 = "海阔天空·不设目标"
-                elif _et1 is not None and abs(tgt1 - _et1) < 1e-9:
-                    basis1 = "引擎targets.t1（已过RR闸）"
                 elif t1 and abs(tgt1 - t1) < max(0.01, atr_v * 0.05):
                     basis1 = "t1"
                 else:
                     basis1 = "近墙@%.2f（买价+0.5ATR之上）" % tgt1
+            if tgt2 is not None and tgt1 is not None and tgt2 <= tgt1:
+                tgt2 = None
             r1 = round((tgt1 - buy) / risk, 2) if tgt1 else None
             r2 = round((tgt2 - buy) / risk, 2) if tgt2 else None
             rows.append({

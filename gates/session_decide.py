@@ -21,6 +21,7 @@
 from __future__ import print_function
 
 import argparse
+import datetime
 import json
 import os
 import sys
@@ -185,11 +186,24 @@ def plan_from_files(analysis_path, notes_path=None):
     chase = None
     _zc = ((a.get("plan") or {}).get("buy_zone") or {}).get("next_day_chase")
     if isinstance(_zc, dict) and _zc.get("limit") is not None:
+        # ★ 深度 review P1（2026-11-05）：授权必须能判时效。
+        #   生成端 rule123 写 issued；历史 analysis 无该字段 ⇒ 用文件生成日兜底；
+        #   两者都拿不到就留 None，由 chase_still_valid fail-closed 停用，
+        #   绝不让它「无限期有效」。
+        _issued = (_zc.get("issued") or (a.get("meta") or {}).get("date")
+                   or a.get("as_of") or a.get("date"))
+        if not _issued:
+            try:
+                _issued = datetime.date.fromtimestamp(
+                    os.path.getmtime(analysis_path)).isoformat()
+            except OSError:
+                _issued = None
         chase = {"limit": float(_zc["limit"]),
                  "stop": _zc.get("stop"),
                  "size_ratio": float(_zc.get("size_ratio") or 0.5),
                  "src": _zc.get("src") or "次日追价授权",
-                 "valid_for": _zc.get("valid_for") or "仅次日"}
+                 "valid_for": _zc.get("valid_for") or "仅次日",
+                 "issued": str(_issued)[:10] if _issued else None}
     return {
         "code": (a.get("meta") or {}).get("code"),
         "name": (a.get("meta") or {}).get("name"),
@@ -202,6 +216,39 @@ def plan_from_files(analysis_path, notes_path=None):
         "zone_hi": z.get("primary_hi"),
         "zone_lo": z.get("primary_lo"),
     }
+
+
+def chase_still_valid(chase, day_date):
+    """「仅次日」追价授权的时效闸，返回 (是否有效, 停用理由)。
+
+    ★ 深度 review P1 修（2026-11-05）：改前 `valid_for:"仅次日"` 只是个字符串，
+      全链无人消费、授权块里也没有生成日期 ⇒ 数天前 analysis 里那张「抬 cap
+      基准 + 换收紧止损 + 半仓」的授权会无限期生效，属越权下单。
+
+    口径：issued = 计划生成日；允许 issued ~ issued+3 自然日（覆盖周末），
+      再往后判过期。缺 issued / 缺当日日期 / 日期非法 ⇒ **fail-closed 停用**
+      （放宽类授权不得无日期生效），并给出理由让使用者重跑计划，不静默踏空。
+    """
+    if not chase or not isinstance(chase, dict):
+        return True, ""
+    vf = str(chase.get("valid_for") or "仅次日")
+    if "次日" not in vf and "仅" not in vf:
+        return True, ""                       # 显式长期授权不在本闸范围
+    issued = chase.get("issued")
+    cur = (day_date or "")[:10]
+    if not issued or not cur:
+        return False, "追价授权缺生成日期/当日日期 ⇒ 已停用（请重跑计划）"
+    try:
+        d0 = datetime.date.fromisoformat(str(issued)[:10])
+        d1 = datetime.date.fromisoformat(cur)
+    except ValueError:
+        return False, "追价授权日期格式非法 ⇒ 已停用（请重跑计划）"
+    delta = (d1 - d0).days
+    if delta < 0:
+        return False, "追价授权尚未生效（计划 %s 晚于当日 %s）" % (d0, d1)
+    if delta > 3:
+        return False, "追价授权已过期（生成 %s，当日 %s，仅次日有效）" % (d0, d1)
+    return True, ""
 
 
 def truncate_day(day, asof):
@@ -803,7 +850,8 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
     #   ③ 仓位减半（size_ratio）
     #   R 闸仍照常生效（用收紧后的 stop 重算，通常更容易达标），不放宽赔率。
     chase_hit = None
-    if chase and isinstance(chase, dict) and chase.get("limit") is not None:
+    _chase_fresh, chase_expired = chase_still_valid(chase, day.get("date"))
+    if _chase_fresh and chase and isinstance(chase, dict) and chase.get("limit") is not None:
         _lim = float(chase["limit"])
         _cstop = chase.get("stop")
         if (price <= _lim + 1e-9 and price > entry
@@ -814,12 +862,32 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
     buy_cap = resolve_cap(entry, stop_eff, target, cap, pre, day_open, structure_base)
     gates = cap_gates(entry, stop_eff, target, cap, pre, day_open, structure_base)
     if chase_hit:
-        # 授权价本身即为上限（不再叠加 +2%），且不得顶穿涨停
-        buy_cap = round_px(max(buy_cap or 0.0, float(chase_hit["limit"])))
+        # ★ 深度 review P0-A 修（2026-11-05）：授权只能**收紧**，不得掀翻三闸取严。
+        #   改前 `max(buy_cap, limit)` 把显式 cap / R≥1.5 闸 / 昨收+2% 闸一次性
+        #   作废，只剩下方「现价 R」一道闸 —— 等于授权给了无条件越权下单。
+        #   正确口径：limit 只是**额外一道上界**，与三闸结果取 min。
+        #     ① 授权收紧的 stop_eff 已让 resolve_cap 的 R 闸自然抬高，无需放宽；
+        #     ② structure_base 迁到 limit 只是让「昨收+2%」闸基准不把授权压死
+        #        （rule123 生成 limit 时已取 min(hi, 前收×1.02)，本就过闸）；
+        #     ③ 显式 --cap 是用户硬约束，任何授权都不得越过。
+        _lim_cap = round_px(float(chase_hit["limit"]))
+        _combined = [v for v in (buy_cap, _lim_cap,
+                                 float(cap) if cap is not None else None)
+                     if v is not None]
+        buy_cap = round_px(min(_combined)) if _combined else _lim_cap
         if limit_px is not None:
             buy_cap = min(buy_cap, round_px(limit_px * (1.0 - LIMIT_NEAR) - 0.01))
         gates["final"] = buy_cap
+        gates["chase_limit"] = _lim_cap
+        # 归因同步：final 若由授权/显式cap收紧，tightest 必须如实标出，
+        # 否则 render 会打印「卡住的是 R闸」而 final 其实由别的闸给出。
+        _cands = [(k, v) for k, v in (("显式cap", gates.get("explicit")),
+                                      ("R闸", gates.get("rr_gate")),
+                                      ("昨收+2%闸", gates.get("gap_gate")),
+                                      ("追价授权limit", _lim_cap)) if v is not None]
+        gates["tightest"] = min(_cands, key=lambda kv: kv[1])[0] if _cands else "—"
         gates["chase_applied"] = chase_hit
+        gates["chase_tightened"] = True
     # ★ 浮动买区：cap 上方容差带内视为「计划内」（2026-10-12 老罗反馈）。
     #   固定点 cap 会差 0.45~0.67 元就放跑合法买点（天溯 -4% 实证）。
     #   near_zone=True 时仍按实际价重算 R（下方 R 闸照常卡 ≥1.5），仅放宽「价格上限」这一道。
@@ -893,7 +961,23 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
         # ★ 全修②：追价授权 + 并列向上档（谁先到做谁，不再只给向下回踩档）
         "chase_applied": chase_hit,
         "chase_size_ratio": (chase_hit or {}).get("size_ratio"),
+        "chase_expired": chase_expired,
         "above_entry": (chase_hit or {}).get("limit") or zone_hi,
+        # ★ 深度 review P1：向下/向上两档各自给**真实可成交价 + 执行方式**，
+        #   不再是一行「档位 X ｜ Y」的文案（limit_buy 恒=现价 ⇒ 只有一条路径）。
+        "two_ways": {
+            "down": {
+                "price": round_px(min(entry, buy_cap)) if buy_cap is not None else round_px(entry),
+                "exec": "可隔夜预挂限价",
+                "trigger": "现价回落到该价及以下即成交",
+            },
+            "up": {
+                "price": round_px(float((chase_hit or {}).get("limit") or zone_hi or entry)),
+                "exec": "需盯盘手动打（A股无 buy-stop，不可隔夜预挂）",
+                "trigger": "站上该价且 R≥%.1f / 分时结构健康" % RR_QUALIFIED,
+                "authorized": bool(chase_hit),
+            },
+        },
         "handoff": False,
         "risk_scale": risk_scale,
         "pulse_scale": _pulse_scale,
@@ -1105,13 +1189,21 @@ def render(d):
         lines.append("◆ 浮动买区：现价 %.2f 落在 cap %.2f 上方容差带（≤%.2f，+%.1f%%）内，"
                      "按实际价重算 R 仍合格 ⇒ 视为计划内。"
                      % (d["price"], d["cap"], d["cap_band"], (d["cap_tol_pct"] or 0) * 100))
-    # ★ 全修②：向上档与回踩档并列给价（谁先到做谁），不再只给向下档
-    _above = d.get("above_entry")
-    if _above is not None:
-        lines.append("档位  向下回踩 %.2f ｜ 向上突破/追价 %.2f%s（现价 %.2f）"
-                     % (d["entry"], float(_above),
-                        " ·授权半仓" if d.get("chase_applied") else "",
-                        d["price"]))
+    # ★ 深度 review P1：两档并列，**各自给价 + 各自执行方式**（谁先到做谁）。
+    #   向下档可预挂，向上档 A股无 buy-stop ⇒ 只能盯盘手动打，必须分开说清。
+    _ways = d.get("two_ways") or {}
+    if _ways.get("down") and _ways.get("up"):
+        _dw, _up = _ways["down"], _ways["up"]
+        lines.append("档位  向下回踩 %.2f ｜ %s（%s）"
+                     % (_dw["price"], _dw["exec"], _dw["trigger"]))
+        lines.append("      向上突破/追价 %.2f ｜ %s%s"
+                     % (_up["price"], _up["exec"],
+                        " ·授权半仓" if d.get("chase_applied") else " ·未授权"))
+    elif d.get("above_entry") is not None:
+        lines.append("档位  向下回踩 %.2f ｜ 向上突破/追价 %.2f（现价 %.2f）"
+                     % (d["entry"], float(d["above_entry"]), d["price"]))
+    if d.get("chase_expired"):
+        lines.append("授权  ✖ %s" % d["chase_expired"])
     if d["action"] != "能买" and d.get("arm_price") is not None:
         lines.append("盯价  %.2f  %s" % (d["arm_price"], d.get("arm_note") or ""))
     if d["action"] == "能买" and d["size"]:
@@ -1171,9 +1263,10 @@ def render(d):
     g = d.get("cap_gates") or {}
     if g.get("final") is not None:
         tight = g.get("tightest") or "—"
-        lines.append("买入上限 %.2f 来自哪一闸：%s（显式 %s / R闸 %s / 昨收+2%%闸 %s%s）"
+        lines.append("买入上限 %.2f 来自哪一闸：%s（显式 %s / R闸 %s / 昨收+2%%闸 %s / 授权limit %s%s）"
                      % (g["final"], tight, g.get("explicit") or "无",
                         g.get("rr_gate") or "无", g.get("gap_gate") or "无",
+                        g.get("chase_limit") or "无",
                         "，基准=%s" % g["gap_base_src"] if g.get("gap_base_src") else ""))
     q = d.get("quality")
     if not q:

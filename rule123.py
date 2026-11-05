@@ -3121,6 +3121,9 @@ def attach_zone_exec(plan, bars, atr_v):
             "size_ratio": 0.5,
             "stop": cstop,
             "valid_for": "仅次日",
+            # ★ 深度 review P1：授权必须带生成日，否则消费端无法判「仅次日」
+            #   ⇒ 几天前的计划里这张授权会无限期生效（抬 cap + 半仓 = 越权）。
+            "issued": (bars[-1]["d"] if bars else None),
             "src": "买区内 R 不足·追价授权",
             "note": (f"买区上沿 {round(float(hi), 2)} 处 R 不足（R≥{RR_GATE} 只能挂到 "
                      f"{round(cap, 2)}）⇒ 次日开盘 ≤{anchor} 可**半仓**执行，"
@@ -5142,6 +5145,7 @@ def _plan_entry_core(bars, ev):
                         "size_ratio": 0.5,
                         "stop": chase_stop,
                         "valid_for": "仅次日",
+                        "issued": (bars[-1]["d"] if bars else None),  # 时效闸，见 chase_still_valid
                         "note": (
                             f"强突破（{why}）次日多不回踩："
                             f"若次日开盘 ≤{chase_cap}，可**半仓**限价执行，"
