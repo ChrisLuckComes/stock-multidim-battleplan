@@ -51,6 +51,17 @@ LEVEL_RANK = {"ok": 0, "alert": 1, "block": 2}
 STATE_CN = {"none": "无", "pending": "待确认", "confirmed": "已确认", "invalidated": "已推翻"}
 VOL_CN = {"huge": "巨量", "heavy": "放量", "flat": "平量", "thin": "缩量", "none": "无量"}
 
+# ── ⚑ C 口径：否决权只留给「强拉 + 无旗形结构」（老罗 2026-11-05 批 A+B 后追加批 C）──
+# 全量 900 票 / 71,972 时点，20 日收益中位，对照＝无信号组 −1.60%：
+#   强拉后（20 日 ≥15%）**且无**旗形结构   n=728   −11.76%（Δ−5.08pp）← 判别力几乎全在这
+#   强拉后**且有**旗形结构                n= 59   −3.98%（Δ+2.70pp）⇒ 否决即误杀
+#   非强拉（20 日 <15%）                  其余      Δ 仅 −1.2~−1.7pp ⇒ 信息量不足以拿走 100% 否决权
+#   「上升趋势+整理回踩」子集（n=1,825）    Δ +0.10pp（≈0）却全额否决 ⇒ 本次要修掉的正是这批
+# ⇒ block 保留；其余降 alert（缩仓 0.5、不禁买）。
+VETO_MIN_GAIN20 = 15.0        # 「强拉」阈值：20 日涨幅（当日收 / 21 根前收 −1）
+VETO_SCOPE_STRONG = "strong_pull"   # 默认（C 口径）
+VETO_SCOPE_LEGACY = "legacy"        # 回退旧口径（所有已确认都 block），对照/回测用
+
 # ⚑ **顶部候选白名单口径**（老罗图注 + 形态性质）：
 #   入池（可作顶部预警）：偏空形态 —— 头肩顶/双重顶/三重顶/V顶/圆顶/对称三角形/
 #                         下降三角形/扩散三角形/上升楔形；另加「菱形」
@@ -248,7 +259,8 @@ def _prob_tier(state, vol_tier, shape_confirmed):
 
 
 def analyze_top_shapes(bars, atr_v=None, lookback=WAVE_LOOKBACK, scan=SCAN_BARS,
-                       vol_win=VOL_WIN, live_last=False, veto="confirmed", name=None):
+                       vol_win=VOL_WIN, live_last=False, veto="confirmed", name=None,
+                       veto_scope=VETO_SCOPE_STRONG):
     """★ 顶部形态判断（几何形态版）。返回 dict，供 rule123 出口闸门消费。
 
     字段与旧 `top_signals.analyze_top_signals` 对齐（ok/state/block/best/…），
@@ -258,6 +270,8 @@ def analyze_top_shapes(bars, atr_v=None, lookback=WAVE_LOOKBACK, scan=SCAN_BARS,
     empty = {"ok": False, "state": "none", "block": False, "block_reason": "",
              "best": None, "signals": [], "rejected": [], "pattern_cn": None,
              "rvol": None, "invalidation": None, "size_factor": 1.0,
+             "veto_scope": veto_scope, "veto_downgraded": False,
+             "veto_downgrade_reason": "", "gain20": None, "flag_seen": False,
              "summary": "未识别到顶部形态"}
     if not bars or n < 30:
         return empty
@@ -327,6 +341,11 @@ def analyze_top_shapes(bars, atr_v=None, lookback=WAVE_LOOKBACK, scan=SCAN_BARS,
                 "best": None, "signals": [], "rejected": rejected,
                 "pattern_cn": None, "rvol": None, "invalidation": None,
                 "size_factor": 1.0,
+                "veto_scope": veto_scope, "veto_downgraded": False,
+                "veto_downgrade_reason": "",
+                "gain20": ((bars[-1]["c"] / bars[-21]["c"] - 1) * 100
+                           if n >= 21 and (bars[-21].get("c") or 0) > 0 else None),
+                "flag_seen": any(s.get("pattern") == "旗形" for s in shapes),
                 "summary": ("识别到顶部形态但均未通过「这一波最高点」位置闸门"
                             if rejected else "未识别到顶部形态")}
 
@@ -350,9 +369,31 @@ def analyze_top_shapes(bars, atr_v=None, lookback=WAVE_LOOKBACK, scan=SCAN_BARS,
                     best = sg
                 break
 
+    # ── ⚑ C 口径：把「否决权」从所有已确认形态，收回到「强拉 + 无旗形结构」这一组 ──
+    #   其余仅降级为 alert（size_factor 0.5）——仍在报告里预警、仍缩仓，但不再禁买。
+    #   ⚠ `veto == "signal"`（--strict，信号当日即避雷）是显式另立的口径，C 不裁它。
+    gain20 = None
+    if n >= 21 and (bars[-21].get("c") or 0) > 0:
+        gain20 = (bars[-1]["c"] / bars[-21]["c"] - 1) * 100
+    flag_seen = any(s.get("pattern") == "旗形" for s in shapes)
+    veto_downgraded, veto_downgrade_reason = False, ""
+    if block and veto_scope == VETO_SCOPE_STRONG and veto != "signal":
+        strong = gain20 is not None and gain20 >= VETO_MIN_GAIN20
+        if not (strong and not flag_seen):
+            veto_downgraded = True
+            why_gain = (f"{gain20:+.1f}%" if gain20 is not None else "未知")
+            veto_downgrade_reason = (
+                f"否决权降级（C 口径）：20 日涨幅 {why_gain}"
+                + ("" if strong else f" < {VETO_MIN_GAIN20:.0f}% 非强拉")
+                + f"、{'有' if flag_seen else '无'}旗形结构 ⇒ "
+                "不属「强拉 + 无旗形」，由「禁买」降为「缩仓 0.5」")
+            block = False          # block_reason 原样保留，供审计/日志
+
     size_factor = 1.0
     if block:
         size_factor = 0.0
+    elif veto_downgraded:
+        size_factor = 0.5          # C 口径：降级 ⇒ 缩半仓，不禁止买
     elif best["state"] == "pending":
         size_factor = 0.5 if best["vol_tier"] == "huge" else 0.75
 
@@ -363,40 +404,56 @@ def analyze_top_shapes(bars, atr_v=None, lookback=WAVE_LOOKBACK, scan=SCAN_BARS,
         "rejected": rejected, "pattern_cn": best["pattern_cn"],
         "rvol": best["rvol"], "invalidation": invalidation,
         "size_factor": size_factor,
+        "veto_scope": veto_scope,
+        "veto_downgraded": veto_downgraded,
+        "veto_downgrade_reason": veto_downgrade_reason,
+        "gain20": gain20, "flag_seen": flag_seen,
         "summary": (f"顶部形态 {best['pattern_cn']}（{best['variant_cn']}）"
-                    f"｜状态 {STATE_CN.get(best['state'], best['state'])}"),
+                    f"｜状态 {STATE_CN.get(best['state'], best['state'])}"
+                    + ("｜⚑ 否决权已降级（缩仓 0.5）" if veto_downgraded else "")),
     }
 
 
-def _advice(level, b, held=None):
+def _advice(level, b, held=None, downgraded=False, downgrade_reason=""):
     if level == "block":
         base = ("顶部形态已确认（次日走弱）——当日不出买点，已确认的形态亦不可挂突破单")
     elif level == "alert":
-        base = ("顶部形态预警（未确认）——形态当日无预测力，**不否决买点**，"
-                "按仓位系数缩仓并盯次日收盘是否走弱")
+        if downgraded:
+            base = ("顶部形态**已确认**，但按 C 口径不构成否决（不属「强拉 + 无旗形结构」）"
+                    "——**可以买**，仓位系数 0.5（缩半仓）、止损照常"
+                    + (f"；{downgrade_reason}" if downgrade_reason else ""))
+        else:
+            base = ("顶部形态预警（未确认）——形态当日无预测力，**不否决买点**，"
+                    "按仓位系数缩仓并盯次日收盘是否走弱")
     else:
         base = "未识别到有效顶部形态——不构成本项限制"
     if held is True:
         base += "；持仓视角：优先减仓腿，勿加仓"
     elif held is False:
-        base += "；空仓视角：等次日确认，不追高"
+        base += ("；空仓视角：可缩仓进，勿满仓追" if downgraded
+                 else "；空仓视角：等次日确认，不追高")
     return base
 
 
 def top_verdict(bars, atr_v=None, veto="confirmed", live_last=False, strict=False,
                 lookback=WAVE_LOOKBACK, scan=SCAN_BARS, vol_win=VOL_WIN,
-                confirm_max_age=None, tol_atr=0.0, name=None, held=None):
+                confirm_max_age=None, tol_atr=0.0, name=None, held=None,
+                veto_scope=VETO_SCOPE_STRONG):
     """★ 顶部形态「硬指标」—— 单票唯一结论出口（CLI / 报告 / 探针 / 扫描器共用）。
 
     level（与 exit_code 同值，可直接当进程退出码）：
       ok    = 0  近端无有效顶部形态
       alert = 1  出现顶部形态但**未确认** —— 只预警 + 缩仓，**不否决买点**
-      block = 2  「这一波最高点 + 顶部形态 + 次日走弱」⇒ 硬避雷，rule123 置 recommend=False
+                 ⚑ C 口径（2026-11-05）：**已确认但不属「强拉≥15% + 无旗形结构」**的，
+                 同样落这一级（`veto_downgraded=True`，level_cn「顶部已确认·降级缩仓」）
+      block = 2  「这一波最高点 + 顶部形态 + 次日走弱」**且** 强拉无旗形 ⇒ 硬避雷，
+                 rule123 置 recommend=False
     """
     if strict:
         veto = "signal"
     top = analyze_top_shapes(bars, atr_v=atr_v, lookback=lookback, scan=scan,
-                              vol_win=vol_win, live_last=live_last, veto=veto)
+                              vol_win=vol_win, live_last=live_last, veto=veto,
+                              veto_scope=veto_scope)
     b = top.get("best")
     state = top.get("state", "none")
     conf = (b or {}).get("confirm") or {}
@@ -407,12 +464,19 @@ def top_verdict(bars, atr_v=None, veto="confirmed", live_last=False, strict=Fals
         level = "alert"
     else:
         level = "ok"
+    downgraded = bool(top.get("veto_downgraded"))
     if level == "block":
         reason = top.get("block_reason") or (b or {}).get("note") or ""
+    elif downgraded:
+        reason = top.get("veto_downgrade_reason") or (b or {}).get("note") or ""
     elif b:
         reason = b.get("note") or ""
     else:
         reason = top.get("summary") or ""
+    level_cn = LEVEL_CN[level]
+    if downgraded:
+        # 这批是**已确认**后被降级的，用「未确认」文案会误导
+        level_cn = "顶部已确认·降级缩仓"
     sy = month_super_yin(bars)
     ht = None
     if sy:
@@ -420,7 +484,7 @@ def top_verdict(bars, atr_v=None, veto="confirmed", live_last=False, strict=Fals
               "note": "%s，%s" % (sy["month"], sy["note"])}
     v = {
         "ok": bool(top.get("ok")),
-        "level": level, "level_cn": LEVEL_CN[level], "level_ascii": LEVEL_ASCII[level],
+        "level": level, "level_cn": level_cn, "level_ascii": LEVEL_ASCII[level],
         "rank": LEVEL_RANK[level], "exit_code": LEVEL_RANK[level],
         "hit": level != "ok", "veto": veto, "strict": bool(strict),
         "live_last": bool(live_last), "name": name,
@@ -445,8 +509,13 @@ def top_verdict(bars, atr_v=None, veto="confirmed", live_last=False, strict=Fals
         "confirm_reason": conf.get("reason"),
         "invalidation": top.get("invalidation"),
         "size_factor": 0.0 if level == "block" else top.get("size_factor", 1.0),
+        "veto_scope": top.get("veto_scope") or veto_scope,
+        "veto_downgraded": downgraded,
+        "veto_downgrade_reason": top.get("veto_downgrade_reason") or "",
+        "gain20": top.get("gain20"), "flag_seen": bool(top.get("flag_seen")),
         "reason": reason,
-        "advice": _advice(level, b, held=held),
+        "advice": _advice(level, b, held=held, downgraded=downgraded,
+                          downgrade_reason=top.get("veto_downgrade_reason") or ""),
         "n_signals": len(top.get("signals") or []),
         "n_rejected": len(top.get("rejected") or []),
         "summary": top.get("summary") or "",
@@ -474,14 +543,16 @@ def format_signal(s, brief=False):
 
 
 def screen_exclude(bars, atr_v=None, lookback=WAVE_LOOKBACK, scan=SCAN_BARS,
-                   veto="confirmed"):
+                   veto="confirmed", veto_scope=VETO_SCOPE_STRONG):
     """筛选层统一口径（替换旧 top_signals.screen_exclude）。
 
     返回 (excluded: bool, reason: str, detail: dict)：
       excluded = 顶部形态**已确认**（这一波最高点 + 次日走弱）
+                 **且** 满足 C 口径「强拉≥15% + 无旗形结构」；
+                 不满足者只降 alert（缩仓 0.5），不在筛选层剔除。
     """
     top = analyze_top_shapes(bars, atr_v=atr_v, lookback=lookback, scan=scan,
-                              veto=veto)
+                              veto=veto, veto_scope=veto_scope)
     detail = {"top_shapes": top}
     if top.get("block"):
         b = top["best"]

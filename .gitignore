@@ -19,6 +19,10 @@ out_cn/*.jsonl
 out_us/*.jsonl
 out_cn/*.md
 out_us/*.md
+# 体检/对照脚本的控制台日志（2026-11-05 补）：与同目录 json 一样属可再生产物，
+# 只是「同一批数据的文本视图」，结论要留就写进工作日志，不入库。
+out_cn/*.log
+out_us/*.log
 # 排障过程中的临时/复核中间产物（2026-10-09 补）：_tmp_*、_review_* 属一次性诊断文件，
 # 结论落定后即失效；out_cn/*.json 已覆盖其余分析产物。
 out_cn/_tmp_*.json

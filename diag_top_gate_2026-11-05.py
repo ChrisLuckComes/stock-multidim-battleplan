@@ -85,7 +85,8 @@ def work(item):
     for i in range(lo, n - 1, STEP):
         seg = bars[:i + 1]
         try:
-            v = TJ.top_verdict(seg)
+            # ⚑ C 口径 A/B：`TOP_SC=legacy` 走旧口径（所有已确认都 block），默认 C
+            v = TJ.top_verdict(seg, veto_scope=os.environ.get("TOP_SC", TJ.VETO_SCOPE_STRONG))
         except Exception:
             continue
         c = seg[-1]["c"]
@@ -130,6 +131,7 @@ def work(item):
         rows.append({
             "code": code, "name": name, "d": seg[-1]["d"],
             "level": v["level"], "state": v["state"],
+            "downgraded": bool(v.get("veto_downgraded")),
             "pattern": v.get("pattern_cn"), "is_top": bool(v.get("is_top")),
             "covered": flag_covered,      # 当日被旗形覆盖的偏空形态**个数**
             "flag_seen": flag_seen,
@@ -306,13 +308,54 @@ def main():
           lambda r: r["above_ma20"] and r["ma20_up"] and r["pos20"] > -12
           and r["above_ma60"] and r["ma60_up"])
 
+    # ── 【J】C 口径（否决权只留「强拉≥15% + 无旗形结构」）的实际效果 ──
+    print("\n" + "=" * 104)
+    print("【J】C 口径落地效果：降级组 vs 保留 block 组（对照=无信号 ok 组）")
+    print("=" * 104)
+    okv = [r for r in allrows if r["level"] == "ok"]
+    base = pct([r["r20"] for r in okv if r["r20"] is not None], .5) or 0
+    print("  对照 ok 无信号 n=%d 20日 %+.2f%%" % (len(okv), base))
+    blk = [r for r in allrows if r["level"] == "block"]
+    dg = [r for r in allrows if r["level"] == "alert" and r["downgraded"]]
+    al_plain = [r for r in allrows if r["level"] == "alert" and not r["downgraded"]]
+    def _row(tag, rs):
+        if not rs:
+            print("    %-30s （无样本）" % tag); return
+        r20 = pct([r["r20"] for r in rs if r["r20"] is not None], .5) or 0
+        d20 = pct([r["dd20"] for r in rs if r["dd20"] is not None], .5) or 0
+        nh = 100.0 * sum(1 for x in rs if x["nh10"]) / max(1, sum(1 for x in rs if x["nh10"] is not None))
+        print("    %-30s n=%-6d 20日%+7.2f%% (Δ%+6.2fpp) MAE%+7.2f%% 创10日新高%5.1f%%"
+              % (tag, len(rs), r20, r20 - base, d20, nh))
+    print("  ── 保留 block（强拉≥15% 且 无旗形）──")
+    _row("保留 block", blk)
+    print("  ── 降级为 alert（原 block 中被剥掉否决权的）──")
+    _row("★降级组", dg)
+    _row("　└ 非强拉(<15%)", [r for r in dg if (r["gain20"] or 0) < 15])
+    _row("　└ 强拉但有旗形", [r for r in dg if (r["gain20"] or 0) >= 15 and r["flag_seen"]])
+    print("  ── 原本就是 alert（非降级）──")
+    _row("普通 alert(未确认)", al_plain)
+    if blk or dg:
+        _scope = os.environ.get("TOP_SC", TJ.VETO_SCOPE_STRONG)
+        if _scope == TJ.VETO_SCOPE_LEGACY:
+            print("  ⇒ legacy 口径：无降级，block 全量 %d 个。" % len(blk))
+        else:
+            print("  ⇒ C 口径：block %d → %d（降级掉 %d 个，−%.1f%%）；"
+                  "保留组 Δ%+.2fpp vs 降级组 Δ%+.2fpp，落差 %.1f 倍才算收对了。"
+                  % (len(blk) + len(dg), len(blk), len(dg),
+                     100.0 * len(dg) / max(1, len(blk) + len(dg)),
+                     (pct([r["r20"] for r in blk if r["r20"] is not None], .5) or 0) - base,
+                     (pct([r["r20"] for r in dg if r["r20"] is not None], .5) or 0) - base,
+                     abs((pct([r["r20"] for r in blk if r["r20"] is not None], .5) or 0) - base)
+                     / max(0.01, abs((pct([r["r20"] for r in dg if r["r20"] is not None], .5) or 0) - base))))
+
     # 落盘原始行，便于复算
     import json
     outdir = os.path.join(HERE, "out_cn")
     os.makedirs(outdir, exist_ok=True)
-    with open(os.path.join(outdir, "diag_top_gate_20261105.json"), "w", encoding="utf-8") as f:
+    _tag = "c" if os.environ.get("TOP_SC", TJ.VETO_SCOPE_STRONG) != TJ.VETO_SCOPE_LEGACY else "legacy"
+    with open(os.path.join(outdir, "diag_top_gate_20261105_%s.json" % _tag), "w", encoding="utf-8") as f:
         json.dump(allrows, f, ensure_ascii=False)
-    print("\n原始行已落盘：out_cn/diag_top_gate_20261105.json（%d 行）" % len(allrows))
+    print("\n原始行已落盘：out_cn/diag_top_gate_20261105_%s.json（%d 行）" % (_tag, len(allrows)))
 
     # ── 覆盖率：全样本 block 里，旗形豁免生效多少次 ──
     allb = [r for r in allrows if r["level"] == "block"]
@@ -321,6 +364,9 @@ def main():
           % (len(allb), _cov, 100.0 * _cov / max(1, len(allb))))
     print("  ⚑ 注意：这**不等于**「block 被解除数」——覆盖只改 bias，若同日还有别的"
           "偏空形态（或 next-day 走弱确认）仍会 block。")
+    if os.environ.get("TOP_SC", TJ.VETO_SCOPE_STRONG) != TJ.VETO_SCOPE_LEGACY:
+        print("  ⚑ C 口径下此列**必然为 0**：block 已要求「无旗形结构」，两者互斥。"
+              "看旗形作用请用 TOP_SC=legacy 对照。")
 
 
 if __name__ == "__main__":

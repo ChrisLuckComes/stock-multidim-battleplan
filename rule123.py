@@ -5863,8 +5863,19 @@ def apply_top_signal_gate(result, bars, ev=None, veto=None):
         "summary": top.get("summary"),
         "note": (b or {}).get("note"),
         "warn": list((b or {}).get("warn") or []),
+        # ⚑ C 口径（老罗 2026-11-05 批）：已确认但非「强拉≥15% + 无旗形结构」⇒ 只缩仓不禁买
+        "veto_downgraded": bool(top.get("veto_downgraded")),
+        "veto_downgrade_reason": top.get("veto_downgrade_reason") or "",
+        "gain20": top.get("gain20"),
+        "flag_seen": bool(top.get("flag_seen")),
     }
     if not top.get("block"):
+        if top.get("veto_downgraded"):
+            # 不许静默放行：把「已确认、但降级为缩仓」写进 note，报告与终端都能看见
+            result["top_signal_downgraded"] = True
+            result["note"] = (
+                "【顶部已确认·按 C 口径降级为缩仓 0.5，不禁买】"
+                f"{top.get('veto_downgrade_reason') or ''}｜{result.get('note') or ''}")
         return result
 
     result["recommend"] = False
