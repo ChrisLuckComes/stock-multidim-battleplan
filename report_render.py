@@ -1418,15 +1418,28 @@ def build_scr(a, n):
                    "价值在二者背离读，非独立 L2 信号。</span></p>"
                    % (_vpc, esc(vp), esc(r.get("vprofile_note") or "")))
     # ★ S4（2026-10-31）：主力行为（存量趋势）—— S1 保留净流出符号 + S2 按存量比例减仓
-    #   之后才可能存在的信息。旧版只有单点「主力成本」，看不到派发，会把主力已跑光读成锁仓。
+    #   之后才可能存在的信息。
+    #   ⚠ 2026-11-05 纠偏（老罗：「完全看不出来是派发」）：原文注释写「看不到派发，会把主力
+    #     已跑光读成锁仓」——这句把本块说成了派发判据，是误导。**本块不判派发**：
+    #     派发由七态 state（需搬运证据）判；本块只报「资金流残值与边际变化」，
+    #     且当 state 非派发态时必须同屏做口径隔离（见下方 _cal）。
     #   ⚑ 只描述行为、不输出买法。S3 回测（400 只×10 截面、按票聚类）显示该信号与后续
     #     10 日收益的相关是**反向**的（现价越远离主力成本、主力越加仓的高动量票越偏弱，
     #     IC(gap_new)=−0.13、IC(chg5)=−0.09），且 chg5 的增量集中在高动量档 ⇒ 只作排序参考。
     mp = r.get("main_phase")
+    st_state = r.get("state") or ""
     mline = ""
     if mp and mp != "无资金流":
         _mpc = {"加仓中": "b-ok", "减仓中": "b-no", "已清仓": "b-no",
                 "锁仓/持平": "b-warn"}.get(mp, "b-warn")
+        # ★ 2026-11-05 口径隔离（老罗：「完全看不出来是派发，不知道怎么算的」）：
+        #   main_phase 是资金流累积残值，七态 state 才是筹码判据。两者不一致时必须在同屏写明，
+        #   否则「已清仓」会被读成「主力派发」（大参林 603233 当日即此情况）。
+        _cal = ""
+        if st_state and ("派发" not in st_state) and mp in ("已清仓", "减仓中"):
+            _cal = ("<br><span>⚠ <b>口径隔离</b>：本项是「资金流累积残值」，"
+                    "<b>不是</b>筹码派发结论。七态 state = <b>%s</b>。"
+                    "判派发只看 state（需搬运证据），不看本项。</span>" % esc(st_state))
         segs = []
         if r.get("main_keep_ratio") is not None:
             segs.append("存量保留峰值 %d%%" % round(r["main_keep_ratio"] * 100))
@@ -1437,14 +1450,14 @@ def build_scr(a, n):
         segs.append("净买入 %d 日 / 净卖出 %d 日"
                     % (r.get("main_days_in") or 0, r.get("main_days_out") or 0))
         mline = ("<p class='note'><b>主力行为</b>：<span class='badge %s'>%s</span> %s"
-                 "<br><span>%s</span>"
+                 "<br><span>%s</span>%s"
                  "<br><span>⚠ 颜色只表示主力<b>行为方向</b>，<b>不是买卖建议</b>：回测"
                  "（400 只 × 10 截面、按票聚类）显示「现价越远离主力成本 / 主力越加仓的高动量票，"
                  "后续 10 日越偏弱」（IC(gap) −0.13、IC(存量变化) −0.09，反转口径）"
-                 "⇒ 本项只作排序参考，<b>不作闸门</b>。主力成本 = 剩余存量重心；"
-                 "净流出保留符号 + 按存量比例减仓后，才看得到派发。</span></p>"
+                 "⇒ 本项只作排序参考，<b>不作闸门</b>。主力成本 = 剩余存量重心。"
+                 "⚠ 本项<b>不判派发</b>：派发由七态 state 判（需搬运证据）。</span></p>"
                  % (_mpc, esc(mp), "｜".join(esc(x) for x in segs),
-                    esc(r.get("main_phase_note") or "")))
+                    esc(r.get("main_phase_note") or ""), _cal))
     # 现价 / 你的成本 vs 主力成本：三者是**不同的两件事**，分开说（老罗 2026-10-14 追问后定的口径）
     guard = ""
     if devi is not None:

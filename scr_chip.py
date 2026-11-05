@@ -1956,8 +1956,16 @@ def analyze(code, n=120, decay_k=None, half_life=None, us_mode=False,
         m_phase, m_phase_note = "无资金流", "未取到资金流，主力层不可用（成本为低位带替代）"
     elif m_keep_ratio is not None and m_keep_ratio < 0.05:
         m_phase = "已清仓"
-        m_phase_note = (f"主力存量已降至峰值的 {m_keep_ratio * 100:.1f}%"
-                        f"（{m_din} 日净买入 / {m_dout} 日净卖出）⇒ 派发基本完成")
+        # ★★ 2026-11-05 改口径（老罗质疑「完全看不出来是派发，不知道你通过什么口径计算」）：
+        #   原文案写「⇒ 派发基本完成」，把「资金流累积残值 <5%」直接读成**筹码派发结论**，
+        #   而七态 state 是另一套判据（chip_state_of，需搬运证据）。两者经常不一致 ——
+        #   大参林 603233 当日 main_phase=已清仓，但 state=拉升脱离成本区中、verdict=观察、
+        #   behavior=none、drain_votes=0、accum_votes=1、rho5=−0.02%、chip_risk=low，
+        #   盘中「看不出派发」是对的。⇒ 本字段只描述「资金流口径存量残值」，**不许输出派发定性**。
+        m_phase_note = (f"资金流口径存量残值降至峰值的 {m_keep_ratio * 100:.1f}%"
+                        f"（{m_din} 日净买入 / {m_dout} 日净卖出）"
+                        f"—— <b>这只是累积净额残值，不等于筹码派发</b>；"
+                        f"是否派发一律以七态 state 为准（本项不作闸门）")
     elif m_chg5 is not None and m_chg5 <= -0.15 and (m_chg10 is None or m_chg10 <= 0):
         # ★ 2026-11-02 多窗口共识：必须「近 5 日减 + 近 10 日也不增」才算减仓
         # ⚑ 但 m_chg10 为 None（基期不足）时**不许声称「两窗口同向」**——那只是没第二个窗口。
