@@ -233,7 +233,8 @@ def apply_gate(lst, gmap):
         if g["block_open"]:
             r["tags"] = [t for t in r["tags"] if t != "可买"] + ["%s禁开" % short]
         elif g["chase_ban"]:
-            r["tags"] = [t for t in r["tags"] if t != "可买"] + ["%s只挂回踩" % short]
+            # L1 = 只限价、不禁买（2026-11-05 改）：买价须落在 [VWAP−1%, VWAP+3%]
+            r["tags"] = [t for t in r["tags"] if t != "可买"] + ["%s限VWAP+3%%内" % short]
         else:
             r["tags"] = r["tags"] + ["%sOK" % short]
     return lst
@@ -358,7 +359,7 @@ def print_stocks(only_pool=False, pages=3, exclude_bj=True, top=20, gmap=None):
         for r in retr[:top]:
             g = r.get("gate")
             gtag = ("%s%s" % (g["name"].split("·")[-1][:6],
-                              "" if not g["chase_ban"] else "只挂回踩")) if g else "未覆盖"
+                              "" if not g["chase_ban"] else "限±VWAP")) if g else "未覆盖"
             print("  %-8s %-8s %+6.2f%% %8.2f %8.2f %8.2f %7.0f %7.1f  %s %s" % (
                 r["code"], r["name"][:8], r["chg"], r["buy_vwap"], r["buy_mid"],
                 r["buy_low"], r["lot_amt"], r["amt_yi"], gtag,
