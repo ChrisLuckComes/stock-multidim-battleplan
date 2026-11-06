@@ -94,29 +94,8 @@ _CACHE = {}          # index_code → (timestamp, bars)；TTL 内复用，避免
 _CACHE_TTL = 600.0
 
 
-def fetch_index_bars(index_code, n=65):
-    """拉指数 qfq 日K → [{d,o,h,l,c,v}]（旧→新）。失败返回 None（静默降级）。
-
-    市场分流（老罗 2026-10-15 实测修正）：A 股指数走腾讯 qfq 日K；美股宽基
-    （usXXXX，如 usQQQ/usSPY）走 bars_source.us_quote 三级链路 —— 腾讯美股日K
-    只回稀疏快照（实测 usQQQ 请求 140 根仅得 2 根、usALAB 仅 1 根），喂不饱
-    index_regime 的 MA10/MA20 与 RS 的 20 日窗口。两条路都失败才返回 None。
-    """
-    now = time.time()
-    hit = _CACHE.get(index_code)
-    if hit and (now - hit[0]) < _CACHE_TTL:
-        return hit[1]
-    if str(index_code).startswith("us"):        # 美股宽基 → 项目既有美股链路
-        try:
-            import bars_source as BS
-            q, _notes = BS.us_quote(str(index_code)[2:], min_bars=n, use_cache=True)
-            out = [{"d": b["d"], "o": b["o"], "h": b["h"], "l": b["l"],
-                    "c": b["c"], "v": b.get("v")} for b in (q.get("bars") or [])]
-        except Exception:
-            out = []
-        if out:
-            _CACHE[index_code] = (now, out)
-        return out or None
+def _fetch_index_tencent(index_code, n=65):
+    """腾讯 fqkline 旧源（2026-11 起稳定 501，仅作首跳，失败即回落新浪/东财）。"""
     url = ("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
            "?param=%s,day,,,%d,qfq" % (index_code, n))
     try:
@@ -155,10 +134,102 @@ def fetch_index_bars(index_code, n=65):
                 "o": float(d[1]), "c": float(d[2]),
                 "h": float(d[3]), "l": float(d[4]), "v": float(d[5]),
             })
-        _CACHE[index_code] = (now, out)
-        return out
+        return out or None
     except Exception:
         return None
+
+
+def _fetch_index_sina(index_code, n=65):
+    """新浪日K兜底（sh/sz 指数通用，code 原样拼 symbol）。"""
+    url = ("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+           "CN_MarketData.getKLineData?symbol=%s&scale=240&ma=no&datalen=%d"
+           % (str(index_code), n))
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            arr = json.loads(r.read().decode("utf-8", "ignore"))
+        if not arr:
+            return None
+        out = []
+        for d in arr[-n:]:
+            out.append({
+                "d": d["day"], "o": float(d["open"]), "c": float(d["close"]),
+                "h": float(d["high"]), "l": float(d["low"]), "v": float(d["volume"]),
+            })
+        return out or None
+    except Exception:
+        return None
+
+
+def _fetch_index_eastmoney(index_code, n=65):
+    """东财日K兜底（仅覆盖两只宽基；其余指数回落新浪）。"""
+    secid_map = {"sh000001": "1.000001", "sz399006": "0.399006"}
+    secid = secid_map.get(str(index_code))
+    if not secid:
+        return None
+    url = ("https://push2his.eastmoney.com/api/qt/stock/kline/get?"
+           "secid=%s&fields1=f1,f2&fields2=f51,f52,f53,f54,f55,f56,f57,f58"
+           "&klt=101&fqt=1&end=20500101&lmt=%d" % (secid, n))
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read().decode("utf-8", "ignore"))
+        klines = (data.get("data", {}) or {}).get("klines")
+        if not klines:
+            return None
+        out = []
+        for s in klines[-n:]:
+            f = s.split(",")
+            # 东财顺序：日期,开,收,高,低,量,额,涨跌幅%
+            out.append({
+                "d": f[0], "o": float(f[1]), "c": float(f[2]),
+                "h": float(f[3]), "l": float(f[4]), "v": float(f[5]),
+            })
+        return out or None
+    except Exception:
+        return None
+
+
+def fetch_index_bars(index_code, n=65):
+    """拉指数 qfq 日K → [{d,o,h,l,c,v}]（旧→新）。失败返回 None（静默降级）。
+
+    市场分流（老罗 2026-10-15 实测修正）：A 股指数走腾讯 qfq 日K；美股宽基
+    （usXXXX，如 usQQQ/usSPY）走 bars_source.us_quote 三级链路 —— 腾讯美股日K
+    只回稀疏快照（实测 usQQQ 请求 140 根仅得 2 根、usALAB 仅 1 根），喂不饱
+    index_regime 的 MA10/MA20 与 RS 的 20 日窗口。两条路都失败才返回 None。
+    """
+    now = time.time()
+    hit = _CACHE.get(index_code)
+    if hit and (now - hit[0]) < _CACHE_TTL:
+        return hit[1]
+    if str(index_code).startswith("us"):        # 美股宽基 → 项目既有美股链路
+        try:
+            import bars_source as BS
+            q, _notes = BS.us_quote(str(index_code)[2:], min_bars=n, use_cache=True)
+            out = [{"d": b["d"], "o": b["o"], "h": b["h"], "l": b["l"],
+                    "c": b["c"], "v": b.get("v")} for b in (q.get("bars") or [])]
+        except Exception:
+            out = []
+        if out:
+            _CACHE[index_code] = (now, out)
+        return out or None
+    # A 股指数：腾讯 fqkline 于 2026-11 起稳定返回 HTTP 501（端点废弃）→
+    # 回落 新浪 / 东财 兜底；三者都失败才返回 None（铁律③：取数失败=unknown 放行，不误杀）。
+    # 注：扫描期 scan_warfare 会把本函数 monkeypatch 成 _fetch_from_db（宽基走库），
+    #     但 market_pulse / broad_state / plan_entry 走的是这里（未 patch），故兜底对脉搏生效。
+    out = _fetch_index_tencent(index_code, n=n)
+    if out:
+        _CACHE[index_code] = (now, out)
+        return out
+    out = _fetch_index_sina(index_code, n=n)
+    if out:
+        _CACHE[index_code] = (now, out)
+        return out
+    out = _fetch_index_eastmoney(index_code, n=n)
+    if out:
+        _CACHE[index_code] = (now, out)
+        return out
+    return None
 
 
 def sma(closes, n):
