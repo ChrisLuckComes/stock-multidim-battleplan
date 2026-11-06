@@ -250,24 +250,38 @@ def conclude(day, summary):
     after = summary["after_share"]
     main = flow.get("main")
     super_amt = flow.get("super")
-    if None in (close, vwap, pos, after) or main is None:
+    hi = summary.get("hi") or {}
+    if None in (close, vwap, pos, after) or main is None or not hi:
         return {"label": "读数不全", "buy": "先不买", "text": "读数不全。先不买。"}
     above = close >= vwap
     closed = bool(summary.get("session_done")) or day.get("frame") == "range"
-    supply = (not above) and after >= 0.50 and main < 0
     chg = (day.get("quote") or {}).get("f170")
     up = chg is not None and chg > 0
-    if supply and not closed:
+    # 自最高价回吐幅度（价格口径，非区间位置口径）：(最高-收)/最高
+    pullback_hi = (hi.get("h", 0) - close) / hi["h"] if hi.get("h") else 0.0
+    # 量能是否收缩：量比<1 视为缩量（range 模式无量比则跳过该约束）
+    rvol = (day.get("quote") or {}).get("f50")
+    vol_shrink = (rvol is not None) and (rvol < 1.0)
+    # —— 派发（出货）硬条件：缺一不可 ——
+    # 老罗 2026-11-06 纠错：匠心家居收+0.88%(红)、自高点仅回吐3.66%，被旧逻辑
+    # (收均价下+高点后量>=0.50+主力净卖) 误判派发。修正：决定性指标是「自高点回吐幅度」，
+    # 收红还是收跌不重要——收红+小回落=强票(非派发)，收红/收跌+大回落=派发，收跌+小回落=普通弱日。
+    # 真派发须同时：高位派发(高点后量过半) + 大单净卖 + 自高点显著回吐(>=6%) + 量能不缩
+    # + (收在均价下 或 回吐>=8%)，否则极易误杀强票或漏判长上影派发。
+    is_dist = (after >= 0.55) and (main < 0) and (pullback_hi >= 0.06) \
+              and (not vol_shrink) and ((not above) or (pullback_hi >= 0.08))
+    if is_dist and not closed:
         label = "未收盘"
         buy = "收盘前不下派发结论，先不买"
-    elif supply:
+    elif is_dist:
         label = "派发"
         buy = "不买"
     elif above and pos >= 0.55 and main > 0 and up:
         label = "趋势延续"
         buy = "能买，只接回踩，不追"
-    elif above and pos >= 0.55 and up and main < 0:
-        # 理工能科 002322 2026-10-19：收涨、位高、均价上，主力净卖 ≠ 回调
+    elif up and pos >= 0.55 and main < 0:
+        # 收红但主力净卖：分歧承接日，价强资弱，属高位换手而非派发/干净趋势
+        # （理工能科 002322 2026-10-19 同类：收涨、位高、均价上方、主力净卖 ≠ 回调）
         label = "高位消化"
         buy = "先不买，不追"
     elif above and main > 0:
@@ -289,7 +303,7 @@ def conclude(day, summary):
     return {"label": label, "buy": buy, "text": "".join(bits)}
 
 
-def reading(close, vwap, pos, after_share, main, small):
+def reading(close, vwap, pos, after_share, main, small, up=False, pullback_hi=0.0):
     """量价读数，给结论做依据。"""
     if None in (close, vwap, pos, after_share, main, small):
         return "incomplete", "读数不全"
@@ -297,8 +311,10 @@ def reading(close, vwap, pos, after_share, main, small):
     big_bought = main > 0 and small < 0
     if above and pos >= 0.55 and after_share < 0.45 and big_bought:
         return "big_buy", "大单净买、小单净卖，收在均价上方，高点后成交没有占到一半"
-    if (not above) and after_share >= 0.50 and main < 0:
-        return "supply", "收在均价下，高点后成交过半，且大单净卖"
+    # 派发读数：自高点大幅回吐是决定性指标，收红/收跌不重要；需高位派发+大单净卖+量能不缩
+    if (after_share >= 0.55) and (main < 0) and (pullback_hi >= 0.06) \
+            and ((not above) or (pullback_hi >= 0.08)):
+        return "supply", "自高点大幅回吐、高点后成交过半、大单净卖，属高位派发"
     if above and pos >= 0.55 and main < 0:
         return "digest", "收在均价上方高位，但主力净卖，属高位换手消化"
     return "mixed", "多空都有，分段看，不把全天收成一个标签"
@@ -563,7 +579,11 @@ def summarize(day):
     after_share = after / vol
     main = flow["main"] if flow else None
     small = flow["small"] if flow else None
-    key, text = reading(last["c"], last["avg"], pos, after_share, main, small)
+    chg = (day.get("quote") or {}).get("f170")
+    up = chg is not None and chg > 0
+    pullback_hi = (hi["h"] - last["c"]) / hi["h"] if hi.get("h") else 0.0
+    key, text = reading(last["c"], last["avg"], pos, after_share, main, small,
+                        up=up, pullback_hi=pullback_hi)
     verdict = conclude(day, {
         "last": last, "flow": flow, "pos": pos, "after_share": after_share,
         "session_done": day["session_done"], "hi": hi,
@@ -579,6 +599,7 @@ def summarize(day):
         "hi": hi, "lo": lo, "last": last, "vol": vol,
         "up": up, "dn": dn, "above": above, "below": below,
         "after": after, "after_share": after_share, "pos": pos,
+        "giveback_hi": pullback_hi,
         "bench_at_low": bench_at(lo["t"]),
         "bench_at_high": bench_at(hi["t"]),
         "bench_at_close": bench_at(last["t"]),
@@ -634,9 +655,9 @@ def render(day, s):
            _num(last["c"]), chg_label, _num(q.get("f170")))
     )
     lines.append(
-        "区间位置 %s  从高点回吐 %s%%  均价 %s  收盘%s均价"
+        "区间位置 %s  自最高价回吐 %s%%  均价 %s  收盘%s均价"
         % (_num(s["pos"]),
-           _num((1 - s["pos"]) * 100 if s["pos"] is not None else None, 1),
+           _num(s.get("giveback_hi", 0) * 100 if s.get("giveback_hi") is not None else None, 1),
            _num(last["avg"]),
            "高于" if last["c"] >= last["avg"] else "低于")
     )
@@ -747,7 +768,6 @@ def fact_rows(day, summary):
     lo = summary["lo"]
     ranged = day.get("frame") == "range"
     pos = summary["pos"]
-    giveback = (1 - pos) * 100 if pos is not None else None
     up_dn = summary["up"] / summary["dn"] if summary["dn"] else None
     above_below = summary["above"] / summary["below"] if summary["below"] else None
     out = [
@@ -758,7 +778,8 @@ def fact_rows(day, summary):
         ("收", _num(last["c"])),
         ("涨跌" if not ranged else "区间涨跌", "%s%%" % _num(q.get("f170"))),
         ("区间位置", _num(pos)),
-        ("从高点回吐", "%s%%" % _num(giveback, 1)),
+        ("自最高价回吐", "%s%%" % _num(summary.get("giveback_hi", 0) * 100, 1)
+         if summary.get("giveback_hi") is not None else "—"),
         ("均价", "%s，收盘%s" % (_num(last["avg"]), "高于均价" if last["c"] >= last["avg"] else "低于均价")),
     ]
     if ranged:
