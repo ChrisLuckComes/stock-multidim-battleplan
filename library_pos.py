@@ -56,12 +56,43 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CN_DB_ID = "eLKj7AvdWJyFmHYP6bCmku"
 US_DB_ID = "5ezNsvqYiC8iFY89HaFzHc"
 
-# 资料库 skill 的脚本目录；可用环境变量覆盖
-LIBRARY_SKILL_DIR = os.environ.get(
-    "LIBRARY_SKILL_DIR",
-    r"D:\workbuddy\resources\app.asar.unpacked\resources\plugins"
-    r"\workbuddy-builtin\skills\library",
-)
+# 资料库 skill 的脚本目录；可用环境变量覆盖。
+# 2026-11-06 修：原默认值写死 `D:\workbuddy\resources\...`（该目录已不存在），
+# 导致每次读持仓都 SystemExit ⇒ 自动化持仓档被迫退回手填兜底值。
+# 改为**自动探测**：环境变量 > WorkBuddy 安装目录 > 用户 cache 目录，逐个校验真实脚本存在。
+_LIB_PROBE_FILE = os.path.join("database", "query_database_record.py")
+
+
+def _find_library_skill_dir() -> str:
+    env = os.environ.get("LIBRARY_SKILL_DIR")
+    if env and os.path.exists(os.path.join(env, _LIB_PROBE_FILE)):
+        return env
+    homes = [p for p in (
+        os.environ.get("LOCALAPPDATA"),
+        os.environ.get("APPDATA"),
+        os.path.expanduser("~"),
+        os.environ.get("ProgramFiles"),
+        os.environ.get("ProgramFiles(x86)"),
+    ) if p]
+    cands: list[str] = []
+    for h in homes:
+        for app in ("Programs/WorkBuddy", "WorkBuddy"):
+            base = os.path.join(h, app, "resources", "app.asar.unpacked",
+                                "resources", "plugins", "workbuddy-builtin")
+            cands.append(os.path.join(base, "skills", "library"))
+            cands.append(os.path.join(base, "skill-library"))
+    for h in homes:
+        cache = os.path.join(h, ".workbuddy", "plugins", "cache", "workbuddy-builtin")
+        cands.append(os.path.join(cache, "skills", "library"))
+        cands.append(os.path.join(cache, "skill-library"))
+    for c in cands:
+        if os.path.exists(os.path.join(c, _LIB_PROBE_FILE)):
+            return c
+    # 探测失败时返回环境变量或首个候选，由 _run 报出完整路径便于人工定位
+    return env or (cands[0] if cands else "")
+
+
+LIBRARY_SKILL_DIR = _find_library_skill_dir()
 
 # 两表字段类型（用于把 --set 的裸值包成 PropertyValue oneof）
 FIELD_TYPE = {
