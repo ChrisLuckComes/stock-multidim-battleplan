@@ -45,7 +45,27 @@ def round_px(p):
 
 # ─────────────────────── 自动计划（纯代码，对齐美股 us_session_decide） ───────────────────────
 AUTO_LOW_N = 25      # 自动计划：止损取近 N 分最低点
-AUTO_HIGH_N = 40     # 自动计划：目标取近 N 分最高点
+AUTO_HIGH_N = 40     # 自动计划：目标取近 N 分最高点（仅美股用；A 股目标=日线结构阻力）
+# ★ A 股自动计划最小止损距（老罗 2026-11-06 定）。
+#   病根：A 股 T+1 —— 今天买、今天卖不掉，止损腿只能明天开盘执行。
+#   用 0.25×ATR（levels.NOISE_ATR，日内噪声带）当最小止损距 ⇒ 止损被抬到 1.0%~1.4%
+#   ⇒ 目标却按涨停价（+8%）算 ⇒ R 虚高到 6~8，属纸面赔率：
+#     600316 ATR14=1.97（5.5%）→ 止损 1.27%；002315 ATR14=1.24 → 止损 1.02%，
+#     隔夜一个常规跳空就穿透，这个 R 不可执行。
+#   口径：隔夜止损必须覆盖「一个典型日波动」，即 ≥1×ATR。
+#   ⚠ 只作用于自动计划（auto_plan_cn）；--plan / 显式 --stop 是人给的止损，
+#     仍走 decide() 里的 0.25×ATR 下限（那里只防「贴脸止损 ⇒ R 爆表」，不强改数值）。
+T1_MIN_RISK_ATR = 1.0
+# ★ A 股自动计划目标锚：日线结构阻力（老罗 2026-11-06 定）。
+#   旧版 target = 涨停价（刻意设计，源自杭氧 002430「近高≈现价 ⇒ R 坍缩 ⇒ 误杀」），
+#   但它把 R 变成了 ATR 的倒数：ATR 越大 ⇒ 止损越宽 ⇒ R 越低 ⇒ 波动大的强票被系统性
+#   判弱、波动小的弱票被判强（2026-11-06 实测：洪都一路拉升 R1.47 判不买、
+#   焦点冲高回落 R2.19 判能买，与强弱正好相反）。
+#   改为：取日线前 10/20/60/120 日高里「高于现价且距离 ≥1×ATR」的最近一档。
+#   · 距离下限 1×ATR：避免贴着阻力买导致 R 坍缩成 0.2 的假否决；
+#   · 全部在前价之下（创 N 日新高）= 上方真空 ⇒ 退化为 现价 + 2×ATR。
+AUTO_RESIST_DAYS = (10, 20, 60, 120)
+AUTO_VACUUM_ATR = 2.0
 
 
 def _cn_atr14(code):
@@ -63,13 +83,61 @@ def _cn_atr14(code):
     return None
 
 
-def auto_plan_cn(minutes, code, pre):
-    """无 --plan / 无 --entry 时的自动计划：entry=现价，stop=近 LOW_N 分低点（≤3×ATR），
-    target=近 HIGH_N 分高点（≤4×ATR）。语义 = 「若现在买，合理的止损/目标在哪」。
-    买在高位→R<1.5→decide 如实答不买；买在回踩→R≥1.5→答能买。cap 留空交 decide 算。
+def _cn_resistance(code, cur, a):
+    """日线结构阻力（A 股自动计划目标锚，2026-11-06）。
 
-    对齐美股 us_session_decide.auto_plan_us；差异仅在 A 股买上限仍由 decide 按
-    R≥1.5 与 昨收+2% 自动算（A 股不用 pre+2ATR），故 cap 返回 None。
+    取前 AUTO_RESIST_DAYS 日（10/20/60/120）最高价中「高于现价且距离 ≥1×ATR」的
+    最近一档作为 target：
+      · 距离下限 1×ATR —— 贴着阻力买会让 R 坍缩成 0.2 的假否决，跳过一档取上一级；
+      · 全部低于现价（创 120 日新高）⇒ 上方真空，退化为 现价 + AUTO_VACUUM_ATR×ATR。
+
+    返回 (target, label)；取不到日线返回 (None, "")，由调用方退化到 ATR 倍数。
+    """
+    try:
+        import bars_source as BS
+        prefix = "sh" if str(code)[0] in "69" else "sz"
+        bars, _src, _notes = BS.ash_bars(prefix, code, n=max(AUTO_RESIST_DAYS) + 10)
+        if not bars or len(bars) < 15:
+            return None, ""
+        # ★ 末根可能是今日未收盘 bar —— 结构阻力只认已完成交易日，否则会拿「今天的
+        #   最高价」当阻力，等于自己挡自己（与「收盘价确认」同源错误）。
+        prev = bars[:-1] if len(bars) > 15 else bars
+        highs = [float(b["h"]) for b in prev]
+        floor = cur + T1_MIN_RISK_ATR * a
+        cands = []
+        for d in AUTO_RESIST_DAYS:
+            if len(highs) >= d:
+                h = max(highs[-d:])
+                if h >= floor:
+                    cands.append((h, "前%d日高" % d))
+        if cands:
+            best = min(cands, key=lambda x: x[0])
+            return round_px(best[0]), best[1]
+        return round_px(cur + AUTO_VACUUM_ATR * a), "创%d日新高·真空" % max(AUTO_RESIST_DAYS)
+    except Exception:
+        return None, ""
+
+
+def auto_plan_cn(minutes, code, pre):
+    """无 --plan / 无 --entry 时的自动计划：entry=现价，stop=近 AUTO_LOW_N 分低点，
+    target=**日线结构阻力**（前 10/20/60/120 日高中距现价 ≥1×ATR 的最近一档；
+    创 120 日新高时退化为 现价 + 2×ATR）。
+    语义 = 「若现在买，合理的止损/目标在哪」。买在高位→R<1.5→decide 如实答不买；
+    买在回踩→R≥1.5→答能买。cap 留空交 decide 算。
+
+    止损三条约束（依次）：
+      ① 近 AUTO_LOW_N 分低点；low 贴住现价时退化 cur−1×ATR；
+      ② 上限 3×ATR（防止损过宽）；
+      ③ 下限 T1_MIN_RISK_ATR×ATR = 1×ATR（★ T+1：隔夜止损必须覆盖一个典型日波动，
+         用 0.25×ATR 的日内噪声带会被隔夜跳空穿透 ⇒ R 虚高 6~8，不可执行）。
+
+    target 为何不用涨停价（2026-11-06 老罗定）：涨停价把 R 变成 ATR 的倒数 ——
+    ATR 越大止损越宽、R 越低 ⇒ 波动大的强票被判弱、波动小的弱票被判强，方向反了。
+    日线结构阻力是真实空间，R 才可比。
+
+    对齐美股 us_session_decide.auto_plan_us；差异：美股 target 用近 N 分高点，
+    A 股用日线结构阻力；A 股买上限仍由 decide 按 R≥1.5 与 昨收+2% 自动算
+    （不用 pre+2ATR），故 cap 返回 None。
     """
     if not minutes:
         raise RuntimeError("无分钟序列，无法自动计划")
@@ -81,23 +149,33 @@ def auto_plan_cn(minutes, code, pre):
     high = max(float(m["h"]) for m in minutes[-high_n:])
     atr = _cn_atr14(code)
     a = atr if atr else max(0.01, (high - low) / 2.0)
-    stop = low if low < cur else cur - 1.5 * a
+    # ★ 2026-11-06：low 贴住现价时过去用 cur−1.5×ATR，与下面 1×ATR 下限不连续
+    #   ⇒ 同一只票「近25分低点=现价」的那几分钟给 −6.2%，下一分钟给 −4.2%，
+    #   结论在「不买 / 能买」之间来回翻转（002389 实测）。统一用 T1_MIN_RISK_ATR，
+    #   保证 T+1 隔夜止损位稳定，不随窗口滚动跳变。
+    stop = low if low < cur else cur - T1_MIN_RISK_ATR * a
     if cur - stop > 3.0 * a:          # 风险距过宽 → 收紧到 3×ATR（买在高位时自然触发）
         stop = cur - 3.0 * a
-    # ★ 全修①附：最小止损距（与美股 auto_plan_us / 做空 NOISE_ATR 同口径）。
-    #   开盘前 5 分钟 low≈cur ⇒ 分母极小 ⇒ R 虚高 ⇒ 假「能买」。
-    from levels import NOISE_ATR
-    _min_risk = NOISE_ATR * a
+    # ★ T+1 最小止损距（2026-11-06）：A 股今天买明天才能卖，隔夜止损必须覆盖
+    #   一个典型日波动 ⇒ 1×ATR。旧版用 NOISE_ATR=0.25×ATR（日内噪声带）⇒ 止损被
+    #   抬到 1.0%~1.4%，而 target 是涨停（+8%）⇒ R 虚高 6~8，属纸面赔率。
+    _min_risk = T1_MIN_RISK_ATR * a
     if cur - stop < _min_risk:
         stop = cur - _min_risk
-    # ★ 真实阻力 = 涨停价（A股硬顶）。不用「近 HIGH_N 分高点」——上涨途中近高≈现价
-    #   ⇒ R 坍缩 ⇒ 误杀（杭氧 002430 10-13 13:30 实例：价26.57、近高≈26.6 ⇒ R0.25 被否）。
-    #   涨停价是天然上限，价格贴着均线往上走时 R 保持稳定，框架才不会被「涨」误杀。
-    target = limit_up_price(pre, code)
+    # ★ 2026-11-06 老罗定：target = **日线结构阻力**，不再用涨停价。
+    #   旧注释的理由（杭氧：「近高≈现价 ⇒ R 坍缩 ⇒ 误杀」）只对「当日近高」成立，
+    #   对「日线多日形成的前高」不成立；而涨停价把 R 变成 ATR 的倒数 ——
+    #   ATR 越大 ⇒ 止损越宽 ⇒ R 越低 ⇒ 强票被判弱、弱票被判强（洪都 vs 焦点实测反向）。
+    #   取不到日线时退化涨停价兜底，保证 target 不丢。
+    target, _tag = _cn_resistance(code, cur, a)
+    if target is None or target <= cur * 1.002:
+        target = limit_up_price(pre, code)
+        _tag = "涨停价·兜底"
     if target is None or target <= cur:
         target = cur + 2.5 * a
+        _tag = "2.5×ATR·兜底"
     return {"entry": round_px(cur), "stop": round_px(stop),
-            "target": round_px(target), "cap": None}
+            "target": round_px(target), "cap": None, "target_src": _tag}
 
 
 # 相对昨收的常见回踩窗口（不是新买法，只作位置标注）
@@ -1457,9 +1535,9 @@ def main(argv=None):
         ap_plan = auto_plan_cn(day["minutes"], args.code, day.get("pre"))
         entry, stop, target, cap = (ap_plan["entry"], ap_plan["stop"],
                                     ap_plan["target"], ap_plan["cap"])
-        plan_src = ("自动计划(无--plan)：entry=现价 %.2f，stop=近%d分低点 %.2f，"
-                    "target=近%d分高点 %.2f" % (entry, AUTO_LOW_N, stop,
-                                                AUTO_HIGH_N, target))
+        plan_src = ("自动计划(无--plan)：entry=现价 %.2f，stop=近%d分低点/≥%g×ATR %.2f，"
+                    "target=%s %.2f" % (entry, AUTO_LOW_N, T1_MIN_RISK_ATR, stop,
+                                        ap_plan.get("target_src") or "日线结构阻力", target))
 
     if entry is None or stop is None:
         print("无法解析 entry/stop（计划文件缺字段且未给 --entry/--stop）")

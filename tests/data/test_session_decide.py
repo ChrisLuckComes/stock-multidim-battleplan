@@ -196,7 +196,9 @@ def test_auto_plan_cn_no_network():
     """自动计划：纯代码推导 entry/stop/target，不依赖 --plan/--entry；离线用分时区间兜底 ATR。"""
     import gates.session_decide as SD
     saved = SD._cn_atr14
+    saved_res = SD._cn_resistance
     SD._cn_atr14 = lambda code: None          # 离线：强制走分时区间兜底
+    SD._cn_resistance = lambda code, cur, a: (None, "")   # 离线：target 退化涨停价
     try:
         # 现价 10.00；近 25 分低 9.70 ⇒ stop=9.70；涨停价=9.75×1.10=10.73 ⇒ target=10.73
         minutes = [
@@ -217,6 +219,7 @@ def test_auto_plan_cn_no_network():
         assert rr >= 1.5, rr
     finally:
         SD._cn_atr14 = saved
+        SD._cn_resistance = saved_res
 
 
 if __name__ == "__main__":
