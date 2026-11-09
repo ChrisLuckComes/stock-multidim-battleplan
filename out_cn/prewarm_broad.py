@@ -27,7 +27,7 @@ if _ROOT not in sys.path:
 
 HDR = {"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn"}
 
-INDICES = ["sh000001", "sz399006", "sh000688"]
+INDICES = ["sh000001", "sz399006", "sh000852", "sh000688"]
 
 
 def _get(url, timeout=15, encoding="utf-8"):

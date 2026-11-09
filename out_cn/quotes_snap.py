@@ -13,7 +13,8 @@ import urllib.request
 
 HDR = {"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn"}
 
-IDX = {"000001": "sh000001", "399006": "sz399006", "000688": "sh000688"}
+IDX = {"000001": "sh000001", "399006": "sz399006", "000852": "sh000852",
+       "000905": "sh000905", "000300": "sh000300", "000688": "sh000688"}
 
 
 def to_sina(code):
