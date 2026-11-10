@@ -285,7 +285,7 @@ def test_market_split():
     assert MP.market_of("688018") == "cn"
     assert MP.market_of("AAPL") == "us"
     assert MP.market_of("usSPY") == "us"
-    assert MP.indices_for("cn") == ["sh000001", "sz399006"]
+    assert MP.indices_for("cn") == ["sh000001", "sz399006", "sh000852"]
     assert MP.indices_for("us") == ["usSPY", "usQQQ"]
 
 
@@ -301,13 +301,34 @@ def test_pulse_for_uses_correct_market(monkeypatch):
 
     monkeypatch.setattr(MP, "index_pulse", fake_index_pulse)
     MP.pulse_for(code="300274")
-    assert [m for _, m in seen] == ["cn", "cn"]
-    assert [i for i, _ in seen] == ["sh000001", "sz399006"]
+    assert [m for _, m in seen] == ["cn", "cn", "cn"]
+    assert [i for i, _ in seen] == ["sh000001", "sz399006", "sh000852"]
 
     seen.clear()
     MP.pulse_for(code="AAPL")
     assert [m for _, m in seen] == ["us", "us"]
     assert [i for i, _ in seen] == ["usSPY", "usQQQ"]
+
+
+def test_cn_indices_include_csi1000_core():
+    """A 股核心观察集必须含中证1000（老罗 2026-11-09 定：比上证/创业板更贴近小票）。"""
+    assert MP.CN_CORE_SMALLCAP == "sh000852"
+    assert MP.CN_CORE_SMALLCAP in MP.indices_for("cn")
+    # 美股口径不受影响（不能把 A 股小盘指数混进美股链）
+    assert MP.CN_CORE_SMALLCAP not in MP.indices_for("us")
+
+
+def test_combine_csi1000_binds_when_smallcap_weak():
+    """上证/创业板都还行、只有小盘转弱时，由中证1000 决定仓位（取更严）。"""
+    sh = {"ok": True, "index": "sh000001", "state": MP.ST_CONFIRMED,
+          "state_cn": MP.STATE_CN[MP.ST_CONFIRMED], "scale": 1.0, "why": ""}
+    cyb = {"ok": True, "index": "sz399006", "state": MP.ST_ATTEMPT,
+           "state_cn": MP.STATE_CN[MP.ST_ATTEMPT], "scale": 0.8, "why": ""}
+    csi = {"ok": True, "index": MP.CN_CORE_SMALLCAP, "state": MP.ST_CORRECTION,
+           "state_cn": MP.STATE_CN[MP.ST_CORRECTION], "scale": 0.4, "why": ""}
+    out = MP._combine([sh, cyb, csi])
+    assert out["scale"] == 0.4
+    assert out["binding_index"] == MP.CN_CORE_SMALLCAP
 
 
 def test_both_markets_same_module():
