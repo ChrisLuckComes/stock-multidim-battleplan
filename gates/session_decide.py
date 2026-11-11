@@ -303,6 +303,7 @@ def plan_from_files(analysis_path, notes_path=None):
         "cap": cap,
         "shares": ov.get("shares") or rec.get("qty"),
         "chase": chase,
+        "atr_extension": a.get("atr_extension"),
         "zone_hi": z.get("primary_hi"),
         "zone_lo": z.get("primary_lo"),
     }
@@ -872,7 +873,8 @@ def chase_risk(minutes, lookback=20, ratio=6.0, gap_min=1.0, dev_max=6.0):
 
 def decide(day, summary, entry, stop, target, cap=None, account=None,
             risk_scale=1.0, quality=None, cap_tol_pct=None, atr=None,
-            pulse=None, pulse_enabled=True, chase=None, zone_hi=None):
+            pulse=None, pulse_enabled=True, chase=None, zone_hi=None,
+            atr_extension=None):
     """核心判定。返回结构化结果，供 CLI 与测试用。
 
     ★ 盘中口径（老罗 2026-10-09 14:26 定调）：
@@ -1090,6 +1092,16 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
 
     tight = (gates or {}).get("tightest")
     stale_tgt = target_is_stale(price, target, atr)
+
+    # ★ ATR 延伸闸（atr_extension · 2026-11-06）：≥7×ATR 高于 MA50 ⇒ 禁开新多。
+    #   价位与延伸倍数必须可见，禁止静默软否决。不是做空信号。
+    _ext = atr_extension if isinstance(atr_extension, dict) else None
+    if _ext and _ext.get("ban_new_long"):
+        out["atr_extension"] = _ext
+        return _reject(_ext.get("ban_reason") or _ext.get("line")
+                       or "延伸过度，满 7 倍 ATR 高于 MA50，禁开/不追")
+    if _ext:
+        out["atr_extension"] = _ext
 
     if price <= stop_eff:
         return _reject("现价已在%s止损下方，不接飞刀。" %
@@ -1535,6 +1547,7 @@ def main(argv=None):
     # 2) 解析 entry/stop/target（--plan < --entry/--stop 显式 < 自动计划）
     plan_src = ""
     chase, zone_hi = None, None          # ★ 全修②：追价授权 / 并列向上档
+    atr_extension = None
     if args.plan:
         p = plan_from_files(args.plan, args.notes)
         entry = args.entry if args.entry is not None else p["entry"]
@@ -1542,6 +1555,7 @@ def main(argv=None):
         target = args.target if args.target is not None else p["target"]
         cap = args.cap if args.cap is not None else p["cap"]
         chase, zone_hi = p.get("chase"), p.get("zone_hi")
+        atr_extension = p.get("atr_extension")
         plan_src = "计划文件 %s" % args.plan
     elif args.entry is not None and args.stop is not None:
         entry, stop, target, cap = args.entry, args.stop, args.target, args.cap
@@ -1587,6 +1601,7 @@ def main(argv=None):
         quality=quality, cap_tol_pct=cap_tol_pct, atr=atr_v,
         pulse_enabled=not args.no_pulse,
         chase=chase, zone_hi=zone_hi,       # ★ 全修②
+        atr_extension=atr_extension,
     )
     if d.get("handoff"):
         try:

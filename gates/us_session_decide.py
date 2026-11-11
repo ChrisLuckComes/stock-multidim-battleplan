@@ -382,6 +382,7 @@ def plan_from_us(plan_path):
             "ride_state": ride,
             "recommend": p.get("recommend"),
             "chase": chase,
+            "atr_extension": p.get("atr_extension"),
             "raw": p}
 
 
@@ -1301,7 +1302,8 @@ def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
               zone_lo=None, zone_hi=None, mode=None, ride_state=None,
               daily_bars=None, channel_expired=False, reaches_deep=None,
               day_low_final=False, structure_plan=None,
-              pulse=None, pulse_enabled=True, chase_auth=None):
+              pulse=None, pulse_enabled=True, chase_auth=None,
+              atr_extension=None):
     """美股核心判定。结构对齐 A股 decide()，去掉涨跌停/主力资金流/整手/昨收+2% 闸。
 
     挂单由 select_us_hang 分浅档 / 深档。现价高于选出的档，不追，盯那一档。
@@ -1416,6 +1418,22 @@ def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
         if out["arm_price"] is not None and price < out["arm_price"]:
             out["reason"] = reason + " 盯 %.2f：%s" % (out["arm_price"], out["arm_note"])
         return out
+
+    # ★ ATR 延伸闸（atr_extension · 2026-11-06）：≥7×ATR 高于 MA50 ⇒ 禁开新多。
+    #   价位与延伸倍数必须可见。不是做空信号；不替代破位/反抽 + RR。
+    _ext = atr_extension if isinstance(atr_extension, dict) else None
+    if _ext is None and daily_bars:
+        try:
+            from gates.atr_extension import assess_bars as _ext_bars
+            _ext = _ext_bars(daily_bars, market="US")
+        except Exception:  # noqa: BLE001
+            _ext = None
+    if _ext and _ext.get("ban_new_long"):
+        out["atr_extension"] = _ext
+        return _reject(_ext.get("ban_reason") or _ext.get("line")
+                       or "延伸过度，满 7 倍 ATR 高于 MA50，禁开/不追")
+    if _ext:
+        out["atr_extension"] = _ext
 
     if price <= stop:
         out["arm_price"] = entry
@@ -1736,7 +1754,8 @@ def main(argv=None):
                   zone_lo=zone_lo, zone_hi=zone_hi, mode=mode,
                   ride_state=ride, structure_plan=structure_plan,
                   pulse_enabled=not args.no_pulse,
-                  chase_auth=(plan or {}).get("chase"))  # ★ 全修②
+                  chase_auth=(plan or {}).get("chase"),  # ★ 全修②
+                  atr_extension=(plan or {}).get("atr_extension"))
     d["plan_src"] = plan_src
     d["intraday_source"] = args.source
     decide_ms = (time.perf_counter() - t1) * 1000.0
