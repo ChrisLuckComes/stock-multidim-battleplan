@@ -255,3 +255,97 @@ def test_constants_match_spec():
     assert BAN_NEW == 7.0
     assert SCALE_6 == 6.0
     assert SCALE_8 == 8.0
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-11 防守修回归：A 股 decide() 曾经只在 --plan 路径接延伸闸，
+# 「显式 --entry/--stop」与「无 --plan 自动计划」两条路径 atr_extension=None
+# 被静默放行、绕过「涨幅过大禁开新多」。下面钉死这两条路径必须兜底自算并拦下。
+# ---------------------------------------------------------------------------
+
+def _bars_stretched(n=80, base=100.0, ramp=30, ramp_to=140.0, start="2026-01-01"):
+    """合成一段缓坡拉升：后 ramp 根从 base 线性爬到 ramp_to，ATR 小、MA50 滞后 ⇒ 高延伸。"""
+    import datetime as dt
+    d0 = dt.date.fromisoformat(start)
+    flat = n - ramp
+    out = []
+    for i in range(n):
+        d = (d0 + dt.timedelta(days=i)).isoformat()
+        c = base if i < flat else base + (ramp_to - base) * (i - flat + 1) / ramp
+        out.append(_bar(d, c, h=c + 0.5, l=c - 0.5, o=c))
+    return out
+
+
+def _day_summary(px=200.0):
+    """喂给 decide 的最小分时结构（走到延伸闸之前不炸）。"""
+    day = {"code": "688999", "name": "测试票", "pre": 190.0,
+           "minutes": [{"t": "09:30", "o": px, "c": px, "v": 1e4, "avg": px - 1.0},
+                       {"t": "09:31", "o": px, "c": px, "v": 1e4, "avg": px - 1.0}]}
+    summary = {"last": {"c": px, "avg": px - 1.0}}
+    return day, summary
+
+
+def test_stretched_bars_really_ban():
+    """前置自检：合成日线的延伸倍数确实 ≥7，后续拦截测试才有意义。"""
+    block = assess_bars(_bars_stretched(), market="ASH")
+    assert block["computable"] is True, block
+    assert block["extension"] >= BAN_NEW, block
+    assert block["ban_new_long"] is True
+
+
+def test_decide_auto_plan_path_fallback_blocks():
+    """无 --plan 自动计划路径：显式 atr_extension=None 但有 daily_bars ⇒ 必被拦。"""
+    from gates import session_decide as sd
+    bars = _bars_stretched()
+    day, summary = _day_summary()
+    r = sd.decide(day, summary, entry=200.0, stop=190.0, target=220.0,
+                  cap=None, daily_bars=bars, atr_extension=None, pulse_enabled=False)
+    assert r.get("atr_extension", {}).get("ban_new_long") is True
+    assert "延伸" in (r.get("reason") or "")
+    assert "禁开" in (r.get("reason") or "")
+
+
+def test_decide_explicit_entry_stop_path_fallback_blocks():
+    """显式 --entry/--stop 路径（原来 100% 绕过）也要被兜底拦下。"""
+    from gates import session_decide as sd
+    bars = _bars_stretched()
+    day, summary = _day_summary()
+    r = sd.decide(day, summary, entry=205.0, stop=195.0, target=225.0,
+                  cap=None, daily_bars=bars, atr_extension=None, pulse_enabled=False)
+    assert r.get("atr_extension", {}).get("ban_new_long") is True
+    assert "延伸" in (r.get("reason") or "")
+
+
+def test_decide_explicit_block_takes_priority_over_bars():
+    """显式传入的 plan 延伸块优先于 daily_bars 自算，避免 --plan 路径被误拦。"""
+    from gates import session_decide as sd
+    ok_block = assess(100, 95, 2)          # 2.5×，放行
+    assert ok_block["ban_new_long"] is False
+    day, summary = _day_summary()
+    r = sd.decide(day, summary, entry=200.0, stop=190.0, target=220.0,
+                  cap=None, daily_bars=_bars_stretched(),  # 自算会 ban
+                  atr_extension=ok_block, pulse_enabled=False)
+    assert r.get("atr_extension", {}).get("ban_new_long") is False
+
+
+def test_decide_below_threshold_allowed_but_visible():
+    """ext<7 ⇒ 放行，但 atr_extension 字段带倍数可见，不再静默漏检。"""
+    from gates import session_decide as sd
+    day, summary = _day_summary()
+    r = sd.decide(day, summary, entry=200.0, stop=190.0, target=220.0,
+                  cap=None, daily_bars=_bars_flat(n=80, px=100.0),  # ext≈0
+                  atr_extension=None, pulse_enabled=False)
+    ext = r.get("atr_extension")
+    assert ext and ext.get("computable") is True
+    assert ext.get("ban_new_long") is False
+    assert "延伸" in (ext.get("line") or "")
+
+
+def test_decide_without_bars_never_false_bans():
+    """日 K 完全取不到（无 daily_bars）⇒ 闸自算缺席，绝不凭空否决。
+    CLI 层另会显式塞入 skip 块让「算不了」可见，不静默放行。"""
+    from gates import session_decide as sd
+    day, summary = _day_summary()
+    r = sd.decide(day, summary, entry=200.0, stop=190.0, target=220.0,
+                  cap=None, daily_bars=None, atr_extension=None, pulse_enabled=False)
+    assert not (r.get("atr_extension") or {}).get("ban_new_long")
