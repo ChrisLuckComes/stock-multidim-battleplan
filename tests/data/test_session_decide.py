@@ -222,6 +222,34 @@ def test_auto_plan_cn_no_network():
         SD._cn_resistance = saved_res
 
 
+def test_cn_resistance_ignores_pre_split_highs():
+    """2026-11-11 敏芯 688286：除权前的不复权高价不得当结构阻力。
+
+    bars_source 给的是**不复权**日线；688286 于 2026-07-02 除权（收 133.33 → 85.77）。
+    旧逻辑「前120日高」取到除权前的 138.07（东财前复权同段仅 98.64），
+    使自动计划 target 虚高 40%、R 从 2.0 变 8.98 —— 纸面赔率、会误放高位追入。
+    修复后应截断到同复权段；窗口不足 120 根 ⇒ 自然走「上方真空」= cur + 2×ATR。
+    """
+    import gates.session_decide as SD
+    import bars_source
+    saved = bars_source.ash_bars
+    old = [{"d": "2026-06-%02d" % (i + 1), "o": 133.0, "c": 133.33,
+            "h": 138.07, "l": 130.0, "v": 1e6} for i in range(43)]
+    new = [{"d": "2026-08-%02d" % (i + 1), "o": 75.0, "c": 75.03,
+            "h": 77.18, "l": 70.0, "v": 1e6} for i in range(87)]
+    bars = old + new + [{"d": "2026-11-11", "o": 73.5, "c": 73.1,
+                         "h": 75.57, "l": 72.0, "v": 1e6}]
+    bars_source.ash_bars = lambda *a, **k: (bars, "fake", [])
+    try:
+        target, label = SD._cn_resistance("688286", 73.67, 7.17)
+        assert target is not None and label
+        assert target < 100, (target, label)   # 除权前 138.07 绝不能成为 target
+        assert abs(target - (73.67 + SD.AUTO_VACUUM_ATR * 7.17)) < 0.02, (target, label)
+        assert "真空" in label, label
+    finally:
+        bars_source.ash_bars = saved
+
+
 if __name__ == "__main__":
     test_dip_zone_and_cap()
     test_buy_in_0_2_window()
@@ -231,4 +259,5 @@ if __name__ == "__main__":
     test_limit_down_board_is_rejected()
     test_missing_target_blocks_entry()
     test_auto_plan_cn_no_network()
-    print("ok 8")
+    test_cn_resistance_ignores_pre_split_highs()
+    print("ok 9")

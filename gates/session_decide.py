@@ -102,6 +102,23 @@ def _cn_resistance(code, cur, a):
         # ★ 末根可能是今日未收盘 bar —— 结构阻力只认已完成交易日，否则会拿「今天的
         #   最高价」当阻力，等于自己挡自己（与「收盘价确认」同源错误）。
         prev = bars[:-1] if len(bars) > 15 else bars
+        # ★ 跨复权段截断（2026-11-11，敏芯 688286 实测）：bars_source 给的是**不复权**
+        #   日线，除权日之前的高价与当前价不是同一基准。688286 于 2026-07-02 除权
+        #   （收 133.33 → 85.77），不截断时「前120日高」取到除权前的 138.07，而同段
+        #   前复权阻力只有 98.64 ⇒ target 虚高 40%、R 从 2.0 虚高到 8.98（纸面赔率）。
+        #   从后往前找最近一次单日 >25% 跳变（A 股常规限幅 20%，跳变只可能来自
+        #   除权/拆合股；北交所 30% 等例外误判的后果只是走真空分支，属保守侧），
+        #   只保留跳变之后的同基准 bar；窗口不够则按既有逻辑自然落到「上方真空」。
+        cut = 0
+        for i in range(len(prev) - 1, 0, -1):
+            c0, c1 = float(prev[i - 1]["c"]), float(prev[i]["c"])
+            if c0 > 0 and (c1 / c0 > 1.25 or c1 / c0 < 0.80):
+                cut = i
+                break
+        if cut:
+            prev = prev[cut:]
+        if len(prev) < 15:
+            return None, ""
         highs = [float(b["h"]) for b in prev]
         floor = cur + T1_MIN_RISK_ATR * a
         cands = []
