@@ -567,6 +567,7 @@ def build_plan_rows(a):
     out = [
         ("结构止损", "<b>%s</b>（%s · 收盘破）" % (num(z.get("struct_stop")), esc(z.get("struct_anchor")))),
         ("赢家持有", esc(_hold_sentence(a))),
+        ("ATR延伸", esc(_ext_sentence(a))),
         ("硬止损", "<b>%s</b>（%s · 盘中触价）" % (num(z.get("hard_stop")), esc(z.get("hard_anchor")))),
         # ★ 2026-10-13 老罗定：T1 短均线多头排列的主卖点是「动态」的 —— 三短均线多头排列
         #   一打乱（MA5<MA7 或 MA7<MA10）即卖出，硬止损（MA20/MA60 托底位）仅作兜底层。
@@ -934,6 +935,18 @@ def build_oneline(a, n):
                     "预案层仍 %s（wait 原因见结论来源）。%s"
                     % (num(_ia.get("entry")), num(_ia.get("stop")),
                        num(_ia.get("est_loss"), 0), esc(p.get("mode")), _src_txt))
+        _ext = a.get("atr_extension") if isinstance(a.get("atr_extension"), dict) else {}
+        if _ext.get("ban_new_long"):
+            _bl = ((_ext.get("banned_levels") or {}).get("rec")
+                   or (_ext.get("banned_levels") or {}).get("rec_up") or {})
+            _px = ""
+            if _bl.get("entry") is not None:
+                _px = ("原可挂档仍可见：入场 %s / 止损 %s%s。"
+                       % (num(_bl.get("entry")), num(_bl.get("stop")),
+                          (" / R %s" % num(_bl.get("r1"))) if _bl.get("r1") is not None else ""))
+            return ("结论：<b>不做（延伸过度）</b> —— %s %s%s"
+                    % (esc(_ext.get("ban_reason") or _ext.get("line") or "满 7 倍 ATR 高于 MA50，禁开/不追"),
+                       _px, _src_txt))
         return ("结论：<b>不做</b> —— 引擎未给出合格档（mode=%s · recommend=%s），"
                 "不凭形态硬凑一个价。%s"
                 % (esc(p.get("mode")), p.get("recommend"), _src_txt))
@@ -963,6 +976,21 @@ def _hold_sentence(a):
         return block["line"]
     return ("赢家持有（hold_winners · 2026-10-27）：结构未破不要轻易卖出这一腿。"
             "收盘破才离场。")
+
+
+def _ext_sentence(a):
+    """ATR 延伸一行。旧 analysis 没有该键时按 struct/meta 现算。"""
+    block = a.get("atr_extension") if isinstance(a.get("atr_extension"), dict) else None
+    if block and block.get("line"):
+        return block["line"]
+    try:
+        from gates.atr_extension import from_analysis
+        block = from_analysis(a)
+    except Exception:                           # noqa: BLE001
+        block = None
+    if isinstance(block, dict) and block.get("line"):
+        return block["line"]
+    return "ATR 延伸（atr_extension · 2026-11-06）：未知，不算延伸倍数。"
 
 
 def build_summary(a, n):
@@ -1001,6 +1029,7 @@ def build_summary(a, n):
         ("止损", "结构 %s（收盘破） / 硬 %s（盘中）"
          % (num(z.get("struct_stop")), num(z.get("hard_stop")))),
         ("赢家持有", esc(_hold_sentence(a))),
+        ("ATR延伸", esc(_ext_sentence(a))),
         ("目标", "t1 %s / 远端 %s / ATH %s"
          % (num(a["targets"].get("t1")), num(a["targets"].get("wall_far")),
             num(a["targets"].get("ath")))),

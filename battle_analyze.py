@@ -2033,6 +2033,27 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
             "hard_gate": False,
             "line": "赢家持有（hold_winners · 2026-10-27）：未知（%s）" % e,
         }
+    # ★ ATR 延伸（atr_extension，2026-11-06）：A股/美股多头共用。
+    #   extension=(已完成日线收盘−MA50)/ATR14(Wilder)。≥7 禁开新多（价位仍可见）；
+    #   持仓 6/7/8 分级减仓留 runner。不是做空信号；不收紧结构止损。
+    try:
+        from gates.atr_extension import assess_bars as _ext_bars
+        from gates.atr_extension import apply_new_long_ban as _ext_ban
+        _ext = _ext_bars(bars, market="US" if is_us else "ASH")
+        out["atr_extension"] = _ext
+        _ext_ban(out, _ext, notes_all=notes_all)
+    except Exception as e:                      # noqa: BLE001
+        out["atr_extension"] = {
+            "rule": "atr_extension",
+            "date": "2026-11-06",
+            "computable": False,
+            "tier": "skip",
+            "ban_new_long": False,
+            "allow_new_long": None,
+            "is_short_signal": False,
+            "line": "ATR 延伸（atr_extension · 2026-11-06）：未知（%s）" % e,
+            "skip_reason": "%s" % e,
+        }
     return out
 
 
@@ -2183,6 +2204,9 @@ def summarize(r):
             _hw = None
     if isinstance(_hw, dict) and _hw.get("line"):
         L.append(" " + _hw["line"])
+    _ext = r.get("atr_extension")
+    if isinstance(_ext, dict) and _ext.get("line"):
+        L.append(" " + _ext["line"])
     # ★ 2026-09-26：两条**成交口径**以前只活在引擎里、人读输出一行都不打 ——
     #   老罗读不到就等于没落地（回放实测这两条各多买中一笔：中科飞测 06-15 +83.0%、
     #   兆易创新 04-29 +74.1%，且无副作用）。这里与报告/探针保持同一份文案来源。

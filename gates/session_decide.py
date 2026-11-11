@@ -68,16 +68,33 @@ AUTO_RESIST_DAYS = (10, 20, 60, 120)
 AUTO_VACUUM_ATR = 2.0
 
 
-def _cn_atr14(code):
+def _cn_daily_bars(code, n=60):
+    """A 股日 K 唯一取数入口（bars_source.ash_bars）；取不到返回 []。
+
+    ★ 2026-11-11 防守修：ATR 与 ATR 延伸闸共用同一份日 K。延伸闸靠它在
+    显式 --entry/--stop、无 --plan 自动计划两条路径兜底自算 —— 绝不允许
+    atr_extension=None 静默绕过「涨幅过大禁开新多」。延迟导入避常路径开销。
+    """
+    try:
+        import bars_source as BS
+        prefix = "sh" if str(code)[0] in "69" else "sz"
+        bars, _src, _notes = BS.ash_bars(prefix, code, n=n)
+        return list(bars or [])
+    except Exception:
+        return []
+
+
+def _cn_atr14(code, bars=None):
     """尽力取 A 股日 ATR14（bars_source.ash_bars → rule123.atr14）；
-    取不到返回 None，由 auto_plan_cn 用分时区间兜底。延迟导入，避免常路径开销。"""
+    取不到返回 None，由 auto_plan_cn 用分时区间兜底。延迟导入，避免常路径开销。
+
+    bars: 可选，复用调用方已取的日 K，避免同一票盘中重复请求（延伸闸同用一份）。
+    """
     try:
         import rule123 as R                       # noqa: F401
-        import bars_source as BS                 # noqa: F401
-        prefix = "sh" if str(code)[0] in "69" else "sz"
-        bars, _src, _notes = BS.ash_bars(prefix, code, n=60)
-        if bars and len(bars) >= 15:
-            return float(R.atr14(bars))
+        bb = bars if bars is not None else _cn_daily_bars(code)
+        if bb and len(bb) >= 15:
+            return float(R.atr14(bb))
     except Exception:
         pass
     return None
@@ -135,7 +152,7 @@ def _cn_resistance(code, cur, a):
         return None, ""
 
 
-def auto_plan_cn(minutes, code, pre):
+def auto_plan_cn(minutes, code, pre, atr=None):
     """无 --plan / 无 --entry 时的自动计划：entry=现价，stop=近 AUTO_LOW_N 分低点，
     target=**日线结构阻力**（前 10/20/60/120 日高中距现价 ≥1×ATR 的最近一档；
     创 120 日新高时退化为 现价 + 2×ATR）。
@@ -164,7 +181,8 @@ def auto_plan_cn(minutes, code, pre):
     high_n = max(10, min(AUTO_HIGH_N, n))
     low = min(float(m["l"]) for m in minutes[-low_n:])
     high = max(float(m["h"]) for m in minutes[-high_n:])
-    atr = _cn_atr14(code)
+    if atr is None:                      # ★ 2026-11-11：复用 CLI 已取的 ATR，避免重复请求
+        atr = _cn_atr14(code)
     a = atr if atr else max(0.01, (high - low) / 2.0)
     # ★ 2026-11-06：low 贴住现价时过去用 cur−1.5×ATR，与下面 1×ATR 下限不连续
     #   ⇒ 同一只票「近25分低点=现价」的那几分钟给 −6.2%，下一分钟给 −4.2%，
@@ -303,6 +321,7 @@ def plan_from_files(analysis_path, notes_path=None):
         "cap": cap,
         "shares": ov.get("shares") or rec.get("qty"),
         "chase": chase,
+        "atr_extension": a.get("atr_extension"),
         "zone_hi": z.get("primary_hi"),
         "zone_lo": z.get("primary_lo"),
     }
@@ -872,7 +891,8 @@ def chase_risk(minutes, lookback=20, ratio=6.0, gap_min=1.0, dev_max=6.0):
 
 def decide(day, summary, entry, stop, target, cap=None, account=None,
             risk_scale=1.0, quality=None, cap_tol_pct=None, atr=None,
-            pulse=None, pulse_enabled=True, chase=None, zone_hi=None):
+            pulse=None, pulse_enabled=True, chase=None, zone_hi=None,
+            daily_bars=None, atr_extension=None):
     """核心判定。返回结构化结果，供 CLI 与测试用。
 
     ★ 盘中口径（老罗 2026-10-09 14:26 定调）：
@@ -1091,6 +1111,26 @@ def decide(day, summary, entry, stop, target, cap=None, account=None,
     tight = (gates or {}).get("tightest")
     stale_tgt = target_is_stale(price, target, atr)
 
+    # ★ ATR 延伸闸（atr_extension · 2026-11-06）：≥7×ATR 高于 MA50 ⇒ 禁开新多。
+    #   价位与延伸倍数必须可见，禁止静默软否决。不是做空信号。
+    #   ★ 2026-11-11 防守修（对齐美股 decide_us）：调用方没算延伸时，有日 K 就兜底自算，
+    #     堵住「显式 --entry/--stop」与「无 --plan 自动计划」两条路径 atr_extension=None
+    #     被静默放行、绕过禁开的缺口。定位只禁开新多（≥7×），不改止损、不接管持仓
+    #     分级减仓（那是持仓侧独立规则）、不是做空信号。
+    _ext = atr_extension if isinstance(atr_extension, dict) else None
+    if _ext is None and daily_bars:
+        try:
+            from gates.atr_extension import assess_bars as _ext_bars
+            _ext = _ext_bars(daily_bars, market="ASH")
+        except Exception:  # noqa: BLE001 —— 闸自算失败不升级成硬错误，但见下方可见性
+            _ext = None
+    if _ext and _ext.get("ban_new_long"):
+        out["atr_extension"] = _ext
+        return _reject(_ext.get("ban_reason") or _ext.get("line")
+                       or "延伸过度，满 7 倍 ATR 高于 MA50，禁开/不追")
+    if _ext:
+        out["atr_extension"] = _ext
+
     if price <= stop_eff:
         return _reject("现价已在%s止损下方，不接飞刀。" %
                        ("日内结构" if dyn["applied"] else ""))
@@ -1248,6 +1288,10 @@ def render(d):
     lines.append("分时  %s  %s" % (d["tape"]["label"], d["tape"]["text"]))
     lines.append("窗口  全天已出现 %d 根落在昨收 0%%～2%%" % d["dip_minutes"])
     lines.append("结论  %s。%s" % (d["action"], d["reason"]))
+    if d.get("atr_extension"):
+        _xb = d["atr_extension"]
+        # ★ 2026-11-11：延伸闸状态必须可见（算到倍数 / 算不了），禁止静默漏检。
+        lines.append("延伸  %s" % (_xb.get("line") or "状态未知"))
     if d.get("pulse_state_cn"):
         lines.append("大盘  %s（脉搏系数×%.2f·只缩放仓位不否决开仓）"
                      % (d["pulse_state_cn"], d.get("pulse_scale") or 1.0))
@@ -1535,6 +1579,11 @@ def main(argv=None):
     # 2) 解析 entry/stop/target（--plan < --entry/--stop 显式 < 自动计划）
     plan_src = ""
     chase, zone_hi = None, None          # ★ 全修②：追价授权 / 并列向上档
+    atr_extension = None
+    # ★ 2026-11-11 防守：日 K 一次取数，ATR 与 ATR 延伸闸共用同一份，
+    #   不增加盘中网络请求；延伸闸靠它在无 --plan 路径兜底自算、堵住禁开绕过。
+    daily_bars = _cn_daily_bars(args.code)
+    atr_v = _cn_atr14(args.code, bars=daily_bars)
     if args.plan:
         p = plan_from_files(args.plan, args.notes)
         entry = args.entry if args.entry is not None else p["entry"]
@@ -1542,6 +1591,7 @@ def main(argv=None):
         target = args.target if args.target is not None else p["target"]
         cap = args.cap if args.cap is not None else p["cap"]
         chase, zone_hi = p.get("chase"), p.get("zone_hi")
+        atr_extension = p.get("atr_extension")
         plan_src = "计划文件 %s" % args.plan
     elif args.entry is not None and args.stop is not None:
         entry, stop, target, cap = args.entry, args.stop, args.target, args.cap
@@ -1549,7 +1599,7 @@ def main(argv=None):
     else:
         # 纯代码自动计划（对齐美股 us_session_decide）：无 --plan / 无 --entry 时
         # entry=现价，stop=近 N 分低点，target=近 N 分高点，cap 留空交 decide 算。
-        ap_plan = auto_plan_cn(day["minutes"], args.code, day.get("pre"))
+        ap_plan = auto_plan_cn(day["minutes"], args.code, day.get("pre"), atr=atr_v)
         entry, stop, target, cap = (ap_plan["entry"], ap_plan["stop"],
                                     ap_plan["target"], ap_plan["cap"])
         plan_src = ("自动计划(无--plan)：entry=现价 %.2f，stop=近%d分低点/≥%g×ATR %.2f，"
@@ -1580,13 +1630,22 @@ def main(argv=None):
         except Exception as e:                      # 质量闸不得因自身故障挡住决策
             quality = {"level": "unknown", "scale": 1.0,
                        "blocks": [], "notes": ["质量闸异常：%s" % e], "facts": {}}
-    atr_v = _cn_atr14(args.code)
+    if atr_extension is None and not daily_bars:
+        # ★ 2026-11-11 防守：日 K 取不到时也让「延伸闸算不了」可见，
+        #   绝不静默放行（「禁止静默软否决」的镜像：禁止静默漏检）。
+        try:
+            from gates.atr_extension import assess as _ext_assess
+            atr_extension = _ext_assess(None, None, None, skip_reason="无日线（取数失败）")
+        except Exception:
+            atr_extension = None
     d = decide(
         day, summary, entry, stop, target,
         cap=cap, account=args.account, risk_scale=args.risk_scale,
         quality=quality, cap_tol_pct=cap_tol_pct, atr=atr_v,
         pulse_enabled=not args.no_pulse,
         chase=chase, zone_hi=zone_hi,       # ★ 全修②
+        daily_bars=daily_bars,              # ★ 延伸闸兜底自算数据源（2026-11-11）
+        atr_extension=atr_extension,
     )
     if d.get("handoff"):
         try:

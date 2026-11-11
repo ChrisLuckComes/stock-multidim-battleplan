@@ -153,6 +153,12 @@ def analyze_one(item):
     r["recommend"] = bool(plan.get("recommend"))
     r["verdict"] = plan.get("verdict")
     r["note"] = plan.get("note")
+    try:
+        from gates.atr_extension import annotate_row as _ext_ann
+        _ext_ann(r, bars2, market="ASH")
+    except Exception as _e:  # noqa: BLE001
+        r["atr_extension"] = {"computable": False, "skip_reason": "%s" % _e,
+                              "is_short_signal": False}
     r["priority"] = plan.get("priority")
     r["buy_type"] = z.get("type")
     r["zone_lo"] = z.get("primary_lo")
@@ -436,6 +442,12 @@ def render(cfg, rows, senti, idx, src_stat=None, snap_info=None):
             L.append(f"      研判：{r['verdict']}")
         if r.get("note"):
             L.append(f"      依据：{r['note']}")
+        if r.get("extension_ban_line"):
+            L.append(f"      ⛔ ATR延伸：{r['extension_ban_line']}")
+        elif (r.get("atr_extension") or {}).get("line") and (r.get("atr_extension") or {}).get("computable"):
+            _xl = r["atr_extension"]["line"]
+            if _xl and _xl not in (r.get("note") or ""):
+                L.append(f"      ATR延伸：{_xl}")
         if r.get("buy_type"):
             L.append(f"      买区：{fmt(r.get('zone_lo'))} ~ {fmt(r.get('zone_hi'))}"
                      f"（{r['buy_type']}）"
