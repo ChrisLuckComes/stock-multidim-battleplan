@@ -44,6 +44,7 @@ IDX_CAT = "指数"
 
 sys.path.insert(0, LIB)
 import library_pos as LP                                    # noqa: E402
+from gates.stopout_reclaim import should_keep_watching      # noqa: E402  §1j 防物理删除拦截
 
 
 # ────────────────────────── 解析 ──────────────────────────
@@ -91,6 +92,24 @@ def resolve(tok, recs):
 
 def tag(rec):
     return f"{code_of(rec)} {name_of(rec)[:6]}"
+
+
+def removal_verdict(rec):
+    """单条记录的删除裁决（纯函数，便于回归；main 里的拦截分支调用它）。
+
+    返回 None = 可删；字符串 = 拦截理由。优先级：温度计 > 有持仓 > §1j 有逻辑未证伪。
+    """
+    cat = rec.get("类别") or ""
+    qty = float(rec.get("持仓数量") or 0)
+    if cat == TEMP_CAT:
+        return "情绪温度计，破位本身就是信号，删了等于拆仪表盘"
+    if qty > 0:
+        return f"有持仓 {qty:g} 股，删了会让占用统计失真"
+    if should_keep_watching(rec):
+        st = str(rec.get("状态") or "")
+        return (f"§1j 止损出局≠出池：状态「{st}」入选逻辑未证伪，"
+                "须保留观察扫跨日收复；逻辑证伪才允许删（--force 可破）")
+    return None
 
 
 # ────────────────────────── 主流程 ──────────────────────────
@@ -154,10 +173,11 @@ def main():
             cat = rec.get("类别") or ""
             qty = float(rec.get("持仓数量") or 0)
             item = {"rec": rec, "cat": cat, "qty": qty, "tok": tok}
-            if cat == TEMP_CAT:
-                blocked.append((item, "情绪温度计，破位本身就是信号，删了等于拆仪表盘"))
-            elif qty > 0:
-                blocked.append((item, f"有持仓 {qty:g} 股，删了会让占用统计失真"))
+            # §1j 2026-11-11：「破位下行中」是当日快照、不是逻辑证伪 ——
+            # 恒玄 10-31 正是被 scr_chip 坑底判破位清退，4 个交易日后 11-04 放量收复。
+            why = removal_verdict(rec)
+            if why:
+                blocked.append((item, why))
             else:
                 todo.append(item)
 

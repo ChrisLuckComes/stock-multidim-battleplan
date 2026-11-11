@@ -17,6 +17,9 @@ sys.path.insert(0, os.path.join(ROOT, "gates"))
 from gates.stopout_reclaim import (  # noqa: E402
     has_live_logic, should_keep_watching, reclaim_signal, reclaim_plan_outline,
     MIN_GAP_BARS, MIN_VOL_RATIO,
+    STATUS_PENDING, STATUS_RECLAIMED, STATUS_REENTERED, STATUS_INVALID, VALID_STATUS,
+    CHASE_VS_SOLD_PCT, normalize_status, build_reclaim_state, classify_reclaim,
+    _bars_since,
 )
 
 SOLD_PRICE = 116.33
@@ -185,3 +188,107 @@ def test_missing_sold_date_falls_back_to_first_later_bar():
 def test_empty_bars_returns_none():
     assert reclaim_signal([], SOLD_PRICE, SOLD_DATE) is None
     assert reclaim_signal(BARS, 0, SOLD_DATE) is None
+
+
+# ═══════════════ ⑥ 观察池状态机（方案 A · 2026-11-11）═══════════════
+
+def test_status_enum_is_closed_four_states():
+    """状态枚举钉死四态，不许自由发挥第五态。"""
+    assert VALID_STATUS == (STATUS_PENDING, STATUS_RECLAIMED,
+                            STATUS_REENTERED, STATUS_INVALID)
+
+
+def test_build_reclaim_state_pins_sold_price_not_cost():
+    """参照物钉死卖出价；成本只留档在 cost 字段、不参与判定。"""
+    st = build_reclaim_state(SOLD_PRICE, SOLD_DATE, cost=COST, qty=200)
+    assert st["sold_price"] == SOLD_PRICE and st["cost"] == COST
+    assert st["status"] == STATUS_PENDING and st["qty"] == 200
+    sig = reclaim_signal(BARS, st["sold_price"], st["sold_date"])
+    st2 = build_reclaim_state(SOLD_PRICE, SOLD_DATE, status=STATUS_RECLAIMED, signal=sig)
+    assert st2["signal_date"] == "2026-11-04"
+    assert abs(st2["signal_above_sold_pct"] - 3.66) < 0.02
+
+
+def test_build_reclaim_state_rejects_bad_input():
+    import pytest
+    with pytest.raises(ValueError):
+        build_reclaim_state(0, SOLD_DATE)              # 无卖出价
+    with pytest.raises(ValueError):
+        build_reclaim_state(SOLD_PRICE, SOLD_DATE, status="观察中")  # 第五态
+
+
+def test_normalize_status_legacy_empty_logic_defaults_pending():
+    """老池票无 reclaim 块：qty=0 + 有活逻辑 ⇒ 默认待收复，机制上线即覆盖存量。"""
+    assert normalize_status({"状态": "空仓观察", "持仓数量": 0,
+                             "板块主题": "阿里AI眼镜 BES2800 供货"}) == STATUS_PENDING
+    assert normalize_status({"持仓数量": 200, "板块主题": "某逻辑"}) == ""   # 有持仓不算跟踪
+    assert normalize_status({"持仓数量": 0}) == STATUS_INVALID                 # 无逻辑 ⇒ 允许删
+
+
+def test_normalize_status_respects_explicit_block():
+    rb = {"status": STATUS_RECLAIMED, "sold_price": 116.33, "sold_date": SOLD_DATE}
+    assert normalize_status({"持仓数量": 0, "reclaim": rb}) == STATUS_RECLAIMED
+
+
+def test_classify_fresh_reclaim_on_signal_day():
+    """信号日 == 扫描基准日 ⇒ 当日新收复，给二次入场口径。"""
+    st = build_reclaim_state(SOLD_PRICE, SOLD_DATE)
+    out = classify_reclaim(st, BARS, asof="2026-11-04")
+    assert out["state"] == "fresh"
+    assert "当日新收复" in out["action"] and "仓位控风险" in out["action"]
+    assert out["sig"]["date"] == "2026-11-04"
+
+
+def test_classify_historical_reclaim_never_reported_as_new():
+    """★ 核心反例：视涯/恒玄历史信号日（11-02/11-04）绝不能被报成 11-11 的新机会。"""
+    st = build_reclaim_state(SOLD_PRICE, SOLD_DATE, signal=reclaim_signal(BARS, SOLD_PRICE, SOLD_DATE))
+    out = classify_reclaim(st, BARS, asof="2026-11-10")
+    assert out["state"] == "historical"
+    assert "历史已收复" in out["action"] and "非今日新信号" in out["action"]
+    assert "当日新收复" not in out["action"]
+
+
+def test_classify_historical_far_above_sold_warns_chase():
+    """现价较卖出价高出 >20% ⇒ 加「勿追高」软标注（不改 recommend、不作否决闸）。"""
+    st = build_reclaim_state(SOLD_PRICE, SOLD_DATE, signal=reclaim_signal(BARS, SOLD_PRICE, SOLD_DATE))
+    # 11-10 收 135.91 较卖价 116.33 = +16.8%（未过 20%）；造一根 +25% 的 bar
+    bars = [dict(b) for b in BARS]
+    bars[-1] = {**bars[-1], "d": "2026-11-10", "c": 145.41}
+    out = classify_reclaim(st, bars, asof="2026-11-10")
+    assert out["chg_vs_sold_pct"] == 25.0
+    assert "勿追高" in out["action"]
+    assert CHASE_VS_SOLD_PCT == 20.0
+
+
+def test_classify_pending_reports_gap_and_gate():
+    """尚未收复：报距卖出价还差多少 + 距出局几根 + 起算门槛。"""
+    st = build_reclaim_state(140.0, SOLD_DATE)          # 卖价 140，末根 135.91 未站上
+    out = classify_reclaim(st, BARS, asof="2026-11-10")
+    assert out["state"] == "pending"
+    assert "距卖出价" in out["action"] and "收盘站上" in out["action"]
+
+
+def test_classify_pending_respects_min_gap():
+    """出局次日就算放量收复，pending 提示也要写「再过 N 根起才可能命中」。"""
+    st = build_reclaim_state(SOLD_PRICE, "2026-11-03")  # 出局 11-03
+    short = [b for b in BARS if b["d"] <= "2026-11-04"]  # 隔 1 根
+    out = classify_reclaim(st, short, asof="2026-11-04")
+    assert out["state"] == "pending" or out["state"] == "fresh"
+    assert _bars_since(short, "2026-11-03") == 1
+
+
+def test_classify_skips_reentered_invalid_and_missing():
+    """已重入（按新持仓管）/ 逻辑证伪（已移出）/ 数据缺失 ⇒ skip，不产提醒。"""
+    assert classify_reclaim({"status": STATUS_REENTERED}, BARS, "2026-11-10")["state"] == "skip"
+    assert classify_reclaim({"status": STATUS_INVALID}, BARS, "2026-11-10")["state"] == "skip"
+    assert classify_reclaim({"status": STATUS_PENDING, "sold_price": 0}, BARS, "2026-11-10")["state"] == "skip"
+    assert classify_reclaim({"status": STATUS_PENDING, "sold_price": 116.33}, [], "2026-11-10")["state"] == "skip"
+
+
+def test_classify_reclaimed_state_still_reports_history():
+    """已收复态（视涯/恒玄）仍产历史回顾，不会因状态推进就消失。"""
+    st = build_reclaim_state(SOLD_PRICE, SOLD_DATE, status=STATUS_RECLAIMED,
+                             signal=reclaim_signal(BARS, SOLD_PRICE, SOLD_DATE))
+    out = classify_reclaim(st, BARS, asof="2026-11-10")
+    assert out["state"] == "historical"
+    assert "历史已收复" in out["action"]
