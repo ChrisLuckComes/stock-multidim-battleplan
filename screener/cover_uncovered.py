@@ -124,6 +124,9 @@ def apply_map(mapping, make_new=False):
     for k in m:
         if not k.startswith("_"):
             m[k] = sorted(existing[k])
+    # 新增板块也要写回（否则只更新了内存 existing，落盘时丢失）
+    for sec in new_secs:
+        m[sec] = sorted(existing[sec])
     m["_updated"] = __import__("datetime").date.today().isoformat()
     json.dump(m, open(SECTOR_MAP, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
     return added, new_secs
