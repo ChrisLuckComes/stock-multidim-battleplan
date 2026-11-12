@@ -49,6 +49,8 @@
 返回码：0 正常；2 = 数据不可用。
 """
 import argparse
+from datetime import datetime
+from zoneinfo import ZoneInfo
 import json
 import os
 import sys
@@ -192,7 +194,8 @@ def _get_account_risk(a):
         return float(a.account or 5000), float(a.risk or 1.5)
 
 
-def plan_levels(bars, anchor, stop_atr=STRUCT_STOP_ATR, entry=None, stop=None, lv=None):
+def plan_levels(bars, anchor, stop_atr=STRUCT_STOP_ATR, entry=None, stop=None, lv=None,
+                execution_context=None):
     """裸K结构位 → 空点/止损/目标。**口径唯一真源**：main 与回测共用。
 
     ⚑ anchor 必须是「决策当时已知的价格」（复盘/回测恒填昨收），否则会把当天已走完
@@ -201,8 +204,9 @@ def plan_levels(bars, anchor, stop_atr=STRUCT_STOP_ATR, entry=None, stop=None, l
     返回 dict：
       atr/lows/highs  结构位原始列表
       t1/t2           目标 = 下方最近两个摆动低点（S1/S2）
-      s_broken/r1     刚跌破的支撑(=止损参考) / 上方最近阻力
-      broken          已跌破结构支撑 = 破位模式（否则为反抽模式）
+      s_broken/r1     上方旧支撑(=止损参考) / 上方最近阻力
+      broken          低于旧支撑的日线状态，绝不是当次触发
+      execution       最终执行校验；缺分钟证据/目标时域评估则不可挂
       stop            最终止损（已过最小距离兜底）
       stop_raw        纯结构止损（未兜底）
       fallback        结构锚落在入场价下方 ⇒ 已改用「入场价 + stop_atr×ATR」
@@ -239,9 +243,36 @@ def plan_levels(bars, anchor, stop_atr=STRUCT_STOP_ATR, entry=None, stop=None, l
     #   MU 1550）是无效档，兜底会把它错判成有效 —— 必须保留无效。
     if entry is not None and st > entry:
         st = max(st, entry + NOISE_ATR * atr)
+    # Compatibility: keep historical structural math for backtests. Execution
+    # is a separate fail-closed contract; callers MUST NOT infer a trigger from broken.
+    from short_execution import finalize
+    evidence = execution_context or {}
+    inputs = {}
+    for kind, e in (("break", anchor), ("bounce", s_broken if broken else r1)):
+        payload = dict(evidence.get(kind) or {})
+        # Explicitly assessed trade objectives may differ from nearest swing
+        # references. Do not force a nearby obstacle to be the exit target.
+        assessed = payload.get("targets") or {}
+        objective1 = (assessed.get("target1") or {}).get("price", t1)
+        objective2 = (assessed.get("target2") or {}).get("price", t2)
+        prints = payload.get("observations") or []
+        actual_entry = prints[-1].get("price") if prints else e
+        from short_execution import positive
+        actual_entry = actual_entry if positive(actual_entry) else e
+        payload.update(entry=actual_entry,
+                       stop=max(actual_entry + stop_atr * atr, actual_entry + NOISE_ATR * atr),
+                       target1=objective1, target2=objective2, side="short", min_rr=MIN_RR, atr=atr)
+        payload.setdefault("obstacles", [{"price": px, "source": "daily_swing", "date": bars[index]["d"]}
+                                          for index, px in lows if positive(objective1) and objective1 < px < actual_entry])
+        inputs[kind] = payload
+    execution = finalize([dict(symbol="underlying", inputs=inputs)])
     return dict(lv=lv, atr=atr, lows=lows, highs=highs, t1=t1, t2=t2,
                 s_broken=s_broken, r1=r1, broken=broken,
-                stop=st, stop_raw=struct_stop, fallback=fallback)
+                stop=st, stop_raw=struct_stop, fallback=fallback,
+                target_origin={"t1": "swing" if sup_below else "synthetic_reference_only",
+                               "t2": "swing" if len(sup_below) > 1 else "synthetic_reference_only"},
+                execution=execution, can_hang=execution["can_hang"],
+                recommend=execution["recommend"])
 
 
 def main():
@@ -294,6 +325,8 @@ def main():
     S_broken, R1, broken = _p["s_broken"], _p["r1"], _p["broken"]
     stop, _fallback = _p["stop"], _p["fallback"]
     t1_lbl, t2_lbl = "S1", "S2"
+    if _p["target_origin"]["t1"]!="swing" or _p["target_origin"]["t2"]!="swing":
+        print("目标缺少对应摆动点时的百分比兜底仅数学参考，不是已存在结构目标；不可用于执行准入。")
     account, risk_pct = _get_account_risk(a)
 
     print("=" * 64)
@@ -306,7 +339,7 @@ def main():
     #   ⑤ 顶部形态 / T0头肩顶 / 大背景 / 多空转换地图 = **旁证，默认收成一行**，
     #      表里也可能写出入场/RR，⚠ **别当成主空点**；用 --full 展开。
     print("【只看这三块】① 类型(破位/反抽) → ② 空点候选(入场/止损/目标/RR) → ③ RR临界(够不够1.5)"
-          "｜ETF价=落地价｜形态·T0·大背景=旁证(默认收起, --full 展开)")
+          "｜ETF价仅参考映射，非落地/成交价｜形态·T0·大背景=旁证(默认收起, --full 展开)")
     # ★ 2026-10-22：按时段标签现价（夜盘/盘前/盘后/盘中），禁止再写「实时/盘前」一把梭
     if not isinstance(meta, dict):
         meta = {}
@@ -340,12 +373,13 @@ def main():
     print()
     # 模式判定（裸K结构位口径）
     if broken:
-        _mode = "【破位结构空】已跌破结构支撑 S_broken，目标看下一结构支撑；禁闭眼追跌，需确认"
+        _mode = "【旧支撑下方状态】不等于当次破位；候选需新鲜向下穿越/反抽失败确认"
     else:
         _mode = "【反抽结构位空】等反抽至阻力(R1)/破位区不过空才空，禁止开盘追跌"
     # ⚑ 纯裸K：不接受任何「指标否决」。RSI 超卖在趋势下跌中会钝化（一直超卖一直跌），
     #   不构成禁空理由；MA20 滞后且不属裸K体系，也不作趋势过滤——模式只看结构是否破位。
     print(_mode)
+    print("  执行状态：待确认；本CLI仅有日线/单点报价，不提供可挂建议。")
     if lv.get("rsi14") is not None:
         _st, _note = rsi_stance(lv["rsi14"])
         print(f"  （RSI14 {lv['rsi14']:.1f} {_st}：仅展示，超卖可钝化，不作禁空依据）")
@@ -360,29 +394,23 @@ def main():
 
     _cands = []
     if broken:
-        _cands.append(("破位延续空(目标S2)", anchor, _cs(anchor), t2))
+        _cands.append(("破位延续空(结构候选)", anchor, _cs(anchor), t2))
         _cands.append((f"反抽S_broken({S_broken:.2f})不过空", S_broken, _cs(S_broken), t2))
     else:
         _cands.append((f"反抽R1({R1:.2f})不过空", R1, _cs(R1), t1))
-    # ★ 全修①：主 RR 一律按 **T1（现实可达第一目标）** 算，与下面的 RR 临界表、
-    #   warnings_for、watch 的 verdict 硬闸同尺；候选展示的 T2 目标另列「远目标 RR」，
-    #   只作参考、不参与门槛。改前候选 RR 用 T2（虚高，SNDK 5.75/21.78 即此），
-    #   门槛却用 T1 反解 ⇒ 展示的 RR 与展示的门槛不是同一个价。
     for name, e, cs, tg in _cands:
-        r = rr_ratio(e, t1, cs)                       # 主 RR：T1 口径
-        r_far = rr_ratio(e, tg, cs) if tg != t1 else None
-        noise = (cs - e) < NOISE_ATR * atr
-        tag = "  ⚠ 噪声带（止损距离 <0.25×ATR，假赔率）" if noise else ""
-        far_txt = ("｜远目标RR %.2f（目标 %.2f·仅参考）" % (r_far, tg)
-                   if r_far is not None else "")
-        print(f"  {name}: 入场 {e:.2f}  止损 {cs:.2f}  目标 {tg:.2f}  "
-              f"RR(T1) {('%.2f' % r) if r is not None else '—'}{far_txt}{tag}")
+        from short_execution import ratio
+        r1, r2 = ratio("short", e, cs, t1), ratio("short", e, cs, t2)
+        f1 = "—" if r1 is None else f"{r1:.2f}"
+        f2 = "—" if r2 is None else f"{r2:.2f}"
+        print(f"  {name}: 入场 {e:.2f}  止损 {cs:.2f}  "
+              f"T1 {t1:.2f}/RR1 {f1}  T2 {t2:.2f}/RR2 {f2}｜结构参考，时域/触发未核验")
     print()
     print("── RR 临界入场价（★ T1 口径：与主 RR / 门槛 / 判决同尺）──")
     for rr in RR_LADDER:
         e = min_entry_for_rr(rr, t1, stop)
-        tag = " ← 门槛线" if rr == MIN_RR else (" ← 强烈推荐线" if rr == 3.0 else "")
-        grade = "放弃" if e >= stop else OP_GRADE(rr)
+        tag = " ← 门槛线" if rr == MIN_RR else (" ← 纯数学3R线" if rr == 3.0 else "")
+        grade = "无效" if e >= stop else "数学参考，非准入"
         print(f"  RR≥{rr:.1f}  ⇔  入场价 ≥ {e:.2f}  {grade}{tag}")
     print()
     if verbose:
@@ -467,14 +495,17 @@ def main():
         try:
             eb, _, em = R.bars_from_us(etf_code)
             etf_ref = eb[-1]["c"]
-            _ep = S_broken if broken else R1
-            rows = [("空点", _ep), ("止损", stop),
-                    (f"T1({t1_lbl})", t1), (f"T2({t2_lbl})", t2)]
-            print(f"  {etf_code}  昨收 {etf_ref:.4g}  系数 {lev}x"
-                  f"{'(实测beta)' if a.beta else ''}")
-            for name, px in rows:
-                print(f"    {name:<10} 正股 {px:9.2f} → {etf_code} "
-                      f"{etf_from_underlying(px, ref, etf_ref, lev):.4g}")
+            from short_execution import map_etf
+            print(f"  {etf_code} 日线参考收盘 {etf_ref:.4g} 系数 {lev}x；仅线性近似，非成交价")
+            for name, e, cs, tg in _cands:
+                mapping = map_etf(dict(entry=e, stop=cs, target1=t1, target2=t2),
+                                  ref, {"daily_close": etf_ref}, lev,
+                                  datetime.fromisoformat(eb[-1]["d"] + "T16:00:00").replace(
+                                      tzinfo=ZoneInfo("America/New_York")).isoformat())
+                print(f"    {name}｜参考日 正股{lv['last_date']}/ETF{eb[-1]['d']}｜{mapping['status']}")
+                for field in ("entry", "stop", "target1", "target2"):
+                    px = mapping[field]
+                    print(f"      {field}: {px:.4g}" if px is not None else f"      {field}: —")
         except Exception as e:
             print(f"  [{etf_code}] 换算取数失败：{e}")
         # ★★ 老罗的用法（2026-10-31）：看**正股**的背景与信号，用**反向ETF**入场。
