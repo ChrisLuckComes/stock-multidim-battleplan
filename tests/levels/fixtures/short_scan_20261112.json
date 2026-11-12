@@ -1,0 +1,590 @@
+{
+  "provenance": {
+    "sample": "us-short-scan-20261112-0855",
+    "recompute_sha256": "1f9ac0130a78a550b5cbb4b73d21791b49ed7db7ade88c929b97862761c1a88f",
+    "parent_summary_sha256": "32ba3b33ef80a82850b4dd44fba60a9e1f6faa28feca5f3db06996aeb6493460"
+  },
+  "recompute": {
+    "SKHY": {
+      "sina": {
+        "as_of": "Nov 11 07:58PM EST",
+        "ext": 138.7,
+        "reg": 142.25,
+        "wednesday_ah": true,
+        "wednesday_overnight": false
+      },
+      "nasdaq": {
+        "as_of": "Nov 11, 2026 7:59 PM ET",
+        "prev_close": 142.25,
+        "session": "After-Hours",
+        "spot": 138.7063,
+        "stale_session": false,
+        "wednesday_ah": true,
+        "wednesday_overnight": false
+      },
+      "etf_sina": {
+        "as_of": "Nov 11 07:53PM EST",
+        "ext": 9.29,
+        "reg": 8.9
+      },
+      "etf_nasdaq": {
+        "as_of": "Nov 11, 2026 7:58 PM ET",
+        "prev_close": 8.9,
+        "spot": 9.34
+      },
+      "accepted": {
+        "as_of": "Nov 11 07:58PM EST",
+        "source": "sina_ext",
+        "spot": 138.7,
+        "valid": true,
+        "reason": "both Wednesday After-Hours-valid, gap 0.00% ≤1.5%, prefer sina_ext"
+      },
+      "script_spot": 138.75,
+      "script_meta": {
+        "as_of": "Nov 11, 2026 7:59 PM ET",
+        "nasdaq_session": "After-Hours",
+        "prev_close": 142.25,
+        "script_spot": 138.75,
+        "session": "After-Hours",
+        "session_label": "盘后",
+        "spot_source": "nasdaq"
+      },
+      "daily": {
+        "atr": 10.391495285336237,
+        "engine_last_before_fill": "2026-11-10",
+        "fill_note": "filled/updated 2026-11-11 from morning_snap",
+        "last_bar_c": 142.25,
+        "last_close": 142.25,
+        "last_date": "2026-11-11",
+        "n_bars": 88,
+        "close_mismatch": null
+      },
+      "live": {
+        "anchor": 138.7,
+        "atr": 10.391495285336237,
+        "broken": true,
+        "r1": 162.65,
+        "s_broken": 145.5701,
+        "t1": 133.8,
+        "t2": 130.79,
+        "break": {
+          "entry": 138.7,
+          "stop": 141.81744858560086,
+          "target": 130.79,
+          "rr": 1.5717981758007191,
+          "rr_far": 2.537331340935457
+        },
+        "bounce": {
+          "entry": 145.5701,
+          "stop": 148.68754858560087,
+          "target": 130.79,
+          "rr": 3.7755554508147156,
+          "rr_far": 4.741088615949454
+        },
+        "last_date": "2026-11-11",
+        "last_close": 142.25
+      },
+      "etf": {
+        "symbol": "SKDD",
+        "prev_close": 8.9,
+        "lev": 2.0,
+        "short": 8.484549876977155,
+        "stop": 8.094457892276308,
+        "t1": 9.957363796133567,
+        "t2": 10.334010544815467,
+        "break_approx": 9.344217926186294,
+        "live": 9.29,
+        "live_as_of": "Nov 11 07:53PM EST",
+        "live_valid": true
+      }
+    },
+    "SNDK": {
+      "sina": {
+        "as_of": "Nov 11 07:59PM EST",
+        "ext": 951.5775,
+        "reg": 977.69,
+        "wednesday_ah": true,
+        "wednesday_overnight": false
+      },
+      "nasdaq": {
+        "as_of": "Nov 11, 2026 7:59 PM ET",
+        "prev_close": 977.69,
+        "session": "After-Hours",
+        "spot": 952.0,
+        "stale_session": false,
+        "wednesday_ah": true,
+        "wednesday_overnight": false
+      },
+      "etf_sina": {
+        "as_of": "Nov 11 07:58PM EST",
+        "ext": 23.53,
+        "reg": 22.38
+      },
+      "etf_nasdaq": {
+        "as_of": "Nov 11, 2026 7:58 PM ET",
+        "prev_close": 22.35,
+        "spot": 23.53
+      },
+      "accepted": {
+        "as_of": "Nov 11 07:59PM EST",
+        "source": "sina_ext",
+        "spot": 951.5775,
+        "valid": true,
+        "reason": "both Wednesday After-Hours-valid, gap 0.04% ≤1.5%, prefer sina_ext"
+      },
+      "script_spot": 951.9975,
+      "script_meta": {
+        "as_of": "Nov 11, 2026 7:59 PM ET",
+        "nasdaq_session": "After-Hours",
+        "prev_close": 977.69,
+        "script_spot": 951.9975,
+        "session": "After-Hours",
+        "session_label": "盘后",
+        "spot_source": "nasdaq"
+      },
+      "daily": {
+        "atr": 107.99562069080942,
+        "engine_last_before_fill": "2026-11-10",
+        "fill_note": "filled/updated 2026-11-11 from morning_snap",
+        "last_bar_c": 977.69,
+        "last_close": 977.69,
+        "last_date": "2026-11-11",
+        "n_bars": 276,
+        "close_mismatch": null
+      },
+      "live": {
+        "anchor": 951.5775,
+        "atr": 107.99562069080942,
+        "broken": true,
+        "r1": 965.0,
+        "s_broken": 998.19,
+        "t1": 803.97,
+        "t2": 574.5,
+        "break": {
+          "entry": 951.5775,
+          "stop": 983.9761862072428,
+          "target": 574.5,
+          "rr": 4.555971777861843,
+          "rr_far": 11.63866638258015
+        },
+        "bounce": {
+          "entry": 998.19,
+          "stop": 1030.588686207243,
+          "target": 574.5,
+          "rr": 5.994687523983025,
+          "rr_far": 13.077382128701307
+        },
+        "last_date": "2026-11-11",
+        "last_close": 977.69
+      },
+      "etf": {
+        "symbol": "SNDQ",
+        "prev_close": 22.38,
+        "lev": 2.0,
+        "short": 21.44148165573955,
+        "stop": 19.958225005230503,
+        "t1": 30.333141793411002,
+        "t2": 40.838595669383956,
+        "break_approx": 23.575466354365904,
+        "live": 23.53,
+        "live_as_of": "Nov 11 07:58PM EST",
+        "live_valid": true
+      }
+    },
+    "MU": {
+      "sina": {
+        "as_of": "Nov 11 07:59PM EST",
+        "ext": 789.55,
+        "reg": 811.3,
+        "wednesday_ah": true,
+        "wednesday_overnight": false
+      },
+      "nasdaq": {
+        "as_of": "Nov 11, 2026 7:59 PM ET",
+        "prev_close": 811.3,
+        "session": "After-Hours",
+        "spot": 789.55,
+        "stale_session": false,
+        "wednesday_ah": true,
+        "wednesday_overnight": false
+      },
+      "etf_sina": {
+        "as_of": "Nov 11 07:58PM EST",
+        "ext": 9.35,
+        "reg": 8.86
+      },
+      "etf_nasdaq": {
+        "as_of": "Nov 11, 2026 7:59 PM ET",
+        "prev_close": 8.87,
+        "spot": 9.3515
+      },
+      "accepted": {
+        "as_of": "Nov 11 07:59PM EST",
+        "source": "sina_ext",
+        "spot": 789.55,
+        "valid": true,
+        "reason": "both Wednesday After-Hours-valid, gap 0.00% ≤1.5%, prefer sina_ext"
+      },
+      "script_spot": 789.4101,
+      "script_meta": {
+        "as_of": "Nov 11, 2026 7:59 PM ET",
+        "nasdaq_session": "After-Hours",
+        "prev_close": 811.3,
+        "script_spot": 789.4101,
+        "session": "After-Hours",
+        "session_label": "盘后",
+        "spot_source": "nasdaq"
+      },
+      "daily": {
+        "atr": 60.804012398242534,
+        "engine_last_before_fill": "2026-11-10",
+        "fill_note": "filled/updated 2026-11-11 from morning_snap",
+        "last_bar_c": 811.3,
+        "last_close": 811.3,
+        "last_date": "2026-11-11",
+        "n_bars": 276,
+        "close_mismatch": null
+      },
+      "live": {
+        "anchor": 789.55,
+        "atr": 60.804012398242534,
+        "broken": true,
+        "r1": 818.67,
+        "s_broken": 804.0,
+        "t1": 737.88,
+        "t2": 652.21,
+        "break": {
+          "entry": 789.55,
+          "stop": 807.7912037194727,
+          "target": 652.21,
+          "rr": 2.8325981549584602,
+          "rr_far": 7.529108391755274
+        },
+        "bounce": {
+          "entry": 804.0,
+          "stop": 822.2412037194728,
+          "target": 652.21,
+          "rr": 3.624760789739763,
+          "rr_far": 8.321271026536577
+        },
+        "last_date": "2026-11-11",
+        "last_close": 811.3
+      },
+      "etf": {
+        "symbol": "MUZ",
+        "prev_close": 8.86,
+        "lev": 2.0,
+        "short": 9.019442869468753,
+        "stop": 8.621027819660966,
+        "t1": 10.463602120054233,
+        "t2": 12.334762479970417,
+        "break_approx": 9.335052385061013,
+        "live": 9.35,
+        "live_as_of": "Nov 11 07:58PM EST",
+        "live_valid": true
+      }
+    },
+    "SOXX": {
+      "sina": {
+        "as_of": "Nov 11 07:58PM EST",
+        "ext": 152.6,
+        "reg": 155.4,
+        "wednesday_ah": true,
+        "wednesday_overnight": false
+      },
+      "nasdaq": {
+        "as_of": "Nov 11, 2026 7:58 PM ET",
+        "prev_close": 155.4,
+        "session": "After-Hours",
+        "spot": 152.7275,
+        "stale_session": false,
+        "wednesday_ah": true,
+        "wednesday_overnight": false
+      },
+      "etf_sina": {
+        "as_of": "Nov 11 07:58PM EST",
+        "ext": 47.7593,
+        "reg": 45.32
+      },
+      "etf_nasdaq": {
+        "as_of": "Nov 11, 2026 7:58 PM ET",
+        "prev_close": 45.33,
+        "spot": 47.7593
+      },
+      "accepted": {
+        "as_of": "Nov 11 07:58PM EST",
+        "source": "sina_ext",
+        "spot": 152.6,
+        "valid": true,
+        "reason": "both Wednesday After-Hours-valid, gap 0.08% ≤1.5%, prefer sina_ext"
+      },
+      "script_spot": 152.7275,
+      "script_meta": {
+        "as_of": "Nov 11, 2026 7:58 PM ET",
+        "nasdaq_session": "After-Hours",
+        "prev_close": 155.4,
+        "script_spot": 152.7275,
+        "session": "After-Hours",
+        "session_label": "盘后",
+        "spot_source": "nasdaq"
+      },
+      "daily": {
+        "atr": 8.457589935536914,
+        "engine_last_before_fill": "2026-11-10",
+        "fill_note": "filled/updated 2026-11-11 from morning_snap",
+        "last_bar_c": 155.4,
+        "last_close": 155.4,
+        "last_date": "2026-11-11",
+        "n_bars": 276,
+        "close_mismatch": null
+      },
+      "live": {
+        "anchor": 152.6,
+        "atr": 8.457589935536914,
+        "broken": true,
+        "r1": 154.6233,
+        "s_broken": 154.6933,
+        "t1": 130.745,
+        "t2": 115.1067,
+        "break": {
+          "entry": 152.6,
+          "stop": 155.13727698066106,
+          "target": 115.1067,
+          "rr": 8.613564922780283,
+          "rr_far": 14.776983469195976
+        },
+        "bounce": {
+          "entry": 154.6933,
+          "stop": 157.23057698066106,
+          "target": 115.1067,
+          "rr": 9.438583245949168,
+          "rr_far": 15.60200179236486
+        },
+        "last_date": "2026-11-11",
+        "last_close": 155.4
+      },
+      "etf": {
+        "symbol": "SOXS",
+        "prev_close": 45.32,
+        "lev": 3.0,
+        "short": 45.9382942857143,
+        "stop": 43.71842183854133,
+        "t1": 66.89074517374516,
+        "t2": 80.5727481853282,
+        "break_approx": 47.76972972972973,
+        "live": 47.7593,
+        "live_as_of": "Nov 11 07:58PM EST",
+        "live_valid": true
+      }
+    },
+    "LITE": {
+      "sina": {
+        "as_of": "Nov 11 07:58PM EST",
+        "ext": 631.0,
+        "reg": 648.06,
+        "wednesday_ah": true,
+        "wednesday_overnight": false
+      },
+      "nasdaq": {
+        "as_of": "Nov 11, 2026 7:59 PM ET",
+        "prev_close": 648.06,
+        "session": "After-Hours",
+        "spot": 631.0,
+        "stale_session": false,
+        "wednesday_ah": true,
+        "wednesday_overnight": false
+      },
+      "etf_sina": {
+        "as_of": "Nov 11 07:56PM EST",
+        "ext": 34.25,
+        "reg": 32.54
+      },
+      "etf_nasdaq": {
+        "as_of": "Nov 11, 2026 7:59 PM ET",
+        "prev_close": 32.3,
+        "spot": 34.25
+      },
+      "accepted": {
+        "as_of": "Nov 11 07:58PM EST",
+        "source": "sina_ext",
+        "spot": 631.0,
+        "valid": true,
+        "reason": "both Wednesday After-Hours-valid, gap 0.00% ≤1.5%, prefer sina_ext"
+      },
+      "script_spot": 630.0,
+      "script_meta": {
+        "as_of": "Nov 11, 2026 7:59 PM ET",
+        "nasdaq_session": "After-Hours",
+        "prev_close": 648.06,
+        "script_spot": 630.0,
+        "session": "After-Hours",
+        "session_label": "盘后",
+        "spot_source": "nasdaq"
+      },
+      "daily": {
+        "atr": 77.1313491619334,
+        "engine_last_before_fill": "2026-11-10",
+        "fill_note": "filled/updated 2026-11-11 from morning_snap",
+        "last_bar_c": 648.06,
+        "last_close": 648.06,
+        "last_date": "2026-11-11",
+        "n_bars": 276,
+        "close_mismatch": null
+      },
+      "live": {
+        "anchor": 631.0,
+        "atr": 77.1313491619334,
+        "broken": true,
+        "r1": 783.8,
+        "s_broken": 642.37,
+        "t1": 594.84,
+        "t2": 573.73,
+        "break": {
+          "entry": 631.0,
+          "stop": 654.13940474858,
+          "target": 573.73,
+          "rr": 1.5627022558658965,
+          "rr_far": 2.4749988438451314
+        },
+        "bounce": {
+          "entry": 642.37,
+          "stop": 665.50940474858,
+          "target": 573.73,
+          "rr": 2.0540718534653233,
+          "rr_far": 2.966368441444558
+        },
+        "last_date": "2026-11-11",
+        "last_close": 648.06
+      },
+      "etf": {
+        "symbol": "LITZ",
+        "prev_close": 32.54,
+        "lev": 2.0,
+        "short": 33.111405734036964,
+        "stop": 30.78768191056755,
+        "t1": 37.8845014350523,
+        "t2": 40.004426750609504,
+        "break_approx": 34.25321297410733,
+        "live": 34.25,
+        "live_as_of": "Nov 11 07:56PM EST",
+        "live_valid": true
+      }
+    },
+    "SPCX": {
+      "sina": {
+        "as_of": "Nov 11 07:59PM EST",
+        "ext": 138.14,
+        "reg": 139.75,
+        "wednesday_ah": true,
+        "wednesday_overnight": false
+      },
+      "nasdaq": {
+        "as_of": "Nov 11, 2026 7:59 PM ET",
+        "prev_close": 139.75,
+        "session": "After-Hours",
+        "spot": 138.14,
+        "stale_session": false,
+        "wednesday_ah": true,
+        "wednesday_overnight": false
+      },
+      "etf_sina": {
+        "as_of": "Nov 11 07:57PM EST",
+        "ext": 8.75,
+        "reg": 8.56
+      },
+      "etf_nasdaq": {
+        "as_of": "Nov 11, 2026 7:59 PM ET",
+        "prev_close": 8.58,
+        "spot": 8.75
+      },
+      "accepted": {
+        "as_of": "Nov 11 07:59PM EST",
+        "source": "sina_ext",
+        "spot": 138.14,
+        "valid": true,
+        "reason": "both Wednesday After-Hours-valid, gap 0.00% ≤1.5%, prefer sina_ext"
+      },
+      "script_spot": 138.0827,
+      "script_meta": {
+        "as_of": "Nov 11, 2026 7:59 PM ET",
+        "nasdaq_session": "After-Hours",
+        "prev_close": 139.75,
+        "script_spot": 138.0827,
+        "session": "After-Hours",
+        "session_label": "盘后",
+        "spot_source": "nasdaq"
+      },
+      "daily": {
+        "atr": 8.14672082790952,
+        "engine_last_before_fill": "2026-11-10",
+        "fill_note": "filled/updated 2026-11-11 from morning_snap",
+        "last_bar_c": 139.75,
+        "last_close": 139.75,
+        "last_date": "2026-11-11",
+        "n_bars": 106,
+        "close_mismatch": null
+      },
+      "live": {
+        "anchor": 138.14,
+        "atr": 8.14672082790952,
+        "broken": true,
+        "r1": 149.8,
+        "s_broken": 140.66,
+        "t1": 130.39,
+        "t2": 120.39,
+        "break": {
+          "entry": 138.14,
+          "stop": 140.58401624837285,
+          "target": 120.39,
+          "rr": 3.171010014830987,
+          "rr_far": 7.262635840419351
+        },
+        "bounce": {
+          "entry": 140.66,
+          "stop": 143.10401624837286,
+          "target": 120.39,
+          "rr": 4.20209972287926,
+          "rr_far": 8.293725548467625
+        },
+        "last_date": "2026-11-11",
+        "last_close": 139.75
+      },
+      "etf": {
+        "symbol": "SSPC",
+        "prev_close": 8.56,
+        "lev": 2.0,
+        "short": 8.448520930232558,
+        "stop": 8.149118009501658,
+        "t1": 9.706641860465119,
+        "t2": 10.93168658318426,
+        "break_approx": 8.757232200357784,
+        "live": 8.75,
+        "live_as_of": "Nov 11 07:57PM EST",
+        "live_valid": true
+      }
+    }
+  },
+  "parent_summary": {
+    "timestamp_shanghai": "2026-11-12 08:59 CST",
+    "hang_now": {
+      "SKHY": [
+        "break"
+      ],
+      "SNDK": [
+        "break"
+      ],
+      "MU": [
+        "break"
+      ],
+      "SOXX": [
+        "break"
+      ],
+      "LITE": [
+        "break"
+      ],
+      "SPCX": [
+        "break"
+      ]
+    }
+  }
+}

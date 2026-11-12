@@ -4,6 +4,79 @@
 > **命令**：`python us_short.py SNDK`（结构+空点+临界价表+ETF 换算）；已持仓加 `--entry 1761 --stop 1805`（出本笔核算，股数按 ETF 腿）。
 > **指标只走引擎口径**：`rule123.atr14`（Wilder）/ `rule123.sma`。9/24 实战教训：手算简单均值 ATR 106.42 vs 引擎 Wilder 116.50，止损锚差 9.5% —— 手算口径已废弃。
 
+
+## 实盘数据适配与独立入口（2026-11-12，始终只读、不下单）
+
+无需加载任何技能备份；在仓库根直接运行，Python ≥3.10：
+
+```bash
+python -m venv .venv-short
+.venv-short/bin/python -m pip install -r requirements-us-short.txt
+.venv-short/bin/python gates/us_short_scan.py --live --state out_us/short_scan/events.json --output out_us/short_scan/<新目录>
+# 缩小为现有池子成员，不扩池：加 --symbols SNDK
+# 如睡前比当前会话结束更早：加 --exit-at <带时区的真实退出时点>
+# 精确重放本次真实原始响应，不联网，不重新猜日期或使用当前映射：
+.venv-short/bin/python gates/us_short_scan.py --replay-live out_us/short_scan/<原目录>/live_snapshot.json --output out_us/short_scan/<新重放目录>
+```
+
+Windows 使用 `.venv-short/Scripts/python.exe`。依赖 `exchange-calendars>=4.11,<5`（XNYS节假日/提前收盘）；
+目标/触发适配模块 `gates/us_short_live.py` 直接复用仓库 HTTP 与四左/四右摆动定义，不依赖 skill 安装位置。
+输出同时保存 `prepared_inputs.json`、`live_snapshot.json`（原响应、来源URL、抓取时间、当时映射）及最终报告。
+
+- 真实分钟：Yahoo `includePrePost=true` 完成的1分钟OHLC，Nasdaq有日期的chart抽样价；
+  不把Nasdaq只含HH:MM的点强补成今天，也不信其可能将美东墙钟误编码为UTC的x字段。
+  Yahoo非整分钟尾部成交时间不伪装为完整蜡烛；fulldayPrice没有自身成交时间则不借分钟时戳冒充实时。
+- 会话边界：盘前/正规/盘后/夜盘分开；周末/节假日和提前收盘由日历处理。
+  上一时段19:59分钟即使20:00结束也不算夜盘。未提供真实夜盘数据就报缺价，允许正常等待。
+- 最新日线：选整套Nasdaq/Yahoo日线，不跨源拼历史。若两家日线尚未更新，只有Yahoo覆盖**全部正规分钟**且
+  regular metadata准确对应已完成收盘，才用真实首分钟open及官方当日high/low/收盘竞价close/volume生成带来源的完成日。
+  不把15:59分钟close冒充收盘竞价价；覆盖不全则缺日线。基准冲突保留并降级。
+- 自动目标：仅从本会话、事先已确认的分钟摆动低点选；先按局部突出度选主要结构，**不按R凑目标，也不强制最近墙止盈**。
+  再要求真实更早下行段的已发生跌幅≥入场到目标价差、耗时≤本笔剩余窗口；最终闸重新核算端点而不是相信`suitable=true`。
+  这是有来源的**已观察波动尺度核对**，不是统计校准的可达概率/胜率，不保证未来兑现。
+  不满足就明确时域未核验，数月前目标只留结构参考。缺不同更远目标时可重复T1，不捏造新低。
+- 默认退出为当前会话段结束，**不代设个人睡前时间**；更早退出需显式`--exit-at`，不能超过会话段结束。
+  ETF换算仍是近似，当前不自动生成ETF股数/订单。所有运行均无交易操作。
+- 默认池子直接读现有配置，绝不增加或同步股池；本地未提交配置可与远端main不同，发布本次修复不携带它们。
+
+## 执行安全契约（2026-11-12 修复，优先于下文旧“到价就做”描述）
+
+- 结构计算仍为 `gates/us_short.py:plan_levels`。`broken` **只表示低于旧日线支撑**；
+  新增 `execution` / `can_hang` / `recommend` 才是执行结果。旧回测结构计算不变。
+- 唯一最终汇总/渲染入口：`python gates/us_short_scan.py --input <cards.json> --state <event-ledger.json> --output <新目录>`。
+  不得再复制临时 `run_scan.py` 自行算资格、排序或拼“可挂”。`--input` 不抓行情：调用方必须提交实际来源及时间戳；
+  命令会以真实墙钟重新检查新鲜度，并持久化已输出事件 ID；并发锁冲突直接失败，不拆锁。
+- 输入卡片 schema / 构造正例见 `gates/short_execution.py` 与 `tests/levels/test_short_execution.py:raw_leg`。
+  `inputs.break` / `inputs.bounce` 各自携带 `entry/stop/target1/target2/atr/context/trigger/observations/targets/quote`。
+  反向 ETF 另交 `etf_basis`（正股基准、各源 ETF 收盘、参考时点、倍率）、`etf_quote`、`reference_session_id`；
+  `context.reference_session_id` 必须匹配。基准不同不得默认选择新浪；保留各源近似情景并降级。
+- 破位要求事先冻结且有来源/时点的触发位，随后真实分钟收盘或逐笔价 **上方→下方**；
+  反抽要求 **下方→触位/上方→失败回落**。最新一个样本必须正好形成事件；不能以 `live <= entry` 自证，
+  也不能把两家同刻报价伪造成前后序列。重复事件不再输出推荐。
+- 默认新鲜度 **120 秒**是执行数据 TTL（两根分钟样本），不是胜率统计；可调严，未声称回测最优。
+  所有证据需在本时段内，带时区；执行窗口最长 24 小时只是“当笔日内”的定义边界，不是可达性预测。
+- T1/R1、T2/R2 同腿同源；资格与排序固定使用 **已核验本笔持有时域的 T1/R1，门槛仍 ≥1.5**。
+  每个目标的结构来源/日期与时域适用性分开；时域评估要有来源、理由、评估时点、会话及计划退出时点。
+  **最近墙是途中障碍，不强制当止盈目标**；可提供不同于最近摆动点、但有真实结构与时域依据的目标。
+  不按“找够 1.5R 的远目标”自动准入；没有可核验目标则待确认。未核验 T2 只展示结构参考。
+- 已有 0.25ATR 最小止损距离不变。最终校验重建所有推荐标志与模板，缺触发/价格/时域或低 R 不进排序，
+  不带入历史 `brief/UI/plan/hang`。名义≥$1000、风险$30–50 只在验证充分且整股可行时生成正股计划；
+  ETF 近似映射不是实时成交价，当前不据它生成 ETF 股数/挂单计划。
+- 旧 CLI `python gates/us_short.py <ticker>` 只有日线/单点价，输出结构候选和两腿 ETF 近似，**不产生可挂建议**。
+  如 `--entry`，仅核算用户指定的既有/假设交易，不构成新开仓推荐。
+
+离线保存样本回放（绝不覆盖源样本；输出目录须不存在）：
+
+```bash
+python gates/us_short_scan.py --replay <保存扫描目录> --output <新回放目录>
+python -m pytest tests/levels tests/gates/test_reverse_kline_short.py -q
+python tests/levels/test_us_short.py
+```
+
+**部署边界**：历史临时 runner 仍能绕过新增 `execution` 字段；必须把调用方接到以上最终汇总入口。
+独立备份 skill 不是仓库联接，修仓库不会更改备份。禁止复制同步；由父代理按用户授权修正技能/定时入口，
+不得把仓库通过测试宣称为定时已上线。分钟证据采集与时域目标评估不会被本模块凭空补齐。
+
 ## ① 流程（顺序固定）
 
 1. **先证伪宏观叙事**（债收益率 / PMI / 加息概率 / 板块宽度），叙事站不住就不做空。9/23 实证：10Y 触 5.133%（2007-07 以来最高）、10 月加息概率 53%→66~75%、费半 30 只成分股 24 只飘绿 ⇒ 前提成立。注意 VIX 低（15.24）= 估值压制型回调，不是恐慌，别按崩盘打法做。
