@@ -148,6 +148,31 @@ def underlying_from_etf(etf_px, und_ref, etf_ref, lev):
     return und_ref * (1.0 - (etf_px / etf_ref - 1.0) / lev)
 
 
+def short_objectives(entry, stop, t1, t2):
+    """同源空点目标：门槛只看 T1/R1，T2/R2 只展示，不得用远目标凑过 1.5R。
+
+    近墙（下方最近结构）是途中障碍，不是自动止盈。返回的 rr/rr1 同为 T1 口径，
+    供 verdict / 临界表沿用既有 `rr` 字段。
+    """
+    r1 = rr_ratio(entry, t1, stop)
+    r2 = rr_ratio(entry, t2, stop)
+    return dict(entry=entry, stop=stop, target1=t1, target2=t2,
+                rr=r1, rr1=r1, rr2=r2, rr_far=r2, rr_basis="T1")
+
+
+def format_short_objectives(name, obj, near_wall=None):
+    """旧式实战卡一行：入场·止损·T1/R1·T2/R2，并标明近墙不是自动止盈。"""
+    def px(v):
+        return "—" if v is None else f"{v:.2f}"
+    def rr(v):
+        return "—" if v is None else f"{v:.2f}"
+    wall = ("｜近墙 %s 为途中障碍，不是自动止盈" % px(near_wall)
+            if near_wall is not None else "｜近墙为途中障碍，不是自动止盈")
+    return (f"{name}: 入场 {px(obj.get('entry'))}  止损 {px(obj.get('stop'))}  "
+            f"T1 {px(obj.get('target1'))}/R1 {rr(obj.get('rr1'))}  "
+            f"T2 {px(obj.get('target2'))}/R2 {rr(obj.get('rr2'))}{wall}")
+
+
 def warnings_for(entry, stop, t1, atr):
     """数字失真 / 负期望告警。返回 [str]。"""
     ws = []
@@ -360,23 +385,17 @@ def main():
 
     _cands = []
     if broken:
-        _cands.append(("破位延续空(目标S2)", anchor, _cs(anchor), t2))
-        _cands.append((f"反抽S_broken({S_broken:.2f})不过空", S_broken, _cs(S_broken), t2))
+        _cands.append(("破位延续空", anchor, _cs(anchor)))
+        _cands.append((f"反抽S_broken({S_broken:.2f})不过空", S_broken, _cs(S_broken)))
     else:
-        _cands.append((f"反抽R1({R1:.2f})不过空", R1, _cs(R1), t1))
-    # ★ 全修①：主 RR 一律按 **T1（现实可达第一目标）** 算，与下面的 RR 临界表、
-    #   warnings_for、watch 的 verdict 硬闸同尺；候选展示的 T2 目标另列「远目标 RR」，
-    #   只作参考、不参与门槛。改前候选 RR 用 T2（虚高，SNDK 5.75/21.78 即此），
-    #   门槛却用 T1 反解 ⇒ 展示的 RR 与展示的门槛不是同一个价。
-    for name, e, cs, tg in _cands:
-        r = rr_ratio(e, t1, cs)                       # 主 RR：T1 口径
-        r_far = rr_ratio(e, tg, cs) if tg != t1 else None
+        _cands.append((f"反抽R1({R1:.2f})不过空", R1, _cs(R1)))
+    # 主 RR / 门槛 / 临界表一律 T1 口径；T2/R2 同源展示，不得用远目标凑过 1.5R。
+    # 改前候选把「目标」写成 T2、RR 却按 T1 算，展示与门槛不是同一个价。
+    for name, e, cs in _cands:
+        obj = short_objectives(e, cs, t1, t2)
         noise = (cs - e) < NOISE_ATR * atr
         tag = "  ⚠ 噪声带（止损距离 <0.25×ATR，假赔率）" if noise else ""
-        far_txt = ("｜远目标RR %.2f（目标 %.2f·仅参考）" % (r_far, tg)
-                   if r_far is not None else "")
-        print(f"  {name}: 入场 {e:.2f}  止损 {cs:.2f}  目标 {tg:.2f}  "
-              f"RR(T1) {('%.2f' % r) if r is not None else '—'}{far_txt}{tag}")
+        print("  " + format_short_objectives(name, obj, near_wall=t1) + tag)
     print()
     print("── RR 临界入场价（★ T1 口径：与主 RR / 门槛 / 判决同尺）──")
     for rr in RR_LADDER:

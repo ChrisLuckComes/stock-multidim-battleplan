@@ -82,18 +82,18 @@ def one_card(sym, pairs):
     ctx = bearish_context(bars)
     # ── ★ ① 主决策（裸K结构位，**口径唯一真源** plan_levels，与 us_short.py 同源）──
     from gates.us_short import (NOISE_ATR, STRUCT_STOP_ATR, plan_levels,
-                                rr_ratio)
+                                rr_ratio, short_objectives)
     anchor = live                                     # 结构位锚 = 现价（与 us_short 的 spot 一致）
     pl = plan_levels(bars, anchor, STRUCT_STOP_ATR, lv=lv)
     atr = pl["atr"]
     main_cands = []
     if pl["broken"]:
-        main_cands.append(("破位延续空(目标S2)", anchor, pl["stop"], pl["t2"]))
-        main_cands.append(("反抽S_broken不过空", pl["s_broken"], pl["stop"], pl["t2"]))
+        main_cands.append(("破位延续空", anchor, pl["stop"]))
+        main_cands.append(("反抽S_broken不过空", pl["s_broken"], pl["stop"]))
     else:
-        main_cands.append(("反抽R1不过空", pl["r1"], pl["stop"], pl["t1"]))
+        main_cands.append(("反抽R1不过空", pl["r1"], pl["stop"]))
     rr_ladder = []
-    t1 = pl["t1"]
+    t1, t2 = pl["t1"], pl["t2"]
     for rr in (3.0, 2.5, 2.0, 1.5, 1.0):
         e = min_entry_for_rr(rr, t1, pl["stop"])
         rr_ladder.append((rr, e))
@@ -152,14 +152,9 @@ def one_card(sym, pairs):
         "ref_close": ref_close,                       # 昨收：ETF 换算 und_ref 固定用昨收（与 close=live 解耦）
         "sig_age": sig_age,
         "mode": "破位结构空" if pl["broken"] else "反抽结构空",
-        # ★ 全修①：主 RR 一律 T1 口径（与 rr_ladder / verdict 硬闸同尺）；
-        #   候选展示目标仍是 T2（远支撑，ETF 换算用），其 RR 单列 rr_far 只作参考。
-        #   改前用 T2 算主 RR ⇒ 虚高，且与 T1 反解的门槛价不是同一个价。
-        "main_cands": [{"name": n, "entry": e, "stop": cs, "target": tg,
-                         "rr": rr_ratio(e, t1, cs),
-                         "rr_far": rr_ratio(e, tg, cs) if tg != t1 else None,
-                         "rr_basis": "T1", "target_basis": ("T2" if tg != t1 else "T1")}
-                        for (n, e, cs, tg) in main_cands],
+        # 主 RR / 门槛 / 临界表一律 T1 口径；T2/R2 同源展示，不得用远目标凑过 1.5R。
+        "main_cands": [dict(name=n, **short_objectives(e, cs, t1, t2))
+                        for (n, e, cs) in main_cands],
         "rr_ladder": rr_ladder,
         "s_broken": pl["s_broken"], "r1": pl["r1"], "t1": pl["t1"], "t2": pl["t2"],
         "atr": atr,
@@ -336,32 +331,32 @@ def _verdict(c):
                      ("｜" + "；".join(tips)) if tips else ""))
 
 
-def _fmt_etf_cand(cd, e, ref, er, lev, t1_und=None):
-    """单候选：**ETF 执行价为主**（买/止损/目标），正股入场/止损仅作锚参考。
+def _fmt_etf_cand(cd, e, ref, er, lev, t1_und=None, t2_und=None):
+    """单候选：**ETF 执行价为主**（买/止损/T1/T2），正股入场/止损仅作锚参考。
 
-    无 ETF 映射时退回正股价。目标默认取候选自身的 t2（远结构位），
-    t1（近支撑）若存在且不同则附 (T1≈…) 一并给出。
+    门槛只用 T1/R1；T2/R2 同源展示。兼容旧卡缺 target1 时回退 card.t1 或 target。
     """
-    rr = cd.get("rr")                      # T1 口径（主 RR，与门槛同尺）
-    rr_s = ("%.2f" % rr) if rr is not None else "—"
-    rr_far = cd.get("rr_far")              # T2 远目标口径（仅参考）
-    far_s = ("｜远目标RR %.2f(仅参考)" % rr_far) if rr_far is not None else ""
-    e_u, s_u, t_u = cd["entry"], cd["stop"], cd["target"]
+    t1 = cd.get("target1", t1_und if t1_und is not None else cd.get("target"))
+    t2 = cd.get("target2", t2_und)
+    r1 = cd.get("rr1", cd.get("rr"))
+    r2 = cd.get("rr2", cd.get("rr_far"))
+    e_u, s_u = cd["entry"], cd["stop"]
+    def rr(v):
+        return "—" if v is None else ("%.2f" % v)
+    wall = "｜近墙为途中障碍，不是自动止盈"
     if not e.get("code"):
-        s = "%s 买%.2f 止损%.2f 目标%.2f RR(T1)%s%s" % (
-            cd["name"], e_u, s_u, t_u, rr_s, far_s)
-        if t1_und is not None and abs(t1_und - t_u) > 1e-6:
-            s += " (T1≈%.2f)" % t1_und
-        return s
+        t1s = "—" if t1 is None else ("%.2f" % t1)
+        t2s = "—" if t2 is None else ("%.2f" % t2)
+        return ("%s 买%.2f 止损%.2f T1 %s/R1 %s  T2 %s/R2 %s%s" % (
+            cd["name"], e_u, s_u, t1s, rr(r1), t2s, rr(r2), wall))
     b = etf_from_underlying(e_u, ref, er, lev)
     s = etf_from_underlying(s_u, ref, er, lev)
-    t = etf_from_underlying(t_u, ref, er, lev)
-    t1e = etf_from_underlying(t1_und, ref, er, lev) if t1_und is not None else None
-    st = "%s 买%.4g 止损%.4g 目标%.4g RR(T1)%s%s" % (
-        cd["name"], b, s, t, rr_s, far_s)
-    if t1e is not None and abs(t1e - t) > 1e-6:
-        st += " (T1≈%.4g)" % t1e
-    st += "｜正股%.2f/%.2f" % (e_u, s_u)
+    t1e = etf_from_underlying(t1, ref, er, lev) if t1 is not None else None
+    t2e = etf_from_underlying(t2, ref, er, lev) if t2 is not None else None
+    def etf_px(v):
+        return "—" if v is None else ("%.4g" % v)
+    st = ("%s 买%.4g 止损%.4g T1 %s/R1 %s  T2 %s/R2 %s%s｜正股%.2f/%.2f" % (
+        cd["name"], b, s, etf_px(t1e), rr(r1), etf_px(t2e), rr(r2), wall, e_u, s_u))
     return st
 
 
@@ -384,9 +379,9 @@ def brief_line(c):
                                           ("  " + c.get("mode", "")) if c.get("mode") else "")
     out = []
     cands = c.get("main_cands") or []
-    t1_und = c.get("t1")
+    t1_und, t2_und = c.get("t1"), c.get("t2")
     if cands:
-        bits = [_fmt_etf_cand(cd, e, ref, er, lev, t1_und) for cd in cands]
+        bits = [_fmt_etf_cand(cd, e, ref, er, lev, t1_und, t2_und) for cd in cands]
         out.append("%s\n           ① 主决策(ETF执行价)：%s" % (head, " ｜ ".join(bits)))
         lad = c.get("rr_ladder") or []
         gate = [x for x in lad if abs(x[0] - MIN_RR_NOW) < 1e-9]
@@ -474,10 +469,10 @@ def line(c):
         out.append("   ① 背景  : 无（尚未见顶）")
     # ① 主决策（★ **ETF 执行价为主**，你实际下单的价；正股仅作锚参考）
     cands = c.get("main_cands") or []
-    t1_und = c.get("t1")
+    t1_und, t2_und = c.get("t1"), c.get("t2")
     if cands:
         for cd in cands:
-            out.append("   ① 主决策(ETF): %s" % _fmt_etf_cand(cd, e, ref, er, lev, t1_und))
+            out.append("   ① 主决策(ETF): %s" % _fmt_etf_cand(cd, e, ref, er, lev, t1_und, t2_und))
         lad = c.get("rr_ladder") or []
         gate = [x for x in lad if abs(x[0] - MIN_RR_NOW) < 1e-9]
         if gate and gate[0][1] is not None:
@@ -589,8 +584,8 @@ def main():
         lev = e.get("lev") or 2.0
         er = e.get("ref") or ref
         cands = c.get("main_cands") or []
-        t1_und = c.get("t1")
-        bits = [_fmt_etf_cand(cd, e, ref, er, lev, t1_und) for cd in cands]
+        t1_und, t2_und = c.get("t1"), c.get("t2")
+        bits = [_fmt_etf_cand(cd, e, ref, er, lev, t1_und, t2_und) for cd in cands]
         print("  %-6s %s" % (c["sym"], " ｜ ".join(bits)))
         if e.get("code"):
             print("        └─ %s（%sx）｜背景 %s 第%s根(%s)"
