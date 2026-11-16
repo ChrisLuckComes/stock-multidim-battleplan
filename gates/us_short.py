@@ -64,6 +64,8 @@ except Exception:
 
 import rule123 as R          # noqa: E402  指标只走引擎口径（Wilder ATR / SMA）
 from open_playbook import long_grade as OP_GRADE  # noqa: E402  五档与做多同一套
+# ★ 2026-11-16：夜盘现价统一校准（Tiingo 24x5）；日线 bars 不碰，只换 spot。
+from gates.us_overnight import refine_night_spot  # noqa: E402
 
 # 压力/支撑/RSI/多空转换地图 —— 2026-09-24 抽到独立模块 levels.py
 # （A 股 T0 / 缩量回调同样可调，市场无关）。这里 re-export 保持旧调用名可用。
@@ -287,6 +289,10 @@ def main():
     ap.add_argument("--beta", type=float, help="实测 beta（替代名义杠杆做换算）")
     ap.add_argument("--account", type=float, help="账户美元（默认 account_config）")
     ap.add_argument("--risk", type=float, help="单笔风险 %%（默认 account_config）")
+    ap.add_argument("--allow-stale-night-quote", action="store_true",
+                    help="夜盘无实时报价时仍用静态价判（默认关闭：只出计划、标注不可执行）")
+    ap.add_argument("--asof", action="store_true",
+                    help="历史复盘：禁用夜盘实时价（与 us_session_decide 同口径）")
     a = ap.parse_args()
     # ★ 旁证面板默认**收成一行**（一屏干净）；--full 展开
     verbose = bool(a.full)
@@ -297,6 +303,10 @@ def main():
     except Exception as e:
         print(f"[{sym}] 取数失败：{type(e).__name__}: {e}")
         sys.exit(2)
+    # ★ 夜盘（ET 20:00–03:59）用 Tiingo 24x5 实时参考价校准现价；
+    #   日线 bars/结构位/ATR 不动。无实时价 ⇒ quote_fresh=False ⇒ 下方只作计划。
+    spot, meta = refine_night_spot(
+        sym, spot, meta, allow=(not a.asof) and (not a.allow_stale_night_quote))
     lv = levels_from_bars(bars)
     ref = lv["last_close"]
     # ★ 2026-10-31：经典头肩顶形态参考（纯排序器，不参与能否空判定）。
@@ -347,6 +357,21 @@ def main():
           f"{spot if spot else 'n/a'} ({dev})  session={sess}"
           f"  spot_source={spot_src}"
           + (f"  nasdaq={nasdaq_sess}" if nasdaq_sess else ""))
+    # ★ 夜盘数据上屏（2026-11-16）：实时=是⇒参考价为合成报价（非可成交盘口）；
+    #   实时=否⇒现价是 Yahoo/新浪盘后静态价，下面点位只能当计划，不能当可执行价。
+    _nq = meta.get("night_quote") or {}
+    if sess_lbl == "夜盘" or _nq:
+        _fresh = bool(meta.get("quote_fresh"))
+        print(f"  夜盘数据  实时={'是' if _fresh else '否'}  价源={_nq.get('source') or 'nasdaq_static'}"
+              + (f"  滞留={_nq.get('stale_sec')}s" if _nq.get("stale_sec") is not None else "")
+              + (f"  session累计量={_nq.get('volume'):.0f}" if _nq.get("volume") else ""))
+        if _nq.get("bid") is not None:
+            print(f"  夜盘参考盘口  bid {_nq['bid']:.2f} / ask {_nq['ask']:.2f}"
+                  f"  ⚑ 合成派生参考价，非可成交盘口；按券商 BOATS 盘口校准")
+        if not _fresh:
+            print(f"  ⚠⚠ 夜盘无实时报价（{meta.get('quote_note') or '数据陈旧'}）"
+                  f"⇒ 下方空点/临界/RR 仅为**计划与盯价**，不得按当前静态价直接进出。"
+                  f"配 TIINGO_TOKEN 或等 04:00 ET 盘前再判。")
     if spot:
         print(f"MA5 {lv['ma5']:.2f}（现价 {(spot / lv['ma5'] - 1) * 100:+.2f}%）"
               f"  MA10 {lv['ma10']:.2f}（{(spot / lv['ma10'] - 1) * 100:+.2f}%）  "

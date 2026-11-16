@@ -46,6 +46,8 @@ except Exception:
 
 from gates.us_short import (etf_from_underlying, load_reverse_etf,   # noqa: E402
                             STRUCT_STOP_ATR)
+# ★ 2026-11-16：夜盘现价统一校准（Tiingo 24x5）；日线 bars 不碰，只换 spot。
+from gates.us_overnight import refine_night_spot               # noqa: E402
 from levels import levels_from_bars                                # noqa: E402
 from us_short import min_entry_for_rr                              # noqa: E402
 from top_patterns import detect_head_shoulders_top                  # noqa: E402
@@ -66,13 +68,19 @@ def load_pool(path=None):
     return list(DEFAULT_POOL)
 
 
-def one_card(sym, pairs):
-    """单票决策卡。返回 dict（任何异常都收敛成 error 字段，不中断整屏）。"""
+def one_card(sym, pairs, allow_night=True):
+    """单票决策卡。返回 dict（任何异常都收敛成 error 字段，不中断整屏）。
+
+    `allow_night=False`（--asof 回放）禁用夜盘实时价，避免实时报价污染历史窗口。
+    """
     import rule123 as R
     try:
         bars, spot, _meta = R.bars_from_us(sym)
     except Exception as e:
         return {"sym": sym, "error": "%s: %s" % (type(e).__name__, e)}
+    # ★ 夜盘实时参考价校准（日线结构/ATR 不动）；无报价 ⇒ quote_fresh=False
+    #   ⇒ actionable() 拒进「今日可做空」，只在盯盘/计划区展示。
+    spot, _meta = refine_night_spot(sym, spot, _meta, allow=allow_night)
     if len(bars) < 60:
         return {"sym": sym, "error": "日线不足 %d 根" % len(bars)}
     lv = levels_from_bars(bars)
@@ -149,6 +157,12 @@ def one_card(sym, pairs):
             sig_age = None
     card = {
         "sym": sym, "date": last["d"], "close": live,
+        # ★ 2026-11-16 夜盘数据（无实时报价 ⇒ actionable 拒进「今日可做空」）
+        "quote_fresh": bool(_meta.get("quote_fresh", True)),
+        "quote_note": _meta.get("quote_note") or "",
+        "spot_source": _meta.get("spot_source"),
+        "night_quote": _meta.get("night_quote"),
+        "session": _meta.get("session"),
         "ref_close": ref_close,                       # 昨收：ETF 换算 und_ref 固定用昨收（与 close=live 解耦）
         "sig_age": sig_age,
         "mode": "破位结构空" if pl["broken"] else "反抽结构空",
@@ -522,6 +536,11 @@ def actionable(c):
       把它也算进「今日可做空」，与门槛行「现价未到·需反抽」自相矛盾
       （上一轮双价问题的残留）⇒ 等到位只进盯盘，不进可做空。
     """
+    # ★ 2026-11-16 fail-closed：夜盘无实时报价 ⇒ 现价是盘后静态价冒充，
+    #   「现价已到临界价」这个判定不成立 ⇒ 不得进「今日可做空」可执行清单。
+    #   计划/盯盘照常展示（可用性优先），只是不背书为可执行。
+    if not c.get("quote_fresh", True):
+        return False
     v = str(c.get("verdict") or "")
     return v in ("推荐", "推荐(优先)")
 
@@ -533,11 +552,25 @@ def main():
     ap.add_argument("--json", action="store_true", help="输出 JSON")
     ap.add_argument("--brief", action="store_true",
                     help="★ 纯文本摘要（贴进对话用）：每票一段，去掉装饰线")
+    ap.add_argument("--asof", action="store_true",
+                    help="历史复盘：禁用夜盘实时价（防实时报价污染历史窗口）")
     a = ap.parse_args()
 
     syms = [s.upper() for s in a.symbols] if a.symbols else load_pool(a.pool)
     pairs = load_reverse_etf()
-    cards = [one_card(s, pairs) for s in syms]
+    cards = [one_card(s, pairs, allow_night=not a.asof) for s in syms]
+    # ★ 夜盘数据横幅：有实时价=合成参考（非可成交盘口）；无=静态价，全部降级为计划
+    _stale = [c for c in cards if not c.get("error") and not c.get("quote_fresh", True)]
+    if _stale:
+        print("⚠⚠ 夜盘无实时报价（%s）⇒ %d 只票的现价是盘后静态价冒充；"
+              "下方结论降为**计划/盯价**，不得按当前价进出。"
+              "配 TIINGO_TOKEN 或等 04:00 ET 盘前再判。"
+              % (_stale[0].get("quote_note") or "数据陈旧", len(_stale)))
+    _live = [c for c in cards if c.get("night_quote", {}).get("source") == "tiingo_24x5"]
+    if _live:
+        print("ℹ 夜盘实时参考价已接入（Tiingo 24x5 合成派生，非可成交盘口；"
+              "按券商 BOATS 盘口校准）：%s"
+              % "、".join("%s %.2f" % (c["sym"], c["close"]) for c in _live))
 
     if a.json:
         print(json.dumps(cards, ensure_ascii=False, default=str, indent=2))

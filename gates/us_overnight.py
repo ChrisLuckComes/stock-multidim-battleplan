@@ -326,6 +326,42 @@ def apply_night_quote(day, symbol, allow=True, resolver=None, now_utc=None):
     return day
 
 
+def refine_night_spot(symbol, spot, meta=None, allow=True, resolver=None, now_utc=None):
+    """把 `rule123.bars_from_us` 的现价按夜盘实时报价校准 —— 做空卡统一入口。
+
+    与 `apply_night_quote` 的区别：那里是给 `us_session_decide` 的分时序列追加
+    零量参考价 bar；这里 `us_short` / `us_short_watch` 只吃**日线结构 + 独立现价**，
+    所以只校准 spot 与 meta，绝不碰日线 bars（MA/ATR/RS/结构位不被污染）。
+
+    ★ 行为（与 us_session_decide 同一口径）：
+      非夜盘 / --asof 回放（allow=False）⇒ 原样返回，fresh=True、零请求。
+      夜盘且有新鲜 Tiingo 价 ⇒ spot 换成实时参考价，spot_source=tiingo_24x5。
+      夜盘但取数失败/陈旧 ⇒ **保留原 spot**（Yahoo/新浪的盘后静态价），
+        fresh=False + note 说清；调用方据此降级「今日可做空」为不可执行。
+      绝不抛异常：取数层失败时脚本仍能出计划与盯价（可用性优先）。
+
+    返回 (spot, meta)；meta 一定含 quote_fresh / quote_note / night_quote。
+    """
+    meta = dict(meta or {})
+    if not allow or not is_overnight(now_utc):
+        meta.update(quote_fresh=True, quote_note="", night_quote=None)
+        return spot, meta
+    fn = resolver or resolve_night_quote
+    try:
+        q = fn(symbol, float(spot) if spot else 0.0, now_utc=now_utc)
+    except Exception as e:
+        q = {"ok": False, "fresh": False, "price": None,
+             "note": "夜盘报价异常（%s）" % type(e).__name__}
+    fresh = bool(q.get("fresh"))
+    meta.update(quote_fresh=fresh,
+                quote_note=(q.get("note") or "") if not fresh else "",
+                night_quote=q)
+    if fresh and q.get("source") == "tiingo_24x5" and q.get("price"):
+        meta["spot_source"] = "tiingo_24x5"
+        return float(q["price"]), meta
+    return spot, meta
+
+
 # ───────────────────────── 自检 CLI（只读、不下单）─────────────────────────
 def main(argv=None):
     import argparse
