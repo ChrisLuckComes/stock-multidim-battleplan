@@ -32,6 +32,10 @@
          prev_close。会话 VWAP 与日线 vwap5 分开，vwap5 只标「5日」，低于真 −1%
          不作浅档。浅档被宽止损或 cap 滤光时写「浅档不可挂」，或把止损收到买价 5%
          再算 R（不许更紧）。禁止把更深的价标成「−1% 浅档」。
+      ⑥ 计划挂单已触及或几乎触及（日低≤挂单，或上方不超过 0.1×ATR，且未破计划止损）后，
+         不得再用原 R 闸上限把「贴会话均价的第二买点」判成不买、并写「原挂仍有效」。
+         止损收到日内低点下方 0.1×ATR，目标仍用原 T1 重算；R≥1.5 且现价不高于
+         VWAP+0.25×ATR ⇒ 能买。已离开均价、走完的高位仍不追。点名回踩一旦出现必须改口。
 
   ⏰ 美股交易时段（致富证券 · 2026-10-10 老罗确认 · 已固化）：
       支持 **24 小时交易**，含 夜盘 / 盘前 (04:00 ET 起) / 盘后。
@@ -1306,6 +1310,87 @@ def apply_us_hang(price, stop, target, plan=None, **kwargs):
     return _with_emit(sel, True)
 
 
+
+# 计划挂单「一带已测」与第二买点（L005，2026-11-16 SPOT / APPN）
+HANG_TOUCH_ATR = 0.10          # 日低在挂单上方不超过 0.1×ATR 视为几乎触及
+SESSION_STOP_ATR = 0.10        # 第二买点止损 = 日内低点 − 0.1×ATR
+SECOND_LOOK_VWAP_ATR = 0.25    # 现价高于会话均价超过 0.25×ATR 则已离开，不追
+SECOND_LOOK_MIN_TARGET_ATR = 0.75  # 第二买点要求目标相对挂单至少 0.75×ATR，防止靠收窄止损救活过近目标
+
+
+
+def hang_already_tested(day_low, entry, plan_stop, atr):
+    """计划挂单当日已触及，或只差 0.1×ATR 的一带。
+
+    日低已经跌破计划止损 = 结构失败，不是第二买点。
+    """
+    low, ent, stp = _num(day_low), _num(entry), _num(plan_stop)
+    if low is None or ent is None:
+        return False
+    if stp is not None and low <= stp + 1e-9:
+        return False
+    if low <= ent + 1e-9:
+        return True
+    a = _num(atr)
+    if a is None or a <= 0:
+        return False
+    return low <= ent + HANG_TOUCH_ATR * a + 1e-9
+
+
+def evaluate_session_second_look(price, target, day_low, atr, vwap=None,
+                                 plan_entry=None, plan_stop=None, pre=None):
+    """挂单已测后的贴均价第二买点。目标必须是原计划 T1，不另编远目标。"""
+    p, t, low = _num(price), _num(target), _num(day_low)
+    if p is None or t is None or low is None:
+        return None
+    a = _num(atr) or 0.0
+    sess_stop = low - SESSION_STOP_ATR * a
+    plan_stop_n = _num(plan_stop)
+    if plan_stop_n is not None:
+        sess_stop = max(sess_stop, plan_stop_n)
+    sess_stop = float(sess_stop)
+    ent_txt = ("%.2f" % plan_entry) if _num(plan_entry) is not None else "原挂"
+    if p <= sess_stop + 1e-9:
+        return {
+            "action": "不买", "stop": sess_stop, "rr": None, "cap": None,
+            "why": ("计划挂单已触及（日内低点 %.2f），不再等 %s；"
+                    "现价已在日内止损 %.2f 下方，不接飞刀。"
+                    % (low, ent_txt, sess_stop)),
+        }
+    v = _num(vwap)
+    if v is None or v <= 0:
+        return {
+            "action": "不买", "stop": sess_stop, "rr": None, "cap": None,
+            "why": ("计划挂单已触及（日内低点 %.2f），不再等 %s；"
+                    "会话均价未知，不把现价当第二买点。"
+                    % (low, ent_txt)),
+        }
+    band = SECOND_LOOK_VWAP_ATR * a if a > 0 else 0.01 * v
+    if p > v + band + 1e-9:
+        return {
+            "action": "不买", "stop": sess_stop, "rr": None, "cap": None,
+            "why": ("计划挂单已触及（日内低点 %.2f），不再等 %s；"
+                    "现价 %.2f 已离开会话均价 %.2f，不追已走完的这一截。"
+                    % (low, ent_txt, p, v)),
+        }
+    rr = long_rr(p, t, sess_stop)
+    cap = resolve_cap_us(p, sess_stop, t, None, pre, atr)
+    if rr is None or rr < RR_QUALIFIED:
+        rr_txt = "%.2f" % rr if rr is not None else "—"
+        return {
+            "action": "不买", "stop": sess_stop, "rr": rr, "cap": cap,
+            "why": ("计划挂单已触及（日内低点 %.2f），不再等 %s；"
+                    "贴均价第二买点相对日内止损 %.2f、目标 %.2f，R %s 不足 %.1f。"
+                    % (low, ent_txt, sess_stop, t, rr_txt, RR_QUALIFIED)),
+        }
+    return {
+        "action": "能买", "stop": sess_stop, "rr": rr, "cap": cap,
+        "why": ("计划挂单已触及（日内低点 %.2f，不再等 %s）。"
+                "贴会话均价第二买点，止损收到日内低下方 %.2f，目标仍 %.2f。"
+                % (low, ent_txt, sess_stop, t)),
+    }
+
+
 def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
               account=None, risk_scale=1.0,
               zone_lo=None, zone_hi=None, mode=None, ride_state=None,
@@ -1360,9 +1445,14 @@ def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
     #   必须同步补上。铁律：担心止损太贴，唯一正确修法 = 止损端往下加缓冲带
     #   （用 levels.NOISE_ATR 下限，不是剔除买点）。
     from levels import NOISE_ATR
+    plan_stop_orig = stop
+    # 现价已经跌破计划止损，先判不接飞刀，再谈最小止损距或第二买点。
+    # 最小止损距只用于「价在止损上方但太贴」，不能把已破位的止损下移后改判能买。
+    if price <= plan_stop_orig:
+        pass  # 下面 out 建好后立刻拒绝；先占位避免改 stop
     _min_risk = NOISE_ATR * float(atr or 0.0)
     min_stop_applied = False
-    if _min_risk > 0 and (price - stop) < _min_risk:
+    if price > plan_stop_orig and _min_risk > 0 and (price - stop) < _min_risk:
         stop = price - _min_risk
         min_stop_applied = True
     buy_cap = resolve_cap_us(entry, stop, target, cap, pre, atr)
@@ -1457,10 +1547,10 @@ def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
     if _ext:
         out["atr_extension"] = _ext
 
-    if price <= stop:
+    if price <= plan_stop_orig:
         out["arm_price"] = entry
         out["arm_note"] = "回到 %.2f 以下再判（结构止损下方不接飞刀）" % entry
-        return _reject("现价 %.2f 已在止损 %.2f 下方，不接飞刀。" % (price, stop))
+        return _reject("现价 %.2f 已在止损 %.2f 下方，不接飞刀。" % (price, plan_stop_orig))
     if target is None:
         out["arm_price"] = None
         out["arm_note"] = ""
@@ -1501,30 +1591,83 @@ def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
     out["hang_why"] = sel["why"]
     out["hang_structure"] = sel["structure"]
 
-    if buy_cap is not None and price > buy_cap + 1e-9:
-        reason = "现价 %.2f 高于买入上限 %.2f（R 不足或超计划上限）。" % (price, buy_cap)
-        if sel["hang"] is not None and sel["hang"] <= buy_cap + 0.01:
+    second = None
+    rr_plan = long_rr(entry, target, plan_stop_orig) if target is not None else None
+    would_wait_again = (
+        (buy_cap is not None and price > buy_cap + 1e-9) or
+        (sel.get("hang") is not None and price > sel["hang"] + 0.01)
+    )
+    # 目标相对挂单须有足够空间（≥0.75×ATR）；无 ATR 时退回原计划 R≥1.5。
+    # 不要求「宽止损的原计划已经满足 1.5R」——那正是把已给到的回踩判成 R 不够的错因。
+    # 也不得改写已在挂单价成交、仍在上限内的回踩单。
+    reward_ok = False
+    if target is not None:
+        a = _num(atr)
+        if a is not None and a > 0:
+            reward_ok = (float(target) - float(entry)) >= SECOND_LOOK_MIN_TARGET_ATR * a - 1e-9
+        else:
+            reward_ok = rr_plan is not None and rr_plan >= RR_QUALIFIED
+    if (would_wait_again
+            and reward_ok
+            and hang_already_tested(day_low, entry, plan_stop_orig, atr)):
+        out["hang_tested"] = True
+        out["hang_tested_low"] = day_low
+        second = evaluate_session_second_look(
+            price, target, day_low, atr, vwap=vwap_hang,
+            plan_entry=entry, plan_stop=plan_stop_orig, pre=pre)
+        if second and second.get("action") == "能买":
+            stop = second["stop"]
+            buy_cap = second.get("cap")
+            rr = second["rr"]
+            out["stop"] = stop
+            out["cap"] = buy_cap
+            out["rr"] = rr
+            out["second_look"] = True
+            out["hang_tier"] = HANG_SHALLOW
+            out["hang_px"] = round_px(price)
+            out["hang_anchor"] = "已测挂单·贴均价"
+            out["hang_why"] = second.get("why") or ""
+            out["arm_price"] = None
+            out["arm_note"] = ""
+        else:
+            why = (second or {}).get("why") or (
+                "计划挂单已触及（日内低点 %.2f），不再等 %.2f。"
+                % (day_low, entry))
+            out["arm_price"] = None
+            out["arm_note"] = ""
+            out["second_look"] = False
+            if second and second.get("stop") is not None:
+                out["stop"] = second["stop"]
+            return _reject(why)
+
+    if not out.get("second_look"):
+        if buy_cap is not None and price > buy_cap + 1e-9:
+            reason = "现价 %.2f 高于买入上限 %.2f（R 不足或超计划上限）。" % (price, buy_cap)
+            if sel["hang"] is not None and sel["hang"] <= buy_cap + 0.01:
+                out["arm_price"] = sel["hang"]
+                out["arm_note"] = "%s %s" % (sel["tier"], sel["anchor"] or "")
+                reason += "%s挂 %.2f 仍有效，不追现价。" % (sel["tier"], sel["hang"])
+            return _reject(reason)
+        if rr is None or rr < RR_QUALIFIED:
+            return _reject("现价盈亏比 %s，低于 %.1f。" % (
+                ("%.2f" % rr) if rr is not None else "—", RR_QUALIFIED))
+        if sel["tier"] == HANG_PASS or sel["hang"] is None:
+            return _reject(sel["why"])
+        if price > sel["hang"] + 0.01:
             out["arm_price"] = sel["hang"]
             out["arm_note"] = "%s %s" % (sel["tier"], sel["anchor"] or "")
-            reason += "%s挂 %.2f 仍有效，不追现价。" % (sel["tier"], sel["hang"])
-        return _reject(reason)
-    if rr is None or rr < RR_QUALIFIED:
-        return _reject("现价盈亏比 %s，低于 %.1f。" % (
-            ("%.2f" % rr) if rr is not None else "—", RR_QUALIFIED))
-    if sel["tier"] == HANG_PASS or sel["hang"] is None:
-        return _reject(sel["why"])
-    if price > sel["hang"] + 0.01:
-        out["arm_price"] = sel["hang"]
-        out["arm_note"] = "%s %s" % (sel["tier"], sel["anchor"] or "")
-        return _reject("%s挂 %.2f（%s）。现价 %.2f 高于该档，不追。" % (
-            sel["tier"], sel["hang"], sel["anchor"] or "—", price))
+            return _reject("%s挂 %.2f（%s）。现价 %.2f 高于该档，不追。" % (
+                sel["tier"], sel["hang"], sel["anchor"] or "—", price))
 
-    if price <= entry:
+    if out.get("second_look"):
+        tag = "计划挂单已测，贴均价第二买点（不再等原挂）"
+    elif price <= entry:
         tag = "按计划回踩（贴近 MA）"
     elif rally.get("ok"):
         tag = "拉升中，只买刚起涨那一下"
     else:
         tag = "计划上限内"
+
     limit_buy = round_px(price)
     tier_txt = ""
     if sel["tier"] in (HANG_SHALLOW, HANG_DEEP):
