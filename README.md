@@ -81,8 +81,10 @@ stock-multidim-battleplan/
 ├── README.md            # 本文件
 ├── AGENTS.md            # 本仓库 Agent 操作约定（独立于上级目录）
 ├── SKILL.md             # 主技能定义（Agent 加载的核心指令）
-├── account_config.py    # 账户/仓位额度（env / .env）
-├── .env.example         # 账户配置模板（复制为 .env）
+├── account_config.py    # 账户/仓位额度（env / 两层 dotenv）
+├── .env                 # 共享默认配置（已入库，零密钥）
+├── .env.example         # 配置说明 / 本机覆盖示例
+├── .env.local           # 本机私有密钥（gitignore，不入库）
 ├── fetch_market.py      # 通用行情取数
 ├── rule123.py           # 结构判定
 ├── probe_intraday.py    # 盘中先手
@@ -189,11 +191,16 @@ python --version   # 需 3.8+
 
 美股**没有**额外单笔比例上限（旧 50% 闸门已移除）：仓位只受 `US_ACCOUNT` 全额约束（默认 $5000）。A 股仍有 `ASH_SINGLE_ABS` 绝对额硬顶与主力/备用组合层。
 
-优先级：**进程环境变量 > 仓库根目录 `.env` > 上表默认值**。CLI `--account` / `--us-account` 只覆盖当次探测的账户口径，不改组合层 `ASH_PRIMARY` 等。
+优先级：**进程环境变量 > `.env.local`（本机私有）> `.env`（入库共享模板）> 上表默认值**。
+CLI `--account` / `--us-account` 只覆盖当次探测的账户口径，不改组合层 `ASH_PRIMARY` 等。
+
+⚑ 仓库 public：`.env` 是**零密钥模板，已入库**，clone 下来直接能跑；API key / token /
+自己改过的额度一律写 `.env.local`（已被 `.gitignore` 忽略），绝不提交。两层 dotenv 改任一个，
+下一次取值自动重建缓存，不用重启进程。
 
 ```bash
-cp .env.example .env   # 按自己的资金改；.env 已 gitignore，勿提交
-python probe_intraday.py 002961
+python probe_intraday.py 002961           # 直接用 .env 的共享默认值
+# 本机覆盖：编辑 .env.local（照 .env.example 三行示例）
 # 或临时覆盖：
 # set ASH_PRIMARY=80000          # Windows cmd
 # $env:ASH_PRIMARY=80000         # PowerShell

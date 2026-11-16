@@ -27,7 +27,7 @@
 - Language: Python 3.8+
 - 无外部付费数据源；A 股东方财富，美股 Yahoo
 - 测试：`python -m pytest test_*.py -q` 或单文件 `python test_review_fixes.py`
-- 探测：`python probe_intraday.py <code>`；账户额度见 `account_config.py` / `.env.example`
+- 探测：`python probe_intraday.py <code>`；账户额度见 `account_config.py` / `.env`（已入库共享模板）；本机密钥写 `.env.local`（gitignore），优先级 `.env.local` > `.env`
 - **盘中「现在能上吗」**（快速决策，2026-09-28）：见下条；命令入口 `python gates/session_decide.py`
 - **四层文档分工**（择时层已补齐，2026-11-02）：
   | 层 | 文件 | 管什么 |

@@ -14,7 +14,8 @@
 |---|---|---|---|
 | 源码 + 文档 | 小 | ✅ 在 | `git clone` |
 | `data/screener.db`（日线库） | **215 MB** | ❌ 被 `/data/` 忽略 | **必须重建**，见 §3（首次约 6 分钟） |
-| `.env`（账户额度/密钥） | 私密 | ❌ 被忽略 | 从旧机器复制，或照 `.env.example` 重建 |
+| `.env`（共享默认配置） | 零密钥 | ✅ 在 git | `git clone` 即带；键位注释齐全 |
+| `.env.local`（本机密钥/个性化额度） | 私密 | ❌ 被忽略 | 从旧机器复制，或照 `.env.example` 新建 |
 | 定时任务 | 存在本地 `~/.workbuddy/` | ❌ 被忽略 | **必须重建**，见 §5（prompt 原文在 §5.3） |
 
 ⚑ **结论：定时任务是「绑机器」的**，不是绑仓库。换机 = 重新建数据 + 重新建任务，这是预期行为，不是故障。
@@ -71,14 +72,24 @@ git log --oneline -1      # 应看到 3548cc0 或更新的提交
 <PY> -c "import baostock; print('baostock ok')"
 ```
 
-### 2.3 可选：账户配置 `.env`
+### 2.3 账户配置与本机密钥
 
-`screener` 三个脚本**不读** `.env`（扫描只用本地库 + 战法判据，跟钱无关）。
-但如果你还要跑 `battle_analyze.py` / `report_render.py`（个股作战计划），就得有：
+`screener` 三个脚本**不读** dotenv（扫描只用本地库 + 战法判据，跟钱无关）。
+`battle_analyze.py` / `report_render.py`（个股作战计划）则走 `account_config`：
+
+- `.env` **已入库**（零密钥共享模板），clone 下来就带，不用手工复制；
+- 本机私有值（额度、`TIINGO_TOKEN`、`TICKFLOW_API_KEY`）写 `.env.local`，
+  该文件被 `.gitignore` 忽略，换机时从旧机器复制或照 `.env.example` 新建：
 
 ```bash
-cp .env.example .env     # 再按账户实际额度改：ASH_ACCOUNT / US_ACCOUNT 等
+# .env.local（本机，不入库）
+TIINGO_TOKEN=你自己的token
+ASH_ACCOUNT=60000
 ```
+
+读取优先级：进程 env > `.env.local` > `.env` > DEFAULTS。
+不配 Tiingo token 不影响扫描；只影响美股**夜盘**——会 fail-closed 不出可执行买单
+（避免拿昨收假价出单），详见 `gates/us_overnight.py`。
 
 ---
 

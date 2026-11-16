@@ -45,8 +45,12 @@ cache/
 .cache/
 reports/
 run.log
-.env
 us_proxy.txt
+
+# .env 是入库的共享配置模板（不含任何密钥，供其他机器 clone 后直接用）。
+# 真密钥一律写 .env.local —— 仓库为 public，绝不提交。
+# 读取优先级：进程 env > .env.local > .env
+.env.local
 
 # 私人生成物（2026-09-25 补）：作战计划笔记 + 顶部研究控制台输出。
 # 仓库为 public，notes_*.json 含持仓/成本/买点，不得收录。

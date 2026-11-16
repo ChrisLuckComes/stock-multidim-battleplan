@@ -83,6 +83,7 @@ if _HERE not in sys.path:
 
 from gates.session_decide import (rally_state, trend_structure, trend_shape,
                                   volume_burst, chase_risk, round_px)
+from gates.us_overnight import apply_night_quote
 from open_playbook import long_rr, RR_QUALIFIED, max_entry_for_rr
 
 UA = {"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"}
@@ -167,12 +168,18 @@ def fetch_daily_stats(symbol, n=60):
             "atr": a, "prev_close": cl[-1], "last": rows[-1]}
 
 
-def load_us_day(symbol, source="nasdaq"):
+def load_us_day(symbol, source="nasdaq", allow_night_quote=True):
     """组装 decide_us 需要的 day 结构（兼容 A股 decide 的 minutes 字段名）。
 
     source="nasdaq"（默认）：Nasdaq /chart 主源（沙箱里东财 trends2 偶发断连，故默认走 Nasdaq），
         失败自动回退东财。序列含盘前 04:00 ET 起，盘前/盘后/夜盘买点均可执行。
     source="eastmoney"：强制东财 trends2（--source eastmoney 可切）。
+
+    ★ 夜盘数据层单一真源（2026-11-16）：Nasdaq /chart 只到 19:59 ET，亚洲白天
+      （ET 20:00–03:59）跑本函数拿到的「现价」其实是昨夜盘后收盘静态快照。
+      ⇒ 统一在此调 apply_night_quote：夜盘用 Tiingo 24x5 免费实时参考价覆盖最后一根，
+      取不到则打 quote_fresh=False 让 decide_us fail-closed。所有调用方（本脚本 /
+      probe_us / 完整报告美股分流）自动受益。--asof 回放必须 allow_night_quote=False。
     """
     if source == "eastmoney":
         mins, pre, name = fetch_intraday(symbol)
@@ -183,8 +190,10 @@ def load_us_day(symbol, source="nasdaq"):
             # Nasdaq 兜底不到（限频/网络）再试东财
             mins, pre, name = fetch_intraday(symbol)
     date = mins[0]["t"][:10] if (mins and len(mins[0]["t"]) >= 10) else ""
-    return {"code": symbol.upper(), "name": name, "date": date,
-            "pre": float(pre) if pre else None, "minutes": mins}, pre
+    day = {"code": symbol.upper(), "name": name, "date": date,
+           "pre": float(pre) if pre else None, "minutes": mins}
+    apply_night_quote(day, symbol, allow=allow_night_quote)
+    return day, pre
 
 
 def summarize(day):
@@ -1303,7 +1312,7 @@ def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
               daily_bars=None, channel_expired=False, reaches_deep=None,
               day_low_final=False, structure_plan=None,
               pulse=None, pulse_enabled=True, chase_auth=None,
-              atr_extension=None):
+              atr_extension=None, quote_fresh=True, quote_note=""):
     """美股核心判定。结构对齐 A股 decide()，去掉涨跌停/主力资金流/整手/昨收+2% 闸。
 
     挂单由 select_us_hang 分浅档 / 深档。现价高于选出的档，不追，盯那一档。
@@ -1418,6 +1427,19 @@ def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
         if out["arm_price"] is not None and price < out["arm_price"]:
             out["reason"] = reason + " 盯 %.2f：%s" % (out["arm_price"], out["arm_note"])
         return out
+
+    # ★ 夜盘数据陈旧闸（2026-11-16，fail-closed）：夜盘拿不到实时报价时，
+    #   Nasdaq 序列末根其实是昨夜 19:59 ET 的静态收盘快照 —— 用它算出来的
+    #   「能买 + 限价 + 仓位」是会真亏钱的假单。此处只拦「出可执行买单」，
+    #   **不把夜盘当非交易时段排除**（AGENTS.md §1c 第 4 条 24h 可执行口径不变）：
+    #   有新鲜 Tiingo 24x5 报价时，夜盘照样走完整判据、照样可判「能买」。
+    #   out 仍带完整计划 / 盯价 / 赔率，脚本不抛异常、不崩。
+    if not quote_fresh:
+        out["arm_price"] = None
+        out["arm_note"] = ""
+        return _reject("夜盘无实时报价（%s）⇒ 本次不出可执行买单；"
+                       "配置 TIINGO_TOKEN 或等 04:00 ET 盘前再判。"
+                       % (quote_note or "数据陈旧"))
 
     # ★ ATR 延伸闸（atr_extension · 2026-11-06）：≥7×ATR 高于 MA50 ⇒ 禁开新多。
     #   价位与延伸倍数必须可见。不是做空信号；不替代破位/反抽 + RR。
@@ -1554,6 +1576,27 @@ def render_us(d):
     rr_s = ("%.2f" % d["rr"]) if d["rr"] is not None else "—"
     rr_e = ("%.2f" % d["rr_at_entry"]) if d["rr_at_entry"] is not None else "—"
     lines.append("盈亏比  现价 R %s  挂单价 R %s" % (rr_s, rr_e))
+    # ★ 夜盘数据状态上屏（2026-11-16）：假价单必须看得见「价从哪来、新鲜不新鲜」。
+    nq = d.get("night_quote")
+    if isinstance(nq, dict):
+        lines.append("夜盘数据  %s ｜ 价源 %s ｜ 实时 %s%s"
+                     % (nq.get("session"), nq.get("source"),
+                        "是" if nq.get("fresh") else "否",
+                        (" ｜ 滞留 %s 秒" % nq["stale_sec"])
+                        if nq.get("stale_sec") is not None else ""))
+        if nq.get("note"):
+            lines.append("  %s" % nq["note"])
+        if nq.get("fresh"):
+            if nq.get("bid") is not None and nq.get("ask") is not None:
+                sp = nq.get("spread")
+                vol = nq.get("volume")
+                lines.append("  夜盘参考盘口  bid %.2f / ask %.2f ｜ spread %s ｜ session累计量 %s"
+                             % (nq["bid"], nq["ask"],
+                                ("%.3f%%" % (sp * 100)) if sp is not None else "—",
+                                ("%.0f" % vol) if vol is not None else "—"))
+            lines.append("  ⚑ Tiingo 24x5 = 交易所/ATS/OTC 合成参考价，非可成交盘口；"
+                         "限价单须按券商 BOATS 盘口校准（分钟量置 0：Tiingo volume 是 session 累计"
+                         "口径，不可当单分钟量 ⇒ 量价判据夜盘失真）")
     r = d.get("rally") or {}
     st = d.get("structure") or {}
     sh = d.get("shape") or {}
@@ -1649,6 +1692,8 @@ def main(argv=None):
                     help="回放目标日期 YYYY-MM-DD（钉死 DST 判定，历史回放必填）")
     ap.add_argument("--source", choices=["nasdaq", "eastmoney"], default="nasdaq",
                    help="分钟线数据源（默认 nasdaq，含盘前；eastmoney 走东财 trends2）")
+    ap.add_argument("--allow-stale-night-quote", action="store_true",
+                    help="夜盘无实时报价时仍按静态收盘价判（默认关闭：fail-closed 不出买单）")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
@@ -1673,7 +1718,9 @@ def main(argv=None):
     # 2) 取数（自动计划也需要 atr / 分钟序列）
     try:
         t0 = time.perf_counter()
-        day, pre = load_us_day(symbol, source=args.source)
+        # ★ --asof 是历史回放：绝不能用「此刻」的实时价去覆盖回放窗口（前瞻）。
+        day, pre = load_us_day(symbol, source=args.source,
+                               allow_night_quote=not args.asof)
         if args.asof:
             # ★ 全修④：先归一成 ET 时钟再比较，杜绝 ET/BJ 裸比字符串错位
             asof_et, crossed = normalize_asof(args.asof, args.asof_tz,
@@ -1748,6 +1795,12 @@ def main(argv=None):
         mode = plan.get("mode")
         ride = plan.get("ride_state")
         structure_plan = plan.get("raw")
+    # ★ 夜盘陈旧闸：默认 fail-closed；--allow-stale-night-quote 是显式逃生口（会上屏标注）。
+    _nq = day.get("night_quote")
+    _quote_fresh = bool(day.get("quote_fresh", True))
+    _stale_auth = bool(args.allow_stale_night_quote and _nq and not _nq.get("fresh"))
+    if _stale_auth:
+        _quote_fresh = True
     d = decide_us(day, summary, entry, stop, target,
                   cap=cap, atr=atr, account=args.account,
                   risk_scale=args.risk_scale,
@@ -1755,9 +1808,15 @@ def main(argv=None):
                   ride_state=ride, structure_plan=structure_plan,
                   pulse_enabled=not args.no_pulse,
                   chase_auth=(plan or {}).get("chase"),  # ★ 全修②
-                  atr_extension=(plan or {}).get("atr_extension"))
+                  atr_extension=(plan or {}).get("atr_extension"),
+                  quote_fresh=_quote_fresh,
+                  quote_note=day.get("quote_note") or "")
     d["plan_src"] = plan_src
     d["intraday_source"] = args.source
+    d["night_quote"] = _nq
+    if _stale_auth:
+        d["stale_quote_authorized"] = True
+        d["reason"] += " ⚠ 已显式授权使用陈旧夜盘价（--allow-stale-night-quote），非实时。"
     decide_ms = (time.perf_counter() - t1) * 1000.0
     d["elapsed_ms"] = round(fetch_ms + decide_ms, 1)
     d["fetch_ms"] = round(fetch_ms, 1)

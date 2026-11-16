@@ -8,8 +8,14 @@
 
 配置来源（优先级从高到低）：
   1. 进程环境变量
-  2. 仓库根目录 `.env`（从 `.env.example` 复制后改；已被 .gitignore，勿提交）
-  3. 下方 DEFAULTS（只在**完全没配置**时兜底，值等于 2026-09-21 的口径）
+  2. 仓库根目录 `.env.local`（本机私有：API key / token / 个性化额度；
+     已被 .gitignore 忽略，绝不提交）
+  3. 仓库根目录 `.env`（**已入库的共享模板，零密钥**，clone 下来就能跑）
+  4. 下方 DEFAULTS（只在**完全没配置**时兜底，值等于 2026-09-21 的口径）
+
+⚑ 两层 dotenv 的优先级靠**加载顺序**实现：`.env.local` 先注入、`.env` 后注入；
+   `_load_dotenv` 不覆盖已存在的 env ⇒ 本机值胜出。指纹同时 stat 两个文件，
+   改任一层都会让 cfg() 自动重建缓存（不重启进程也生效）。
 
 A 股口径（2026-09-21 定稿）::
 
@@ -35,7 +41,10 @@ from typing import Optional
 
 _ROOT = Path(__file__).resolve().parent
 
-# 只在「env 与 .env 都没有这个键」时生效。改这里等于改「未配置时的行为」。
+# dotenv 层，按优先级从高到低：先加载者胜出（_load_dotenv 不覆盖已存在的 env）
+DOTENV_FILES = (".env.local", ".env")
+
+# 只在「env 与两层 dotenv 都没有这个键」时生效。改这里等于改「未配置时的行为」。
 DEFAULTS = {
     "ash_account": 50000,      # A 股单票探测默认账户（CLI --account）
     "us_account": 4694.80,     # 美股默认账户美元（CLI --us-account；老罗全额）
@@ -59,28 +68,29 @@ ENV_KEYS = {
     "ASH_CASH": "ash_cash",
 }
 
-_DOTENV_VALUES: dict = {}      # env 键 -> .env 里写的值（用来判断当前值是否仍来自 .env）
+_DOTENV_VALUES: dict = {}      # env 键 -> dotenv 里写的值（用来判断当前值是否仍来自配置层）
 _CACHE: Optional[dict] = None
 _FP: Optional[str] = None      # 缓存对应的环境指纹
 
 
 def _fingerprint() -> str:
-    """当前「环境状态」的指纹：相关 env 值 + .env 的 mtime/size。
+    """当前「环境状态」的指纹：相关 env 值 + 两层 dotenv 的 mtime/size。
 
-    只做内存取值和一次 stat，不读文件内容 —— 所以 cfg() 可以每次调用都算。
+    只做内存取值和几次 stat，不读文件内容 —— 所以 cfg() 可以每次调用都算。
+    ★ 必须把 .env.local 也纳入：否则改了本机私有配置，缓存不失效。
     """
     parts = [str(os.environ.get(k, "")) for k in ENV_KEYS]
-    try:
-        st = (_ROOT / ".env").stat()
-        parts.append("%d:%d" % (st.st_mtime_ns, st.st_size))
-    except OSError:
-        parts.append("-")
+    for name in DOTENV_FILES:
+        try:
+            st = (_ROOT / name).stat()
+            parts.append("%s=%d:%d" % (name, st.st_mtime_ns, st.st_size))
+        except OSError:
+            parts.append("%s=-" % name)
     return "|".join(parts)
 
 
-def _load_dotenv(path: Optional[Path] = None) -> None:
-    """把仓库根目录 `.env` 读进 os.environ（不覆盖已存在的真 env）。"""
-    env_path = path or (_ROOT / ".env")
+def _load_one_dotenv(env_path: Path) -> None:
+    """把单个 dotenv 读进 os.environ（不覆盖已存在的真 env / 更高优先层）。"""
     if not env_path.is_file():
         return
     for raw in env_path.read_text(encoding="utf-8").splitlines():
@@ -95,6 +105,15 @@ def _load_dotenv(path: Optional[Path] = None) -> None:
         if key not in os.environ:
             os.environ[key] = val
             _DOTENV_VALUES[key] = val
+
+
+def _load_dotenv(path: Optional[Path] = None) -> None:
+    """按优先级加载 dotenv；`path` 只为测试 / 单次显式指定保留。"""
+    if path is not None:
+        _load_one_dotenv(path)
+        return
+    for name in DOTENV_FILES:              # .env.local 先 ⇒ 胜出
+        _load_one_dotenv(_ROOT / name)
 
 
 def _num(name: str, default):
@@ -118,7 +137,7 @@ def _source(env_key: str) -> str:
     """这个键当前的值来自哪一层：env / dotenv / default。
 
     ★ 只记「曾被 .env 注入过」是不够的 —— 注入过之后又被代码 / 测试改写，来源
-    就变成 env 了。所以要**比对当前值与 .env 里写的值**：一致才算 dotenv。
+    就变成 env 了。所以要**比对当前值与配置层里写的值**：一致才算 dotenv。
     """
     if env_key not in os.environ:
         return "default"
@@ -175,9 +194,9 @@ def load_account_config(*, dotenv: bool = True) -> dict:
 def cfg(reload: bool = False) -> dict:
     """进程内共享的配置（**带环境指纹缓存**）。
 
-    每次调用先算一次「环境指纹」（相关 env 键的值 + .env 的 mtime/size；纯内存 +
-    一次 stat，微秒级）。指纹没变就复用缓存对象、不碰磁盘；一旦你改了 env 或
-    编辑了 .env，下一次取值就自动重建 —— 不用手工 reload。
+    每次调用先算一次「环境指纹」（相关 env 键的值 + 两层 dotenv 的 mtime/size；
+    纯内存 + 几次 stat，微秒级）。指纹没变就复用缓存对象、不碰磁盘；一旦你改了
+    env 或编辑了任一 dotenv 文件，下一次取值就自动重建 —— 不用手工 reload。
 
     这就是「动态读 env」的落点：既没有 import 时快照的分叉，也没有每次取股数
     都去读文件的开销。
@@ -191,7 +210,7 @@ def cfg(reload: bool = False) -> dict:
 
 
 def reload_cfg() -> dict:
-    """重新读 .env + env 并刷新缓存（probe_intraday 会同步刷新其模块属性）。"""
+    """重新读两层 dotenv + env 并刷新缓存（probe_intraday 会同步刷新其模块属性）。"""
     return cfg(reload=True)
 
 
@@ -216,7 +235,7 @@ def describe() -> str:
         ("美股 账户", "us_account", "{:,.2f}", src.get("us_account", "default")),
         ("     单笔风险预算", "us_risk_pct", "{:.2%}", src.get("us_risk_pct", "default")),
     ]
-    L = ["账户 / 仓位配置（来源：env > .env > DEFAULTS）",
+    L = ["账户 / 仓位配置（来源：env > .env.local > .env > DEFAULTS）",
          "─" * 62]
     for label, key, fmt, s in rows:
         v = c.get(key)
