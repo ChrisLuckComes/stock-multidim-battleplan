@@ -18,7 +18,8 @@ from gates.us_session_decide import (decide_us, size_for_us, resolve_cap_us,
                                      select_us_hang, us_exec_target,
                                      lows_often_reach_depth, render_us,
                                      apply_us_hang, partial_session_tape,
-                                     dip_basis)
+                                     dip_basis,
+                                     hang_already_tested, evaluate_session_second_look)
 from open_playbook import long_rr, max_entry_for_rr
 
 FAILS = []
@@ -69,7 +70,7 @@ def test_pullback_buy():
     # 末价 = 95.0 = 挂单价（回踩到价）；R闸 = 93+(100-93)/2.5 = 95.8
     day, summary = day_of([100, 99, 98, 97, 96, 95.2, 95.0])
     d = decide_us(day, summary, entry=95.0, stop=93.0, target=100.0,
-                  atr=2.0, account=DEFAULT_ACCOUNT)
+                  atr=2.0, account=DEFAULT_ACCOUNT, pulse_enabled=False)
     chk("回踩到价判能买", d["action"] == "能买", d)
     chk("贴MA档标签", "回踩" in d["reason"], d["reason"])
     chk("R≈2.5", abs(d["rr_at_entry"] - 2.5) < 0.05, d["rr_at_entry"])
@@ -85,7 +86,12 @@ def test_chase_reject():
     d = decide_us(day, summary, entry=95.0, stop=93.0, target=100.0,
                   atr=2.0, account=DEFAULT_ACCOUNT)
     chk("追高被拒", d["action"] == "不买", d)
-    chk("原因含上限", "上限" in d["reason"], d["reason"])
+    # 开盘即见到挂单 95 后一路拉到 106：挂单已测，现价已离开均价，不追这一截；
+    # 不再写「原挂仍有效」。上限/离开均价/不再等 都算拒因。
+    chk("原因含上限或已测后不追",
+        ("上限" in d["reason"]) or ("不再等" in d["reason"]) or ("离开" in d["reason"]),
+        d["reason"])
+    chk("不写原挂仍有效", "仍有效" not in (d.get("reason") or ""), d.get("reason"))
 
 
 def test_no_target_reject():
@@ -138,8 +144,10 @@ def test_size_for_us():
     chk("风险超预算→0股", s2["qty"] == 0, s2)
     chk("0股带警告", bool(s2.get("warn")), s2)
     # 最小1股（风险<预算）
-    s3 = size_for_us(50.0, 49.5, account=DEFAULT_ACCOUNT, risk_scale=1.0)  # 每股风险0.5 → 140股
-    chk("小额可满仓", s3["qty"] == 140, s3)
+    s3 = size_for_us(50.0, 49.5, account=DEFAULT_ACCOUNT, risk_scale=1.0)
+    # 风险 0.5 按预算可到 140 股，但名义上限 = 账户/入场价 = 93 股（全现金、不融资）。
+    chk("小额受名义上限", s3["qty"] == 93, s3)
+    chk("触发名义上限", s3.get("qty_cap_hit") is True, s3)
 
 
 def test_rally_linear():
@@ -195,7 +203,7 @@ def test_auto_plan_us_at_low():
     assert abs(cap - 90.8) < 1e-6, cap
     d = decide_us({"code": "X", "name": "X", "date": "", "pre": 90.0, "minutes": mins},
                   {"last": mins[-1]}, ap["entry"], ap["stop"], ap["target"],
-                  atr=atr, account=DEFAULT_ACCOUNT)
+                  atr=atr, account=DEFAULT_ACCOUNT, pulse_enabled=False)
     assert d["action"] == "能买", d
     assert abs(d["rr"] - 20.0 / 12.0) < 1e-6, d["rr"]
     assert d["limit_buy"] == 90.0, d
@@ -222,7 +230,7 @@ def test_auto_plan_us_pullback_rejects_chase():
     assert abs(long_rr(100.0, 112.5, 90.0) - 1.25) < 1e-9, "R 应为 1.25"
     d = decide_us({"code": "X", "name": "X", "date": "", "pre": 100.0, "minutes": mins},
                   {"last": mins[-1]}, ap["entry"], ap["stop"], ap["target"],
-                  atr=atr, account=DEFAULT_ACCOUNT)
+                  atr=atr, account=DEFAULT_ACCOUNT, pulse_enabled=False)
     assert d["action"] == "不买", d
     assert "上限" in d["reason"], d["reason"]
     assert abs(d["cap"] - 99.0) < 1e-6, d["cap"]
@@ -412,7 +420,9 @@ def test_decide_us_labels_shallow():
     chk("档位是浅档", d["hang_tier"] == "浅档", d)
     chk("浅档价 40.80", d["hang_px"] is not None and abs(d["hang_px"] - 40.80) < 0.001, d)
     chk("原因写不追", "不追" in d["reason"], d["reason"])
-    chk("盯浅档", d["arm_price"] is not None and abs(d["arm_price"] - 40.80) < 0.001, d)
+    # 分时低点 40.50 已测浅档 40.80，现价已离开均价：不追，也不再死等原挂。
+    chk("已测浅档不再死等", d.get("arm_price") is None, d.get("arm_price"))
+    chk("原因写不再等或已触及", ("不再等" in d["reason"]) or ("已触及" in d["reason"]), d["reason"])
     txt = render_us(d)
     chk("输出标浅档", "浅档" in txt, txt)
 
@@ -648,6 +658,174 @@ def test_decide_prints_rerun_note():
     txt = render_us(d)
     chk("输出写再跑", "再跑" in txt and "全日低点" in txt, txt)
 
+def _appn_dip_minutes(last=52.47):
+    """2026-11-16 APPN 型：开 53.95，回踩消化区 52.31，再略抬。"""
+    return [
+        {"t": "09:30", "o": 53.95, "h": 53.95, "l": 53.20, "c": 53.40, "v": 800, "avg": 53.70},
+        {"t": "09:45", "o": 53.40, "h": 53.50, "l": 52.80, "c": 52.90, "v": 1200, "avg": 53.20},
+        {"t": "10:00", "o": 52.90, "h": 53.00, "l": 52.31, "c": last, "v": 2000, "avg": 52.80},
+    ]
+
+
+def test_appn_dip_not_rejected_for_wide_stop():
+    """APPN：回踩已给到，不得用宽止损把近端 T1 算成 R 不够。"""
+    atr, pre = 3.02, 54.51
+    mins = _appn_dip_minutes(last=52.47)
+    day = {"code": "APPN", "name": "Appian", "date": "2026-11-16",
+           "pre": pre, "minutes": mins}
+    # 宽结构止损 47.93 + 近端目标周五高 55.16：原计划 R 不够 1.5，但日内止损后应能买。
+    d = decide_us(day, summarize(day), entry=52.50, stop=47.93, target=55.16,
+                  atr=atr, account=DEFAULT_ACCOUNT, pulse_enabled=False)
+    chk("回踩低点能买", d["action"] == "能买", d.get("reason") or d)
+    chk("不是用宽止损否决", d.get("second_look") is True or float(d["stop"]) > 47.93 + 0.5, d)
+    chk("目标仍是近端 T1", d["target"] == 55.16, d["target"])
+    chk("现价 R≥1.5", d["rr"] is not None and d["rr"] >= 1.5, d["rr"])
+    chk("结论不含 R 不够当拒因", "R 不足" not in (d.get("reason") or "") or d["action"]=="能买", d.get("reason"))
+
+
+def test_appn_extended_after_dip_does_not_chase():
+    """APPN 回踩已走完、现价离开均价冲到 56.7：不追，也不再等 52.3。"""
+    atr, pre = 3.02, 54.51
+    mins = _appn_dip_minutes(last=52.47)
+    mins.append({"t": "11:38", "o": 56.20, "h": 56.78, "l": 56.00, "c": 56.70,
+                 "v": 3000, "avg": 54.80})
+    day = {"code": "APPN", "name": "Appian", "date": "2026-11-16",
+           "pre": pre, "minutes": mins}
+    d = decide_us(day, summarize(day), entry=52.50, stop=47.93, target=55.16,
+                  atr=atr, account=DEFAULT_ACCOUNT, pulse_enabled=False)
+    chk("走完后不追", d["action"] == "不买", d.get("reason"))
+    chk("不写原挂仍有效", "仍有效" not in (d.get("reason") or ""), d.get("reason"))
+    chk("写明不再等", "不再等" in (d.get("reason") or ""), d.get("reason"))
+    chk("不盯已测原挂", d.get("arm_price") is None, d.get("arm_price"))
+
+
+def _app_minutes(low=404.78, last=411.00, last_avg=411.00):
+    """2026-11-16 APP 型：开 414.60，回踩 404.78（已测 405.01），再抬。"""
+    return [
+        {"t": "09:30", "o": 414.60, "h": 414.60, "l": 410.00, "c": 412.00, "v": 2000, "avg": 413.0},
+        {"t": "09:36", "o": 408.00, "h": 408.00, "l": low, "c": 406.10, "v": 4000, "avg": 408.0},
+        {"t": "10:20", "o": 410.50, "h": 412.00, "l": 409.80, "c": last, "v": 3000, "avg": last_avg},
+    ]
+
+
+def test_app_reentry_at_vwap_after_405_tested():
+    """APP：405.01 已给到（今低 404.78），贴均价应能买，不再死等 405。"""
+    atr = 21.90
+    mins = _app_minutes(last=411.00, last_avg=411.00)
+    day = {"code": "APP", "name": "AppLovin", "date": "2026-11-16",
+           "pre": 409.10, "minutes": mins}
+    d = decide_us(day, summarize(day), entry=405.01, stop=400.42, target=435.0,
+                  atr=atr, account=DEFAULT_ACCOUNT, pulse_enabled=False)
+    chk("已测 405 后贴均价能买", d["action"] == "能买", d.get("reason") or d)
+    chk("第二买点", d.get("second_look") is True, d)
+    chk("不再盯 405", d.get("arm_price") is None, d.get("arm_price"))
+    chk("止损在今低下方附近", 401.5 <= float(d["stop"]) < 404.78, d["stop"])
+    chk("目标仍 435", d["target"] == 435.0, d["target"])
+    chk("R≥1.5", d["rr"] is not None and d["rr"] >= 1.5, d["rr"])
+    chk("不写仍有效", "仍有效" not in (d.get("reason") or ""), d.get("reason"))
+
+
+def test_app_418_does_not_wait_405():
+    """APP 现价 418 已近今高：不追，也不再无脑等 405。"""
+    atr = 21.90
+    mins = _app_minutes(last=418.25, last_avg=411.00)
+    mins.append({"t": "12:16", "o": 417.50, "h": 418.77, "l": 417.20, "c": 418.25,
+                 "v": 3000, "avg": 411.00})
+    day = {"code": "APP", "name": "AppLovin", "date": "2026-11-16",
+           "pre": 409.10, "minutes": mins}
+    d = decide_us(day, summarize(day), entry=405.01, stop=400.42, target=435.0,
+                  atr=atr, account=DEFAULT_ACCOUNT, pulse_enabled=False)
+    chk("418 不追", d["action"] == "不买", d.get("reason"))
+    chk("不写 405 仍有效", "仍有效" not in (d.get("reason") or ""), d.get("reason"))
+    chk("写明不再等", "不再等" in (d.get("reason") or ""), d.get("reason"))
+    chk("不把 405 再当盯价", d.get("arm_price") is None, d.get("arm_price"))
+
+
+def _spot_style_minutes(low=598.56, last=608.77, last_vol=3000, extra=None):
+    """2026-11-16 SPOT 型：开盘冲高、回踩一带、再收回贴均价。"""
+    mins = [
+        {"t": "09:30", "o": 618.56, "h": 618.56, "l": 614.00, "c": 614.00, "v": 800, "avg": 616.0},
+        {"t": "09:36", "o": 604.00, "h": 604.00, "l": low, "c": 600.00, "v": 1200, "avg": 602.0},
+        {"t": "09:47", "o": 608.00, "h": 609.47, "l": 607.00, "c": 609.00, "v": 2000, "avg": 608.5},
+    ]
+    for m in range(0, 21):
+        mins.append({"t": "10:%02d" % m, "o": 608.50, "h": 609.20, "l": 608.00,
+                     "c": last, "v": last_vol, "avg": last})
+    if extra:
+        mins.extend(extra)
+    return mins
+
+
+def test_hang_already_tested_tol_and_stop():
+    atr = 20.88
+    chk("精确触及", hang_already_tested(598.35, 598.35, 586.15, atr))
+    chk("一带几乎触及 0.21", hang_already_tested(598.56, 598.35, 586.15, atr))
+    chk("IEX 低点 599.43 仍算一带", hang_already_tested(599.43, 598.35, 586.15, atr))
+    chk("未回踩到挂单", not hang_already_tested(605.00, 598.35, 586.15, atr))
+    chk("跌破计划止损不算第二买点", not hang_already_tested(585.00, 598.35, 586.15, atr))
+
+
+def test_second_look_after_hang_tested_buys():
+    """SPOT 10:20 型：598 一带已给到，现价贴均价，应用日内止损放行，不再等原挂。"""
+    atr, pre = 20.88, 612.63
+    mins = _spot_style_minutes()
+    day = {"code": "SPOT", "name": "Spotify", "date": "2026-11-16",
+           "pre": pre, "minutes": mins}
+    d = decide_us(day, summarize(day), entry=598.35, stop=586.15, target=635.0,
+                  atr=atr, account=DEFAULT_ACCOUNT, pulse_enabled=False)
+    chk("已测挂单贴均价能买", d["action"] == "能买", d.get("reason") or d)
+    chk("第二买点标记", d.get("second_look") is True, d)
+    chk("不再盯原挂", d.get("arm_price") is None, d.get("arm_price"))
+    chk("止损收到日内低下方", 596.0 < float(d["stop"]) < 598.56, d["stop"])
+    chk("目标仍是原 T1 635", d["target"] == 635.0, d["target"])
+    chk("现价 R≥1.5", d["rr"] is not None and d["rr"] >= 1.5, d["rr"])
+    chk("结论不写原挂仍有效", "仍有效" not in (d.get("reason") or ""), d.get("reason"))
+    # 自动远目标不得混进来
+    chk("没有编造远目标", d["target"] != 660.98, d["target"])
+
+
+def test_untested_hang_still_waits():
+    """挂单从未给到，现价高于原上限 ⇒ 仍不追，盯原挂。"""
+    atr, pre = 20.88, 612.63
+    mins = _spot_style_minutes(low=605.00, last=608.77)
+    day = {"code": "SPOT", "name": "Spotify", "date": "2026-11-16",
+           "pre": pre, "minutes": mins}
+    d = decide_us(day, summarize(day), entry=598.35, stop=586.15, target=635.0,
+                  atr=atr, account=DEFAULT_ACCOUNT, pulse_enabled=False)
+    chk("未测挂单现价不买", d["action"] == "不买", d.get("reason"))
+    chk("没有第二买点", not d.get("second_look"), d)
+    chk("仍盯原挂 598.35", d.get("arm_price") is not None and abs(d["arm_price"] - 598.35) < 0.02,
+        d.get("arm_price"))
+
+
+def test_second_look_does_not_chase_extended():
+    """挂单已测，但现价已离开均价冲到早盘高 ⇒ 不追，且不得写原挂仍有效。"""
+    atr, pre = 20.88, 612.63
+    extra = []
+    for m in range(50, 59):
+        extra.append({"t": "11:%02d" % m, "o": 617.0, "h": 618.60, "l": 616.8,
+                      "c": 618.30, "v": 400, "avg": 618.0})
+    mins = _spot_style_minutes(last=608.77, last_vol=4000, extra=extra)
+    day = {"code": "SPOT", "name": "Spotify", "date": "2026-11-16",
+           "pre": pre, "minutes": mins}
+    d = decide_us(day, summarize(day), entry=598.35, stop=586.15, target=635.0,
+                  atr=atr, account=DEFAULT_ACCOUNT, pulse_enabled=False)
+    chk("离开均价后不追", d["action"] == "不买", d.get("reason"))
+    chk("不是第二买点成交", not d.get("second_look"), d)
+    chk("不写原挂仍有效", "仍有效" not in (d.get("reason") or ""), d.get("reason"))
+    chk("写明不再等原挂", "不再等" in (d.get("reason") or ""), d.get("reason"))
+    chk("不盯已测原挂", d.get("arm_price") is None, d.get("arm_price"))
+
+
+def test_broken_plan_stop_is_not_second_look():
+    atr, pre = 20.88, 612.63
+    mins = _spot_style_minutes(low=585.00, last=608.77)
+    day = {"code": "SPOT", "name": "Spotify", "date": "2026-11-16",
+           "pre": pre, "minutes": mins}
+    d = decide_us(day, summarize(day), entry=598.35, stop=586.15, target=635.0,
+                  atr=atr, account=DEFAULT_ACCOUNT, pulse_enabled=False)
+    chk("破计划止损不能当第二买点", not d.get("second_look"), d)
+    chk("破止损后现价不买", d["action"] == "不买", d.get("reason"))
 
 if __name__ == "__main__":
     test_pullback_buy()
@@ -690,5 +868,14 @@ if __name__ == "__main__":
     test_vwap5_above_floor_is_labeled_five_day()
     test_wide_stop_retarget_does_not_rename_deep_price()
     test_decide_prints_rerun_note()
+    test_hang_already_tested_tol_and_stop()
+    test_second_look_after_hang_tested_buys()
+    test_untested_hang_still_waits()
+    test_second_look_does_not_chase_extended()
+    test_broken_plan_stop_is_not_second_look()
+    test_appn_dip_not_rejected_for_wide_stop()
+    test_appn_extended_after_dip_does_not_chase()
+    test_app_reentry_at_vwap_after_405_tested()
+    test_app_418_does_not_wait_405()
     print("\n%d failed" % len(FAILS))
     sys.exit(1 if FAILS else 0)
