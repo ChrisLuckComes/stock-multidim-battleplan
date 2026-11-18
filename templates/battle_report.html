@@ -48,6 +48,14 @@
   ul{margin:6px 0 6px 20px;padding:0}
   li{margin:3px 0}
   .note{font-size:12.5px;color:var(--dim)}
+  /* ★ 固定文案折叠（老罗 2026-11-18）：每次都一样的说明/公式/纪律默认收起，点开看全文。 */
+  .fold-note{margin:6px 0;border:1px dashed var(--line);border-radius:7px;padding:5px 10px;background:#fafbfc}
+  .fold-note>summary{cursor:pointer;color:var(--dim);font-size:12px;list-style:none;user-select:none;padding:1px 0}
+  .fold-note>summary::-webkit-details-marker{display:none}
+  .fold-note[open]>summary{color:var(--accent);margin-bottom:5px}
+  .fold-note[open]{background:#fff}
+  .fold-note>summary:hover{color:var(--accent)}
+  .fold-note .note{margin:0}
   code{background:#f0f3f6;padding:1px 5px;border-radius:4px;font-size:12px}
   .sec-no{color:var(--dim2);font-weight:400;font-size:14px}
   /* ★ 一句话结论（2026-10-10）：一页汇总那张十几行的表可读性差，压成一句话。 */

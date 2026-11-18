@@ -1968,13 +1968,57 @@ def render(a, n, tmpl_path=DEFAULT_TMPL, vp_from=None, vp_to=None):
             return "<!-- 未定义插槽 %s -->" % k
         return str(slots[k])
 
-    return SLOT_RE.sub(sub, tmpl)
+    html = SLOT_RE.sub(sub, tmpl)
+    return fold_fixed_notes(html)
+
+
+# ───────────────────────── 固定文案折叠（老罗 2026-11-18「优化掉废话/提示/公式」） ─────────────────────────
+# 这些说明/公式/纪律文字每次报告一字不差，属于「知道了就不用再看第二遍」的固定成本。
+# 只折叠**纯说明性 note**，不碰任何数据驱动的判定/数值/表格主行。默认收起、一行标题、点开看全文 ⇒ 信息零丢失。
+# 判据用「去标签后的纯文本前缀」匹配，规避 &gt;/&lt;/&amp; 等转义差异。
+_FOLD_NOTE_RULES = (
+    # (纯文本前缀特征, 折叠标题)
+    ("口径：三角分布", "SCR 筹码算法口径与校准说明"),
+    ("公式：(近5日日均振幅", "活跃度算法公式与分档说明"),
+    ("本计数只用于排序与解释", "叠加计数的性质（只排序不否决）"),
+    ("未计入分母的", "未计入分母的层（无数据）"),
+    ("与 2026-10-08 实证有张力", "VCP 收缩项的实证张力提醒"),
+    ("形态质量排序器（只加分不否决）", "形态质量排序器说明"),
+    ("⚠ A 股 T+1", "A 股 T+1 与止损腿纪律"),
+    ("本表只回答", "开盘作战表的适用范围"),
+    ("未提供基准日情绪分", "情绪分数据来源说明"),
+    ("无板块共振数据", "板块共振数据来源说明"),
+    ("催化剂未量化", "催化剂计分口径说明"),
+)
+
+
+def fold_fixed_notes(html):
+    """把每次都一样的固定说明 note 包进 <details>（默认收起）。
+
+    ⚑ 只处理完整的 <p class='note'>…</p> 块，且纯文本必须以 _FOLD_NOTE_RULES 中
+    某条前缀开头。数据驱动的 note（现价/主力行为/追价授权等）前缀不匹配 ⇒ 原样保留。
+    """
+    _p_re = re.compile(r"<p class='note'[^>]*>.*?</p>", re.S)
+
+    def _repl(mo):
+        block = mo.group(0)
+        plain = re.sub(r"<[^>]+>", "", block)
+        plain = (plain.replace("&gt;", ">").replace("&lt;", "<")
+                      .replace("&amp;", "&").replace("&#10;", " ")).strip()
+        for prefix, title in _FOLD_NOTE_RULES:
+            if plain.startswith(prefix):
+                return ("<details class='fold-note'><summary>▸ %s（点开看全文）</summary>%s</details>"
+                        % (esc(title), block))
+        return block
+
+    return _p_re.sub(_repl, html)
 
 
 def check_html(html):
     """标签配对自检（返回 (ok, 详情行列表)）。"""
     res, ok = [], True
-    for tag in ("div", "table", "tr", "td", "th", "p", "ul", "ol", "li", "span", "b", "code"):
+    for tag in ("div", "table", "tr", "td", "th", "p", "ul", "ol", "li", "span", "b", "code",
+                "details", "summary"):
         o = len(re.findall(r"<" + tag + r"[ >]", html))
         c = len(re.findall(r"</" + tag + r">", html))
         flag = "OK" if o == c else "*** MISMATCH"
