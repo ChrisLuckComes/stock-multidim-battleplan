@@ -1042,7 +1042,32 @@ def volprice_20d(bars):
 
 # ────────────────────────── 同行轻量对照 ──────────────────────────
 
+def _stock_name(code):
+    """本地库补股票名（2026-11-19）。
+
+    `--peers 688135,002156` 手工指定时不带名字，报告第 6 节只剩代码，读不出
+    「利扬芯片 / 通富微电」。用本地 screener.db 补，零联网、失败就退回代码。
+    """
+    try:
+        import sqlite3
+        db = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "data", "screener.db")
+        if not os.path.exists(db):
+            return ""
+        con = sqlite3.connect(db)
+        try:
+            r = con.execute("select name from stocks where code=?",
+                            (str(code),)).fetchone()
+        finally:
+            con.close()
+        return (r[0] or "").strip() if r else ""
+    except Exception:                             # noqa: BLE001
+        return ""
+
+
 def peer_row(prefix, code, name=None, n=150):
+    if not name:
+        name = _stock_name(code) or None
     bars, src, notes = BS.ash_bars(prefix, code, n=max(n, 140))
     if not bars or len(bars) < 25:
         return {"code": code, "name": name or code, "error": "日线不足",

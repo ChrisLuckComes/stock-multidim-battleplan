@@ -354,6 +354,13 @@ def from_analysis(data, market=None, sector=None, catalyst=None):
     # ── sector：没显式注入就用「同行近 20 日同向只数」近似（2026-10-10）
     if sector is None:
         sector = _sector_from_peers(data)
+    # ⚑ 2026-11-19（伟测 688372）：同行成分接口挂掉 ⇒ peers 空 ⇒ sector=None
+    #   ⇒ 板块层只剩「无数据」四个字。已知板块名必须显示（老罗「留空我看什么」）。
+    #   count 仍为 None ⇒ 仍是 unknown，绝不编造共振只数。
+    if sector is None:
+        _theme = str(meta.get("theme") or "").strip()
+        if _theme:
+            sector = {"count": None, "bucket": _theme}
 
     # ── market：没显式注入就去 data/sentiment_<基准日>.json 找
     if market is None:

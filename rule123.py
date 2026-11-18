@@ -5114,9 +5114,14 @@ def _plan_entry_core(bars, ev):
             lv = z.get("level")
             hi = z.get("primary_hi")
             d = (last_c - lv) / atr_v if (atr_v and lv is not None and last_c is not None) else None
+            # ⚑ 2026-11-19 修（伟测 688372）：primary_hi 是**追价上限**，常高于现价
+            #   （92.08 vs 95.91），原文案「等回踩 95.91」把上方价位说成回踩位。
+            #   只有 hi 真在现价下方才是回踩位；否则指回买位/最近均线。
+            tail = (f"等回踩 {hi} 一带" if (hi is not None and hi <= last_c)
+                    else f"等回踩到买位 {lv} 附近或最近均线")
             note = (
                 f"收盘 {last_c:.2f} 高出买位 {lv} 已 {d:.1f}×ATR（>2），"
-                f"不追；等回踩 {hi} 一带或等新一轮缩量再站上"
+                f"不追；{tail}，或等新一轮缩量再站上"
             )
             mode, priority, setup, verdict, recommend, path = (
                 "wait", None, "wait", "突破已延伸·等回踩", False, "wait",

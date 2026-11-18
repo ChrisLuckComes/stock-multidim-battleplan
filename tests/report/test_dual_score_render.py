@@ -179,8 +179,24 @@ class TestDualScoreRender(unittest.TestCase):
         a["plan"]["last"] = 22.0
         a["probe"] = {"zone_hi": 22.61, "zone_lo": 21.74}
         html = _render_min(a)
-        self.assertIn("已在买区上沿", html)
+        self.assertIn("在买区内且引擎认可", html)
         self.assertNotIn("此处不是买点", html)
+
+    def test_exec_now_zone_inside_but_reco_false(self):
+        """⚑ 2026-11-19（伟测 688372）：现价在追价带内、但引擎 recommend=False
+        ⇒ 不得说「可按下单档执行」，买点可达性也不得给满分。"""
+        a = _mini()
+        a["plan"]["last"] = 22.0
+        a["plan"]["recommend"] = False
+        a["plan"]["verdict"] = "突破已延伸·等回踩"
+        a["plan"]["note"] = "收盘 22.00 高出买位 19.5 已 2.1×ATR（>2），不追"
+        a["probe"] = {"zone_hi": 22.61, "zone_lo": 18.0}
+        html = _render_min(a)
+        self.assertIn("现价不可买", html)
+        self.assertNotIn("可按下单档执行", html)
+        trd = DS.from_analysis(a)["trade"]
+        buy = [it for it in trd["items"] if it["item"] == "买点可达性"][0]
+        self.assertLessEqual(buy["pts"], 0.2)
 
 
 class TestDualScoreCalc(unittest.TestCase):

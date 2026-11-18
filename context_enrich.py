@@ -223,11 +223,16 @@ def fetch_minesweep(code, days=180, max_pages=3):
     for day, title, _ac in win:
         for cat, pats in MS.PATTERNS.items():
             if any(p in title for p in pats):
-                hit_by_cat.setdefault(cat, []).append(day)
+                hit_by_cat.setdefault(cat, []).append((day, title))
     lines = []
-    for cat, days_hit in sorted(hit_by_cat.items(), key=lambda kv: -len(kv[1])):
-        lines.append("<b>%s</b>：近 %d 天命中 %d 条（最近 %s）"
-                     % (_esc(cat), days, len(days_hit), max(days_hit)))
+    # ⚑ 2026-11-19（伟测 688372）：只报「N 条」信息量太低——老罗得自己去 103 条
+    #   公告里翻。附上最近 2 条标题，让人一眼看出是「再融资审核」还是真诉讼。
+    for cat, hits in sorted(hit_by_cat.items(), key=lambda kv: -len(kv[1])):
+        hits.sort(key=lambda x: x[0], reverse=True)
+        recent = "；".join("%s %s" % (d, _esc(str(t)[:36])) for d, t in hits[:2])
+        lines.append("<b>%s</b>：近 %d 天命中 %d 条（最近 %s）<br>"
+                     "<span class='note'>最近标题：%s</span>"
+                     % (_esc(cat), days, len(hits), hits[0][0], recent))
     lines.append("<span class='note'>关键词命中仅为线索：担保/计提等常规公告需点开正文"
                  "复核，本表不下「有雷/无雷」结论。扫描 %d 条公告，覆盖近 %d 天。</span>"
                  % (len(win), days))

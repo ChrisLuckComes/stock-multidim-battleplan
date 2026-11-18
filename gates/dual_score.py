@@ -168,13 +168,24 @@ def score_trade(a):
     px = _f(_pick(plan.get("last"), val.get("spot")))
     atr = _f(_pick(plan.get("atr14"), st.get("atr14")))
     zone_hi = _f(_pick(probe.get("zone_hi"), rec.get("touch_px"), rec.get("entry")))
+    # 引擎对「现价能不能买」的判断。⚑ 2026-11-19 修（伟测 688372）：
+    #   zone_hi 是**追价上限**（突破位 + N×ATR），买区带可能宽到 20%，
+    #   现价低于它 ≠ 现价可买。必须让引擎结论否决本项满分，否则出现
+    #   「trade 9.5/10 + verdict 突破已延伸·等回踩」自相矛盾。
+    reco = plan.get("recommend")
+    reco_no = (reco is False)
 
     # 1) 买点可达性（现价 vs 买区上沿，用 ATR 归一）
     over_atr = None
     if px is not None and zone_hi is not None:
         over = px - zone_hi
-        if over <= 0:
+        if over <= 0 and not reco_no:
             pts, txt = 2.0, "现价在买区内（%+.1f%%）" % (over / zone_hi * 100.0)
+        elif over <= 0 and reco_no:
+            # 带内但引擎判不可买 ⇒ 买位已远离，最多给 0.2（别把「区间宽」当买点）
+            pts = 0.2
+            txt = ("现价虽在追价上限 %.2f 之下，但引擎判现价不可买（%s）"
+                   % (zone_hi, plan.get("verdict") or "超出买位"))
         elif atr and atr > 0:
             over_atr = over / atr
             if over_atr <= 0.5:
@@ -244,9 +255,17 @@ def score_trade(a):
     # 当下可执行性（不占分，专治「分高就追」的误读）
     exec_now = {"ok": None, "text": ""}
     if px is not None and zone_hi is not None:
-        if px <= zone_hi:
-            exec_now = {"ok": True, "text": "现价 %.2f 已在买区上沿 %.2f 之内，可按下单档执行"
-                                           % (px, zone_hi)}
+        if px <= zone_hi and not reco_no:
+            exec_now = {"ok": True, "text": "现价 %.2f 在买区内且引擎认可，可按下单档执行"
+                                           % px}
+        elif px <= zone_hi and reco_no:
+            # ⚑ 2026-11-19：带内不等于可买（伟测 92.08 落在 77.97~95.91 的追价带内，
+            #   但引擎 verdict=突破已延伸·等回踩、recommend=False）。这里必须说清楚。
+            exec_now = {"ok": False,
+                        "text": "现价 %.2f 虽在追价上限 %.2f 之下，但引擎判「现价不可买」"
+                                "（%s）。%s"
+                                % (px, zone_hi, plan.get("verdict") or "超出买位",
+                                   plan.get("note") or "")}
         else:
             exec_now = {"ok": False,
                         "text": "现价 %.2f 已在买区上沿 %.2f 之外 %+.1f%%%s —— 此处不是买点，"
