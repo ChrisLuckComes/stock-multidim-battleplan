@@ -1094,7 +1094,14 @@ def auto_peer_codes(code, limit=5):
         #   金石亚药 300434 兼营管道机械 ⇒ 被归到「地下管网」，
         #   对照出来是雄塑科技/金洲管道，与它的主营（化学制剂）毫无关系。
         bk, bname = cands[0]["bk"], cands[0]["name"]
-        _tot, mem = SP.board_members(bk, pz=80)
+        try:
+            _tot, mem = SP.board_members(bk, pz=80)
+        except Exception:                          # noqa: BLE001
+            # ★ 2026-11-18 老罗「别留空」：本机 clist 成分接口常被拒，但板块名
+            #   已由 boards_of 拿到 —— 成分挂了也要把 bname 回传，否则 meta.theme
+            #   跟着变 None，叠加概率「板块主题」层无端变无数据。同行表仍为空，
+            #   由渲染层如实标注「成分接口失败」，不编造同行。
+            return bname, []
         out = []
         for r in mem or []:
             c = str(r.get("f12") or "")
@@ -1413,7 +1420,9 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
             intraday=True, min_scale=5, name=None, theme=None,
             peer_names=None, no_cache=False, cash=None,
             auto_peers=True, auto_peer_n=5, scr=True,
-            strength_gate=True):
+            strength_gate=True, enrich=False):
+    # ⚑ enrich 默认关：只由 CLI（--enrich 默认开）显式传 True。
+    #   直接调 analyze() 的离线测试/回测脚本不会因此联网（测试不许 flaky，见 conftest）。
     # ★ 账户 / 现金口径一律从 account_config 现取（env > .env > DEFAULTS），
     #   不在签名里写 50000 —— 那是「代码写死」，改配置还得改代码。
     code = str(code).strip()
@@ -2010,6 +2019,20 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
             out["breakout_hold"] = _e
         except Exception as e:                  # noqa: BLE001
             out["breakout_hold"] = {"error": "%s: %s" % (type(e).__name__, e)}
+    # ★ 事实栏位自动补全（老罗 2026-11-18「该调接口就调，别留空」）：
+    #   拉正式财报 / F10 主营 / 公告催化 / 公告扫雷 / 当日情绪分，写 out["enrich"]。
+    #   ⚑ 必须放在 confluence 之前 —— 情绪分落盘到 data/sentiment_<行情日>.json 后，
+    #     下面的 CF.from_analysis 才能在市场层读到；顺序反了就还是「无数据」。
+    #   只补事实、不改 recommend/odds/仓位/止损；任一子项失败独立降级；可 --no-enrich 关。
+    try:
+        if enrich:
+            import context_enrich as CE
+            out["enrich"] = CE.enrich(code, basis_date=out["meta"]["basis_date"])
+        else:
+            out["enrich"] = {"status": "skipped", "reason": "--no-enrich"}
+    except Exception as e:                       # noqa: BLE001
+        out["enrich"] = {"status": "failed", "reason": "%s: %s" % (type(e).__name__, e)}
+        notes_all.append("事实栏位补全失败（不影响其余分析）：%s" % e)
     # ★ 叠加概率七层计数（2026-09-25 新增）：把上面已经算好的结论**汇总成一个数**，
     #   回答「这单是单因素还是多因素」。市场层自动去 data/sentiment_<基准日>.json 找
     #   当日情绪分（日期必须严格一致，隔日不算）；板块与催化剂单票报告拿不到，
@@ -2099,6 +2122,9 @@ def main():
                     help="跳过筹码面 scr_chip（批量扫描提速用；单票报告默认必跑）")
     ap.add_argument("--no-strength", action="store_true",
                     help="跳过个股强度前置闸门（默认开：WEAK 硬中止不跑报告，见 gates/quick_strength）")
+    ap.add_argument("--no-enrich", action="store_true",
+                    help="跳过事实栏位自动补全（默认开：拉财报/F10主营/公告催化/扫雷/当日情绪分，"
+                         "批量扫描提速用；单票完整报告不要关）")
     a = ap.parse_args()
 
     # ★ 永久黑名单前置闸门（2026-09-27）：命中后直接退出，连日线都不拉。
@@ -2128,7 +2154,8 @@ def main():
                       no_cache=a.no_cache, cash=cash,
                       auto_peers=not a.no_auto_peers,
                       auto_peer_n=a.auto_peer_n, scr=not a.no_scr,
-                      strength_gate=not a.no_strength)
+                      strength_gate=not a.no_strength,
+                      enrich=not a.no_enrich)
         # ★ 个股强度前置闸门硬中止：不写 analysis json、不跑 summarize，
         #   打印强度结论 + 不通过的理由，继续下一只（批量不被单只中断）。
         if isinstance(res, dict) and res.get("aborted"):

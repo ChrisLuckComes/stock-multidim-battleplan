@@ -112,6 +112,29 @@ def note(txt, fallback=""):
     return txt if txt else fallback
 
 
+def _enrich(a, key, field, fallback=None):
+    """读 analysis 的自动补全字段（老罗 2026-11-18「该调接口就调，别留空」）。
+
+    优先级：notes 手写 > enrich 自动拉 > fallback 占位。本函数只负责后两级；
+    调用处先判 notes 再调本函数。只有 status=ok 的值才采用 —— failed/empty/skipped
+    一律回退占位并如实显示原因，绝不把拉失败当成功。
+    """
+    e = ((a or {}).get("enrich") or {}).get(key) or {}
+    if e.get("status") != "ok":
+        return None
+    v = e.get(field)
+    return v if v not in (None, "", [], {}) else fallback
+
+
+def _enrich_reason(a, key):
+    """补全失败原因（用于如实标注，不留白充数）。"""
+    e = ((a or {}).get("enrich") or {}).get(key) or {}
+    if e.get("status") in (None, "ok"):
+        return None
+    return e.get("reason") or e.get("detail") or (
+        "%s（%s）" % (e["status"], e["src"]) if e.get("src") else e.get("status"))
+
+
 def card_list(items, empty="<li>—</li>"):
     return lis(items, empty)
 
@@ -1667,6 +1690,13 @@ def build_confluence(a, n):
         sector = {"count": n.get("sector_count"),
                   "bucket": n.get("sector_bucket"),
                   "peers": n.get("sector_peers")}
+    elif not (a.get("peers") or []):
+        # ★ 2026-11-18：同行成分接口拿不到时，至少把已知板块名带进板块层，
+        #   让 detail 显示「板块[X]：无共振数据」而不是干巴巴「无数据」。
+        #   count 仍为 None ⇒ 仍是 unknown，不编造共振。
+        _theme = (n.get("sector_bucket") or (a.get("meta") or {}).get("theme"))
+        if _theme:
+            sector = {"count": None, "bucket": _theme}
     catalyst = None
     if n.get("catalyst_has") is not None:
         catalyst = {"has": n.get("catalyst_has"),
@@ -1677,6 +1707,15 @@ def build_confluence(a, n):
         #   并附上清单原文作依据。清单为空才保持 unknown（不把「没写」当「没有」）。
         catalyst = {"has": True,
                     "note": "；".join(str(x)[:80] for x in n["catalysts"])[:240]}
+    # ★ 2026-11-18（老罗「别留空」）：notes 没写时，用 context_enrich 自动识别的
+    #   公告利好清单补进催化剂层。仍是「只排序不否决」，且注明是公告标题事实清单。
+    if catalyst is None:
+        _ec = _enrich(a, "catalysts", "catalysts")
+        if _ec is not None:
+            catalyst = {"has": bool(_ec),
+                        "note": ("；".join(str(x)[:60] for x in _ec)[:180]
+                                 + "（公告标题识别 · 事实清单）") if _ec
+                                else "近 45 天公告标题未见利好类事件"}
     try:
         conf = CF.from_analysis(a, sector=sector, catalyst=catalyst)
     except Exception:                        # noqa: BLE001
@@ -1927,12 +1966,27 @@ def render(a, n, tmpl_path=DEFAULT_TMPL, vp_from=None, vp_to=None):
         # ★ 2026-10-10（老罗 6「六维研究不可省略，必须有」）：兜底不再写「未提供」，
         #   而是用 analysis 里已有的数据**先给出一版**，缺的只是叙述性细节。
         #   「未提供」四个字等于把一节交白卷 —— 六维是必答项，不是选答项。
-        "FUND_BODY": n.get("fund_body") or _fund_fallback(a),
-        "FIN_ROWS": rows(n.get("fin_rows") or [["财务", "接口未返回，需人工补"]]),
+        # ★ 2026-11-18（老罗「该调接口就调，留空我看什么」）：五处事实栏位接自动补全。
+        #   优先级 notes 手写 > enrich 自动拉 > 占位；enrich 失败如实标注原因，不静默留白。
+        "FUND_BODY": (n.get("fund_body")
+                      or _enrich(a, "profile", "fund_body")
+                      or _fund_fallback(a)),
+        "FIN_ROWS": rows(n.get("fin_rows")
+                         or _enrich(a, "financials", "rows")
+                         or [["财务", "接口未返回（%s）"
+                              % (_enrich_reason(a, "financials") or "接口未拉到，需人工补")]]),
         "VALUATION_ROWS": rows(n.get("valuation_rows") or _valuation_fallback(a)),
         "VALUATION_NOTE": note(n.get("valuation_note"), ""),
-        "CATALYST_LIST": lis(n.get("catalysts"), "<li>未识别到明确催化剂（本层记无，不编造叙事）</li>"),
-        "MINESWEEP_LIST": lis(n.get("minesweep"), "<li class='flat'>（未提供 —— 扫雷必须检索一手来源）</li>"),
+        "CATALYST_LIST": lis(n.get("catalysts")
+                             or _enrich(a, "catalysts", "catalysts")
+                             or ["<span class='note'>%s</span>" % (
+                                 _enrich_reason(a, "catalysts")
+                                 or "未识别到明确催化剂（本层记无，不编造叙事）")]),
+        "MINESWEEP_LIST": lis(n.get("minesweep")
+                              or _enrich(a, "minesweep", "minesweep")
+                              or ["<span class='note'>%s</span>" % (
+                                  _enrich_reason(a, "minesweep")
+                                  or "扫雷检索失败/未运行 —— 需人工查一手来源")]),
         "MINESWEEP_NOTE": note(n.get("minesweep_note"), ""),
         "BIGSTRUCT_ROWS": rows(n.get("bigstruct_rows") or []),
         "BIGSTRUCT_NOTE": note(n.get("bigstruct_note"), ""),
@@ -2011,7 +2065,13 @@ def fold_fixed_notes(html):
                         % (esc(title), block))
         return block
 
-    return _p_re.sub(_repl, html)
+    html = _p_re.sub(_repl, html)
+    # ★ 老罗 2026-11-18「留空我看什么」：渲染后清掉真正空的 note 壳
+    #   （<p class="note"></p>、<p class="note"> </p>）—— 这些是模板固定槽位
+    #   在 notes/enrich 都没值时留下的空标签，显示出来只是白占一行。
+    #   ⚑ 只删**纯空白**内容；有文字（哪怕是「接口失败」说明）一律保留。
+    html = re.sub(r"<p class=['\"]note['\"][^>]*>\s*</p>", "", html)
+    return html
 
 
 def check_html(html):

@@ -154,8 +154,13 @@ def layer_sector(sector):
         「无数据」、分母静默缩水。用同行同向近似可以补上，但必须写明是近似。
     """
     if not sector or sector.get("count") is None:
-        return _layer("sector", "unknown",
-                      "无板块共振数据（单票报告不产出；池层复盘 watch_cn / pool_us 才有）")
+        # ★ 2026-11-18：已知板块名也要显示，别只写「无数据」——老罗「留空我看什么」。
+        #   没有共振只数仍是 unknown（不编造 on/off），但带上板块名与缺口原因。
+        bk = (sector or {}).get("bucket") or (sector or {}).get("theme")
+        det = ("板块[%s]：单票无池层共振数据，同行成分接口未取到 ⇒ 本层不计入分母"
+               % bk) if bk else (
+            "无板块共振数据（单票报告不产出；池层复盘 watch_cn / pool_us 才有）")
+        return _layer("sector", "unknown", det)
     try:
         n = int(sector["count"])
     except (TypeError, ValueError):
