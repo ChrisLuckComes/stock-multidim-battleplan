@@ -2020,6 +2020,20 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
     except Exception as e:                      # noqa: BLE001
         out["confluence"] = None
         notes_all.append("叠加计数生成失败（不影响其余分析）：%s" % e)
+    # ★ 形态质量排序器（ranking_bonus，2026-11-18 老罗吸收 1/2/3）：
+    #   回踩企稳确认 + 回撤幅度递减 + 平台紧凑度。**只加分不否决**，
+    #   只写 out["ranking_bonus"] 一个软键；绝不改 recommend/odds/仓位/止损
+    #   及任何既有阈值。失败降级 computable=False，不打断主流程。
+    try:
+        from gates.ranking_bonus import from_analysis as _rb_from
+        out["ranking_bonus"] = _rb_from(out, bars=bars)
+    except Exception as e:                      # noqa: BLE001
+        out["ranking_bonus"] = {
+            "rule": "ranking_bonus", "date": "2026-11-18",
+            "hard_gate": False, "advisory_only": True, "computable": False,
+            "bonus_hits": 0, "bonus_max": 3, "items": {},
+            "line": "形态质量排序器（只加分不否决）：未评估（%s）" % e,
+        }
     # 赢家持有（hold_winners，2026-10-27）：软标签。不改 recommend。
     # 卖出对错的硬纠正只在 review_sell（用户同步卖出）里。
     try:

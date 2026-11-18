@@ -1730,6 +1730,50 @@ def build_confluence(a, n):
                "<p class='note'>%s</p>" % esc(conf["note"])))
 
 
+def build_ranking_bonus(a, n):
+    """形态质量排序器卡片（2026-11-18 老罗吸收 1/2/3）。
+
+    三项加分：① 回踩企稳转头向上 ② 回撤幅度递减(VCP) ③ 平台紧凑度。
+    ⚠ 只排序不否决：不改 recommend / 仓位 / 止损。旧 analysis 无此键 ⇒ 返回空串。
+    """
+    rb = a.get("ranking_bonus")
+    if not rb or not isinstance(rb, dict):
+        return ""
+    items = rb.get("items") or {}
+    if not items and not rb.get("computable"):
+        return ("<div class='card'><h3>形态质量（只排序不否决）</h3>"
+                "<p class='note'>%s</p></div>" % esc(rb.get("line") or "未评估"))
+
+    _cn = {"turn_up": "回踩企稳·转头向上",
+           "drawdown_shrink": "回撤递减·VCP收缩",
+           "platform_tightness": "平台紧凑度"}
+    rows_l = []
+    for key in ("turn_up", "drawdown_shrink", "platform_tightness"):
+        it = items.get(key) or {}
+        hit = bool(it.get("hit"))
+        mark = "加分" if hit else "—"
+        color = "#1b7f3b" if hit else "#8a8a8a"
+        rows_l.append([
+            "<b>%s</b>" % esc(_cn.get(key, key)),
+            "<span style='color:%s;font-weight:600'>%s</span>" % (color, mark),
+            esc(it.get("note") or "未评估"),
+        ])
+    head = ("<p><span class='badge %s'>%s</span>"
+            "<span class='note'>合计 %s/3 · 只用于同档候选排序</span></p>"
+            % ("b-ok" if rb.get("bonus_hits", 0) >= 2 else "b-warn",
+               esc("%d/3 项加分" % rb.get("bonus_hits", 0)),
+               esc(rb.get("bonus_hits", 0))))
+    table = "<table>" + rows(rows_l, header=["排序项", "状态", "依据"]) + "</table>"
+    caveat = ""
+    dd = items.get("drawdown_shrink") or {}
+    if dd.get("note_caveat"):
+        caveat = "<p class='note'>%s</p>" % esc(dd["note_caveat"])
+    return ("<div class='card' style='border-left:5px solid #e3e6ea'>"
+            "<h3>形态质量（三项排序器 · 只加分不否决）</h3>%s%s%s"
+            "<p class='note'>%s</p></div>"
+            % (head, table, caveat, esc(rb.get("line") or "")))
+
+
 # ───────────────────────── 主流程 ─────────────────────────
 
 SLOT_RE = re.compile(r"\{\{([A-Z0-9_]+)\}\}")
@@ -1865,6 +1909,7 @@ def render(a, n, tmpl_path=DEFAULT_TMPL, vp_from=None, vp_to=None):
         "SCR_BLOCK": build_scr(a, n) + build_activity(a, n),
         "TOP_SIGNAL_BLOCK": build_top_signal(a, n),
         "CONFLUENCE_BLOCK": build_confluence(a, n),
+        "RANKING_BONUS_BLOCK": build_ranking_bonus(a, n),
         "OPEN_PLAYBOOK_BLOCK": build_open_playbook(a, n),
         "TIER_RANKING_BLOCK": build_tier_ranking(a, n),
         "SECTOR_RISK_BLOCK": build_sector_risk(a, n),
