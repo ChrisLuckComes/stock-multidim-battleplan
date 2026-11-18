@@ -214,12 +214,14 @@
 <h2>7 · 双轨打分（禁止合成总分）</h2>
 <div class="grid g2">
   <div class="card">
-    <h3>投资价值 <span class="sec-no">{{SCORE_INVEST}} / 10</span></h3>
+    <h3>投资价值 <span class="sec-no">{{SCORE_INVEST}} / {{SCORE_INVEST_MAX}}</span></h3>
     <ul>{{SCORE_INVEST_LI}}</ul>
+    {{SCORE_INVEST_NOTE}}
   </div>
   <div class="card">
-    <h3>短线博弈 <span class="sec-no">{{SCORE_TRADE}} / 10</span></h3>
+    <h3>短线博弈 <span class="sec-no">{{SCORE_TRADE}} / {{SCORE_TRADE_MAX}}</span></h3>
     <ul>{{SCORE_TRADE_LI}}</ul>
+    {{SCORE_TRADE_NOTE}}
   </div>
 </div>
 

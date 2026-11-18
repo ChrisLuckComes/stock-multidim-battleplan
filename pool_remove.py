@@ -42,7 +42,15 @@ MIRROR = "mirror_pool_from_library_2026-10-31.py"
 TEMP_CAT = "情绪温度计"
 IDX_CAT = "指数"
 
-sys.path.insert(0, LIB)
+# ⚑ 2026-11-19 修（顺序污染，务必保留 append）：
+#   原为 `sys.path.insert(0, LIB)` —— 把 INST 副本顶到 sys.path[0]。
+#   只要有测试 import 本模块（tests/library/test_pool_remove_guard.py），
+#   同一次 pytest 会话后续的 `import report_render` 就会拿到 **INST 的旧副本**
+#   （缺 _enrich / build_ranking_bonus 等新函数）⇒ 表现为「单跑全绿、全量全红」的
+#   顺序依赖 flaky。改为**追加到末尾**：DEV 根（conftest 已插在首位）永远优先，
+#   LIB 只在 DEV 找不到同名模块时兜底。
+if os.path.isdir(LIB) and LIB not in sys.path:
+    sys.path.append(LIB)
 import library_pos as LP                                    # noqa: E402
 from gates.stopout_reclaim import should_keep_watching      # noqa: E402  §1j 防物理删除拦截
 

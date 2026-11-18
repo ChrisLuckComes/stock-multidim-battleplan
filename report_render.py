@@ -1779,9 +1779,13 @@ def build_ranking_bonus(a, n):
     if not rb or not isinstance(rb, dict):
         return ""
     items = rb.get("items") or {}
-    if not items and not rb.get("computable"):
-        return ("<div class='card'><h3>形态质量（只排序不否决）</h3>"
-                "<p class='note'>%s</p></div>" % esc(rb.get("line") or "未评估"))
+    hits = int(rb.get("bonus_hits") or 0)
+
+    # ★ 2026-11-19 老罗：不要每份报告都套这块 —— 只有真的符合形态（≥1 项命中）才显示。
+    #   0 项命中 ⇒ 整块不渲染（不是显示一张「全都不符合」的空表）。
+    #   ⚠ 这是展示层收敛，不改闸门：三项本来就是排序器，不命中从来的含义就是「不加分」。
+    if hits <= 0:
+        return ""
 
     _cn = {"turn_up": "回踩企稳·转头向上",
            "drawdown_shrink": "回撤递减·VCP收缩",
@@ -1789,13 +1793,12 @@ def build_ranking_bonus(a, n):
     rows_l = []
     for key in ("turn_up", "drawdown_shrink", "platform_tightness"):
         it = items.get(key) or {}
-        hit = bool(it.get("hit"))
-        mark = "加分" if hit else "—"
-        color = "#1b7f3b" if hit else "#8a8a8a"
+        if not it.get("hit"):
+            continue  # 只列命中的项：这张卡说的是「符合了什么」，不是「逐项体检表」
         rows_l.append([
             "<b>%s</b>" % esc(_cn.get(key, key)),
-            "<span style='color:%s;font-weight:600'>%s</span>" % (color, mark),
-            esc(it.get("note") or "未评估"),
+            "<span style='color:#1b7f3b;font-weight:600'>加分</span>",
+            esc(it.get("note") or "加分"),
         ])
     head = ("<p><span class='badge %s'>%s</span>"
             "<span class='note'>合计 %s/3 · 只用于同档候选排序</span></p>"
@@ -1813,8 +1816,53 @@ def build_ranking_bonus(a, n):
             % (head, table, caveat, esc(rb.get("line") or "")))
 
 
-# ───────────────────────── 主流程 ─────────────────────────
+def build_dual_items(ds, key):
+    """双轨打分卡片的列表体（2026-11-19）。
 
+    优先级在调用处决定：notes.score_*_li 有内容 ⇒ 一律用 notes（人写的判断）。
+    本函数只在 notes 没写时，把 gates/dual_score 的**机械粗评**逐项摊开。
+
+    ⚑ 档位表不逐项重复（老罗 2026-11-19「固定文案别每次都糊一遍」）：
+      列表只留「项：实际值 得分」，档位规则统一收进卡底一个 details。
+    """
+    sec = ((ds or {}).get(key) or {})
+    items = sec.get("items") or []
+    if not items:
+        return ""
+    out = []
+    for it in items:
+        pts = it.get("pts")
+        name = esc(str(it.get("item") or ""))
+        val = esc(str(it.get("value") or "—"))
+        if pts is None:
+            out.append("<li class='flat'>%s：<b>%s</b>"
+                       "<span class='note'>无数据，未计入分母</span></li>" % (name, val))
+            continue
+        col = "#1b7f3b" if pts >= 1.2 else ("#8a8a8a" if pts > 0 else "#b3261e")
+        out.append("<li>%s：<b>%s</b> "
+                   "<span style='color:%s;font-weight:600'>%s/2</span></li>"
+                   % (name, val, col, num(pts, 1)))
+    return "\n        ".join(out)
+
+
+def build_dual_tiers(ds, key):
+    """档位表折叠块：规则每次一样，默认收起，需要复核时点开。"""
+    sec = ((ds or {}).get(key) or {})
+    items = sec.get("items") or []
+    seen, lis_ = set(), []
+    for it in items:
+        nm, nt = it.get("item"), it.get("note")
+        if not nt or nm in seen or "无数据" in str(nt):
+            continue
+        seen.add(nm)
+        lis_.append("<li><b>%s</b>：%s</li>" % (esc(str(nm)), esc(str(nt))))
+    if not lis_:
+        return ""
+    return ("<details class='fold-note'><summary>▸ 档位表（改档位＝改口径，须先确认）</summary>"
+            "<ul class='note'>%s</ul></details>" % "".join(lis_))
+
+
+# ───────────────────────── 主流程 ─────────────────────────
 SLOT_RE = re.compile(r"\{\{([A-Z0-9_]+)\}\}")
 def render(a, n, tmpl_path=DEFAULT_TMPL, vp_from=None, vp_to=None):
     m, s, p = a["meta"], a["struct"], a["plan"]
@@ -1924,6 +1972,37 @@ def render(a, n, tmpl_path=DEFAULT_TMPL, vp_from=None, vp_to=None):
             return "<b>%s</b>：%s —— %s" % (esc(x.get("dim", "")), esc(x.get("verdict", "")), esc(x.get("basis", "")))
         return x
 
+    # ★ 双轨打分（2026-11-19）：notes 手写 > dual_score 机械粗评 > 占位。
+    #   分母跟着走 —— 缺数项不计入分母，不能拿「满分 10」硬套一个只有 3 项有数的股。
+    _ds = a.get("dual_score") or {}
+    _ds_inv = _ds.get("invest") or {}
+    _ds_trd = _ds.get("trade") or {}
+    _inv_note_li = [x for x in (n.get("score_invest_li") or []) if x not in (None, "")]
+    _trd_note_li = [x for x in (n.get("score_trade_li") or []) if x not in (None, "")]
+    _inv_from_notes = bool(_inv_note_li) or n.get("score_invest") is not None
+    _trd_from_notes = bool(_trd_note_li) or n.get("score_trade") is not None
+    _exec_now = _ds_trd.get("exec_now") or {}
+    _exec_html = ""
+    if _exec_now.get("text"):
+        # 这行讲的是「现价 vs 买区」这个客观事实，与谁打分无关 ⇒ 无条件显示。
+        # 已在买区外 ⇒ 红字，防「短线分高就当买点」的误读。
+        _col = " style='color:#b3261e'" if _exec_now.get("ok") is False else ""
+        _exec_html = ("<p class='note'%s><b>当下可执行性：</b>%s</p>"
+                      % (_col, esc(_exec_now["text"])))
+    # 「机械粗评」这句只在明细确实来自机械折算时才说 —— notes 手写了明细就不是机械了
+    _inv_mech = bool(_ds_inv) and not _inv_note_li
+    _trd_mech = bool(_ds_trd) and not _trd_note_li
+    _inv_note_txt = note(n.get("score_invest_note"),
+                         ("机械粗评 · %d 项有效（按固定档位表折算引擎证据，非人工判断）"
+                          % _ds_inv["effective"]) if _inv_mech else "")
+    _trd_note_txt = note(n.get("score_trade_note"),
+                         ("机械粗评 · %d 项有效（按固定档位表折算引擎证据，非人工判断）"
+                          % _ds_trd["effective"]) if _trd_mech else "")
+    _inv_note_html = ((("<p class='note'>%s</p>" % _inv_note_txt) if _inv_note_txt else "")
+                      + (build_dual_tiers(_ds, "invest") if _inv_mech else ""))
+    _trd_note_html = ((("<p class='note'>%s</p>" % _trd_note_txt) if _trd_note_txt else "")
+                      + (build_dual_tiers(_ds, "trade") if _trd_mech else "")) + _exec_html
+
     slots = {
         "TITLE": esc(n.get("title") or "%s %s · 多维度作战计划 · %s"
                      % (m["name"], m["code"], m["basis_date"])),
@@ -1995,12 +2074,21 @@ def render(a, n, tmpl_path=DEFAULT_TMPL, vp_from=None, vp_to=None):
         "VETO_NOTE": note(n.get("veto_note"), ""),
         "PEER_ROWS": build_peers(a, n),
         "PEER_NOTE": note(n.get("peers_note"), ""),
-        "SCORE_INVEST": num(n.get("score_invest"), 1),
-        "SCORE_TRADE": num(n.get("score_trade"), 1),
-        "SCORE_INVEST_LI": lis(n.get("score_invest_li"),
-                               "<li>未评分 —— 需补财务/估值数据</li>"),
-        "SCORE_TRADE_LI": lis(n.get("score_trade_li"),
-                              "<li>未评分 —— 需补量价/赔率数据</li>"),
+        "SCORE_INVEST": num(n.get("score_invest") if n.get("score_invest") is not None
+                             else _ds_inv.get("score"), 1),
+        "SCORE_TRADE": num(n.get("score_trade") if n.get("score_trade") is not None
+                           else _ds_trd.get("score"), 1),
+        "SCORE_INVEST_MAX": num(10 if _inv_from_notes else (_ds_inv.get("full") or 10), 0),
+        "SCORE_TRADE_MAX": num(10 if _trd_from_notes else (_ds_trd.get("full") or 10), 0),
+        # ⚑ lis() 是「逐项包 <li>」的，喂整串 HTML 会被按字符拆开（2026-11-19 踩过）
+        "SCORE_INVEST_LI": lis(_inv_note_li) if _inv_note_li else
+                           (build_dual_items(_ds, "invest")
+                            or "<li>未评分 —— 需补财务/估值数据</li>"),
+        "SCORE_TRADE_LI": lis(_trd_note_li) if _trd_note_li else
+                          (build_dual_items(_ds, "trade")
+                           or "<li>未评分 —— 需补量价/赔率数据</li>"),
+        "SCORE_INVEST_NOTE": _inv_note_html,
+        "SCORE_TRADE_NOTE": _trd_note_html,
         "EXEC_ROWS": build_exec(a, n),
         "EXEC_RHYTHM": lis(n.get("exec_rhythm")),
         "EXEC_INVALID": lis(n.get("exec_invalid")),

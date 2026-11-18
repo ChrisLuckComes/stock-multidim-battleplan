@@ -100,7 +100,18 @@ def fetch_financials(code, size=4):
         out.append(["每股收益", "%s 元" % eps])
     if bps is not None:
         out.append(["每股净资产", "%.4f 元" % float(bps)])
-    return {"status": "ok", "rows": out, "report_date": rd,
+    # ★ 2026-11-19：额外落一份**结构化数值**（单位：元 / 百分比数字），
+    #   给 gates/dual_score 这类下游做机械判断用 —— 别让它去正则啃上面那串展示文字
+    #   （展示层文案一改，正则就静默失效，这种隐式耦合踩不起）。
+    metrics = {"report_date": rd}
+    for k, v in (("rev", rev), ("rev_yoy", ystz), ("np", np_), ("np_yoy", sjtzz),
+                 ("roe", roe), ("eps", eps), ("bps", bps)):
+        if v is not None:
+            try:
+                metrics[k] = float(v)
+            except (TypeError, ValueError):
+                pass
+    return {"status": "ok", "rows": out, "report_date": rd, "metrics": metrics,
             "src": "eastmoney/RPT_LICO_FN_CPD", "asof": rd}
 
 

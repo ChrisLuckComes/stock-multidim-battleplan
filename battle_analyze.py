@@ -2057,6 +2057,16 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
             "bonus_hits": 0, "bonus_max": 3, "items": {},
             "line": "形态质量排序器（只加分不否决）：未评估（%s）" % e,
         }
+    # ★ 双轨打分机械粗评（dual_score，2026-11-19 老罗「双轨打分数据缺失」）：
+    #   把已有证据（财报 metrics / valuation / struct / odds_recommend / probe /
+    #   top_verdict / scr / sector_risk）按写死档位表折成两个 0–10 的数，填报告第 7 节。
+    #   ⚠ advisory_only：不改 recommend/odds/仓位/止损；notes 手写 score_* 优先覆盖它。
+    try:
+        from gates.dual_score import from_analysis as _ds_from
+        out["dual_score"] = _ds_from(out)
+    except Exception as e:                      # noqa: BLE001
+        out["dual_score"] = None
+        notes_all.append("双轨粗评生成失败（不影响其余分析）：%s" % e)
     # 赢家持有（hold_winners，2026-10-27）：软标签。不改 recommend。
     # 卖出对错的硬纠正只在 review_sell（用户同步卖出）里。
     try:
