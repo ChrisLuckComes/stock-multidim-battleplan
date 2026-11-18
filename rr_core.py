@@ -24,6 +24,14 @@ MIN_RR = 1.5            # 合格门槛（唯一定义）
 RR_RECOMMEND = 2.0      # 推荐
 RR_STRONG = 3.0         # 强烈推荐
 RR_LADDER = (3.0, 2.5, 2.0, 1.5, 1.0)   # 价梯（做多/做空共用同一组门槛）
+# 2026-11-18：美股做空不必卡死在 1.5。
+# ① 反抽空接近门槛（如 LITE R1 0.99）可挂。
+# ② 正股到 T1 至少 3%（两倍反向 ETF 大约 6%）且 RR>=SHORT_RR_LOOSE 也可挂
+#    （破位/反抽都适用）。两倍杠杆会同时放大盈利和止损，盈亏比本身不乘 2。
+# 不得用 T2 凑过门槛。
+SHORT_BOUNCE_RR_NEAR = 0.95
+SHORT_RR_LOOSE = 0.80
+SHORT_T1_MOVE_MIN = 0.03
 
 # 兼容别名：老代码里的名字一律指向同一对象，禁止再写字面量 1.5
 RR_QUALIFIED = MIN_RR
@@ -70,6 +78,73 @@ def rr_ok(rr, min_rr=None):
     if rr is None:
         return False
     return float(rr) + 1e-9 >= (MIN_RR if min_rr is None else float(min_rr))
+
+
+def is_short_bounce_leg(name):
+    """名称里带「反抽」的做空腿（反抽S_broken/R1 不过空等）。"""
+    return "反抽" in (name or "")
+
+
+def short_t1_move_pct(entry, t1):
+    """正股入场到 T1 的下跌幅度。entry/t1 无效时返回 None。"""
+    if entry is None or t1 is None:
+        return None
+    try:
+        entry = float(entry)
+        t1 = float(t1)
+    except (TypeError, ValueError):
+        return None
+    if entry <= 0:
+        return None
+    return (entry - t1) / entry
+
+
+def short_hang_rr_ok(rr, is_bounce=False, name=None, entry=None, t1=None):
+    """美股做空可挂判定，只用传入的 T1 口径 R，不得用 T2 凑。
+
+    可挂若满足任一：
+      · RR >= MIN_RR（1.5）
+      · 反抽空且 RR >= SHORT_BOUNCE_RR_NEAR（接近 1.5）
+      · RR >= SHORT_RR_LOOSE 且正股到 T1 至少 SHORT_T1_MOVE_MIN（3%，
+        两倍反向 ETF 大约 6%）。破位/反抽都适用。
+
+    两倍杠杆同时放大盈利和止损，不能把 RR 乘 2。
+    """
+    if name is not None:
+        is_bounce = is_short_bounce_leg(name)
+    if rr_ok(rr, min_rr=MIN_RR):
+        return True
+    if is_bounce and rr_ok(rr, min_rr=SHORT_BOUNCE_RR_NEAR):
+        return True
+    move = short_t1_move_pct(entry, t1)
+    if (rr_ok(rr, min_rr=SHORT_RR_LOOSE)
+            and move is not None and move + 1e-9 >= SHORT_T1_MOVE_MIN):
+        return True
+    return False
+
+
+def short_hang_entry_gate(t1, stop, is_bounce=False, name=None):
+    """达到可挂条件的最低做空入场价。无效时返回 None。"""
+    if name is not None:
+        is_bounce = is_short_bounce_leg(name)
+    if t1 is None or stop is None:
+        return None
+    cands = [min_entry_for_rr(MIN_RR, t1, stop)]
+    if is_bounce:
+        cands.append(min_entry_for_rr(SHORT_BOUNCE_RR_NEAR, t1, stop))
+    e_loose = min_entry_for_rr(SHORT_RR_LOOSE, t1, stop)
+    e_move = t1 / (1.0 - SHORT_T1_MOVE_MIN) if SHORT_T1_MOVE_MIN < 1 else None
+    if e_loose is not None and e_move is not None:
+        cands.append(max(e_loose, e_move))
+    valid = [e for e in cands if e is not None and t1 < e < stop]
+    return min(valid) if valid else None
+
+
+def hang_rr_floor(is_bounce=False, name=None):
+    """该腿最宽可挂 RR 下限（用于文案；实际可挂还要看 T1 跌幅）。"""
+    if name is not None:
+        is_bounce = is_short_bounce_leg(name)
+    return SHORT_BOUNCE_RR_NEAR if is_bounce else SHORT_RR_LOOSE
 
 
 def grade(rr):

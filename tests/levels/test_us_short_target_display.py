@@ -62,10 +62,10 @@ def test_structure_plan_emits_conditional_levels_without_minute_path():
 
 
 def test_gate_uses_t1_not_far_t2():
-    # T1 RR = 1.0 (below gate), T2 RR = 3.0 (would falsely pass if used as the gate).
-    entry, stop, t1, t2 = 100.0, 104.0, 96.0, 88.0
+    # T1 RR = 0.50 且到 T1 只有 2%（不够放宽），T2 RR = 3.0（若拿远目标凑会误放行）。
+    entry, stop, t1, t2 = 100.0, 104.0, 98.0, 88.0
     obj = U.short_objectives(entry, stop, t1, t2)
-    assert obj["rr1"] == 1.0 and obj["rr2"] == 3.0
+    assert abs(obj["rr1"] - 0.5) < 1e-9 and obj["rr2"] == 3.0
     assert obj["rr"] == obj["rr1"]
     card = {
         "sym": "TEST", "close": entry, "error": None,
@@ -76,7 +76,7 @@ def test_gate_uses_t1_not_far_t2():
     }
     tier, why = _verdict(card)
     assert tier == "不推荐"
-    assert "RR(T1)" in why and "1.00" in why
+    assert "RR(T1)" in why and "0.50" in why
     assert "3.00" not in why  # must not advertise the T2 RR as the failing/passing figure
 
 
@@ -141,3 +141,94 @@ def test_cli_prints_both_targets_and_not_t2_as_the_sole_objective(monkeypatch, c
     assert "目标S2" not in text
     assert "不是自动止盈" in text
     assert "空点候选" in text
+
+
+def test_bounce_near_1_5_is_recommended():
+    """LITE-style 反抽空 R1 0.99：接近 1.5，应推荐，不能整笔拿掉。"""
+    entry, stop, t1, t2 = 594.84, 616.07, 573.73, 548.24
+    obj = U.short_objectives(entry, stop, t1, t2)
+    assert 0.95 <= obj["rr1"] < 1.5
+    card = {
+        "sym": "LITE", "close": entry, "error": None,
+        "ctx_name": "头肩顶", "ctx_alive": True, "ctx_age": 10, "ctx_grade": "A",
+        "main_cands": [dict(name="反抽S_broken不过空", **obj)],
+        "rr_ladder": [(1.5, 599.13)],
+        "etf": {"code": "LITZ"},
+    }
+    tier, why = _verdict(card)
+    assert tier.startswith("推荐")
+    assert "等到位" not in tier  # already at the bounce entry
+    assert "负期望" not in why
+
+
+def test_bounce_near_1_5_waits_if_price_below_entry():
+    entry, stop, t1, t2 = 594.84, 616.07, 573.73, 548.24
+    obj = U.short_objectives(entry, stop, t1, t2)
+    card = {
+        "sym": "LITE", "close": 585.0, "error": None,
+        "ctx_name": "头肩顶", "ctx_alive": True, "ctx_age": 10, "ctx_grade": "A",
+        "main_cands": [dict(name="反抽S_broken不过空", **obj)],
+        "rr_ladder": [(1.5, 599.13)],
+        "etf": {"code": "LITZ"},
+    }
+    tier, why = _verdict(card)
+    assert tier.startswith("推荐") and "等到位" in tier
+
+
+def test_bounce_below_near_floor_still_rejected():
+    # R1 0.50、到 T1 仅 2%，即使是反抽也不放行。
+    entry, stop, t1, t2 = 100.0, 104.0, 98.0, 88.0
+    obj = U.short_objectives(entry, stop, t1, t2)
+    assert obj["rr1"] < 0.80
+    card = {
+        "sym": "TEST", "close": entry, "error": None,
+        "ctx_name": "头肩顶", "ctx_alive": True, "ctx_age": 3, "ctx_grade": "A",
+        "main_cands": [dict(name="反抽R1不过空", **obj)],
+        "rr_ladder": [(1.5, 102.4)],
+        "etf": {"code": "TESTQ"},
+    }
+    tier, why = _verdict(card)
+    assert tier == "不推荐"
+    assert "RR(T1)" in why
+
+
+def test_break_3pct_t1_is_hangable():
+    """破位空：R1 约 1.08，但正股到 T1 约 4%（两倍 ETF 约 8%），应可挂。"""
+    entry, stop, t1, t2 = 837.31, 868.19, 803.97, 574.5
+    obj = U.short_objectives(entry, stop, t1, t2)
+    assert 1.0 < obj["rr1"] < 1.5
+    assert (entry - t1) / entry >= 0.03
+    card = {
+        "sym": "SNDK", "close": entry, "error": None,
+        "ctx_name": "扩散三角形", "ctx_alive": True, "ctx_age": 0, "ctx_grade": "A",
+        "main_cands": [dict(name="破位延续空", **obj)],
+        "rr_ladder": [(1.5, 842.5)],
+        "etf": {"code": "SNDQ"},
+    }
+    tier, why = _verdict(card)
+    assert tier.startswith("推荐")
+    assert "等到位" not in tier
+    assert "负期望" not in why
+
+
+def test_leg_hang_status_bounce_near_does_not_require_1_5_gate():
+    """反抽空 0.99 在结构入场即可挂，不必再等 1.5 临界价。"""
+    entry, stop, t1 = 594.84, 616.07, 573.73
+    obj = U.short_objectives(entry, stop, t1, 548.24)
+    st, reasons, gate = U.leg_hang_status("反抽S_broken不过空", entry, stop, t1, obj["rr1"], 594.84)
+    assert st == "条件可挂"
+    assert any("接近 1.5" in r or "放宽可挂" in r for r in reasons)
+    # still below bounce entry → wait, not reject
+    st2, _, _ = U.leg_hang_status("反抽S_broken不过空", entry, stop, t1, obj["rr1"], 591.94)
+    assert st2 == "等到位"
+    # breakdown with ~4% to T1 and R~0.99 is now hangable (3% tolerance)
+    br = U.short_objectives(100.0, 104.0, 96.04, 88.0)
+    assert br["rr1"] < 1.5
+    st3, reasons3, _ = U.leg_hang_status("破位延续空", 100.0, 104.0, 96.04, br["rr1"], 100.0)
+    assert st3 == "条件可挂"
+    assert any("T1" in r for r in reasons3)
+    # too little T1 room and weak R stays rejected
+    tight = U.short_objectives(100.0, 104.0, 98.0, 88.0)
+    st4, _, _ = U.leg_hang_status("破位延续空", 100.0, 104.0, 98.0, tight["rr1"], 100.0)
+    assert st4 in ("不挂", "等到位")
+    assert st4 != "条件可挂"

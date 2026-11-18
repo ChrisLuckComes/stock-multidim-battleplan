@@ -253,7 +253,8 @@ def one_card(sym, pairs, allow_night=True):
 #   MAX_SIG_AGE = 3    —— 信号新鲜度硬闸。老罗：「盈亏比到位就能做」「难道下跌只能
 #                         跌这么多天吗？有的无底洞呢」⇒ 改用**价格口径**判定（见下）。
 # ★ 现在的唯一门槛：**用当前价格重算盈亏比，到位就能做**（老罗原则）。
-from rr_core import MIN_RR as MIN_RR_NOW  # noqa: E402  ★ 全修① 单一真源
+from rr_core import (MIN_RR as MIN_RR_NOW,  # noqa: E402  ★ 全修① 单一真源
+                     short_hang_rr_ok, short_hang_entry_gate)
 # ★ 深跌反抽档（老罗 2026-10-31：「夜盘开盘 -3%，反抽到 -1% 买进去」）
 DEEP_D = 3.0           # 跌深门槛：现价较昨收跌 ≥3%（老罗的 -3%）
 DEEP_R = 1.0           # 反抽触发：反抽回到 -1% 就进（老罗的 -1%）
@@ -283,7 +284,7 @@ def _verdict(c):
          **不是「旁证」**，改前 docstring 把二者混为一谈。
        · **旁证 = 只排序不否决**：顶部形态的**类型 / 强度 / 年龄**、大背景强弱、
          反转K线信号、极限目标、止损占现价、较信号价追空幅度。
-       · **硬约束**：结构空点最佳 RR < 1.5、无反向 ETF 映射（无法落地）。
+       · **硬约束**：结构空点未达可挂口径（RR<1.5，且不满足接近 1.5 的反抽空，且正股到 T1 不足 3% 或 RR<0.80）、无反向 ETF 映射（无法落地）。
        按老罗铁律保留 ①② 硬闸，只把口径写对，不擅自放行「未见顶就做空」。
     """
     if c.get("error"):
@@ -294,13 +295,17 @@ def _verdict(c):
     # 战法准入②（标的级结构坏）：背景失效 = 下跌结构被破坏
     if not c.get("ctx_alive"):
         return "不推荐", "背景已失效（价格重回颈线/触发位上方）⇒ 下跌波段可能已结束"
-    # 硬约束③：结构空点盈亏比（③ RR临界 ≥1.5）—— 唯一价格门槛
+    # 硬约束③：结构空点可挂口径 —— RR≥1.5，或反抽接近 1.5，或 RR≥0.80 且正股到 T1≥3%。
+    # 2026-11-18：提高容错；两倍杠杆不把 RR 乘 2。不得用 T2 凑。
     cands = c.get("main_cands") or []
-    rrs = [x["rr"] for x in cands if x.get("rr") is not None]
-    best_rr = max(rrs) if rrs else 0.0
-    if best_rr < MIN_RR_NOW:
-        return "不推荐", ("结构空点盈亏比不足（最佳 RR(T1) %.2f < %g 门槛）⇒ 负期望区"
-                          % (best_rr, MIN_RR_NOW))
+    ok_cands = [x for x in cands
+                if short_hang_rr_ok(x.get("rr"), name=x.get("name"),
+                                    entry=x.get("entry"), t1=x.get("target1") or x.get("t1"))]
+    if not ok_cands:
+        rrs = [x["rr"] for x in cands if x.get("rr") is not None]
+        best_rr = max(rrs) if rrs else 0.0
+        return "不推荐", ("结构空点未达可挂口径（最佳 RR(T1) %.2f；需 ≥1.5，或反抽接近 1.5，或 RR≥0.80 且正股到 T1≥3%%）"
+                          % best_rr)
     # 硬闸④：可执行（只做反向ETF）
     if not (c.get("etf") or {}).get("code"):
         return "不推荐", "无反向ETF映射 ⇒ 无法落地（只做反向ETF）"
@@ -318,10 +323,23 @@ def _verdict(c):
     # ★ 深度 review P1：徽章的「推荐」来自**候选空点 RR**，门槛行的主语是
     #   **现价 vs 临界入场价**。改前同屏「推荐」+「门槛不够」像自相矛盾。
     #   现价未到临界价时如实标「等到位」，明确达标的是候选位，不是现在就做。
-    lad = c.get("rr_ladder") or []
-    gate = [x for x in lad if abs(x[0] - MIN_RR_NOW) < 1e-9 and x[1] is not None]
-    at_gate = bool(gate and c.get("close") is not None
-                   and c["close"] >= gate[0][1])
+    # 现价是否已到可挂入场：反抽空用结构反抽位（接近 1.5 时不再要求 1.5 临界价）；
+    # 若候选没有入场价，再回退到 1.5 临界表。
+    close = c.get("close")
+    at_gate = False
+    has_entry = False
+    for x in ok_cands:
+        e = x.get("entry")
+        if e is None or close is None:
+            continue
+        has_entry = True
+        if close + 1e-9 >= e:
+            at_gate = True
+            break
+    if not has_entry:
+        lad = c.get("rr_ladder") or []
+        gate = [x for x in lad if abs(x[0] - MIN_RR_NOW) < 1e-9 and x[1] is not None]
+        at_gate = bool(gate and close is not None and close >= gate[0][1])
     if not at_gate:
         tier += "·等到位"
     # ── 旁证提示（不否决）──
@@ -374,6 +392,26 @@ def _fmt_etf_cand(cd, e, ref, er, lev, t1_und=None, t2_und=None):
     return st
 
 
+
+def _hang_gate_px(c):
+    """可挂临界入场：结构位已经可挂时等结构入场；否则用放宽后的最低可挂价，再回退 1.5 临界表。"""
+    for cd in (c.get("main_cands") or []):
+        t1 = cd.get("target1") or cd.get("t1") or c.get("t1")
+        stop = cd.get("stop")
+        entry = cd.get("entry")
+        name = cd.get("name")
+        if short_hang_rr_ok(cd.get("rr"), name=name, entry=entry, t1=t1):
+            return entry if entry is not None else short_hang_entry_gate(t1, stop, name=name)
+        g = short_hang_entry_gate(t1, stop, name=name)
+        if g is not None:
+            return g
+    lad = c.get("rr_ladder") or []
+    gate = [x for x in lad if abs(x[0] - MIN_RR_NOW) < 1e-9]
+    if gate and gate[0][1] is not None:
+        return gate[0][1]
+    return None
+
+
 def brief_line(c):
     """★ 纯文本摘要（贴进对话）：**①主决策=ETF执行价**（你实际下单的价）+ 正股锚 + 旁证。"""
     if c.get("error"):
@@ -397,10 +435,8 @@ def brief_line(c):
     if cands:
         bits = [_fmt_etf_cand(cd, e, ref, er, lev, t1_und, t2_und) for cd in cands]
         out.append("%s\n           ① 主决策(ETF执行价)：%s" % (head, " ｜ ".join(bits)))
-        lad = c.get("rr_ladder") or []
-        gate = [x for x in lad if abs(x[0] - MIN_RR_NOW) < 1e-9]
-        if gate and gate[0][1] is not None:
-            gp = gate[0][1]
+        gp = _hang_gate_px(c)
+        if gp is not None:
             # ★ 深度 review P1：门槛行的主语是「现价 vs 临界入场价」，
             #   与徽章的「候选位 RR 达标」不是同一件事，文案必须说清。
             state = ("现价可挂" if c["close"] >= gp else
@@ -408,10 +444,10 @@ def brief_line(c):
                      % ((gp / c["close"] - 1) * 100 if c["close"] else 0))
             if e.get("code"):
                 ge = etf_from_underlying(gp, ref, er, lev)
-                out.append("            RR(T1)≥1.5 临界入场 ETF ≥ %.4g（正股 ≥ %.2f）｜当前 ETF %.4g / 正股 %.2f → %s"
+                out.append("            可挂临界入场 ETF ≥ %.4g（正股 ≥ %.2f）｜当前 ETF %.4g / 正股 %.2f → %s"
                            % (ge, gp, etf_now, c["close"], state))
             else:
-                out.append("            RR(T1)≥1.5 临界入场 ≥ %.2f（当前 %.2f）→ %s"
+                out.append("            可挂临界入场 ≥ %.2f（当前 %.2f）→ %s"
                            % (gp, c["close"], state))
     else:
         out.append("%s\n           ① 主决策(ETF执行价)：—" % head)
@@ -487,20 +523,18 @@ def line(c):
     if cands:
         for cd in cands:
             out.append("   ① 主决策(ETF): %s" % _fmt_etf_cand(cd, e, ref, er, lev, t1_und, t2_und))
-        lad = c.get("rr_ladder") or []
-        gate = [x for x in lad if abs(x[0] - MIN_RR_NOW) < 1e-9]
-        if gate and gate[0][1] is not None:
-            gp = gate[0][1]
+        gp = _hang_gate_px(c)
+        if gp is not None:
             state = ("现价可挂" if c["close"] >= gp else
                      "现价未到·需反抽 +%.1f%%"
                      % ((gp / c["close"] - 1) * 100 if c["close"] else 0))
             if e.get("code"):
                 ge = etf_from_underlying(gp, ref, er, lev)
-                out.append("            RR(T1)≥1.5 临界入场 ETF ≥ %.4g（正股 ≥ %.2f）｜当前 ETF %.4g / 正股 %.2f → %s"
+                out.append("            可挂临界入场 ETF ≥ %.4g（正股 ≥ %.2f）｜当前 ETF %.4g / 正股 %.2f → %s"
                            % (ge, gp, etf_from_underlying(c["close"], ref, er, lev),
                               c["close"], state))
             else:
-                out.append("            RR(T1)≥1.5 临界入场 ≥ %.2f（当前 %.2f）→ %s"
+                out.append("            可挂临界入场 ≥ %.2f（当前 %.2f）→ %s"
                            % (gp, c["close"], state))
     else:
         out.append("   ① 主决策(ETF): —")
@@ -624,7 +658,7 @@ def main():
             print("        └─ %s（%sx）｜背景 %s 第%s根(%s)"
                   % (e["code"], lev, c["ctx_name"], c["ctx_age"], c["ctx_grade"]))
     if not ok:
-        print("  （无：要么背景未成立/已失效，要么结构空点 RR<1.5 负期望）")
+        print("  （无：要么背景未成立/已失效，要么结构空点未达可挂口径）")
     print()
     print("【今日盯盘】%s" % ("、".join("%s(%s第%s根)" % (c["sym"], c["ctx_name"], c["ctx_age"])
                                        for c in watch) if watch else "（无）"))
@@ -634,7 +668,7 @@ def main():
     if not a.brief:
         print()
         print("纪律：① 先看背景（形态破位⇒下跌波段成立）② 背景越新越好（刚成立>早期>中段>晚期）")
-        print("      ③ 只在波段内做空、不追跌 ④ 目标截 2R、同票冷却 5 根 ⑤ 结构空点 RR≥1.5 是门槛（③ RR临界）")
+        print("      ③ 只在波段内做空、不追跌 ④ 目标截 2R、同票冷却 5 根 ⑤ 可挂：RR≥1.5，或反抽接近 1.5，或 RR≥0.80 且正股到 T1≥3%")
         print("      ⑥ 2倍/3倍反向ETF 当日了结（不留隔夜仓）")
 
 if __name__ == "__main__":

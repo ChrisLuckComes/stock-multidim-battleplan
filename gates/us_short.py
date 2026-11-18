@@ -136,8 +136,12 @@ STRUCT_STOP_ATR = 0.30
 # ★ 全修①：公式/常量收敛到 rr_core 单一真源。
 #   做空 rr_ratio 的第二个参数是**目标价**，不再写死 t1 —— 调用方传 T1 就是 T1 口径、
 #   传 T2 就是 T2 口径，杜绝「展示用 T2、门槛用 T1」的混用。
-from rr_core import (MIN_RR, RR_LADDER, short_rr as rr_ratio,  # noqa: E402,F401
-                     min_entry_for_rr, grade as short_grade)
+from rr_core import (MIN_RR, RR_LADDER, SHORT_BOUNCE_RR_NEAR,  # noqa: E402,F401
+                     SHORT_RR_LOOSE, SHORT_T1_MOVE_MIN,
+                     short_rr as rr_ratio, min_entry_for_rr,
+                     grade as short_grade, short_hang_rr_ok,
+                     is_short_bounce_leg, hang_rr_floor,
+                     short_hang_entry_gate, short_t1_move_pct)
 
 
 def etf_from_underlying(und_px, und_ref, etf_ref, lev):
@@ -148,6 +152,40 @@ def etf_from_underlying(und_px, und_ref, etf_ref, lev):
 def underlying_from_etf(etf_px, und_ref, etf_ref, lev):
     """反向换算：ETF 价 → 隐含正股价。"""
     return und_ref * (1.0 - (etf_px / etf_ref - 1.0) / lev)
+
+
+def leg_hang_status(name, entry, stop, t1, rr1, live):
+    """条件计划状态：条件可挂 / 等到位 / 不挂。
+
+    可挂：RR>=1.5；或反抽空 RR 接近 1.5；或 RR>=0.80 且正股到 T1 至少 3%
+    （两倍反向 ETF 大约 6%）。入场用结构位，不再要求必须爬到 1.5 临界价。
+    不得用 T2 凑过门槛。两倍杠杆不把 RR 乘 2。
+    """
+    is_bounce = is_short_bounce_leg(name)
+    gate = short_hang_entry_gate(t1, stop, is_bounce=is_bounce)
+    reasons = []
+    rr_s = "—" if rr1 is None else f"{rr1:.2f}"
+    if not short_hang_rr_ok(rr1, is_bounce=is_bounce, entry=entry, t1=t1):
+        reasons.append(f"RR1 {rr_s} 未达可挂口径（只用T1，不用T2凑）")
+        if gate is not None and live is not None and gate > live + 1e-9 and (stop is None or gate < stop):
+            pct = (gate / live - 1) * 100
+            reasons.append(f"锚未到可挂入场 {gate:.2f}，需反抽 {pct:+.1f}%")
+            return "等到位", reasons, gate
+        return "不挂", reasons, gate
+    if is_bounce and live is not None and entry is not None and live + 1e-9 < entry:
+        pct = (entry / live - 1) * 100
+        reasons.append(f"锚未到反抽入场，需反抽 {pct:+.1f}%")
+        return "等到位", reasons, entry
+    move = short_t1_move_pct(entry, t1)
+    notes = []
+    if rr1 is not None and rr1 + 1e-9 < MIN_RR:
+        if is_bounce:
+            notes.append("接近 1.5，放宽可挂")
+        if move is not None and move + 1e-9 >= SHORT_T1_MOVE_MIN:
+            notes.append(f"正股到 T1 {move*100:.1f}%（两倍 ETF 约 {move*200:.0f}%）")
+    note = ("（" + "；".join(notes) + "）") if notes else ""
+    reasons.append(f"T1 口径可挂{note}（条件计划，非已确认触发）")
+    return "条件可挂", reasons, gate
 
 
 def short_objectives(entry, stop, t1, t2):
@@ -179,9 +217,9 @@ def warnings_for(entry, stop, t1, atr):
     """数字失真 / 负期望告警。返回 [str]。"""
     ws = []
     r = rr_ratio(entry, t1, stop)
-    if r is not None and r < MIN_RR:
-        floor = min_entry_for_rr(MIN_RR, t1, stop)
-        ws.append(f"⚠ 盈亏比 {r:.2f} < {MIN_RR:g} 门槛（该结构负期望区，临界入场价 {floor:.2f}）")
+    if r is not None and not short_hang_rr_ok(r, entry=entry, t1=t1):
+        floor = short_hang_entry_gate(t1, stop) or min_entry_for_rr(MIN_RR, t1, stop)
+        ws.append(f"⚠ 未达可挂口径 RR {r:.2f}（临界入场价 {floor:.2f}）")
     if entry is not None and stop is not None and atr:
         # ⚑ 相对容差：止损最小距离兜底把 stop 恰好推到 entry+0.25×ATR 时，
         #   浮点误差会让「11.66 < 11.66」成立 → 兜底成功了却仍在告警（误导）。
@@ -340,7 +378,7 @@ def main():
     #   ④ 反向ETF 换算 = 主决策的**落地价**（要下单的价）。
     #   ⑤ 顶部形态 / T0头肩顶 / 大背景 / 多空转换地图 = **旁证，默认收成一行**，
     #      表里也可能写出入场/RR，⚠ **别当成主空点**；用 --full 展开。
-    print("【只看这三块】① 类型(破位/反抽) → ② 空点候选(入场/止损/目标/RR) → ③ RR临界(够不够1.5)"
+    print("【只看这三块】① 类型(破位/反抽) → ② 空点候选(入场/止损/目标/RR) → ③ RR临界(1.5，或正股到T1≥3%的放宽可挂)"
           "｜ETF价=落地价｜形态·T0·大背景=旁证(默认收起, --full 展开)")
     # ★ 2026-10-22：按时段标签现价（夜盘/盘前/盘后/盘中），禁止再写「实时/盘前」一把梭
     if not isinstance(meta, dict):
@@ -557,7 +595,7 @@ def main():
             print("── 本笔核算 ──")
             print(f"  ⚠ 入场价 {entry:.2f} 高于昨高 {lv['prev_high']:.2f}，"
                   f"超出当日可验证结构 ⇒ 不给出结论（请核对是否笔误）")
-            print("\n纪律：① 反抽到空点才空 ② RR<1.5 不做 ③ 止损后同板块反手风险减半 "
+            print("\n纪律：① 反抽到空点才空 ② 未达可挂口径不做（1.5，或正股到T1≥3%放宽） ③ 止损后同板块反手风险减半 "
                   "④ 2 倍 ETF 睡觉前无论盈亏都平仓（正股可以拿过半夜，起来盘后确认止损）")
             return
         r = rr_ratio(entry, t1, stop)
@@ -595,7 +633,7 @@ def main():
         for w in warnings_for(entry, stop, t1, lv["atr14"]):
             print(f"  {w}")
     print()
-    print("纪律：① 反抽到空点才空 ② RR<1.5 不做 ③ 止损后同板块反手风险减半"
+    print("纪律：① 反抽到空点才空 ② 未达可挂口径不做（1.5，或正股到T1≥3%放宽） ③ 止损后同板块反手风险减半"
           " ④ 2 倍 ETF 睡觉前无论盈亏都平仓（正股可以拿过半夜，起来盘后确认止损）")
 
 
