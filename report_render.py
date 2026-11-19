@@ -319,6 +319,13 @@ def pick_rec(a):
     """
     top = a.get("odds_top")
     rec = a.get("odds_recommend")
+    # ★ 2026-11-19 修（伟测 688372）：`odds_recommend` 为空不代表「回落到 odds_top 更好」——
+    #   引擎判「突破已延伸·不追」时，odds_top 往往就是「现价市价追」那一行
+    #   （92.08 / 止损 89.10 / 0.44×ATR），拿它当主推等于把已否决的方案又端上首屏，
+    #   与「不出作战表」直接打架。此情形一律返回 None（报告显示「不做」）。
+    if (rec is None and (a.get("plan") or {}).get("recommend") is False
+            and "延伸" in str((a.get("plan") or {}).get("verdict") or "")):
+        return None
 
     def _ok(r):
         if not (isinstance(r, dict) and r):
@@ -451,8 +458,11 @@ def build_mode_rows(a):
     out = [
         ("模式", "<code>%s</code>　%s" % (esc(p.get("mode")), esc(p.get("verdict") or ""))),
         ("买区（下单带）", "<b>%s ~ %s</b>" % (num(z.get("primary_lo")), num(z.get("primary_hi")))),
-        ("回踩锚", "%s = <b>%s</b>" % (esc(z.get("struct_anchor") or z.get("anchor")),
-                                    num(z.get("level")))),
+        # ★ 2026-11-19（伟测 688372）：「回踩锚」这个标签会被读成「回踩到这里买」，
+        #   而 level 是**突破位/结构失效线**（收盘破位就走），不是买位。
+        #   突破延伸后两者相差 2×ATR（77.97 vs 现价 92.08），标错等于给一个等不到的价。
+        ("结构失效锚（止损）", "%s = <b>%s</b>"
+         % (esc(z.get("struct_anchor") or z.get("anchor")), num(z.get("level")))),
         ("均线方向", " ｜ ".join("%s %s（%s）" % (x["name"], num(x["value"]), x["dir_txt"])
                               for x in s["ma"])),
         ("ATR14", "<b>%s</b>（%s%%）" % (num(s["atr14"]), num(s["atr_pct"]))),
@@ -801,15 +811,20 @@ def _valuation_fallback(a):
 
 def build_peers(a, n):
     out = []
-    for x in (a.get("peers") or []):
+    # ★ 2026-11-19：按业务类型分组呈现（独立测试在最前，与主标的同商业模式）。
+    #   混排时读者看不出「利扬才是真同行、长电通富只是景气参考」。
+    _rows = sorted((a.get("peers") or []),
+                   key=lambda x: 0 if x.get("group") == "独立测试" else 1)
+    for x in _rows:
         if x.get("error"):
             out.append('<tr><td>%s %s</td><td colspan="9" class="note">取数失败：%s</td></tr>'
                        % (esc(x["code"]), esc(x.get("name")), esc(x["error"])))
             continue
-        out.append("<tr><td>%s <span class='note'>%s</span></td><td>%s</td>"
+        _grp = (" <span class='note'>%s</span>" % esc(x["group"])) if x.get("group") else ""
+        out.append("<tr><td>%s <span class='note'>%s</span>%s</td><td>%s</td>"
                    "<td>%s</td><td>%s</td><td>%s</td><td><b>%s</b></td><td>%s</td>"
                    "<td>%s</td><td>%s</td><td>%s</td></tr>"
-                   % (esc(x["code"]), esc(x.get("name")), num(x.get("close")),
+                   % (esc(x["code"]), esc(x.get("name")), _grp, num(x.get("close")),
                       pct(x.get("d3")), pct(x.get("d5")), pct(x.get("d10")),
                       pct_plain(x.get("d20")), pct(x.get("d60")),
                       pct(x.get("gap_ytd_hi")), pct_plain(x.get("dist_ma20")),
@@ -833,12 +848,70 @@ def build_peers(a, n):
                    'battle_analyze 默认已开启自动板块对照，'
                    '若仍为空说明板块成分接口失败；可手工指定：'
                    '<code>--peers 代码1,代码2</code></td></tr>')
+    else:
+        # ★ 2026-11-19：按业务类型分解同向只数。混算 1/5 会把「测试环节相对强势」
+        #   这条真信息抹成一句「板块 off」—— 伟测 +14.5%/利扬 +3.1%（独立测试 2/2 同向），
+        #   而长电/通富/甬矽 −7~−15%（封测一体 0/3）。两种口径结论相反，必须分开摆。
+        _ok = [x for x in (a.get("peers") or []) if x.get("d20") is not None]
+        _self20 = ((a.get("struct") or {}).get("range_change") or {}).get("20d")
+        if _ok and _self20 is not None:
+            _up = _self20 >= 0
+
+            def _same(xs):
+                return [x for x in xs if ((x.get("d20") or 0) >= 0) == _up]
+
+            _t = [x for x in _ok if x.get("group") == "独立测试"]
+            _o = [x for x in _ok if x.get("group") != "独立测试"]
+            _parts = []
+            if _t:
+                _s = _same(_t)
+                _parts.append("独立测试（同商业模式）%d/%d 同向%s"
+                              % (len(_s), len(_t),
+                                 ("：" + "、".join((x.get("name") or x["code"]) for x in _s))
+                                 if _s else ""))
+            if _o:
+                _s = _same(_o)
+                _parts.append("封测一体（景气参考）%d/%d 同向%s"
+                              % (len(_s), len(_o),
+                                 ("：" + "、".join((x.get("name") or x["code"]) for x in _s))
+                                 if _s else ""))
+            if _parts:
+                out.append('<tr><td colspan="10" class="note"><b>同向分解</b>（近 20 日）：'
+                           + "；".join(_parts)
+                           + '。<b>两种口径可给出相反结论</b> —— 独立测试同业才是业务可比组，'
+                             '封测一体只作景气参考，不能混算成一个「板块 on/off」。</td></tr>')
     return "\n      ".join(out)
 
 
 def build_exec(a, n):
     rec = pick_rec(a) or {}
     m, z = a["meta"], a["plan"].get("buy_zone") or {}
+    # ★ 2026-11-19 修（伟测 688372）：无推荐档时原实现继续拼表 ⇒ 出现
+    #   「买入价 —（）」「止损 ———」「预挂可行性 ✗ 买点在现价上方」这类空壳与错话
+    #   （根本没有买点，谈什么预挂）。改为一张精简的「不做 + 为什么 + 何时再看」。
+    if not rec and not n.get("exec_rows"):
+        _p = a.get("plan") or {}
+        _v = str(_p.get("verdict") or _p.get("mode") or "")
+        _why = []
+        if "延伸" in _v:
+            _why.append("现价追 ⇒ 止损只能放到结构失效线 <b>%s</b>，风险 <b>%s%%</b>，"
+                        "超单笔预算" % (num(z.get("level")),
+                                     num(z.get("dist_atr") and abs((z.get("dist_atr") or 0) * (
+                                         (a.get("struct") or {}).get("atr14") or 0)
+                                         / max(m.get("basis_close") or 1, 1e-9) * 100), 1)))
+            _why.append("回踩档 ⇒ 已落在硬止损 <b>%s</b> 之下，到价时结构已坏（接飞刀）"
+                        % num(z.get("hard_stop")))
+        else:
+            _why.append("引擎未给出合格档（mode=%s · recommend=%s），不凭形态硬凑一个价"
+                        % (esc(_p.get("mode")), _p.get("recommend")))
+        return rows([
+            ("动作", "<b>不做</b> —— 没有可执行的挂单价"),
+            ("为什么", "<br>".join(_why) if _why else "—"),
+            ("重新评估的条件", "回踩到活均线（MA5 / MA10）<b>且收盘不失守硬止损线 %s</b>，"
+                             "再重跑引擎" % num(z.get("hard_stop"))),
+            ("结构失效线", "%s（收盘破即出，<b>不是买位</b>）" % num(z.get("level"))),
+            ("硬止损（盘中）", "%s（%s）" % (num(z.get("hard_stop")), esc(z.get("hard_anchor")))),
+        ])
     lot = m.get("lot") or 100
     account = m.get("account") or 50000
     risk_pct = m.get("risk_pct") or 0.015
@@ -1182,6 +1255,18 @@ def build_open_playbook(a, n):
         return ("<div class='card'><h3>开盘作战方案</h3>"
                 "<p class='note'>生成失败：%s</p></div>" % e)
     if pb is None:
+        # ★ 2026-11-19：引擎判「突破已延伸·不追」且无推荐档 ⇒ 宁可明说不做，
+        #   也不回落到 odds_primary 拼一份「挂 80.64 / 止损 77.97（0.39ATR）」的假方案。
+        _v = (a.get("plan") or {}).get("verdict")
+        if _v and "延伸" in str(_v) and (a.get("plan") or {}).get("recommend") is False:
+            return ("<div class='card'><h3>开盘作战方案（次日开盘价 → 动作）</h3>"
+                    "<p class='note'><b>本票不出作战表。</b>引擎判「%s」："
+                    "① 现价追 ⇒ 止损要放到结构失效线，风险远超单笔预算；"
+                    "② 回踩档 ⇒ 已落在硬止损线之下，到价时结构已坏（接飞刀）。"
+                    "<b>两条腿都不可执行，与其拼一个假价，不如不做。</b></p>"
+                    "<p class='note'>重新评估的条件：回踩到活均线（MA5 / MA10）"
+                    "<b>且收盘不失守硬止损线</b>，再重跑引擎。</p></div>"
+                    % esc(_v))
         return ""
     return OP.format_html(pb)
 

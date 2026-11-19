@@ -936,6 +936,15 @@ def from_analysis(a, n=None):
     n = n or {}
     plan = a.get("plan") or {}
     meta = a.get("meta") or {}
+    # ★ 2026-11-19 修（伟测 688372）：引擎判「突破已延伸·不追」且没有推荐档时，
+    #   **不许回落到 odds_primary** —— 那会把 80.64/77.97（0.39×ATR 薄止损、
+    #   且买价已在硬止损 88.42 之下）拼成一份"看起来能用"的作战表，
+    #   与「不追」结论直接打架，还会诱导用户在结构走坏后接飞刀。
+    #   没有任何可执行挂单价 ⇒ 返回 None，由渲染层出一张「不出作战表」的说明卡。
+    if ("延伸" in str(plan.get("verdict") or "")
+            and plan.get("recommend") is False
+            and not (isinstance(a.get("odds_recommend"), dict) and a.get("odds_recommend"))):
+        return None
     # ⚑ 只看非空 dict —— list / 空 dict 一律回落到 odds_primary
     od = a.get("odds_recommend")
     if not (isinstance(od, dict) and od):

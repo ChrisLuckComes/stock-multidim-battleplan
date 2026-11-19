@@ -649,7 +649,7 @@ def limit_touch_rate(bars, limit_px, horizon=1):
     return {"px": round(limit_px, 2), "pct": round(hits / n * 100, 1), "n": n, "horizon": horizon}
 
 
-def pick_recommend(rows, z, us=False, bars=None):
+def pick_recommend(rows, z, us=False, bars=None, no_chase=False):
     """推荐档。A 股、美股分开。
 
     A 股当日买入不能卖，仍在可预挂的回踩档里取「达成率×赔率」联合最高的一条。
@@ -667,7 +667,7 @@ def pick_recommend(rows, z, us=False, bars=None):
         r = _pick_recommend_meteor(rows, z, bars=bars)
         if r is not None:
             return r
-    return _pick_recommend_cn(rows, z, bars=bars)
+    return _pick_recommend_cn(rows, z, bars=bars, no_chase=no_chase)
 
 
 def _attain_rate(r, bars):
@@ -756,7 +756,7 @@ def _tactical_pool(rows, struct_stop):
     return out
 
 
-def _pick_recommend_cn(rows, z, bars=None):
+def _pick_recommend_cn(rows, z, bars=None, no_chase=False):
     """A 股：可预挂、不追高、不破位、风险够，里面「达成率×赔率」联合最高的一条。
 
     ★ 2026-10-11 改（用户定）：最佳推荐档 = 达成率 × 赔率 联合排序，不只看赔率最高。
@@ -766,15 +766,31 @@ def _pick_recommend_cn(rows, z, bars=None):
       买点端一档不动 —— 贴均线买不是问题，问题只在止损没加够缓冲。
     ★ 2026-09-27 修：优先在「止损 = 执行止损腿」的口径里挑（与 sizing 同一套数），
       挑不到才回落全矩阵。
+    ★ 2026-11-19 修（伟测 688372）：新增 `no_chase` —— 引擎已判「突破已延伸·不追」
+      时，本函数仍会推荐「现价市价追」（因为现价 attain=1.0 天然最高分），与结论
+      自相矛盾。此开关把 need_pct ≥ 0 的档（现价 + 上方追价档）整体剔出候选，
+      只允许给**回踩档**；回踩档配不出止损就返回 None（宁可不给，不给错的）。
     """
+    no_chase = bool(no_chase)
     struct_stop = z.get("struct_stop")
     zone_hi = z.get("primary_hi")
+    hard_stop = z.get("hard_stop")
     exec_stop = exec_stop_of(z, bars)  # ★ 往下加缓冲的执行止损
 
     def _feas(pool):
         out = []
         for r in pool:
             if not r["prehang"]:
+                continue
+            # no_chase：引擎判「突破已延伸」⇒ 现价及上方档一律不作推荐（见 docstring）
+            if no_chase and (r.get("need_pct") or 0) >= 0:
+                continue
+            # no_chase 且买价已落到**硬止损线**之下 ⇒ 到价时结构已坏（硬止损是盘中破就走的线），
+            # 那不是在支撑上买，是接飞刀。伟测 688372 实测：回踩 MA5 85.75 已低于硬止损
+            # 88.42（阳线下沿）⇒ 该档被剔后返回 None，报告如实说「当前无推荐档」。
+            if (no_chase and isinstance(hard_stop, (int, float))
+                    and isinstance(r.get("entry"), (int, float))
+                    and r["entry"] < hard_stop):
                 continue
             if struct_stop is not None and r["entry"] <= struct_stop:
                 continue
@@ -784,6 +800,14 @@ def _pick_recommend_cn(rows, z, bars=None):
             #   容不下日内波动必被毛刺扫掉（回测：薄止损组扫损 79.1%、PF 0.699）。
             #   与 _top 处 tight 兜底（>=0.35）口径统一：薄止损档不许靠 R 排序上位。
             if r["risk_atr"] is None or r["risk_atr"] < 0.35:
+                continue
+            # ★★ 2026-11-19 修（伟测 688372 实测）：原来只防薄止损、不防宽止损 ⇒
+            #   「现价 92.08 配结构失效线 77.97」这种 **2.07×ATR / 风险 15.3%** 的档，
+            #   靠 need_pct=0 ⇒ attain=1.0 拿到全场最高分（2.27），被当选推荐档；
+            #   而它根本不可执行（200 股风险 2822 元 = 预算 3.8 倍）。
+            #   止损距买价 >1.5×ATR 已不是「止损」而是「腰斩保护」，不入推荐档候选。
+            #   ⚑ 与薄止损闸门（<0.35×ATR）配对，两头都堵：薄了必被扫、宽了配不出预算。
+            if r["risk_atr"] > 1.5:
                 continue
             # ★ 2026-10-11 放宽：原 -4.0% 硬剔除会误删「最近均线回踩」档
             #   （如 301449 滚动MA5=42.83 需跌 -4.6%）；改为软因子交由达成率×赔率联合排序
@@ -1042,6 +1066,20 @@ def volprice_20d(bars):
 
 # ────────────────────────── 同行轻量对照 ──────────────────────────
 
+# ★ 2026-11-19（老罗提「伟测是华为的测试，同行应该还有利扬芯片」）：
+#   半导体「独立测试（测试代工）」与「封测一体」是**两种商业模式** —— 前者只做
+#   晶圆/成品测试（伟测、利扬），后者封装+测试捆绑（长电、通富、华天、甬矽）。
+#   混在一张表里算「同向只数」，等于拿封测景气度去判测试环节的共振：
+#   伟测 +14.5%、利扬 +3.1%，而长电/通富/甬矽 −7~−15% ⇒ 全体口径判「板块 off」，
+#   把「测试环节相对强势」这条真信息抹掉了。故给每行标业务类型，分组呈现。
+INDEP_TEST_PEERS = {"688135": "利扬芯片", "688372": "伟测科技"}
+
+
+def _peer_group(code):
+    """同行业务类型：独立测试 / 封测一体。只作归类展示，不参与任何闸门。"""
+    return "独立测试" if str(code) in INDEP_TEST_PEERS else "封测一体"
+
+
 def _stock_name(code):
     """本地库补股票名（2026-11-19）。
 
@@ -1078,6 +1116,7 @@ def peer_row(prefix, code, name=None, n=150):
     ytd_hi = max(b["h"] for b in bars[-250:]) if len(bars) >= 250 else max(b["h"] for b in bars)
     row = {
         "code": code, "name": name or code, "src": src,
+        "group": _peer_group(code),
         "close": _f(c), "atr_pct": _f(atr / c * 100) if atr else None,
         "d3": _pct(c, bars[-4]["c"]) if len(bars) > 4 else None,
         "d5": _pct(c, bars[-6]["c"]) if len(bars) > 6 else None,
@@ -1636,10 +1675,17 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
     odds = odds_matrix(entries, anchors, atr_v, t1, wall_far if wall_far else t2_engine,
                        last_c, walls=walls, engine_t1=t1)   # ★ 全修⑤ 报告与引擎同尺
     odds = annotate_odds(odds, z, atr_v, last_c)
-    rec = pick_recommend(odds, z, bars=bars, us=is_us)
+    # ⚑ 判据必须同时满足「延伸」+「引擎判不可买（recommend is False）」：
+    #   000034 那种「突破已延伸·只挂回踩单 22.61」仍 recommend=True（≤2ATR 可执行），
+    #   只关向上档、保留回踩档 —— 用单一「延伸」判会把这种误伤成无推荐档。
+    _no_chase = ("延伸" in str((plan or {}).get("verdict") or "")
+                 and (plan or {}).get("recommend") is False)
+    rec = pick_recommend(odds, z, bars=bars, us=is_us, no_chase=_no_chase)
     # ★ 深度 review P0 修（2026-11-05）：A 股向上突破跟单档（与向下回踩档并列）。
     #   美股无此拆分（_pick_recommend_us 已含 chase 分支），rec_up 仅 A 股。
-    rec_up = (None if is_us
+    # ★ 2026-11-19：引擎判「突破已延伸·不追」时，向上突破跟单档一并关闭 ——
+    #   94.86 那种「再涨 3% 追」的档与「突破段已走完」直接冲突（正是追高）。
+    rec_up = (None if (is_us or _no_chase)
               else _pick_recommend_cn_up(odds, z, bars, last_c, t1, atr_v))
     touch_px = None
     if rec and rec.get("entry") is not None and rec["entry"] < last_c:

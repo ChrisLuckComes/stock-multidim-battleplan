@@ -5138,14 +5138,22 @@ def _plan_entry_core(bars, ev):
             lv = z.get("level")
             hi = z.get("primary_hi")
             d = (last_c - lv) / atr_v if (atr_v and lv is not None and last_c is not None) else None
-            # ⚑ 2026-11-19 修（伟测 688372）：primary_hi 是**追价上限**，常高于现价
-            #   （92.08 vs 95.91），原文案「等回踩 95.91」把上方价位说成回踩位。
-            #   只有 hi 真在现价下方才是回踩位；否则指回买位/最近均线。
-            tail = (f"等回踩 {hi} 一带" if (hi is not None and hi <= last_c)
-                    else f"等回踩到买位 {lv} 附近或最近均线")
+            # ⚑ 2026-11-19 修（伟测 688372）：`level` 是**突破位/结构失效线**，不是「买位」。
+            #   原文案「等回踩到买位 77.97」把距现价 −15% 的破位价当成回踩目标 ——
+            #   等不到的价 = 0，等于告诉用户「永远别买」。突破已延伸时唯一可执行的是
+            #   **活均线回踩**（MA5/MA10），level 只承担失效线职责。
+            _cl = [b["c"] for b in bars]
+            _refs = []
+            for _n, _lab in ((5, "MA5"), (10, "MA10")):
+                if len(_cl) >= _n:
+                    _m = sum(_cl[-_n:]) / float(_n)
+                    if last_c is not None and _m < last_c:
+                        _refs.append("%s %.2f" % (_lab, _m))
+            tail = ("回踩参考 " + " / ".join(_refs) + "（活均线）"
+                    if _refs else "回踩最近均线")
             note = (
-                f"收盘 {last_c:.2f} 高出买位 {lv} 已 {d:.1f}×ATR（>2），"
-                f"不追；{tail}，或等新一轮缩量再站上"
+                f"收盘 {last_c:.2f} 已高出突破位 {lv} 共 {d:.1f}×ATR（突破段走完），"
+                f"不追；{tail}；结构失效线 {lv}（收盘破即出，不是买位）"
             )
             mode, priority, setup, verdict, recommend, path = (
                 "wait", None, "wait", "突破已延伸·等回踩", False, "wait",
