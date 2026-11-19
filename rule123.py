@@ -815,6 +815,23 @@ def sma(closes, n):
     return sum(closes[-n:]) / n
 
 
+# ★ 均线/关键位「站上」判据的临界容差（2026-11-19 老罗定：「战法没有完美满足的，即将满足也是满足」）
+#   全市场回测 scratch/bt_tolerance_all_modes_20261119.py：站上 MA5/10/20/60、均线排列这类
+#   【价·位】连续量判据，临界态(差≤0.5%)的后续期望不劣于满足态(T+5 中位 +0.16~0.59pt、胜率还略高)
+#   ⇒ 这一刀切无信息量，给 0.5% 容差。
+#   ⚠ 只适用于【价·位】判据。方向类(当日收涨/过昨高)、防追高类(距MA5≤5%/距墙/不追高)不加容差
+#   —— 回测证明防追高有信息量(临界态 T+5 −0.67pt/胜率−2.3pt)，放宽等于放行追高。
+MA_STAND_TOL_PCT = 0.5
+
+
+def stands_above(price, level, tol_pct=MA_STAND_TOL_PCT):
+    """价格站上均线/关键位（带临界容差）：price >= level*(1-tol%)。
+    仅用于【价·位】连续量判据；方向/防追高类不适用。"""
+    if price is None or level is None:
+        return False
+    return price >= level * (1.0 - tol_pct / 100.0)
+
+
 def ema(closes, n):
     if len(closes) < n:
         return None
@@ -4226,7 +4243,10 @@ def ma_reclaim_break(bars, ev, atr_v, last_c, res_win=25):
     if ma5 is None or ma10 is None or ma20 is None:
         return None
     # ① 全部三条均线之上（用户定：不做均线下方的股票）
-    if not (last_c > ma5 and last_c > ma10 and last_c > ma20):
+    #    ★ 2026-11-19 老罗定「即将满足也是满足」：改用 stands_above 带 0.5% 临界容差。
+    #    临界差≤0.5% 视为站上（TENB 44.68 vs MA20 44.87 差0.43%、RPD 差0.39% 均放行）。
+    #    回测 bt_tolerance_all_modes_20261119.py：临界态 T+5 −0.34% 不劣于满足态 −0.53%。
+    if not (stands_above(last_c, ma5) and stands_above(last_c, ma10) and stands_above(last_c, ma20)):
         return None
     # ①-B ★ D0 必须**当日收涨**（2026-10-19 老罗纠错，C 口径）：
     #   出水芙蓉的形态本义是「一根 K 线从均线纠缠里**向上探出**」（README
@@ -4680,10 +4700,10 @@ def ma_bull_align(bars, ev, atr_v, last_c):
     ma20, ma60 = sma(closes, 20), sma(closes, 60)
     if None in (ma5, ma7, ma10, ma20, ma60):
         return None
-    # ① 短均线组严格多头排列（价格在最上）
-    aligned = (last_c > ma5 > ma7 > ma10)
-    # ② 长均托底：价格必须在 MA20、MA60 之上（支撑在下方）
-    supported = (last_c > ma20 and last_c > ma60)
+    # ① 短均线组多头排列（价格在最上）——2026-11-19 临界容差：逐级带 0.5%
+    aligned = (stands_above(last_c, ma5) and stands_above(ma5, ma7) and stands_above(ma7, ma10))
+    # ② 长均托底：价格必须在 MA20、MA60 之上（支撑在下方）——同样带 0.5% 容差
+    supported = (stands_above(last_c, ma20) and stands_above(last_c, ma60))
     _ma_state = {
         "ma5": round(ma5, 2), "ma7": round(ma7, 2), "ma10": round(ma10, 2),
         "ma20": round(ma20, 2), "ma60": round(ma60, 2),
@@ -4723,11 +4743,13 @@ def ma_bull_align(bars, ev, atr_v, last_c):
     risk_atr = round((last_c - hard) / atr_v, 2) if atr_v else None
     risk_over = risk_pct_v > 8.0
     # 主卖点（动态跟踪，非固定止损锚）：三短均线多头排列一打乱即卖出
+    #   ★ 2026-11-19 与买入口径对称：买入端用 stands_above 带 0.5% 容差，
+    #   卖出端也须用同一容差判「打乱」，否则容差内买入后会被立刻判打乱卖出（自相矛盾）。
     exit_break = {
-        "condition": "MA5<MA7 或 MA7<MA10（三短均线多头排列一打乱即卖出）",
-        "ma5_lt_ma7": bool(ma5 < ma7),
-        "ma7_lt_ma10": bool(ma7 < ma10),
-        "triggered": bool(ma5 < ma7 or ma7 < ma10),
+        "condition": "MA5<MA7 或 MA7<MA10（带0.5%容差，与买入对称）",
+        "ma5_lt_ma7": bool(not stands_above(ma5, ma7)),
+        "ma7_lt_ma10": bool(not stands_above(ma7, ma10)),
+        "triggered": bool(not stands_above(ma5, ma7) or not stands_above(ma7, ma10)),
     }
     _note = (
         f"【T1·短均线多头排列】价格在最上、短均升序：收{last_c:.2f} > MA5 {ma5:.2f} "
@@ -4902,10 +4924,12 @@ def meteor_pit(bars, ev, atr_v, last_c):
         if sum(vols[max(0, i - 20):i]) > 0 else None
 
     # ④ 确认信号
-    above_ma5 = last_c > ma5_now
+    #   ★ 2026-11-19 均线站上类带 0.5% 临界容差（同 T0/ma_bull）；
+    #   rising（当日收涨）是方向类、not_chase（防追高）回测证明有信息量，均不加容差。
+    above_ma5 = stands_above(last_c, ma5_now)
     rising = n >= 2 and last_c > closes[-2]
-    above_ma10 = last_c > ma10_now
-    strong_confirm = last_c > ma5_at_vol
+    above_ma10 = stands_above(last_c, ma10_now)
+    strong_confirm = stands_above(last_c, ma5_at_vol)
     # 防追高：买点 = 站上五日线；远离 5 日线（>5%）或已越过天量高点 5% 不追
     dist_ma5_pct = (last_c - ma5_now) / ma5_now * 100
     not_chase = dist_ma5_pct <= 5.0 and last_c <= peak_hi * 1.05

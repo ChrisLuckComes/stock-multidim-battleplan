@@ -214,12 +214,27 @@ class TestAlignBlockers(unittest.TestCase):
     """不成立场景：临界观察（暂不买），reason 必须可解读。"""
 
     def test_tangled_short_mas_block(self):
-        """价格跌回短均线簇（MA5 未在价格与 MA7 之上）⇒ 不成立。"""
+        """★ 2026-11-19 新规：即将满足也是满足（0.5% 临界容差）。
+        旧口径：价格 12.205 < MA5 12.220（差 −0.123%），判"短均线未严格多头排列"拦截。
+        新口径：−0.123% < 0.5% 容差 ⇒ MA5 视为站上，排列成立 ⇒ 放行。
+        真纠缠（差 > 0.5%）仍拦截，见 test_ma60_pressing_above_price_blocks（价<MA60 −4.19%）。
+        """
         plan = plan_of(sine_series(64))
         mab = plan.get("ma_bull_align") or {}
-        self.assertFalse(mab.get("recommend"))
-        self.assertIn("短均线未严格多头排列", mab.get("why") or "")
-        self.assertNotEqual(plan["mode"], "ma_bull_align")
+        self.assertTrue(mab.get("recommend"),
+                        "11-19 新规：−0.123% 在 0.5% 容差内视为站上 MA5")
+        self.assertEqual(plan["mode"], "ma_bull_align")
+
+    def test_stand_tolerance_boundary_0p5pct(self):
+        """★ 锁定 0.5% 容差边界：容差内放行、容差外拦截（2026-11-19 老罗定）。
+        stands_above(price, ma)：price >= ma*(1-0.5%) 成立。
+        """
+        ma = 100.0
+        self.assertTrue(R.stands_above(99.6, ma), "−0.4% 容差内应站上")
+        self.assertTrue(R.stands_above(99.5, ma), "恰 −0.5% 边界应站上")
+        self.assertFalse(R.stands_above(99.4, ma), "−0.6% 容差外应拦截")
+        self.assertFalse(R.stands_above(100.0, ma) is False, "price==ma 当然站上")
+        # 方向类/防追高类不走容差：由各自严格判据负责，此处仅验证 helper 本身
 
     def test_ma60_pressing_above_price_blocks(self):
         """上海机场式：价格收复 MA5/MA10 但 MA60 仍压在头上 ⇒ 长均未托底，不成立。"""
@@ -243,13 +258,19 @@ class TestRealCases(unittest.TestCase):
     """
 
     def test_600009_critical_observation(self):
+        """★ 2026-11-19 新规翻转案例（需老罗知悉）：
+        老罗 10-13 原判"临界观察，暂不买"——当时 MA7<MA10 差 −0.056%、价<MA60 差 −0.097%，
+        按严格口径判"短均线未严格多头排列 + MA60 压制"⇒ 不买。
+        11-19 老罗定"即将满足也是满足"：两处差值均 < 0.5% 容差 ⇒ 视为成立，改判可买。
+        这是新规的预期后果，不是回归。若老罗认为 MA60 压价属"方向"不该容错，需单独把
+        MA60 判据移出 stands_above 并回退本断言。
+        """
         plan = plan_of_bars(_fixture("600009_airport_bars.json"), "600009")
         mab = plan.get("ma_bull_align") or {}
-        self.assertFalse(mab.get("recommend"), "上海机场 10-13：临界观察，暂不买")
-        why = mab.get("why") or ""
-        self.assertIn("短均线未严格多头排列", why)
-        self.assertIn("MA60", why)
-        self.assertNotEqual(plan["mode"], "ma_bull_align")
+        self.assertTrue(mab.get("recommend"),
+                        "11-19 新规：MA7/MA60 两处差值均 <0.5% 容差，视为站上")
+        # 容差同时让 T0(出水芙蓉) 成立，T0 优先级高于短多 ⇒ mode 归 T0，短多状态仍挂载备查
+        self.assertIn(plan["mode"], ("ma_bull_align", "ma_reclaim_break"))
 
     def test_601766_alignment_attached_breakout_wins(self):
         plan = plan_of_bars(_fixture("601766_crrc_bars.json"), "601766")
