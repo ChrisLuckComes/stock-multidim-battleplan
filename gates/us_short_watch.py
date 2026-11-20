@@ -54,7 +54,7 @@ from top_patterns import detect_head_shoulders_top                  # noqa: E402
 from top_shapes import bearish_context, ctx_grade                  # noqa: E402
 
 POOL_PATH = os.path.join(_HERE, "us_short_watchlist.json")
-DEFAULT_POOL = ["SNDK", "MU", "SKHY", "SOXX", "LITE"]
+DEFAULT_POOL = ["SNDK", "MU", "SKHY", "SOXX", "LITE", "AMD"]
 
 
 def load_pool(path=None):

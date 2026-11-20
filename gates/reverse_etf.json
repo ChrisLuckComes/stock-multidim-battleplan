@@ -6,6 +6,7 @@
     "SKHY": { "etf": "SKDD", "lev": 2.0, "since": "2026-07-14", "issuer": "GraniteShares", "note": "费率 2.20%" },
     "SOXX": { "etf": "SOXS", "lev": 3.0, "since": null, "issuer": "Direxion" },
     "AAOI": { "etf": "AAOZ", "lev": 2.0, "since": "2026-07-14", "issuer": "Tradr", "note": "AUM 仅约 $5.6M，盘口薄、滑点大；正股 AAOI 波动极大，止损务必放宽" },
-    "LITE": { "etf": "LITZ", "lev": 2.0, "since": "2026-04-22", "issuer": "Tradr", "note": "Cboe；日目标 −200% Lumentum；费率 1.49%；买入 LITZ=做空 LITE，禁止 sell short 该 ETF" }
+    "LITE": { "etf": "LITZ", "lev": 2.0, "since": "2026-04-22", "issuer": "Tradr", "note": "Cboe；日目标 −200% Lumentum；费率 1.49%；买入 LITZ=做空 LITE，禁止 sell short 该 ETF" },
+    "AMD":  { "etf": "DAMD", "lev": 2.0, "since": "2025-11-13", "issuer": "Defiance", "note": "2026-11-20 用户指令入做空池并指定走 DAMD。NYSE Arca；日目标 −200% AMD；费率 1.30%；2026-11-18 官网净规模约 $25.71M、收盘 $8.11；买入 DAMD=做空 AMD，禁止 sell short 该 ETF。另有 GraniteShares AMDS，本池只用用户指定的 DAMD。" }
   }
 }

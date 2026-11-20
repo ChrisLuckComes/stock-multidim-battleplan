@@ -86,6 +86,7 @@ DEFAULT_REVERSE_ETF = {
     "SKHY": {"etf": "SKDD", "lev": 2.0},
     "SOXX": {"etf": "SOXS", "lev": 3.0},
     "LITE": {"etf": "LITZ", "lev": 2.0},
+    "AMD": {"etf": "DAMD", "lev": 2.0},
 }
 REVERSE_ETF_PATH = os.path.join(HERE, "reverse_etf.json")
 
