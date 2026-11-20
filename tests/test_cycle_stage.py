@@ -125,6 +125,26 @@ def main():
     check("alert 阶段不自造禁做多", r11["stage"]["key"] == "complacency"
           and r11["long_ok"] is True)
 
+    # 11b) 老罗 11-20 纠错：兜底下跌背景 age>25 + fresh_reclaim + 站回MA20 ⇒ 底部非愤怒
+    #       （盛合晶微 688820 实例：age=105 兜底背景仍 alive，但价已站上全部均线）
+    sig11b = {"top": {"level": "ok"}, "ext": {}, "vp": {"verdict": "neutral"},
+              "ctx": {"alive": True, "name": "下跌趋势(兜底)", "age_bars": 105,
+                      "fallback": True},
+              "ctx_grade": ("背景晚期(降档)", 0),
+              "ride": {"state": "fresh_reclaim"},
+              "strength": {"verdict": "WEAK",
+                           "metrics": {"above_ma20": True}},
+              "chip": {}}
+    r11b = classify(sig11b)
+    check("兜底背景+fresh_reclaim+站回MA20 ⇒ 底部非愤怒",
+          r11b["stage"]["key"] in ("disbelief", "recovery")
+          and r11b["stage"]["phase"] in ("trough", "expansion"))
+
+    # 11c) 同样兜底背景 age>25 但没有站回MA20 ⇒ 仍判愤怒（不滥放行）
+    sig11c = dict(sig11b, strength={"verdict": "WEAK", "metrics": {"above_ma20": False}})
+    r11c = classify(sig11c)
+    check("兜底背景+未站回MA20 ⇒ 仍判愤怒", r11c["stage"]["key"] == "anger")
+
     # 12) 样本不足 → unknown，不给阶段不臆造
     r12 = stage_of(_mk(_rising(10, 10, 0.2)), code="000001", with_chip=False)
     check("样本不足 → unknown", r12.get("unknown") is True and r12.get("stage") is None)

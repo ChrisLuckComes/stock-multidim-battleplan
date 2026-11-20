@@ -250,14 +250,27 @@ def classify(sig):
     # 下跌段
     if _field(ctx, "alive") is True:
         chip_state = _field(chip, "state")
+        # ★ 老罗 2026-11-20 纠错：兜底背景(break_level=旧MA20)在价格反弹后仍 alive，
+        #   若按 age>25 先判 anger，会把「底部刚放量收复全部均线」的票误判成愤怒·下跌段
+        #   （盛合晶微 688820 实例）。现役反转质量必须前置到成熟度之前，与 10-21 方案A
+        #   fresh_reclaim 豁免接刀同源——用现役字段，不自造阈值。
+        reclaim = (ride_state == "fresh_reclaim" or _field(vp, "ma5_reclaim") is True)
+        above_ma20 = _field(sig.get("strength"), "metrics")  # 现役强度里的 above_ma20
+        above_ma20 = _field(above_ma20, "above_ma20") is True
         if _field(top, "level") == "block" or chip_state == "破位下行中":
             stage = "capitulation" if grade_n >= 1 else "panic"
+        elif reclaim and above_ma20:
+            # 下跌背景未清 + 但已站回 MA20 且刚收复 ⇒ 底部怀疑/复苏，不是下跌中途
+            stage = "recovery" if strength == "STRONG" else "disbelief"
+            return _stage_result(stage, sig,
+                                 "下跌背景 alive 但现役 fresh_reclaim/ma5_reclaim + 站回MA20"
+                                 " ⇒ 底部反转初期（非下跌段愤怒）")
         elif grade_n >= 2 or (age is not None and age > 25):
             stage = "anger"
         elif grade_n == 1:
             stage = "panic"
         elif ride_state == "fresh_reclaim":
-            stage = "disbelief"     # 下跌背景里的刚收复 = 底部第一次怀疑
+            stage = "disbelief"     # 下跌背景里的刚收复（未站回MA20）= 底部第一次怀疑
         else:
             stage = "anxiety" if (rvol is not None and rvol < 1.0) else "denial"
         return _stage_result(stage, sig, "下跌波段背景 alive，按 ctx_grade 成熟度定位")
