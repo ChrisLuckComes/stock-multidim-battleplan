@@ -145,6 +145,73 @@ def main():
     r11c = classify(sig11c)
     check("兜底背景+未站回MA20 ⇒ 仍判愤怒", r11c["stage"]["key"] == "anger")
 
+    # ===== 方案A（老罗 11-20）：深跌后反弹站上短均 → 统一底部反转初期 =====
+    # 三票现役信号快照（中芯688981/华虹688347/盛合688820），同为7月见顶深跌后近4日
+    # 放量收复 MA5/10/20，之前被 ride 单点拆成 thrill/anger/disbelief 三个矛盾标签。
+    def _rebound(verdict, ret20, ride_state, ctx_age, ctx_alive=False):
+        return {"top": {"level": "ok"}, "ext": {"extension": 1.5},
+                "vp": {"verdict": "neutral"},
+                "ctx": {"alive": ctx_alive, "age_bars": ctx_age, "name": "前顶"},
+                "ctx_grade": ("背景晚期(降档)", 0),
+                "ride": {"state": ride_state},
+                "strength": {"verdict": verdict,
+                             "metrics": {"above_ma20": True,
+                                         "ma10_gt_ma20": True,
+                                         "ret20": ret20}},
+                "chip": {}}
+
+    # 14) 中芯型：STRONG + new_high + 收复 ⇒ recovery（不再误判顶部兴奋）
+    r14 = classify(_rebound("STRONG", 18.9, "new_high", 31))
+    check("方案A 中芯型(new_high/STRONG) → recovery 非顶部",
+          r14["stage"]["key"] == "recovery")
+
+    # 15) 华虹型：STRONG + mixed + 收复 ⇒ recovery（不再误判下跌愤怒）
+    r15 = classify(_rebound("STRONG", 21.9, "mixed", 43, ctx_alive=True))
+    check("方案A 华虹型(mixed/STRONG) → recovery 非愤怒",
+          r15["stage"]["key"] == "recovery")
+
+    # 16) 盛合型：WEAK + fresh_reclaim + 收复 ⇒ disbelief
+    r16 = classify(_rebound("WEAK", 9.0, "fresh_reclaim", 105, ctx_alive=True))
+    check("方案A 盛合型(fresh_reclaim/WEAK) → disbelief",
+          r16["stage"]["key"] == "disbelief")
+
+    # 17) 三票同归底部反转一侧（phase in trough/expansion），不再跨到 peak/down
+    check("方案A 三票同阶段侧(底部反转,非顶非跌)",
+          all(classify(s)["stage"]["phase"] in ("trough", "expansion")
+              for s in (_rebound("STRONG", 18.9, "new_high", 31),
+                        _rebound("STRONG", 21.9, "mixed", 43, True),
+                        _rebound("WEAK", 9.0, "fresh_reclaim", 105, True))))
+
+    # 18) 防误伤：真顶 block 即便站上短均也不被反弹判吃掉
+    sig18 = _rebound("STRONG", 40.0, "new_high", 20)
+    sig18["top"] = {"level": "block"}
+    check("防误伤 真顶block → euphoria 非recovery",
+          classify(sig18)["stage"]["key"] == "euphoria")
+
+    # 19) 防误伤：ATR 延伸 ext≥6 → thrill（顶），不被吃
+    sig19 = _rebound("STRONG", 40.0, "new_high", 20)
+    sig19["ext"] = {"extension": 6.5}
+    check("防误伤 ext≥6 → thrill 非recovery",
+          classify(sig19)["stage"]["key"] == "thrill")
+
+    # 20) 防误伤：line_ride + collect 主升浪 belief 不被反弹判吃掉
+    sig20 = _rebound("STRONG", 15.0, "line_ride", 30)
+    sig20["vp"] = {"verdict": "collect"}
+    check("防误伤 line_ride+collect → belief 非recovery",
+          classify(sig20)["stage"]["key"] == "belief")
+
+    # 21) 防误伤：无下跌背景(age=None)一路新高 → 不走本报告统一判，按上涨段 thrill
+    sig21 = _rebound("STRONG", 15.0, "new_high", None)
+    check("防误伤 无背景一路新高 → thrill 非recovery",
+          classify(sig21)["stage"]["key"] == "thrill")
+
+    # 22) 防误伤：未站回MA20的真下跌 ⇒ 仍落下跌段，不被统一判救成底部反转
+    sig22 = _rebound("WEAK", -20.0, "mixed", 60, ctx_alive=True)
+    sig22["strength"]["metrics"]["above_ma20"] = False
+    check("防误伤 未站回MA20真跌 → 下跌段非recovery",
+          classify(sig22)["stage"]["phase"] in ("contraction", "trough")
+          and classify(sig22)["stage"]["key"] != "recovery")
+
     # 12) 样本不足 → unknown，不给阶段不臆造
     r12 = stage_of(_mk(_rising(10, 10, 0.2)), code="000001", with_chip=False)
     check("样本不足 → unknown", r12.get("unknown") is True and r12.get("stage") is None)

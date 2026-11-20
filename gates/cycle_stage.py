@@ -246,6 +246,31 @@ def classify(sig):
     ext_v = _num(ext.get("extension"))
     rvol = _field(vp, "ratio")
     ride_state = _field(ride, "state")
+    metrics = _field(sig.get("strength"), "metrics")
+    above_ma20 = _field(metrics, "above_ma20") is True
+    ma10_gt_ma20 = _field(metrics, "ma10_gt_ma20") is True
+    ret20 = _num(_field(metrics, "ret20"))
+
+    # ★ 方案A（老罗 2026-11-20 定）：深跌后反弹站上短均 → 统一归「底部反转初期」。
+    #   实证：中芯688981 / 华虹688347 / 盛合688820 同为「7月见顶→深跌28~55%→近4日放量
+    #   收复 MA5/10/20」，之前却被 ride 单点状态拆成 thrill(顶)/anger(底)/disbelief(底)
+    #   三个矛盾标签。老罗定性「走势相同、阶段就该同类」，顶部判断局部片面。
+    #   判据全用现役字段，不自造阈值：
+    #     above_ma20 + ma10_gt_ma20 + ret20>0（站上短均、反弹中）
+    #     + 有下跌背景 age_bars（深跌过；无背景一路新高不算）
+    #     + 非真顶 top.level≠block 且 ext<6（沿用现役顶部/thrill 阈值）
+    #     + ride≠line_ride（护住 belief 主升浪，不被反弹判吃掉）
+    #   命中 ⇒ STRONG→recovery(复苏) / 其余→disbelief(怀疑)，都在底部反转一侧。
+    if (above_ma20 and ma10_gt_ma20 and ret20 is not None and ret20 > 0
+            and _field(top, "level") != "block"
+            and (ext_v is None or ext_v < 6.0)
+            and age is not None
+            and ride_state != "line_ride"):
+        stage = "recovery" if strength == "STRONG" else "disbelief"
+        return _stage_result(
+            stage, sig,
+            "深跌后反弹站上短均（现役 above_ma20+ma10>ma20+ret20>0+有下跌背景"
+            "+非真顶+非line_ride）⇒ 统一归底部反转初期（非顶部兴奋/非下跌愤怒）")
 
     # 下跌段
     if _field(ctx, "alive") is True:
@@ -255,8 +280,6 @@ def classify(sig):
         #   （盛合晶微 688820 实例）。现役反转质量必须前置到成熟度之前，与 10-21 方案A
         #   fresh_reclaim 豁免接刀同源——用现役字段，不自造阈值。
         reclaim = (ride_state == "fresh_reclaim" or _field(vp, "ma5_reclaim") is True)
-        above_ma20 = _field(sig.get("strength"), "metrics")  # 现役强度里的 above_ma20
-        above_ma20 = _field(above_ma20, "above_ma20") is True
         if _field(top, "level") == "block" or chip_state == "破位下行中":
             stage = "capitulation" if grade_n >= 1 else "panic"
         elif reclaim and above_ma20:
