@@ -86,13 +86,49 @@ def test_cli_end_to_end():
 
 
 def test_isolation_from_decision_chain():
-    """标注层不得接线到现役决策链（§B0 禁自造新闸）。"""
+    """接线纪律（老罗 2026-11-23 更新）：接入**报告层**，但绝不进决策链。
+
+    接入 battle_analyze（出报告时写明阶段 = 重点买入参考）后，原「不被任何引擎
+    import」的断言作废；新口径：不进 rule123/session_decide 这些**开仓/否决**决策链，
+    只允许被报告层调用，且 battle_analyze 只写 out["wyckoff"] 软键、不改 recommend。
+    """
     src = open(os.path.join(_ROOT, "gates", "wyckoff_stage.py"), encoding="utf-8").read()
     check("不 import rule123/session_decide",
           "import rule123" not in src and "from rule123" not in src
           and "import session_decide" not in src and "from gates.session_decide" not in src)
-    check("不被现役引擎 import", "wyckoff_stage" not in open(
+    check("不进决策链 rule123", "wyckoff_stage" not in open(
         os.path.join(_ROOT, "rule123.py"), encoding="utf-8").read())
+    check("不进决策链 session_decide", "wyckoff_stage" not in open(
+        os.path.join(_ROOT, "gates", "session_decide.py"), encoding="utf-8").read())
+    # 已接入报告层
+    ba = open(os.path.join(_ROOT, "battle_analyze.py"), encoding="utf-8").read()
+    rr = open(os.path.join(_ROOT, "report_render.py"), encoding="utf-8").read()
+    tmpl = open(os.path.join(_ROOT, "templates", "battle_report.html"),
+                encoding="utf-8").read()
+    check("已接入 battle_analyze 写软键",
+          "from gates.wyckoff_stage import stage_of" in ba and 'out["wyckoff"] = _wy' in ba)
+    check("battle_analyze 不改 recommend（只标注）",
+          'out["wyckoff"]["recommend"]' not in ba and '_wy["recommend"]' not in ba)
+    check("report_render 有 WYCKOFF_BLOCK 插槽",
+          "build_wyckoff" in rr and "WYCKOFF_BLOCK" in rr and "{{WYCKOFF_BLOCK}}" in tmpl)
+
+
+def test_report_wyckoff_card():
+    """report_render.build_wyckoff：有 wyckoff 出卡片、无则空、unknown 不臆造。"""
+    import report_render as RR
+    good = {"wyckoff": {"stage": "markup", "stage_cn": "上涨", "phase_cn": "上涨段",
+                        "sub_stage": "中继回调", "why": "站上年线+MA60陡峭上行",
+                        "anchors": [{"name": "MA60", "value": 128.46,
+                                     "rule": "跌破改判派发"}]}}
+    html = RR.build_wyckoff(good, {})
+    check("有阶段出卡片", "<div class='card'" in html and "威科夫阶段标注" in html)
+    check("卡片含阶段+子状态+依据", "上涨" in html and "中继回调" in html
+          and "站上年线" in html and "128.46" in html)
+    check("卡片含非开仓闸声明", "不是开仓闸" in html and "重点买入参考" in html)
+    check("无 wyckoff 不出卡片", RR.build_wyckoff({}, {}) == "")
+    unk = {"wyckoff": {"stage": "unknown", "stage_cn": "未知", "why": "样本不足",
+                       "anchors": []}}
+    check("unknown 不臆造阶段", "样本不足" in RR.build_wyckoff(unk, {}))
 
 
 def main():
@@ -100,6 +136,7 @@ def main():
     test_anchor_numeric_values()
     test_cli_end_to_end()
     test_isolation_from_decision_chain()
+    test_report_wyckoff_card()
     print("\n%d/%d passed" % (sum(PASS), len(PASS)))
     return 0 if all(PASS) else 1
 

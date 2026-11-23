@@ -1271,6 +1271,52 @@ def build_open_playbook(a, n):
     return OP.format_html(pb)
 
 
+def build_wyckoff(a, n):
+    """威科夫阶段标注卡片（老罗 2026-11-23：完整报告要写明个股处于哪个阶段，
+    「是重点买入参考」）。
+
+    数据源 a["wyckoff"]（battle_analyze 写）：stage/stage_cn/phase_cn/sub_stage/why/anchors。
+    ⚑ 标注层：位置画像 + 重点买入参考，**不是开仓闸**——不改 recommend/止损；
+      卡片底部固定声明这一点，防止被误读成"派发=必卖/吸筹=必买"。
+    """
+    w = a.get("wyckoff")
+    if not isinstance(w, dict) or not w.get("stage"):
+        return ""
+    stage = str(w.get("stage", ""))
+    cn = str(w.get("stage_cn") or stage)
+    phase = str(w.get("phase_cn") or w.get("phase") or "")
+    sub = str(w.get("sub_stage") or "")
+    why = str(w.get("why") or "")
+    anchors = w.get("anchors") or []
+    computable = w.get("computable", True)
+    # 阶段配色（A 股语境：上涨偏红=强势，下跌偏绿=弱势；吸筹中性蓝，派发橙警示）
+    color = {"accumulation": "#2b6cb0", "markup": "#c53030",
+             "distribution": "#dd6b20", "markdown": "#2f855a",
+             "transition": "#718096", "unknown": "#a0aec0"}.get(stage, "#718096")
+    head = "%s · %s%s" % (cn, phase, ("（%s）" % sub) if sub else "")
+    parts = [
+        "<div class='card' style='border-left:5px solid %s'>" % color,
+        "<h3>威科夫阶段标注 <span class='sec-no'>%s</span></h3>" % esc(head),
+    ]
+    if not computable or stage == "unknown":
+        parts.append("<p class='note'>%s —— 样本不足/计算失败，不臆造阶段。"
+                     "（%s）</p>" % (esc(why), esc(str(w.get("code") or ""))))
+    else:
+        parts.append("<p>%s</p>" % esc(why))
+        if anchors:
+            parts.append("<table><tr><th>证伪锚</th><th>价位</th><th>触发后改判</th></tr>")
+            for a_ in anchors:
+                parts.append("<tr><td><b>%s</b></td><td>%s</td><td>%s</td></tr>"
+                             % (esc(str(a_.get("name", ""))), num(a_.get("value")),
+                                esc(str(a_.get("rule", "")))))
+            parts.append("</table>")
+    parts.append("<p class='note'>⚑ 位置画像 + <b>重点买入参考</b>，"
+                 "不是开仓闸：开仓/否决仍认板块 D0 + 收盘站上 MA20 + 放量确认 + session_decide。"
+                 "「派发」不等于必卖、「吸筹」不等于必买。</p>")
+    parts.append("</div>")
+    return "\n".join(parts)
+
+
 def build_tier_ranking(a, n):
     """买点分层排序区块（2026-10-11 老罗纠正）。
 
@@ -2110,6 +2156,8 @@ def render(a, n, tmpl_path=DEFAULT_TMPL, vp_from=None, vp_to=None):
         "TWO_WAYS_BLOCK": build_two_ways(a, n),
         "CALIBER_NOTES": "".join("<p>%s</p>" % _caliber_html(x) for x in caliber),
         "SCR_BLOCK": build_scr(a, n) + build_activity(a, n),
+        # ★ 威科夫阶段（老罗 2026-11-23：重点买入参考）——紧跟筹码面之后
+        "WYCKOFF_BLOCK": build_wyckoff(a, n),
         "TOP_SIGNAL_BLOCK": build_top_signal(a, n),
         "CONFLUENCE_BLOCK": build_confluence(a, n),
         "RANKING_BONUS_BLOCK": build_ranking_bonus(a, n),

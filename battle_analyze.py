@@ -2172,6 +2172,32 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
             "line": "ATR 延伸（atr_extension · 2026-11-06）：未知（%s）" % e,
             "skip_reason": "%s" % e,
         }
+    # ★ 威科夫阶段标注（老罗 2026-11-23 指令：完整报告要写明个股处于哪个阶段，
+    #   「是重点买入参考」）。⚑ 定位 = 位置画像 + 重点参考，**不是新闸**：
+    #   只写 out["wyckoff"] 一个软键，绝不改 recommend/odds/仓位/止损/任何阈值。
+    #   ⚠ 取数口径：本函数上游 bars 来自 ash_bars 的**不复权缓存**（乐鑫 2026-06-05
+    #   有 −29.7% 除权跳空，会把 MA200 虚高到 139.2、斜率算成 −1.76% 假值）。
+    #   所以 A 股必须用 wyckoff_stage.fetch_bars 的**腾讯前复权**链重取（真实 MA200≈120、
+    #   斜率 +2.18%），不能用不复权 bars；美股 ticker 无此问题，沿用传入 bars。
+    #   失败降级 computable=False，不打断报告（与 ranking_bonus/dual_score 同纪律）。
+    try:
+        from gates.wyckoff_stage import fetch_bars as _wyckoff_fetch
+        from gates.wyckoff_stage import stage_of as _wyckoff_stage_of
+        _wy_bars = _wyckoff_fetch(code, n=640) if not is_us else bars
+        if not _wy_bars:                       # 前复权取数失败 ⇒ 回落传入 bars 并留痕
+            _wy_bars = bars
+            notes_all.append("威科夫阶段：前复权取数失败，回落不复权 bars（均线可能受除权污染）")
+        _wy = _wyckoff_stage_of(_wy_bars, code=code, name=name or market_data.get("name"))
+        if not isinstance(_wy.get("metrics"), dict) or not _wy["metrics"].get("ok"):
+            _wy["computable"] = False
+        out["wyckoff"] = _wy
+    except Exception as e:                      # noqa: BLE001
+        out["wyckoff"] = {
+            "code": code, "name": name, "stage": "unknown", "stage_cn": "未知",
+            "phase": "unknown", "phase_cn": "未知", "sub_stage": None,
+            "why": "威科夫阶段计算失败：%s" % e, "anchors": [], "metrics": {},
+            "computable": False, "is_annotation_only": True,
+        }
     return out
 
 
@@ -2352,6 +2378,17 @@ def summarize(r):
         L.append(" 目标 t1=%s  t2=%s  远端墙=%s  ATH=%s  (rr_target1=%s)" % (
             _tg["t1"], _tg["t2_engine"], _tg["wall_far"],
             _tg["ath"], _tg.get("rr_target1")))
+    # ★ 威科夫阶段（老罗 2026-11-23：完整报告必带「个股处于哪个阶段」= 重点买入参考）
+    _wy = r.get("wyckoff") or {}
+    if isinstance(_wy, dict) and _wy.get("stage"):
+        _wy_head = "%s · %s%s" % (
+            _wy.get("stage_cn"), _wy.get("phase_cn") or "",
+            ("（%s）" % _wy.get("sub_stage")) if _wy.get("sub_stage") else "")
+        L.append(" ★ 威科夫阶段：%s —— %s" % (_wy_head, _wy.get("why") or ""))
+        for _wa in (_wy.get("anchors") or [])[:2]:
+            L.append("     证伪锚 %s=%s ⇒ %s" % (
+                _wa.get("name"), _wa.get("value"), _wa.get("rule")))
+        L.append("     ⚑ 重点买入参考（位置画像），非开仓闸；开仓仍认 D0+站上MA20+放量确认。")
     L.append(" ATR %s (%s%%)   分位 60/120/250 = %s / %s / %s" % (
         s["atr14"], s["atr_pct"],
         s["percentile"].get("60", {}).get("pct"),
