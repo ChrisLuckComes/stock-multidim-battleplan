@@ -1319,6 +1319,66 @@ def build_wyckoff(a, n):
     return "\n".join(parts)
 
 
+def build_staged_entry(a, n):
+    """趋势转换分步试仓卡片（老罗 2026-11-24 定 L1：标注层，不是开仓闸）。
+
+    数据源 a["staged_entry"]（battle_analyze 写）：stage_n/gate/steps/tranches/invalidate。
+    ⚑ 只展示「当前走到第几步 / 每档该买多少 / 走不下去怎么退」的执行编排，
+      不改 recommend/止损，底部固定声明开仓仍认现役闸门。
+    """
+    s = a.get("staged_entry")
+    if not isinstance(s, dict) or not s.get("computable"):
+        return ""
+    stage_n = int(s.get("stage_n") or 0)
+    gate = str(s.get("gate") or "watch")
+    gate_cn = str(s.get("gate_cn") or gate)
+    color = {"avoid": "#c53030", "watch": "#718096",
+             "allow": "#2b6cb0", "allow_event": "#2f855a"}.get(gate, "#718096")
+    parts = [
+        "<div class='card' style='border-left:5px solid %s'>" % color,
+        "<h3>趋势转换分步试仓 <span class='sec-no'>第 %d/5 步 · %s</span></h3>"
+        % (stage_n, esc(gate_cn)),
+    ]
+    # 五步进度条
+    parts.append("<table><tr><th>步骤</th><th>判据</th><th>状态</th><th>证据</th></tr>")
+    for st in (s.get("steps") or []):
+        ok = bool(st.get("hit"))
+        mark = "<b style='color:#2f855a'>✓ 达成</b>" if ok else "<span style='color:#a0aec0'>— 未到</span>"
+        parts.append("<tr><td>%s</td><td>%s</td><td>%s</td><td class='note'>%s</td></tr>"
+                     % (int(st.get("n") or 0), esc(st.get("name", "")), mark,
+                        esc(st.get("detail", ""))))
+    parts.append("</table>")
+    # 分档试仓表
+    trs = s.get("tranches") or []
+    if trs:
+        parts.append("<p class='note'>风险预算 = 单笔 1.5% 总额按 40/30/20/10 切分，"
+                     "<b>不是每档各 1.5%</b>。买价锚取推荐档。</p>")
+        parts.append("<table><tr><th>档</th><th>对应步骤</th><th>买价</th><th>止损</th>"
+                     "<th>股数</th><th>金额</th><th>本档风险</th><th>累计仓位</th></tr>")
+        for t in trs:
+            parts.append(
+                "<tr><td>%d</td><td>%s</td><td><b>%s</b></td><td>%s</td><td>%s</td>"
+                "<td>%s</td><td>%s%%</td><td>%s%%</td></tr>"
+                % (int(t.get("n") or 0), esc(t.get("step", "")), num(t.get("entry")),
+                   num(t.get("stop")), num(t.get("qty"), 0), num(t.get("amount"), 0),
+                   num((t.get("risk_pct") or 0) * 100, 2),
+                   num((t.get("cum_weight") or 0) * 100, 0)))
+        parts.append("</table>")
+    # 退出锚
+    iv = s.get("invalidate") or {}
+    if iv:
+        trig = bool(iv.get("triggered"))
+        tag = ("<b style='color:#c53030'>⚠ 已触发</b>" if trig
+               else "<span style='color:#2f855a'>未触发</span>")
+        parts.append("<p>退出锚（走不下去就<b>平掉全部部位</b>）：%s —— %s</p>"
+                     % (esc(iv.get("rule", "")), tag))
+    parts.append("<p class='note'>⚑ 位置画像 + 执行编排，<b>不是开仓闸</b>："
+                 "开仓/否决仍认板块 D0 + 收盘站上 MA20 + 放量确认 + session_decide。"
+                 "「达成某步」不等于必买，「退出触发」须结合现役止损纪律。</p>")
+    parts.append("</div>")
+    return "\n".join(parts)
+
+
 def build_tier_ranking(a, n):
     """买点分层排序区块（2026-10-11 老罗纠正）。
 
@@ -2160,6 +2220,8 @@ def render(a, n, tmpl_path=DEFAULT_TMPL, vp_from=None, vp_to=None):
         "SCR_BLOCK": build_scr(a, n) + build_activity(a, n),
         # ★ 威科夫阶段（老罗 2026-11-23：重点买入参考）——紧跟筹码面之后
         "WYCKOFF_BLOCK": build_wyckoff(a, n),
+        # ★ 趋势转换分步试仓（老罗 2026-11-24 L1：标注层）——紧跟威科夫之后
+        "STAGED_ENTRY_BLOCK": build_staged_entry(a, n),
         "TOP_SIGNAL_BLOCK": build_top_signal(a, n),
         "CONFLUENCE_BLOCK": build_confluence(a, n),
         "RANKING_BONUS_BLOCK": build_ranking_bonus(a, n),

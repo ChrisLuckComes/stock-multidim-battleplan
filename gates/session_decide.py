@@ -1323,6 +1323,10 @@ def render(d):
         lines.append("授权  ✖ %s" % d["chase_expired"])
     if d["action"] != "能买" and d.get("arm_price") is not None:
         lines.append("盯价  %.2f  %s" % (d["arm_price"], d.get("arm_note") or ""))
+    if d.get("stage") is not None:
+        lines.append("档位  分步试仓第 %d/4 档（风险权重 %d%%；总预算 1.5%% 按档切分，"
+                     "非每档 1.5%%）"
+                     % (d["stage"], round((d.get("stage_weight") or 0) * 100)))
     if d["action"] == "能买" and d["size"]:
         s = d["size"]
         lines.append(
@@ -1550,6 +1554,11 @@ def main(argv=None):
     ap.add_argument("--account", type=float, default=None)
     ap.add_argument("--risk-scale", type=float, default=1.0,
                     help="情绪缩放，极弱可传 0.25")
+    ap.add_argument("--stage", type=int, default=None, choices=(1, 2, 3, 4),
+                    help="分步试仓档位 1~4（老罗 2026-11-24 L1）：按 40/30/20/10 "
+                         "缩放单笔风险预算。等价于 --risk-scale 0.4/0.3/0.2/0.1，"
+                         "只是便利映射；不改任何买卖判定，与 --risk-scale 同性质。"
+                         "完整分档买价/股数见报告「趋势转换分步试仓」卡片。")
     ap.add_argument("--no-pulse", action="store_true",
                     help="关闭市场脉搏缩仓（默认开：只缩放仓位、不否决开仓）")
     ap.add_argument("--json", action="store_true")
@@ -1619,6 +1628,14 @@ def main(argv=None):
     if args.cap_tol is not None and cap is not None:
         cap_tol_pct = args.cap_tol / float(cap)
 
+    # ★ 分步试仓档位（老罗 2026-11-24 L1）：--stage 只缩放风险预算，不碰买卖判定。
+    #   权重 40/30/20/10 与 gates/staged_entry.WEIGHTS 同源；这里内联避免盘中取数链
+    #   多 import 一个模块（纯常量，无副作用）。与用户 --risk-scale 相乘后再走
+    #   quality/pulse 的 min 缩仓，口径一致。
+    stage_weight = None
+    if args.stage is not None:
+        stage_weight = (0.40, 0.30, 0.20, 0.10)[args.stage - 1]
+
     t1 = time.perf_counter()
     quality = None
     if args.quality:
@@ -1638,9 +1655,10 @@ def main(argv=None):
             atr_extension = _ext_assess(None, None, None, skip_reason="无日线（取数失败）")
         except Exception:
             atr_extension = None
+    _eff_risk = args.risk_scale * (stage_weight if stage_weight is not None else 1.0)
     d = decide(
         day, summary, entry, stop, target,
-        cap=cap, account=args.account, risk_scale=args.risk_scale,
+        cap=cap, account=args.account, risk_scale=_eff_risk,
         quality=quality, cap_tol_pct=cap_tol_pct, atr=atr_v,
         pulse_enabled=not args.no_pulse,
         chase=chase, zone_hi=zone_hi,       # ★ 全修②
@@ -1654,6 +1672,10 @@ def main(argv=None):
             ch = {"action": None, "source": None, "why": "通道取数失败：%s" % e}
         d = apply_channel_handoff(d, ch, account=args.account)
     d["plan_src"] = plan_src
+    if stage_weight is not None:
+        d["stage"] = args.stage
+        d["stage_weight"] = stage_weight
+        d["risk_scale_base"] = args.risk_scale
     decide_ms = (time.perf_counter() - t1) * 1000.0
     d["elapsed_ms"] = round(fetch_ms + decide_ms, 1)
     d["fetch_ms"] = round(fetch_ms, 1)

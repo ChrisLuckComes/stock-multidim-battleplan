@@ -2180,6 +2180,7 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
     #   所以 A 股必须用 wyckoff_stage.fetch_bars 的**腾讯前复权**链重取（真实 MA200≈120、
     #   斜率 +2.18%），不能用不复权 bars；美股 ticker 无此问题，沿用传入 bars。
     #   失败降级 computable=False，不打断报告（与 ranking_bonus/dual_score 同纪律）。
+    _se_bars = bars                            # 分步试仓复用威科夫前复权链（见下方挂载）
     try:
         from gates.wyckoff_stage import fetch_bars as _wyckoff_fetch
         from gates.wyckoff_stage import stage_of as _wyckoff_stage_of
@@ -2187,6 +2188,7 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
         if not _wy_bars:                       # 前复权取数失败 ⇒ 回落传入 bars 并留痕
             _wy_bars = bars
             notes_all.append("威科夫阶段：前复权取数失败，回落不复权 bars（均线可能受除权污染）")
+        _se_bars = _wy_bars
         _wy = _wyckoff_stage_of(_wy_bars, code=code, name=name or market_data.get("name"))
         if not isinstance(_wy.get("metrics"), dict) or not _wy["metrics"].get("ok"):
             _wy["computable"] = False
@@ -2197,6 +2199,27 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
             "phase": "unknown", "phase_cn": "未知", "sub_stage": None,
             "why": "威科夫阶段计算失败：%s" % e, "anchors": [], "metrics": {},
             "computable": False, "is_annotation_only": True,
+        }
+    # ★ 趋势转换分步试仓（老罗 2026-11-24 定 L1：标注层，不是闸）。
+    #   与威科夫同纪律：只写 out["staged_entry"] 一个软键，绝不改 recommend/odds/
+    #   仓位/止损/任何阈值；复用威科夫已取的前复权 640 根，不额外联网取数。
+    #   失败降级 computable=False，不打断报告。
+    try:
+        from gates.staged_entry import assess as _se_assess
+        _se_plan = dict(plan)
+        _se_plan["code"] = code
+        # ★ 推荐档在 out 顶层（odds_recommend），不在 plan 内 ⇒ 显式并入，
+        #   否则分档试仓拿不到可执行买价/止损，股数全算不出来（端到端踩过）。
+        _se_rec = out.get("odds_recommend")
+        if isinstance(_se_rec, dict):
+            _se_plan["odds_recommend"] = _se_rec
+        out["staged_entry"] = _se_assess(
+            _se_bars, plan=_se_plan, wyckoff=out.get("wyckoff"), account=account)
+    except Exception as e:                      # noqa: BLE001
+        out["staged_entry"] = {
+            "computable": False, "reason": "分步试仓计算失败：%s" % e,
+            "stage_n": 0, "gate": "unknown", "steps": [], "tranches": [],
+            "is_annotation_only": True,
         }
     return out
 
