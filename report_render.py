@@ -1312,7 +1312,9 @@ def build_wyckoff(a, n):
             parts.append("</table>")
     parts.append("<p class='note'>⚑ 位置画像 + <b>重点买入参考</b>，"
                  "不是开仓闸：开仓/否决仍认板块 D0 + 收盘站上 MA20 + 放量确认 + session_decide。"
-                 "「派发」不等于必卖、「吸筹」不等于必买。</p>")
+                 "「派发」不等于必卖、「吸筹」不等于必买。"
+                 "<b>重点用来排雷</b>：判派发/下跌的标的不参与（否决性参考）；"
+                 "判吸筹/上涨仅作加分项，仍待闸门扳机。</p>")
     parts.append("</div>")
     return "\n".join(parts)
 
