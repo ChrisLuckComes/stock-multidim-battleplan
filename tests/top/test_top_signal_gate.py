@@ -1,14 +1,20 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""顶部标志 K 线闸门在 rule123 出口的回归测试（2026-09-25）。
+"""顶部形态闸门在 rule123 出口的回归测试。
 
 守住三件事：
   ① 闸门必须落在 **T0 接管之后** —— `_t0_takeover` 会把 recommend 重新写成 True，
      若闸门挂在 `plan_entry` 内部更浅的位置，「顶部确认了但 T0 照样叫你过昨高追」
      这种自相矛盾就会漏出去。
-  ② 默认 `veto="confirmed"`：**信号当日不否决**（回测：形态当日无预测力，t=1.64），
-     只有「波峰 + 标志 K 线 + 次日走弱」才 recommend=False。
+  ② **已确认 ≠ 否决**（2026-11-05 C 口径）：只有「20 日涨幅 ≥15% 且无旗形结构」的
+     已确认形态保留否决权（recommend=False）；其余降 alert + 缩仓 0.5、不禁买。
   ③ 反包（已推翻）必须恢复原判定，不得留否决。
+
+⚑ 2026-11-24 迁移说明：`top_signals.py`（单根 K 线）已于 2026-10-31 废弃，顶部形态改由
+`top_judgment` / `top_shapes`（12 种几何形态）判定。**本文件只测闸门语义**，
+形态识别本身由 `tests/gates/test_top_shapes.py` + `test_top_judgment.py` 覆盖。
+故「确认 / 推翻」场景用 `_fake_top()` 伪造 `analyze_top_shapes` 的返回，
+不再拿墓碑线去凑 —— 用真实 K 线凑强拉条件只会把用例测成「形态识别」，与本文件职责错位。
 
 跑法：`python tests/top/test_top_signal_gate.py`
 """
@@ -55,6 +61,30 @@ def gated(rows):
     return R._plan_entry_core(b2, ev), R.plan_entry(b2, ev)
 
 
+def _fake_top(**kw):
+    """伪造 `analyze_top_shapes` 的返回，把「形态识别」这一层隔离掉。
+
+    `apply_top_signal_gate` 优先消费 `ev["top_signals"]`（缓存复用，见 rule123._top_for），
+    所以喂一份伪造的缓存即可精确构造「确认 / 推翻 / 无信号」三种闸门场景，
+    同时**仍然走真实的 plan_entry 路径**（T0 接管照常发生）—— 这正是①要守的东西。
+
+    默认是「强拉 + 无旗形」的确认态（gain20=18% ≥ 15%）⇒ 保留否决权，block=True。
+    C 口径下要构造「降级」就传 `gain20=5.0` 或 `block=False, veto_downgraded=True`。
+    """
+    base = {
+        "ok": True, "state": "confirmed", "block": True, "size_factor": 0.0,
+        "best": {"pattern": "double_top", "pattern_cn": "双重顶", "variant_cn": "已破位",
+                 "is_top": True, "d": "2026-07-02", "prob": "高",
+                 "vol_cn": "巨量", "note": "双重顶，次日走弱已确认"},
+        "pattern_cn": "双重顶", "invalidation": 11.80,
+        "block_reason": "双重顶已确认，次日走弱",
+        "summary": "顶部形态 双重顶｜状态 已确认",
+        "gain20": 18.0, "flag_seen": False, "veto_downgraded": False,
+    }
+    base.update(kw)
+    return {"top_signals": base}
+
+
 def test_fixture_core_recommends():
     """前提：合成序列在裸引擎下 recommend=True（否则「被否决」无从谈起）。"""
     core, _ = gated([])
@@ -83,23 +113,23 @@ def test_signal_day_does_not_veto():
 def test_confirmed_vetoes_recommend_after_t0_takeover():
     """② + ①：core 推荐（T0 已接管）→ 闸门必须把它压成 False。
 
-    ⚠ fixture 为何要在「确认日」之后再补一根 UP（2026-10-19）：
-      出水芙蓉要求**信号日收涨**（老罗 2026-10-19 定的 C 口径，见 rule123.ma_reclaim_break ①-B）。
-      旧 fixture 让 T0 接管发生在
-      WEAK 那一根上，而 WEAK 的作用是「次日走弱 ⇒ 确认」，其定义就是
-      `WEAK.c < GRAVE.c`（低于顶部信号日的收盘）—— 与「收涨」在**同一根 K 线上
-      数学互斥**。所以把两者拆开：GRAVE/WEAK 负责把顶部形态确认掉，再补一根 UP
-      （收于 11.50 > WEAK 10.90）让 T0 在末根合法接管。这样测的仍是同一件事 ——
-      「顶部已确认后，当日新出现的 T0 接管必须被闸门压成否决」，且场景更贴近实盘
-      （确认发生在过去，接管发生在当下）。
+    fixture 保留 GRAVE/WEAK/UP 的形状：T0 必须在**末根**合法接管 —— 出水芙蓉要求信号日
+    收涨（老罗 2026-10-19 C 口径），而「次日走弱 ⇒ 确认」与「收涨」在同一根 K 线上数学互斥，
+    故用 UP 那根接管；这样才测得到「接管发生**之后**闸门还能不能压住」。
+    顶部判定本身用 `_fake_top()` 伪造（强拉 + 无旗形的确认态），与形态识别解耦。
     """
-    core, g = gated([GRAVE, WEAK, UP])
+    bars = app(t0_series(), [GRAVE, WEAK, UP])
+    ev, b2, _ = R.build_ev(bars, ticker="688999")
+    core = R._plan_entry_core(b2, ev)
     assert core["recommend"] is True, "前提：裸引擎在 T0 接管下 recommend=True"
     assert core["mode"] == "ma_reclaim_break", "前提：确实是 T0（出水芙蓉）接管"
+    ev2 = dict(ev)
+    ev2["top_signals"] = _fake_top()["top_signals"]
+    g = R.plan_entry(b2, ev2)
     assert g["recommend"] is False and g["top_signal_veto"] is True
     assert g["top_signal"]["state"] == "confirmed"
     assert "顶部确认·否决" in g["verdict"]
-    assert "顶部标志K线已确认" in g["note"]
+    assert "顶部形态已确认" in g["note"]
     assert g["top_signal"]["size_factor"] == 0.0
 
 
@@ -113,18 +143,47 @@ def test_pending_with_t0_still_allowed():
 
 def test_invalidated_restores_decision():
     """③ 反包推翻后必须恢复原判定，不得留否决。"""
-    core, g = gated([GRAVE, ENGULF])
-    assert g["recommend"] == core["recommend"] is True
+    bars = app(t0_series(), [GRAVE, ENGULF])
+    ev, b2, _ = R.build_ev(bars, ticker="688999")
+    core = R._plan_entry_core(b2, ev)
+    assert core["recommend"] is True, "前提：裸引擎本身是推荐态"
+    ev2 = dict(ev)
+    ev2["top_signals"] = _fake_top(state="invalidated", block=False,
+                                   size_factor=1.0)["top_signals"]
+    g = R.plan_entry(b2, ev2)
+    assert g["recommend"] is True
     assert not g.get("top_signal_veto")
     assert g["top_signal"]["state"] == "invalidated"
-    assert g["top_signal"]["prob"] == "作废"
-
-
-def test_gate_attaches_info_even_when_no_veto():
-    _, g = gated([])
-    assert g["top_signal"]["state"] == "none"
     assert g["top_signal"]["block"] is False
+
+
+def test_no_pattern_leaves_no_key():
+    """无顶部形态时**不挂键**（`apply_top_signal_gate` 在 `not top["ok"]` 时提前返回）。
+
+    下游（probe_intraday / report_render）全部用 `plan.get("top_signal")` 消费，
+    所以「没键」是既定契约；这里钉住它，防止哪天改成挂一个空 dict 而下游仍按真值判断。
+    """
+    _, g = gated([])
     assert g["recommend"] is True
+    assert "top_signal" not in g, "无顶部形态不应挂 top_signal 键"
+
+
+def test_downgraded_state_is_not_veto():
+    """C 口径：已确认但降级 ⇒ 挂 key、写 downgraded 标记，**不否决**。"""
+    bars = app(t0_series(), [GRAVE, WEAK, UP])      # UP 让 T0 在末根接管 ⇒ core 推荐
+    ev, b2, _ = R.build_ev(bars, ticker="688999")
+    core = R._plan_entry_core(b2, ev)
+    assert core["recommend"] is True, "前提：裸引擎推荐"
+    ev2 = dict(ev)
+    ev2["top_signals"] = _fake_top(block=False, veto_downgraded=True,
+                                   size_factor=0.5,
+                                   veto_downgrade_reason="20 日涨幅 +5.0% < 15% 非强拉"
+                                   )["top_signals"]
+    g = R.plan_entry(b2, ev2)
+    assert g["recommend"] is True, "降级不否决"
+    assert not g.get("top_signal_veto")
+    assert g["top_signal"]["veto_downgraded"] is True
+    assert "按 C 口径降级为缩仓 0.5" in g["note"]
 
 
 def test_pre_breakout_order_is_suppressed_on_veto():
@@ -132,11 +191,11 @@ def test_pre_breakout_order_is_suppressed_on_veto():
     res = {"recommend": True, "verdict": "平台突破", "note": "买突破位",
            "pre_breakout": {"trigger": 11.80, "note": "挂 11.80"}}
     bars = app(t0_series(), [GRAVE, WEAK])
-    out = R.apply_top_signal_gate(res, bars, {"top_signals": TS.analyze_top_signals(bars)})
+    out = R.apply_top_signal_gate(res, bars, _fake_top())
     assert out["recommend"] is False
     assert out["pre_breakout"]["suppressed_by"] == "top_signal"
-    assert out["pre_breakout"]["status"] == "已作废（顶部标志K线确认）"
-    assert out["pre_breakout"]["note"].startswith("【已作废·顶部标志K线确认】")
+    assert out["pre_breakout"]["status"] == "已作废（顶部形态确认）"
+    assert out["pre_breakout"]["note"].startswith("【已作废·顶部形态确认】")
 
 
 def test_gate_reuses_cached_ev_block():

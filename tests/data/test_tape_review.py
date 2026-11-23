@@ -47,7 +47,9 @@ def test_flow_partition_and_pullback():
 def test_reading_labels():
     key, _ = reading(39.45, 38.12, 0.71, 0.27, 3e7, -4e7)
     assert key == "big_buy"
-    key, _ = reading(35.0, 38.0, 0.2, 0.6, -1e7, 1e7)
+    # ⚑ 2026-11-06 起 supply 判据以「自高点回吐幅度」为决定性指标（pullback_hi≥6%），
+    #   不再仅凭「收均价下 + 高点后量过半 + 大单净卖」——旧三条件会把收红小回落误判派发。
+    key, _ = reading(35.0, 38.0, 0.2, 0.6, -1e7, 1e7, pullback_hi=0.07)
     assert key == "supply"
     key, _ = reading(13.24, 13.13, 0.89, 0.80, -3.14e6, -4.6e6)
     assert key == "digest"
@@ -112,11 +114,15 @@ def test_fact_and_verdict_share_reading():
 
 
 def test_conclude_four_ways():
-    def pack(close, avg, pos, after, main, chg, done=True):
+    # ⚑ 原 fixture 把 hi["h"] 固定写 10，而 close 是 35~47 ⇒ pullback=(10-close)/10 为
+    #   **负数**，派发判据的「自高点回吐≥6%」永远不成立（2026-11-06 起该项是决定性指标）。
+    #   现按 pullback 参数反推真实高点，fixture 才和判据同量纲。
+    def pack(close, avg, pos, after, main, chg, done=True, pullback=0.0):
+        hi_px = close / (1.0 - pullback) if 0.0 <= pullback < 1.0 else close
         day = {
             "frame": "minute", "session_done": done, "bench_name": "科创50",
             "quote": {"f170": chg},
-            "minutes": [{"t": "15:00", "h": 10, "l": 8, "c": close}],
+            "minutes": [{"t": "15:00", "h": hi_px, "l": close, "c": close}],
         }
         summary = {
             "last": {"c": close, "avg": avg}, "hi": day["minutes"][0],
@@ -129,19 +135,19 @@ def test_conclude_four_ways():
     up = pack(39.45, 35.82, 0.87, 0.0, 3.7e7, 39.65)
     assert up["label"] == "趋势延续"
     assert up["buy"] == "能买，只接回踩，不追"
-    pull = pack(39.0, 38.0, 0.4, 0.2, 1e6, 1.0)
+    pull = pack(39.0, 38.0, 0.4, 0.2, 1e6, 1.0, pullback=0.01)
     assert pull["label"] == "正常回调"
     assert pull["buy"] == "能等回踩接，不追"
     # 理工能科型：收涨、位高、均价上、主力净卖 → 高位消化（不是回调）
-    digest = pack(47.9, 46.6, 0.84, 0.43, -6e6, 1.96)
+    digest = pack(47.9, 46.6, 0.84, 0.43, -6e6, 1.96, pullback=0.03)
     assert digest["label"] == "高位消化"
     assert digest["buy"] == "先不买，不追"
-    ligong = pack(13.24, 13.13, 0.89, 0.80, -3.14e6, 1.85)
+    ligong = pack(13.24, 13.13, 0.89, 0.80, -3.14e6, 1.85, pullback=0.03)
     assert ligong["label"] == "高位消化"
-    dist = pack(35.0, 38.0, 0.2, 0.6, -1e7, -2.0)
+    dist = pack(35.0, 38.0, 0.2, 0.6, -1e7, -2.0, pullback=0.08)
     assert dist["label"] == "派发"
     assert dist["buy"] == "不买"
-    live = pack(35.0, 38.0, 0.2, 0.6, -1e7, -2.0, done=False)
+    live = pack(35.0, 38.0, 0.2, 0.6, -1e7, -2.0, done=False, pullback=0.08)
     assert live["label"] == "未收盘"
     assert "不下派发" in live["buy"]
 

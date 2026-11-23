@@ -30,26 +30,45 @@ class TestWidthMapping(unittest.TestCase):
         self.assertGreater(ms.WIDTH_CENTER, 0.30)
 
     def test_center_gives_50_points(self):
-        s, r = ms.score_width(45, 55)
+        """中性宽度必须恰好 50 分 —— 用「实测中位宽度」而非整数百分比。
+
+        ⚑ 2026-11-03 按 23 交易日落盘分位数校准（commit 780f2a0）：
+        WIDTH_CENTER 0.45 → 0.403、WIDTH_SLOPE 200 → 96。
+        故本用例取上涨占比 = WIDTH_CENTER 本身（403/1000），而不是旧的 45/55。
+        """
+        s, r = ms.score_width(403, 597)
+        self.assertAlmostEqual(r, ms.WIDTH_CENTER, places=6)
         self.assertAlmostEqual(s, 50.0, places=6)
-        self.assertAlmostEqual(r, 0.45, places=6)
 
     def test_today_like_reading(self):
-        """涨1375 / 跌3709（占比 27.0%）→ 14.1 分（中性点 50% 时会掉到 3.8 分）。"""
+        """涨1375 / 跌3709（占比 27.0%）→ 37.3 分。
+
+        ⚑ 校准后口径（中心 40.3% / 斜率 96）：50 + (27.0%−40.3%)×96 = 37.3。
+        旧口径（中心 45% / 斜率 200）为 14.1 分 —— 斜率变缓后普跌日不再被打进深低分区。
+        """
         s, r = ms.score_width(1375, 3709)
         self.assertAlmostEqual(r * 100, 27.0, delta=0.2)
-        self.assertAlmostEqual(s, 14.1, delta=0.3)
+        self.assertAlmostEqual(s, 37.3, delta=0.3)
 
     def test_weak_range_keeps_resolution(self):
-        """上涨占比 22%→34% 必须单调递增且跨度 ≥15 分（v2 口径下这段几乎全挤在 0 分）。"""
+        """上涨占比 22%→34% 必须单调递增且跨度 ≥11 分。
+
+        ⚑ 阈值随斜率校准下调（200→96）：这段 12 个百分点 × 96 = 11.5 分，
+        旧斜率 200 时为 24 分。校验的是「不被压平」，不是「跨度必须 15 分」。
+        """
         vals = [ms.score_width(int(x * 1000), int((1 - x) * 1000))[0]
                 for x in (0.22, 0.25, 0.28, 0.31, 0.34)]
         for a, b in zip(vals, vals[1:]):
             self.assertLess(a, b, f"宽度分不再单调递增：{vals}")
-        self.assertGreaterEqual(vals[-1] - vals[0], 15.0, f"普跌区间被压平：{vals}")
+        self.assertGreaterEqual(vals[-1] - vals[0], 11.0, f"普跌区间被压平：{vals}")
 
     def test_clamped(self):
-        self.assertEqual(ms.score_width(0, 100)[0], 0.0)
+        """极端宽度的边界值。
+
+        ⚑ 校准后斜率 96 的后果（须记住，不是笔误）：宽度 0%（全跌）只得 11.3 分，
+        **不再归零**——极端崩盘日的宽度维度仍留 11 分；只有 100%（全涨）会撞上限 100。
+        """
+        self.assertAlmostEqual(ms.score_width(0, 100)[0], 11.31, places=2)
         self.assertEqual(ms.score_width(100, 0)[0], 100.0)
         self.assertEqual(ms.score_width(0, 0)[0], 50.0)
 

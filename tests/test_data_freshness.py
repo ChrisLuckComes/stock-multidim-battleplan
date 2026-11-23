@@ -213,13 +213,19 @@ def test_ensure_broad_fills_index(monkeypatch):
     from screener import scan_warfare as SW
     conn = _mk_conn()
     today = store._today_bj()
+    # ⚑ 宽基写入自 2026-11-13 起有**量级守卫**（BROAD_INDEX_RANGE）：整条序列的收盘
+    #   必须落在该指数合理区间，越界即判「源取错标的」拒写。故 mock 不能一律用 1.0
+    #   （旧写法会被守卫当成 sh000001=1.0 拒写，宽基补不到今日 ⇒ 陈旧闸误报）。
+    _PX = {"sh000001": 3200.0, "sz399001": 10000.0, "sz399006": 2000.0}
     for c in SW.BROAD_CODES:
+        px = _PX[c]
         conn.execute("INSERT INTO bars VALUES(?,?,?,?,?,?,?)",
-                     (c, _days_ago(3), 1, 1, 1, 1, 100))
+                     (c, _days_ago(3), px, px, px, px, 100))
     conn.commit()
 
     def fake_synth(code, target=None, ref_v=None, ref_max_v=None, db_bars=None):
-        return {"d": target, "o": 1, "h": 1, "l": 1, "c": 1, "v": 100}
+        px = _PX.get(code, 3000.0)
+        return {"d": target, "o": px, "h": px * 1.01, "l": px * 0.99, "c": px, "v": 100}
 
     monkeypatch.setattr(store, "synth_today_bar_tencent", fake_synth)
     SW.ensure_broad(conn, verbose=False)
@@ -258,15 +264,25 @@ def test_session_target_flags_stale(monkeypatch):
     from screener import scan_warfare as SW
     import datetime as _dt
 
-    class _Fake:
+    # ⚑ 旧 mock 把 module 级 `datetime` 整体换成 _Fake 实例，但 `_session_target`
+    #   用的是 `datetime.datetime.now(tz)` ⇒ `_Fake().__getattr__("datetime")` 落到
+    #   真实 datetime，`now.hour` 是运行时刻，after_close 恒 False，
+    #   用例看着绿、其实 fail-closed 一次都没被验到。必须替到 **.datetime.now** 这一层。
+    class _FakeDT:
         @staticmethod
         def now(tz=None):
             return _dt.datetime(2026, 10, 21, 17, 0, tzinfo=tz)
 
         def __getattr__(self, name):
-            return getattr(_dt, name)
+            return getattr(_dt.datetime, name)
 
-    monkeypatch.setattr(SW, "datetime", _Fake())
+    class _FakeMod:
+        datetime = _FakeDT
+        timezone = _dt.timezone
+        timedelta = _dt.timedelta
+        date = _dt.date
+
+    monkeypatch.setattr(SW, "datetime", _FakeMod)
     conn = _mk_conn()
     conn.execute("INSERT INTO bars VALUES(?,?,?,?,?,?,?)",
                  ("000001", _days_ago(30), 1, 1, 1, 1, 100))

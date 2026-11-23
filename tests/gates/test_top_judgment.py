@@ -45,16 +45,37 @@ class TestTrendGateTopJudgment(unittest.TestCase):
         legs = [(120, 10), (110, 8), (120, 8)] + tail_leg
         return bars_from_closes(closes_from_legs(legs))
 
-    def test_double_top_then_weak_confirms_block(self):
-        """双顶后次日走弱 ⇒ 顶部确认（block）。"""
+    def test_double_top_then_weak_downgrades_without_strong_pull(self):
+        """双顶后次日走弱 ⇒ 形态已确认，但**非「强拉 ≥15% + 无旗形」** ⇒ C 口径降级缩仓。
+
+        ⚑ 2026-11-05 C 口径（老罗定）：否决权只留给「20 日涨幅 ≥15% 且无旗形结构」的形态；
+        其余已确认形态一律 alert（size_factor 0.5）—— 仍预警、仍缩仓，但**不禁买**。
+        强拉版对照见 test_double_top_strong_pull_confirms_block。
+        """
         bars = self._double_top_then([(112, 2)])
         v = TJ.top_verdict(bars)
-        self.assertEqual(v["level"], "block",
-                         f"应确认顶部，实际 {v['level']} / {v.get('summary')}")
-        self.assertEqual(v["exit_code"], 2)
-        self.assertTrue(v["hit"])
+        self.assertEqual(v["state"], "confirmed", f"形态应已确认：{v.get('summary')}")
+        self.assertEqual(v["level"], "alert",
+                         f"非强拉应降级为 alert，实际 {v['level']} / {v.get('summary')}")
+        self.assertEqual(v["exit_code"], 1)
+        self.assertTrue(v["veto_downgraded"])
+        self.assertAlmostEqual(v["size_factor"], 0.5)
+        self.assertLess(v["gain20"], TJ.VETO_MIN_GAIN20)
         self.assertEqual(v["signal"]["pattern_cn"], "双重顶")
         self.assertTrue(v["signal"]["is_top"], "峰值应是这一波最高点")
+
+    def test_double_top_strong_pull_confirms_block(self):
+        """同一形态 + 20 日涨幅 ≥15% 且无旗形 ⇒ 保留否决权，level=block / 退出码 2。"""
+        closes = closes_from_legs([(120, 6), (110, 3), (120, 4), (112, 2)],
+                                  start=97.0, flat_bars=20)
+        v = TJ.top_verdict(bars_from_closes(closes))
+        self.assertEqual(v["level"], "block",
+                         f"强拉应保留否决，实际 {v['level']} / {v.get('summary')}")
+        self.assertEqual(v["exit_code"], 2)
+        self.assertFalse(v["veto_downgraded"])
+        self.assertGreaterEqual(v["gain20"], TJ.VETO_MIN_GAIN20)
+        self.assertFalse(v["flag_seen"])
+        self.assertEqual(v["signal"]["pattern_cn"], "双重顶")
 
     def test_double_top_then_rebound_invalidated(self):
         """双顶后收盘反包（收复信号棒最高价）⇒ 推翻，level=ok。

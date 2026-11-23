@@ -574,31 +574,34 @@ class TestAnalyzeOffline(unittest.TestCase):
         res = BA.analyze("601208", account=50000, data_file=p, intraday=False)
         self.assertEqual(res["plan"]["mode"], "line_pullback")
         z = res["plan"]["buy_zone"]
-        # ⚑ 2026-10-10 复核更新：本组钉死值对应的止损锚口径已变更
-        #   （旧值 struct_stop 50.56 = EMA10 锚；现为 48.03 结构锚），
-        #   primary_lo 随之由 51.85 → 50.39。ATR / 买区上沿未变，仍钉死。
-        #   与本次 INST→DEV 同步无关（用 HEAD 版 battle_analyze 跑同样红）。
+        # ⚑ 2026-11-24 复核更新（钉值随口径迁移，不是新 bug）：
+        #   当前 line_pullback 的两档止损分工是——
+        #     struct_stop = **回踩线本身**（本票 anchor=EMA10 ⇒ 50.56，收盘破才算破）；
+        #     hard_stop   = 成本兜底（浮亏 ≤5% ⇒ 48.03）。
+        #   2026-10-10 记的「48.03 = 结构锚」已迁到 hard 档，struct 档回到 EMA10。
+        #   改动前后该值恒为 50.56（本次 staged_entry 不碰止损口径）。
         self.assertAlmostEqual(z["primary_lo"], 50.39, places=2)
         self.assertAlmostEqual(z["primary_hi"], 53.84, places=2)
-        self.assertAlmostEqual(z["struct_stop"], 48.03, places=2)
+        self.assertAlmostEqual(z["struct_stop"], 50.56, places=2)
+        self.assertEqual(z["struct_anchor"], "EMA10(收盘破)")
+        self.assertAlmostEqual(z["hard_stop"], 48.03, places=2)
         self.assertAlmostEqual(res["struct"]["atr14"], 3.281, places=3)
-        # 主表：MA10(滚动) 50.45 / 结构止损 48.03 → R = 2.17
-        # ⚑ 2026-10-17 复核更新（钉值随口径迁移，不是新 bug）：
-        #   entry_candidates 自 2026-10-11 起 ① 下方均线档改用 rolling_sma_last
-        #   （含当日实时近似）；② 「买区下沿」档被结构完整性闸门剔除（贴/破结构止损的
-        #   纸面高赔率档）。⇒ 主表对应行 50.39 → 50.45（MA10 滚动）、
-        #   52.01 → 52.24（5 日 VWAP）；目标位 t1 未变（两行回算均为 55.70），
-        #   R 随买点微降 2.25 → 2.17。
-        prim = {r["entry"]: r for r in res["odds_primary"]}
-        self.assertIn(50.45, prim)
-        # ⚑ 2026-10-20 复核更新（老罗质疑「R 锚定平台上沿」→ 采纳方案 A，钉值随口径迁移）：
+        # ⚑ 2026-11-24 复核更新（钉值随口径迁移，不是新 bug）：
+        #   struct_stop 现为**回踩线本身**（anchor=EMA10 ⇒ 50.56，收盘破才算破），
+        #   硬止损是成本兜底 48.03。于是「买价 ≤ 结构止损」的均线档被结构完整性闸门
+        #   全部剔除 —— 主表最低档由 MA10 滚动 50.45 上移到 **5 日 52.24**，
+        #   50.45 不再出现是**正确结果**，不是丢档。
+        # ⚑ 2026-10-17 复核更新：entry_candidates 自 2026-10-11 起 ① 下方均线档改用
+        #   rolling_sma_last（含当日实时近似）；② 「买区下沿」档被结构完整性闸门剔除。
+        # ⚑ 2026-10-20 复核更新（老罗质疑「R 锚定平台上沿」→ 采纳方案 A）：
         #   目标由「全票共用 t1 / 远端墙 wall_far」改为「每档买价 + 0.5×ATR 之上最近的墙」
-        #   （odds_matrix 新增 walls 参数）。东材 50.45 档原目标 = t1 55.70（R 2.17），
-        #   新目标 = 近墙 52.89 ⇒ R 2.17 → 1.01；52.24 档近墙 55.50 ⇒ R 0.82 → 0.77。
-        #   方向正确：同一道墙下买价越低空间越大（49.34 档 R 2.71），贴沿档不再虚高
-        #   （53.84 档 R 0.29）；且 R→0 / 海阔天空回落成假目标的问题一并消除。
-        self.assertAlmostEqual(prim[50.45]["r1"], 1.01, places=2)
-        self.assertAlmostEqual(prim[52.24]["r1"], 0.77, places=2)
+        #   （odds_matrix 新增 walls 参数）。贴沿档不再虚高（53.84 档 r1 0.57），
+        #   R→0 / 海阔天空回落成假目标的问题一并消除。
+        prim = {r["entry"]: r for r in res["odds_primary"]}
+        self.assertNotIn(50.45, prim, "买价低于 struct_stop(50.56) 的均线档必须被剔除")
+        self.assertIn(52.24, prim)
+        self.assertAlmostEqual(prim[52.24]["r1"], 2.06, places=2)
+        self.assertAlmostEqual(prim[52.68]["r1"], 1.42, places=2)
         # A 股推荐档必须高于硬止损、不高于买区上沿
         rec = res["odds_recommend"]
         self.assertIsNotNone(rec)
