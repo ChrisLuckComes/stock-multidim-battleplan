@@ -179,6 +179,45 @@ def test_no_lookahead_and_purity():
     check("取数失败降级为空 bars", fetch_empty == [])
 
 
+def _m_low_shadow_retest():
+    """可控指标：吸筹 + 当日上涨 + 远离年线，retest 仅由长下影触发
+    （银之杰 300085 2026-11-23 场景：+6.52%、距年线 −14.9%、下影 2.04%）。"""
+    return {
+        "ok": True, "bars": 641, "as_of": "2026-11-23", "close": 28.76,
+        "ma": {"5": 27.5, "10": 27.0, "20": 27.9, "60": 26.72, "200": 33.78},
+        "vs_ma": {"5": 4.6, "10": 6.5, "20": 3.1, "60": 7.6, "200": -14.9},
+        "slope20": {"ma20_5d": 1.0, "ma60_20d": -2.88, "ma200_20d": -4.32},
+        "range": {
+            "r60": {"lo": 24.71, "hi": 29.6, "pos_pct": 89.2},
+            "r120": {"lo": 24.0, "hi": 32.0, "pos_pct": 60.0},
+            "r250": {"lo": 22.12, "hi": 50.73, "pos_pct": 25.5},
+        },
+        "volume": {"v5_v20": 1.1, "v20_v60": 1.0, "today_vr": 1.27},
+        "today": {"chg": 6.52, "up_shadow": 0.11, "low_shadow": 2.04},
+        "drawdown_from_high60": -1.79, "down_streak10": 0,
+        "events": [{"type": "joc", "vr": 2.1}],
+    }
+
+
+def test_retest_reason_text():
+    """回归 bug：retest 由长下影单独触发时，文案必须如实写长下影，
+    不得硬编码成「贴年线」（银之杰误报，2026-11-23）。"""
+    r = classify(_m_low_shadow_retest())
+    check("长下影场景判定不变(吸筹/JOC回踩)",
+          r["stage"] == "accumulation" and r["sub"] == "JOC回踩")
+    check("文案如实写长下影", "长下影2.04%" in r["why"])
+    check("文案不误报贴年线", "贴年线" not in r["why"])
+    check("文案不再写吸筹末期", "吸筹末期" not in r["why"])
+
+    # 三条件同时触发时，三个原因都要列出（回归多触发不丢信息）
+    all3 = _m_low_shadow_retest()
+    all3["today"]["chg"] = -1.5
+    all3["vs_ma"]["200"] = 2.0
+    r2 = classify(all3)
+    check("多条件触发文案全列", "回踩" in r2["why"]
+          and "贴近年线" in r2["why"] and "长下影" in r2["why"])
+
+
 def main():
     test_stage_table_and_annotation_discipline()
     test_insufficient_data()
@@ -186,6 +225,7 @@ def main():
     test_events_detection()
     test_anchors()
     test_no_lookahead_and_purity()
+    test_retest_reason_text()
     print("\n%d/%d passed" % (sum(PASS), len(PASS)))
     return 0 if all(PASS) else 1
 

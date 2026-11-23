@@ -253,16 +253,26 @@ def classify(m):
 
     # ② 吸筹：长期低位 + 年线仍下行/走平 + 需求信号 + 当下处在回踩/贴线状态
     sos = ev_type & {"sos", "joc"}
-    retest = ((m["today"]["chg"] is not None and m["today"]["chg"] < 0)
-              or (vm.get("200") is not None and abs(vm["200"]) <= 5)
-              or (m["today"]["low_shadow"] is not None and m["today"]["low_shadow"] >= 1.5))
+    # retest 由三个独立条件之一触发；文案须按实际触发原因如实说明，
+    # 不能硬编码成「跌=缩量回踩 / 否则=贴年线」（长下影触发时会误报贴年线）。
+    chg_down = (m["today"]["chg"] is not None and m["today"]["chg"] < 0)
+    near_ma200 = (vm.get("200") is not None and abs(vm["200"]) <= 5)
+    low_shadow_retest = (m["today"]["low_shadow"] is not None
+                         and m["today"]["low_shadow"] >= 1.5)
+    retest = chg_down or near_ma200 or low_shadow_retest
     if (pos is not None and pos <= 45 and sos
             and sl["ma200_20d"] is not None and sl["ma200_20d"] <= 0.5 and retest):
         sub = "JOC回踩" if ("joc" in ev_type or "sos" in ev_type) else "底部震荡"
-        why = ("250日区间低位 %.1f%% + 年线斜率 %+.2f%%仍下行 + 出现%s + 今日%s"
-               " ⇒ 吸筹末期的需求确认/回踩"
-               % (pos, sl["ma200_20d"], "SOS/JOC放量", "缩量回踩" if m["today"]["chg"] is not None
-                  and m["today"]["chg"] < 0 else "贴年线"))
+        _rt = []
+        if chg_down:
+            _rt.append("今日收跌%.2f%%回踩" % abs(m["today"]["chg"]))
+        if near_ma200:
+            _rt.append("贴近年线(乖离%+.1f%%)" % vm["200"])
+        if low_shadow_retest:
+            _rt.append("今日长下影%.2f%%探底" % m["today"]["low_shadow"])
+        why = ("250日区间低位 %.1f%% + 年线斜率 %+.2f%%仍下行 + 出现%s + %s"
+               " ⇒ 吸筹区需求确认/回踩测试"
+               % (pos, sl["ma200_20d"], "SOS/JOC放量", "、".join(_rt)))
         anchors = [
             _anchor("MA200", m["ma"]["200"], "收盘有效跌破 ⇒ 突破作废，退回吸筹区重数"),
             _anchor("区间高", r250["hi"], "放量突破且站稳 ⇒ 转上涨段"),
