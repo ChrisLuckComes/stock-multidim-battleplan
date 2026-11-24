@@ -66,6 +66,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 MAP_PATH = os.path.join(ROOT, "references", "sector_map.json")
+AUTO_PATH = os.path.join(ROOT, "references", "sector_map_auto.json")
 DB_PATH = os.path.join(ROOT, "data", "screener.db")
 
 WIN = 20             # RS 窗口（交易日）——实证选 20，不选 60（见 docstring）
@@ -92,9 +93,24 @@ TIER_CN = {
 
 
 # ── 数据 ────────────────────────────────────────────────────────────────────
+_MAP_CACHE = {}
+
+
 def load_map(path=None):
-    """→ (code→sector, sector→codes)。只取非 `_` 开头的键。"""
-    with open(path or MAP_PATH, encoding="utf-8") as f:
+    """→ (code→sector, sector→codes)。只取非 `_` 开头的键。
+
+    ⚑ 按 (路径, mtime) 缓存：全市场扫描要按票调 400+ 次，每次读 json 是纯浪费；
+      mtime 变了自动失效，所以改完映射表立刻生效（不需要重启进程）。
+    """
+    key = path or MAP_PATH
+    try:
+        mt = os.path.getmtime(key)
+    except OSError:
+        mt = None
+    hit = _MAP_CACHE.get(key)
+    if hit and hit[0] == mt:
+        return hit[1]
+    with open(key, encoding="utf-8") as f:
         raw = json.load(f)
     sec2codes, code2sec = {}, {}
     for k, v in raw.items():
@@ -104,25 +120,144 @@ def load_map(path=None):
         sec2codes[k] = codes
         for c in codes:
             code2sec[c] = k
+    _MAP_CACHE[key] = (mt, (code2sec, sec2codes))
     return code2sec, sec2codes
 
 
-def sector_of(code, path=None):
-    """6 位代码 → (板块名, 成员列表) 或 (None, [])。"""
-    code2sec, sec2codes = load_map(path)
+_AUTO_CACHE = {}
+
+
+def load_auto(path=None):
+    """→ (code→板块, 板块→成员, meta)。文件不存在时返回空表（不报错）。"""
+    key = path or AUTO_PATH
+    try:
+        mt = os.path.getmtime(key)
+    except OSError:
+        return {}, {}, {}
+    hit = _AUTO_CACHE.get(key)
+    if hit and hit[0] == mt:
+        return hit[1]
+    try:
+        with open(key, encoding="utf-8") as f:
+            d = json.load(f)
+    except Exception:                           # noqa: BLE001
+        return {}, {}, {}
+    c2s = {str(k).zfill(6): v for k, v in (d.get("code2sec") or {}).items()}
+    s2c = {k: [str(x).zfill(6) for x in v] for k, v in (d.get("sec2codes") or {}).items()}
+    meta = d.get("_meta") or {}
+    out = (c2s, s2c, meta)
+    _AUTO_CACHE[key] = (mt, out)
+    return out
+
+
+def sector_of_ex(code, path=None):
+    """→ (板块名, 成员列表, 来源)。来源 = "manual"（人工表）/ "auto"（新浪概念兜底）/ None。"""
     c = str(code).strip()[-6:]
+    code2sec, sec2codes = load_map(path)
     sec = code2sec.get(c)
-    return (sec, sec2codes.get(sec, [])) if sec else (None, [])
+    if sec:
+        return sec, sec2codes.get(sec, []), "manual"
+    a2s, as2c, _meta = load_auto()
+    a = a2s.get(c)
+    if a:
+        return a, as2c.get(a, []), "auto"
+    return None, [], None
+
+
+def sector_of(code, path=None):
+    """6 位代码 → (板块名, 成员列表)。**人工表优先**，未覆盖才用新浪概念兜底。
+
+    ⚑ 2026-11-25 加兜底的原因：人工表只覆盖 819/5225（15.7%），实测 2026-10-19 的
+      38 只信号票里 RS 未定位 32 只（84%）⇒ 闸门几乎全判 unknown、名单空转。
+    ⚑ 兜底表来源是**新浪概念板块**（`screener/sector_auto.py`），比人工表粗、也更旧
+      （缺 CPO/光刻胶/算力等新主线），所以：
+        · 人工表覆盖的票永远走人工表（老罗精挑的炒作归属）；
+        · 兜底命中时 `source="auto"`，报告必须显示来源，便于人工复核。
+    """
+    c = str(code).strip()[-6:]
+    code2sec, sec2codes = load_map(path)
+    sec = code2sec.get(c)
+    if sec:
+        return sec, sec2codes.get(sec, [])
+    a2s, as2c, _meta = load_auto()
+    a = a2s.get(c)
+    return (a, as2c.get(a, [])) if a else (None, [])
 
 
 def _norm(code):
     return str(code).strip()[-6:]
 
 
+#: 收盘缓存：db → {"latest": 最新交易日, "closes": {code: [(d, c)...]}}
+#: 全市场扫描要按票调 400+ 次，每次现查库太慢；按 db+latest 失效，补数后自动重取。
+_CLOSES_CACHE = {}
+
+
+_LATEST_CACHE = {}
+
+
+def _db_latest(db):
+    """库内最新交易日。按 (路径, mtime) 缓存 —— 补数后 mtime 变即失效。"""
+    try:
+        mt = os.path.getmtime(db)
+    except OSError:
+        mt = None
+    hit = _LATEST_CACHE.get(db)
+    if hit and hit[0] == mt:
+        return hit[1]
+    con = sqlite3.connect(db)
+    try:
+        v = con.execute("select max(d) from bars").fetchone()[0]
+    finally:
+        con.close()
+    _LATEST_CACHE[db] = (mt, v)
+    return v
+
+
+def _load_into(store, codes, db, latest, win):
+    """把 codes 的最近收盘塞进 store（分批，SQLite 变量上限 999）。"""
+    days = max(120, int((win + 1) * 2.5))
+    con = sqlite3.connect(db)
+    try:
+        for i in range(0, len(codes), 800):
+            chunk = codes[i:i + 800]
+            q = ("select code,d,c from bars where code in (%s) and d>=? order by code,d"
+                 % ",".join("?" * len(chunk)))
+            rows = con.execute(q, chunk + ["%s" % _lookback(latest, days)]).fetchall()
+            for code, d, c in rows:
+                if c and c > 0:
+                    store.setdefault(_norm(code), []).append((d, c))
+    finally:
+        con.close()
+
+
+def prefetch(codes, db_path=None, win=WIN):
+    """预热收盘缓存（一次 SQL 取回全部成员）→ (缓存命中数, 最新交易日)。
+
+    批量场景（全市场扫描）先调它，之后每票 assess 全命中内存，不再回库。
+    """
+    codes = [_norm(c) for c in dict.fromkeys(codes or [])]
+    if not codes:
+        return 0, None
+    db = db_path or DB_PATH
+    if not os.path.exists(db):
+        return 0, None
+    latest = _db_latest(db)
+    st = _CLOSES_CACHE.get(db)
+    if not st or st.get("latest") != latest:
+        st = {"latest": latest, "closes": {}}
+        _CLOSES_CACHE[db] = st
+    store = st["closes"]
+    miss = [c for c in codes if c not in store]
+    if miss:
+        _load_into(store, miss, db, latest, win)
+    return len(store), latest
+
+
 def fetch_closes(codes, db_path=None, win=WIN):
     """批量取最近 win+1 根收盘。→ ({code: [(d, c)...]}, 最新交易日)。
 
-    只读本地 screener.db（前复权），零联网。
+    只读本地 screener.db（前复权），零联网；走模块级缓存（见 _CLOSES_CACHE）。
     """
     codes = [_norm(c) for c in codes]
     if not codes:
@@ -130,23 +265,36 @@ def fetch_closes(codes, db_path=None, win=WIN):
     db = db_path or DB_PATH
     if not os.path.exists(db):
         return {}, None
-    con = sqlite3.connect(db)
-    try:
-        latest = con.execute("select max(d) from bars").fetchone()[0]
-        out = {}
-        # SQLite 变量上限 999，分批
-        for i in range(0, len(codes), 800):
-            chunk = codes[i:i + 800]
-            q = ("select code,d,c from bars where code in (%s) and d>=? order by code,d"
-                 % ",".join("?" * len(chunk)))
-            # 只取近 120 个自然日，足够覆盖 win+1 根（含停牌余量）
-            rows = con.execute(q, chunk + ["%s" % _lookback(latest, 120)]).fetchall()
-            for code, d, c in rows:
-                if c and c > 0:
-                    out.setdefault(_norm(code), []).append((d, c))
-        return out, latest
-    finally:
-        con.close()
+    latest = _db_latest(db)
+    st = _CLOSES_CACHE.get(db)
+    if not st or st.get("latest") != latest:
+        st = {"latest": latest, "closes": {}}
+        _CLOSES_CACHE[db] = st
+    store = st["closes"]
+    miss = [c for c in dict.fromkeys(codes) if c not in store]
+    if miss:
+        _load_into(store, miss, db, latest, win)
+    return {c: store[c] for c in codes if c in store}, latest
+
+
+def assess_many(codes, asof=None, db_path=None, win=WIN):
+    """批量算 RS 排位 → {code: assess 结果}。一次映射表 + 一次预热取数。
+
+    ⚑ 全市场扫描（300~500 只信号票）必须用它：逐票调 assess 会重复查库，
+      400 只 × 同板块重复取数，慢且容易把「数据滞后」判错成不同口径。
+    """
+    codes = [_norm(c) for c in dict.fromkeys(codes or [])]
+    if not codes:
+        return {}
+    need = set()
+    for c in codes:
+        _sec, _codes, _src = sector_of_ex(c)
+        if _codes:
+            need.update(_codes)
+    if need:
+        prefetch(sorted(need), db_path=db_path, win=win)
+    return {c: assess(c, asof=asof, db_path=db_path, win=win) for c in codes}
+
 
 
 def _lookback(latest, days):
@@ -264,8 +412,9 @@ def assess(code, name=None, market="CN", members=None, sector=None,
     # ① 同类集合
     codes = list(members) if members else []
     if not codes:
-        sec, codes = sector_of(c, MAP_PATH)
+        sec, codes, src = sector_of_ex(c, MAP_PATH)
         out["sector"] = out["sector"] or sec
+        out["sector_source"] = src
     if not codes:
         out["reasons"].append(
             "本票不在板块映射表（references/sector_map.json）⇒ RS 无法定位。"
@@ -360,6 +509,21 @@ def assess(code, name=None, market="CN", members=None, sector=None,
                 "本地日线最新 %s，比报告基准日 %s 落后 %d 天 ⇒ RS 分位不可用于否决，降级 watch。"
                 "跑 `python screener/bao_store.py refresh-bars` 补数。" % (latest, asof, gap))
             return out
+
+    if out.get("sector_source") == "auto":
+        # ⚑ 2026-11-25 实测：兜底表混进大量伪概念（地域：成渝特区/皖江区域/振兴沈阳；
+        #   股本事件：整体上市/未股改/资产注入；老政治题材：文化振兴/赛马概念），
+        #   实测上汽 600104 被归到「整体上市」并在其中排中位 —— 用它做**否决**会误伤。
+        #   ⇒ 兜底表只给「名次参考」，不参与判定（与「板块整体崩」同处理：unknown）。
+        out["verdict"] = "unknown"
+        out["action_cn"] = "板块归属来自自动兜底，名次仅供参考（不否决也不放行）"
+        out["reasons"].append(
+            "⚠ **板块=%s（新浪概念兜底，非人工映射表）**：第 %d/%d 名、分位 %.0f%%，"
+            "**仅供参照，不作判定**。该表比人工表旧且混入伪概念（地域/股本事件/老题材），"
+            "用它否决会误伤（实例：上汽 600104 被归到「整体上市」）。"
+            "要真正参与闸门，把本票所属的**实际炒作板块**补进 `references/sector_map.json`。"
+            % (out["sector"], rank, len(ranked), pct * 100))
+        return out
 
     # ③ 判级
     if tier == "back":

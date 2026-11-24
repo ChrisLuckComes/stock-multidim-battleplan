@@ -28,6 +28,7 @@ if _ROOT not in sys.path:
 
 from gates import elasticity as EL                       # noqa: E402
 from screener import bao_store as store                 # noqa: E402
+from screener import gate_view as GV                    # noqa: E402  闸门结论统一读取
 
 OUT = os.path.join(_ROOT, "out_cn")
 
@@ -48,7 +49,12 @@ def _latest_scr_jsonl():
 
 
 def _load_dual(path):
-    """读双通过名单（战法+筹码都过）→ {code: row}。"""
+    """读双通过名单（战法闸 + **开仓闸门**都过）→ {code: row}。
+
+    ⚑ 2026-11-25：闸门从「筹码 allow_new」换成 `gates/entry_gate.py`
+      （板块RS + 威科夫两条必要条件）。**只认 pass**，unknown 不进集合B
+      （未验证 ≠ 通过）；旧 jsonl 由 gate_view 回落 allow_new 并标 legacy。
+    """
     out = {}
     if not path:
         return out
@@ -57,8 +63,7 @@ def _load_dual(path):
         if not line:
             continue
         r = json.loads(line)
-        scr = r.get("scr") or {}
-        if scr.get("allow_new"):
+        if GV.is_pass(r):
             out[r["code"]] = r
     return out
 

@@ -1,20 +1,32 @@
 # -*- coding: utf-8 -*-
-"""gen_best_view 排序口径回归：先强度档，再筹码档，再强度分。
+"""gen_best_view 排序口径回归：先强度档，再板块RS 档，再强度分。
 
-背景：老罗 2026-10-21 20:2x「bestview 也是要按先强度档」——修正旧口径
-「筹码档优先」会把 NEUTRAL 吸筹弱票排到 STRONG 拉升票之前的错排（Grok 意见2）。
-口径须与 screener/elastic_dual.py 交集主表一致：
-  强度档(STRONG>NEUTRAL) → 筹码档(吸筹/锁仓>拉升) → 强度分。
+口径演进：
+  · 2026-10-21（已废）：强度档 → **筹码档**（吸筹/锁仓 > 拉升）→ 强度分
+  · 2026-11-25（现行）：强度档 → **板块RS 档**（龙头 > 前列 > 中位）→ 强度分
+
+废筹码档的依据（`research/bt_chip_drain_exempt_2026-11-25.py`，2376 样本 / 297 只 / 18 时点）：
+  筹码 吸筹 −0.08%（噪音）/ 锁仓 +0.82%（近无效）/ 拉升 −1.72%（**方向反了**）；
+  板块内 RS 龙头是全表唯一 5/10 日双正组（+0.18%/+0.32%，n=865）。
+⇒ 第二档排序器换成板块 RS 档。⚠ 两者都只是**排序器**，不否决；
+  能否进这张表由闸门（`gates/entry_gate.py`，板块RS + 威科夫）决定。
 """
 import os
 
 from screener import gen_pass_list as GPL
 
 
-def _mk(code, name, verdict, chip_state, rs, ma, ret, leader=False):
+def _mk(code, name, verdict, rs_tier, rs, ma, ret, leader=False, rank=None, n=None):
+    """构造一行。`rs_tier` = 板块 RS 档（leader/front/mid/back），驱动第二档排序。"""
     return {
         "code": code, "name": name, "verdict": verdict,
-        "scr": {"state": chip_state},
+        "sector_rs_brief": {"tier": rs_tier, "rank": rank, "n_ranked": n,
+                            "tier_cn": {"leader": "板块龙头", "front": "板块前列",
+                                        "mid": "板块中位", "back": "板块后排"}.get(rs_tier)},
+        "wyckoff": {"stage": "markup", "stage_cn": "上涨"},
+        "gate": {"verdict": "pass"},
+        # 筹码仍带着（作参考列），但**不得再影响排序** —— 这正是本测试要守住的
+        "scr": {"state": "派发出货中"},
         "rs_slope": rs, "ma20_slope": ma, "ret20": ret,
         "leader": leader, "mode": "platform_break", "spot": 10.0,
         "buy_lo": 9.5, "buy_hi": 10.5, "in_zone": True, "stop": 9.0,
@@ -23,13 +35,21 @@ def _mk(code, name, verdict, chip_state, rs, ma, ret, leader=False):
 
 
 def _allow():
-    """STRONG 三只（吸筹1 + 拉升2）+ NEUTRAL 吸筹一只（强度分全场最高=100）。"""
+    """STRONG 三只（RS 龙头1 + 前列1 + 中位1）+ NEUTRAL 龙头一只（强度分全场最高）。
+
+    ⚑ 三只 STRONG 的筹码态故意都设成「派发出货中」（旧口径下最差档）——若排序还在
+      看筹码，600002 会被压到最后；现在它必须因 RS 龙头排第 1。
+    """
     return [
-        _mk("600001", "强拉升高分", "STRONG", "拉升脱离成本区中", 2.0, 1.0, 30, leader=True),
-        _mk("600002", "强吸筹低分", "STRONG", "吸筹中", 1.0, 0.5, 10),
-        _mk("600003", "强弱拉升", "STRONG", "拉升脱离成本区中", 0.5, 0.2, 5),
-        # 强度分 100 但只是 NEUTRAL——旧口径（筹码优先）会排第 1，新口径必须排最后
-        _mk("600004", "中吸筹超高强度", "NEUTRAL", "吸筹中", 3.0, 2.0, 50, leader=True),
+        _mk("600001", "强·RS前列·强度分高", "STRONG", "front", 2.0, 1.0, 30,
+            leader=True, rank=3, n=20),
+        _mk("600002", "强·RS龙头·强度分低", "STRONG", "leader", 1.0, 0.5, 10,
+            rank=1, n=20),
+        _mk("600003", "强·RS中位·强度分低", "STRONG", "mid", 0.5, 0.2, 5,
+            rank=11, n=20),
+        # 强度分 100 但只是 NEUTRAL——任何旧口径都会想把它往前塞，新口径必须排最后
+        _mk("600004", "中·RS龙头·超高强度", "NEUTRAL", "leader", 3.0, 2.0, 50,
+            leader=True, rank=1, n=20),
     ]
 
 
@@ -44,22 +64,34 @@ def _run(monkeypatch, tmp_path):
     return md, hp
 
 
-def test_strength_tier_before_chip_tier(monkeypatch, tmp_path):
-    """核心断言：先强度档。NEUTRAL+吸筹+强度100 不得压过任何 STRONG。"""
+def test_strength_tier_first(monkeypatch, tmp_path):
+    """核心断言①：强度档优先。NEUTRAL+RS龙头+强度100 不得压过任何 STRONG。"""
     md, _ = _run(monkeypatch, tmp_path)
-    expect = ["600002", "600001", "600003", "600004"]  # 档内筹码优先 → 档内强度分降序
+    expect = ["600002", "600001", "600003", "600004"]  # 档内 RS档优先 → 档内强度分降序
     pos = [md.index(c) for c in expect]
     assert pos == sorted(pos), (
-        "排序口径错：期望 %s，实际位置 %s。NEUTRAL 吸筹(600004)若在 STRONG 之前即为旧口径回归。"
+        "排序口径错：期望 %s，实际位置 %s。NEUTRAL(600004)若在 STRONG 之前即为旧口径回归。"
         % (expect, pos))
 
 
-def test_chip_tier_before_score_within_tier(monkeypatch, tmp_path):
-    """同强度档内筹码档优先：STRONG 吸筹(600002) 须排在 STRONG 拉升(600001) 前，
-    即使 600001 强度分(81) 更高。"""
+def test_rs_tier_before_score_within_tier(monkeypatch, tmp_path):
+    """核心断言②：同强度档内板块RS 档优先于强度分。
+
+    STRONG 龙头(600002，强度分最低) 必须排在 STRONG 前列(600001) 之前，
+    即使 600001 强度分更高；中位(600003) 排最后。
+    ⚑ 三只筹码态都是「派发出货中」⇒ 若排序还在看筹码，三者会并列、退回按强度分排，
+      600002 就不再领先 600001（这正是本用例要抓的回归）。
+    """
     md, _ = _run(monkeypatch, tmp_path)
     assert md.index("600002") < md.index("600001") < md.index("600003"), (
-        "档内口径错：应 筹码档(吸筹>拉升) → 强度分降序")
+        "档内口径错：应 板块RS 档(龙头>前列>中位) → 强度分降序")
+
+
+def test_chip_state_not_in_sort(monkeypatch, tmp_path):
+    """筹码已退出排序：三只 STRONG 的 scr.state 相同（派发），排序仍须由 RS 档决定。"""
+    md, _ = _run(monkeypatch, tmp_path)
+    assert md.index("600002") < md.index("600003"), "筹码不该再成为排序依据（派发态不得压制 RS 龙头）"
+    assert "派发出货" not in md, "双通过表不应再展示筹码状态列（筹码已退出闸门）"
 
 
 def test_html_groups_by_strength_tier(monkeypatch, tmp_path):

@@ -345,6 +345,36 @@ def fetch_bars(code, n=640):
     return fetch_stock_bars(_norm_code(code), n=n) or []
 
 
+def bars_from_db(code, n=340, db_path=None):
+    """本地 `data/screener.db` 前复权 OHLCV（**零联网**，全市场扫描用）。
+
+    与 `fetch_bars` 的差异：只读本地库、不取流通股本、不做任何网络请求 ⇒
+    「300~500 只票判威科夫」从几十分钟降到几秒。
+    库内不足 MIN_BARS（260 根）返回 []，`stage_of` 会判 unknown（不猜）。
+    """
+    import os as _os
+    import sqlite3 as _sq
+    c = _norm_code(code)
+    db = db_path or _os.path.join(_os.path.dirname(_os.path.dirname(
+        _os.path.abspath(__file__))), "data", "screener.db")
+    if not _os.path.isfile(db):
+        return []
+    try:
+        con = _sq.connect(db)
+        try:
+            rows = con.execute(
+                "select d,o,h,l,c,v from bars where code=? order by d", (c,)).fetchall()
+        finally:
+            con.close()
+    except Exception:                           # noqa: BLE001
+        return []
+    if len(rows) < MIN_BARS:
+        return []
+    rows = rows[-max(n, MIN_BARS):]
+    return [{"d": d, "o": o, "h": h, "l": l, "c": cl, "v": v}
+            for d, o, h, l, cl, v in rows if cl and cl > 0]
+
+
 def render(res):
     code = res.get("code") or ""
     name = res.get("name") or ""

@@ -6,7 +6,8 @@
   19:59 转述 Grok 两条意见 → 落地如下：
 
     集合A = 高弹性（板块内「弹性日数」分位 ≥ 75，gates.elasticity 高弹性档）
-    集合B = 双通过（战法闸 + 筹码闸都过，读 scr_<date>_close.jsonl）
+    集合B = 双通过（战法闸 + 开仓闸门都过，读 scr_<date>_close.jsonl）
+            ⚑ 2026-11-25 起闸门 = 板块RS + 威科夫（gates/entry_gate.py），不再是筹码
     交集   = A ∩ B = 「股性弹性好 + 当下有 setup」
 
   【意见2 · 排序对齐】主表 = 强度档（STRONG>NEUTRAL）→ 筹码档（吸筹/锁仓>拉升）→ 强度分。
@@ -42,6 +43,7 @@ if _ROOT not in sys.path:
 
 from screener import elasticity_screen as ES     # noqa: E402
 from screener import gen_pass_list as GPL        # noqa: E402
+from screener import gate_view as GV             # noqa: E402  闸门结论统一读取
 
 OUT = os.path.join(_ROOT, "out_cn")
 
@@ -77,7 +79,7 @@ def _bypass_scan(scr):
     cand = []
     for d in scr.values():
         s = d.get("scr") or {}
-        if s.get("allow_new"):                      # 已双通过的不要
+        if GV.is_pass(d):                           # 已通过闸门的不要（旁路只收被否/未验证的强票）
             continue
         if s.get("state") != ST_LOOSE:              # 只要被「发散」否的
             continue

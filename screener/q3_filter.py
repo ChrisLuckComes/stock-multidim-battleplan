@@ -38,6 +38,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 from screener import filters as F   # ⚑ 高位闸/赔率闸 单一真源（与 gen_pass_list 同源）
+from screener import gate_view as GV  # ⚑ 闸门结论统一读取（2026-11-25 筹码退出闸门）
 OUT = os.path.join(ROOT, "out_cn")
 UA = {"User-Agent": "Mozilla/5.0", "Referer": "https://data.eastmoney.com/"}
 BASE = "https://datacenter-web.eastmoney.com/api/data/v1/get"
@@ -144,8 +145,16 @@ def build(date, report_date=DEFAULT_REPORT_DATE):
             if not line:
                 continue
             r = json.loads(line)
+            # ⚑ allow = 通过**开仓闸门**（板块RS + 威科夫），不再是筹码 allow_new。
+            #   筹码 state 只作展示列留给人工核对（已退出闸门）。
+            _b = r.get("sector_rs_brief") or {}
+            _w = r.get("wyckoff") or {}
             pool[r["code"]] = {"code": r["code"], "name": r.get("name"),
-                               "allow": bool(r.get("scr", {}).get("allow_new")),
+                               "allow": GV.is_pass(r),
+                               "gate": GV.verdict_of(r),
+                               "rs_rank": "%s/%s" % (_b.get("rank"), _b.get("n_ranked"))
+                               if _b.get("rank") else None,
+                               "wy": _w.get("stage_cn"),
                                "state": r.get("scr", {}).get("state"),
                                "scr90": r.get("scr", {}).get("scr90"),
                                "main_cost": r.get("scr", {}).get("main_cost")}

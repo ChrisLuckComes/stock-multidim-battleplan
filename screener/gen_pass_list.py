@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-"""生成「双通过名单」（战法闸 + 筹码闸都过）—— MD + HTML。
+"""生成「双通过名单」（战法闸 + 开仓闸门都过）—— MD + HTML。
+
+⚑ 2026-11-25 老罗定：**筹码退出闸门**，闸门换成「板块RS + 威科夫」两条必要条件
+  （`gates/entry_gate.py`）。筹码只作参考列 —— 实测吸筹 −0.08%（噪音）/锁仓 +0.82%
+  （近无效）/拉升 −1.72%（反向）/派发 −6.66%（唯一有效，且已被威科夫吸收）。
+  「双通过」只认 `gate.verdict == pass`；未验证（unknown）单列文末清单，不进可上。
 
 一次性产物生成器：用完即删（AGENTS.md §8）。产物落在 out_cn/。
 """
@@ -16,6 +21,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 from screener import filters as F   # ⚑ 高位闸/赔率闸 单一真源（老罗 2026-10-27）
 from screener import report_calendar as RC   # ⚑ 定期报告披露窗口（老罗 2026-10-27）
+from screener import gate_view as GV          # ⚑ 闸门结论统一读取（2026-11-25 筹码退出闸门）
 OUT = os.path.join(ROOT, "out_cn")
 TAG = "0000-00-00_close"  # 由 main() 按 --date 覆盖，避免硬编码日期读错 jsonl
 
@@ -39,9 +45,38 @@ SCR_CN = {
 }
 # 强度档层级（与 gates.quick_strength 判定一致）：STRONG > NEUTRAL > WEAK
 VERDICT_TIER = {"STRONG": 2, "NEUTRAL": 1, "WEAK": 0}
-# 筹码档层级（老罗 2026-10-21 定）：吸筹/锁仓 = 最佳，拉升 = 其次，其他(发散/破位/派发)不进双通过
+# ⚑ 2026-11-25 老罗定：筹码退出闸门 ⇒ 排序器从「筹码档」换成「板块 RS 档」。
+#   依据：筹码实测 吸筹 −0.08%（噪音）/锁仓 +0.82%（近无效）/拉升 −1.72%（反向）；
+#   而板块内 RS 龙头是全表唯一 5/10 日双正组（+0.18%/+0.32%）。
+RS_TIER = {"leader": 3, "front": 2, "mid": 1, "back": 0}
+RS_BIN = {3: "龙头", 2: "前列", 1: "中位", 0: "—"}
+# 旧口径保留（仅用于读历史 jsonl 的筹码列展示）
 CHIP_TIER = {"吸筹中": 3, "集中锁仓中": 3, "拉升脱离成本区中": 2}
 CHIP_BIN = {3: "吸筹/锁仓", 2: "拉升", 1: "其他"}
+
+
+_TIER_FROM_CN = {"板块龙头": "leader", "板块前列": "front",
+                 "板块中位": "mid", "板块后排": "back"}
+
+
+def rs_tier_of(r):
+    """→ (档位 0~3, 单元格文案)。板块 RS 排序用（不是闸门，闸门看 gate.verdict）。
+
+    ⚑ 兼容两种字段：新产物有 `tier` 键；只有 `tier_cn` 的（旧 scr jsonl）从中文反推，
+      否则整张「强度×板块RS」排序会退化成 0 档（踩过：统计打出「龙头 0 / 前列 0」）。
+    """
+    b = r.get("sector_rs_brief") or {}
+    tier = b.get("tier") or _TIER_FROM_CN.get(b.get("tier_cn"))
+    t = RS_TIER.get(tier, 0)
+    if b.get("rank"):
+        return t, "%s/%s %s" % (b.get("rank"), b.get("n_ranked"), RS_BIN.get(t, ""))
+    return t, "—"
+
+
+def wy_cn_of(r):
+    """→ 威科夫阶段中文（表内展示）。"""
+    w = r.get("wyckoff") or {}
+    return w.get("stage_cn") or "—"
 
 
 def _pct_map(vals):
@@ -104,28 +139,29 @@ def gen_strength_view(allow, rows, rej):
     n_strong = sum(1 for _, t, _ in scored if t == 2)
     n_neutral = sum(1 for _, t, _ in scored if t == 1)
     n_star = sum(1 for r, _, _ in scored if r.get("recommend"))
+    n_unk = max(0, len(rows) - len(allow) - len(rej))
 
     # ── MD ──
     L = []
     L.append("# 双通过名单 · 按强度排序 · %s 收盘\n" % TAG.split("_")[0])
     L.append("> 基准日 **%s**（当日已收盘）｜ 双通过 **%d** 只 → 强度档 STRONG **%d** / "
-             "NEUTRAL **%d**｜ ★引擎推荐 %d ｜ 被筹码否 %d 只\n"
-             % (TAG.split("_")[0], len(allow), n_strong, n_neutral, n_star, len(rej)))
+             "NEUTRAL **%d**｜ ★引擎推荐 %d ｜ 被闸门否 %d 只 ｜ 未验证 %d 只\n"
+             % (TAG.split("_")[0], len(allow), n_strong, n_neutral, n_star, len(rej), n_unk))
     L.append("> **强度分**（0~100）= RS斜率 / MA20斜率 / 20日涨幅 三维度分位均值 + 领头羊 +6；"
              "分位法对 RS 极端哨兵值（≈-99.7，RS 失效）稳健。排序：强度档 → 强度分降序。\n")
     L.append("| # | 强度分 | 档 | 领头羊 | RS斜率 | MA20斜率 | 20日涨 | 代码 | 名称 | 战法 | "
-             "现价 | 买区 | 止损 | R→t1 | 筹码 | 推 | 区 |")
-    L.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+             "现价 | 买区 | 止损 | R→t1 | 板块RS | 威科夫 | 推 | 区 |")
+    L.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for i, (r, tier, sc) in enumerate(scored, 1):
-        s = r.get("scr") or {}
         vt = "强" if tier == 2 else ("中" if tier == 1 else "弱")
         ld = "★" if r.get("leader") else ""
-        L.append("| %d | %.1f | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |"
+        _, rsc = rs_tier_of(r)
+        L.append("| %d | %.1f | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |"
                  % (i, sc, vt, ld, num(r.get("rs_slope"), "%.2f"), num(r.get("ma20_slope"), "%.2f"),
                     num(r.get("ret20"), "%.2f"), r.get("code"), r.get("name"),
                     MODE_CN.get(r.get("mode"), r.get("mode")), num(r.get("spot")),
                     zone(r), num(r.get("stop")), num(r.get("rr1"), "%.2f"),
-                    SCR_CN.get(s.get("state"), s.get("state") or "-"),
+                    rsc, wy_cn_of(r),
                     "★" if r.get("recommend") else "",
                     ("区内" if r.get("in_zone") else "区外")))
     L.append("")
@@ -170,29 +206,32 @@ tr:hover td{background:#f7faff}
     H.append("<div class='mut'>基准日 <b>%s</b>（当日已收盘）｜ 排序：强度档（STRONG&gt;NEUTRAL）→ 强度分降序</div>"
              % TAG.split("_")[0])
     H.append("<div class='kv'>双通过 <b>%d</b> 只 → 强度档 STRONG <b>%d</b> / NEUTRAL <b>%d</b>"
-             "｜ ★引擎推荐 <b>%d</b> ｜ 被筹码否 <b>%d</b> 只<br>"
+             "｜ ★引擎推荐 <b>%d</b> ｜ 被闸门否 <b>%d</b> 只 ｜ 未验证 <b>%d</b> 只<br>"
              "<b>强度分</b>(0~100) = RS斜率 / MA20斜率 / 20日涨幅 三维度分位均值 + 领头羊 +6；"
              "分位法对 RS 极端哨兵值（≈-99.7，RS 失效）稳健。「区内/区外」= 现价相对买区位置。"
-             % (len(allow), n_strong, n_neutral, n_star, len(rej)))
+             % (len(allow), n_strong, n_neutral, n_star, len(rej), n_unk))
     H.append("<table><tr><th>#</th><th>强度分</th><th>档</th><th>领头羊</th><th>RS斜率</th>"
              "<th>MA20斜率</th><th>20日涨</th><th>代码</th><th>名称</th><th>战法</th><th>现价</th>"
-             "<th>买区</th><th>止损</th><th>R→t1</th><th>筹码</th><th>推</th><th>区</th></tr>")
+             "<th>买区</th><th>止损</th><th>R→t1</th><th>板块RS</th><th>威科夫</th><th>推</th>"
+             "<th>区</th></tr>")
     for i, (r, tier, sc) in enumerate(scored, 1):
-        s = r.get("scr") or {}
         vt = "强" if tier == 2 else ("中" if tier == 1 else "弱")
         vcls = "v-strong" if tier == 2 else "v-neutral"
         zc = "zone-in" if r.get("in_zone") else "zone-out"
-        sc_state = SCR_CN.get(s.get("state"), s.get("state") or "-")
+        rt, rsc = rs_tier_of(r)
+        rcls = "chip-3" if rt >= 3 else ("chip-2" if rt == 2 else "v-unknown")
         H.append("<tr><td class='rank'>%d</td><td><b>%.1f</b></td><td class='%s'>%s</td>"
                  "<td class='lead'>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
-                 "<td>%s</td><td>%s</td><td class='%s'>%s</td><td>%s</td><td>%s</td><td class='scr-%s'>%s</td>"
+                 "<td>%s</td><td>%s</td><td class='%s'>%s</td><td>%s</td><td>%s</td>"
+                 "<td class='%s'>%s</td><td>%s</td>"
                  "<td class='%s'>%s</td><td class='%s'>%s</td></tr>" % (
                      i, sc, vcls, vt, "★" if r.get("leader") else "",
                      num(r.get("rs_slope"), "%.2f"), num(r.get("ma20_slope"), "%.2f"),
                      num(r.get("ret20"), "%.2f"), r.get("code"), r.get("name"),
                      MODE_CN.get(r.get("mode"), r.get("mode")), num(r.get("spot")),
                      zc, zone(r), num(r.get("stop")), num(r.get("rr1"), "%.2f"),
-                     sc_state, sc_state, "star" if r.get("recommend") else "",
+                     rcls, rsc, wy_cn_of(r),
+                     "star" if r.get("recommend") else "",
                      "★" if r.get("recommend") else "", zc,
                      ("区内" if r.get("in_zone") else "区外")))
     H.append("</table>")
@@ -205,14 +244,17 @@ tr:hover td{background:#f7faff}
 
 
 def gen_best_view(allow, rows, rej):
-    """「强度×筹码」最佳排序：强度档(STRONG>NEUTRAL) → 筹码档(吸筹/锁仓 > 拉升) → 强度分。
+    """「强度×板块RS」最佳排序：强度档(STRONG>NEUTRAL) → 板块RS档(龙头>前列>中位) → 强度分。
+
+    ⚑ 2026-11-25 老罗定：筹码退出闸门 ⇒ 第二档排序器从「筹码档」换成「板块 RS 档」。
+      依据：筹码 吸筹 −0.08%（噪音）/锁仓 +0.82%（近无效）/拉升 −1.72%（反向）；
+            板块内 RS 龙头是全表唯一 5/10 日双正组（+0.18%/+0.32%，n=865）。
+      ⚠ RS 档只是**排序器**，不否决（否决在 gate.verdict，决定谁进这张表）。
 
     老罗 2026-10-21 定（口径演进）：19:14「强度高 + 吸筹/锁仓，其次拉升」→
     20:2x「bestview 也是要按先强度档」（对齐 elastic_dual 交集主表，Grok 意见2）。
     先看强度档——否则 NEUTRAL 吸筹弱票会压过 STRONG 拉升票（错排）。
-    双通过名单筹码只有三种健康态（发散/破位/派发已被筹码闸否），故筹码档只有两级：
-      吸筹/锁仓(3) = 吸筹中 + 集中锁仓中；拉升(2) = 拉升脱离成本区中。
-    同强度档内按筹码档 → strength_score() 从高到低。产物：screener_<tag>_pass_best.{md,html}
+    同强度档内按板块RS 档 → strength_score() 从高到低。产物：screener_<tag>_pass_best.{md,html}
     """
     pm = {
         "rs_slope": _pct_map([r.get("rs_slope") for r in allow]),
@@ -223,41 +265,43 @@ def gen_best_view(allow, rows, rej):
     def key(r):
         tier = VERDICT_TIER.get(r.get("verdict"), 0)
         sc = strength_score(r, pm)
-        cb = CHIP_TIER.get((r.get("scr") or {}).get("state"), 1)
-        return (-tier, -cb, -sc)
+        rt, _ = rs_tier_of(r)                  # 板块RS 档（排序器，不否决）
+        return (-tier, -rt, -sc)
 
     ranked = sorted(allow, key=key)
-    n_absorb = sum(1 for r in ranked if CHIP_TIER.get((r.get("scr") or {}).get("state"), 1) == 3)
-    n_pull = sum(1 for r in ranked if CHIP_TIER.get((r.get("scr") or {}).get("state"), 1) == 2)
+    n_leader = sum(1 for r in ranked if rs_tier_of(r)[0] == 3)
+    n_front = sum(1 for r in ranked if rs_tier_of(r)[0] == 2)
     n_star = sum(1 for r in ranked if r.get("recommend"))
+    n_unk = max(0, len(rows) - len(allow) - len(rej))
 
-    # 分组（按强度档：先强度后筹码；小节内顺序即全局 ranked 顺序）
+    # 分组（按强度档：先强度后 RS 档；小节内顺序即全局 ranked 顺序）
     bins = defaultdict(list)
     for r in ranked:
         bins[VERDICT_TIER.get(r.get("verdict"), 0)].append(r)
 
     # ── MD ──
     L = []
-    L.append("# 双通过名单 · 强度×筹码 最佳排序 · %s 收盘\n" % TAG.split("_")[0])
-    L.append("> 基准日 **%s**（当日已收盘）｜ 双通过 **%d** 只 → 吸筹/锁仓 **%d** ＋ 拉升 **%d**｜ "
-             "★推荐 %d ｜ 被筹码否 %d 只\n" % (TAG.split("_")[0], len(allow), n_absorb, n_pull, n_star, len(rej)))
-    L.append("> **排序**：强度档（STRONG>NEUTRAL）→ 筹码档（吸筹/锁仓 > 拉升）→ 强度分降序。"
-             "强度分 = RS斜率/MA20斜率/20日涨幅 三维度分位均值 + 领头羊 +6。\n")
-    L.append("| 排名 | 强度分 | 强度档 | 筹码档 | 代码 | 名称 | 战法 | 现价 | 买区 | 止损 | R→t1 | 领头羊 | RS斜率 | MA20斜率 | 20日涨 | 筹码状态 | 推 | 区 |")
-    L.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    L.append("# 双通过名单 · 强度×板块RS 最佳排序 · %s 收盘\n" % TAG.split("_")[0])
+    L.append("> 基准日 **%s**（当日已收盘）｜ 双通过 **%d** 只 → 板块龙头 **%d** ＋ 前列 **%d**｜ "
+             "★推荐 %d ｜ 被闸门否 %d 只 ｜ 未验证 %d 只\n"
+             % (TAG.split("_")[0], len(allow), n_leader, n_front, n_star, len(rej), n_unk))
+    L.append("> **排序**：强度档（STRONG>NEUTRAL）→ 板块RS 档（龙头 > 前列 > 中位）→ 强度分降序。"
+             "强度分 = RS斜率/MA20斜率/20日涨幅 三维度分位均值 + 领头羊 +6。\n"
+             "> ⚑ RS 档只是排序器、不否决；能否进本表由闸门（板块RS + 威科夫）决定。\n")
+    L.append("| 排名 | 强度分 | 强度档 | RS档 | 代码 | 名称 | 战法 | 现价 | 买区 | 止损 | R→t1 | 领头羊 | RS斜率 | MA20斜率 | 20日涨 | 板块RS | 威科夫 | 推 | 区 |")
+    L.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for i, r in enumerate(ranked, 1):
-        s = r.get("scr") or {}
         vt = "强" if r.get("verdict") == "STRONG" else ("中" if r.get("verdict") == "NEUTRAL" else "弱")
-        cb = CHIP_TIER.get(s.get("state"), 1)
+        rt, rsc = rs_tier_of(r)
         st = strength_score(r, pm)
-        L.append("| %d | %.1f | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |"
-                 % (i, st, vt, CHIP_BIN.get(cb, "其他"), r.get("code"), r.get("name"),
+        L.append("| %d | %.1f | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |"
+                 % (i, st, vt, RS_BIN.get(rt, "—"), r.get("code"), r.get("name"),
                     MODE_CN.get(r.get("mode"), r.get("mode")), num(r.get("spot")),
                     zone(r), num(r.get("stop")), num(r.get("rr1"), "%.2f"),
                     "★" if r.get("leader") else "",
                     num(r.get("rs_slope"), "%.2f"), num(r.get("ma20_slope"), "%.2f"),
                     num(r.get("ret20"), "%.2f"),
-                    SCR_CN.get(s.get("state"), s.get("state") or "-"),
+                    rsc, wy_cn_of(r),
                     "★" if r.get("recommend") else "",
                     ("区内" if r.get("in_zone") else "区外")))
     L.append("")
@@ -297,17 +341,17 @@ tr:hover td{background:#f7faff}
 .hint{background:#fff8e6;border:1px solid #f0d68a;border-radius:8px;padding:9px 13px;font-size:12.5px;margin:10px 0;color:#5c4b12}
 """
     H = []
-    H.append("<!doctype html><meta charset='utf-8'><title>双通过名单 · 强度×筹码 最佳排序 · %s 收盘</title>" % TAG.split("_")[0])
+    H.append("<!doctype html><meta charset='utf-8'><title>双通过名单 · 强度×板块RS 最佳排序 · %s 收盘</title>" % TAG.split("_")[0])
     H.append("<style>%s</style><div class='wrap'>" % CSS)
-    H.append("<h1>双通过名单 · 强度×筹码 最佳排序 · %s 收盘</h1>" % TAG.split("_")[0])
-    H.append("<div class='mut'>基准日 <b>%s</b>（当日已收盘）｜ 排序：强度档（STRONG &gt; NEUTRAL）→ 筹码档（吸筹/锁仓 &gt; 拉升）→ 强度分降序</div>"
+    H.append("<h1>双通过名单 · 强度×板块RS 最佳排序 · %s 收盘</h1>" % TAG.split("_")[0])
+    H.append("<div class='mut'>基准日 <b>%s</b>（当日已收盘）｜ 排序：强度档（STRONG &gt; NEUTRAL）→ 板块RS 档（龙头 &gt; 前列 &gt; 中位）→ 强度分降序</div>"
              % TAG.split("_")[0])
-    H.append("<div class='kv'>双通过 <b>%d</b> 只 → 吸筹/锁仓 <b>%d</b> ＋ 拉升 <b>%d</b>"
-             "｜ ★推荐 <b>%d</b> ｜ 被筹码否 <b>%d</b> 只<br>"
+    H.append("<div class='kv'>双通过 <b>%d</b> 只 → 板块龙头 <b>%d</b> ＋ 前列 <b>%d</b>"
+             "｜ ★推荐 <b>%d</b> ｜ 被闸门否 <b>%d</b> 只 ｜ 未验证 <b>%d</b> 只<br>"
              "先强度档（<span class='v-strong'>STRONG</span> &gt; <span class='v-neutral'>NEUTRAL</span>），"
-             "同档内再看筹码：<span class='chip-3'>吸筹/锁仓</span>（最佳）→ "
-             "<span class='chip-2'>拉升</span>（其次）。档内按强度分排序。"
-             % (len(allow), n_absorb, n_pull, n_star, len(rej)))
+             "同档内再看板块内 RS：<span class='chip-3'>龙头</span>（第 1 名）→ "
+             "<span class='chip-2'>前列</span>（前 30%%）。档内按强度分排序。"
+             % (len(allow), n_leader, n_front, n_star, len(rej), n_unk))
     for vt, vlabel in ((2, "STRONG · 强"), (1, "NEUTRAL · 中"), (0, "WEAK · 弱")):
         grp = bins.get(vt)
         if not grp:
@@ -315,27 +359,30 @@ tr:hover td{background:#f7faff}
         H.append("<h2>%s（%d 只）</h2>" % (vlabel, len(grp)))
         H.append("<table><tr><th>排名</th><th>强度分</th><th>强度档</th><th>代码</th><th>名称</th>"
                  "<th>战法</th><th>现价</th><th>买区</th><th>止损</th><th>R→t1</th><th>领头羊</th>"
-                 "<th>RS斜率</th><th>MA20斜率</th><th>20日涨</th><th>筹码状态</th><th>推</th><th>区</th></tr>")
+                 "<th>RS斜率</th><th>MA20斜率</th><th>20日涨</th><th>板块RS</th><th>威科夫</th>"
+                 "<th>推</th><th>区</th></tr>")
         for i, r in enumerate(ranked, 1):
             if VERDICT_TIER.get(r.get("verdict"), 0) != vt:
                 continue
-            s = r.get("scr") or {}
             vt = "强" if r.get("verdict") == "STRONG" else ("中" if r.get("verdict") == "NEUTRAL" else "弱")
             vcls = "v-strong" if r.get("verdict") == "STRONG" else "v-neutral"
             zc = "zone-in" if r.get("in_zone") else "zone-out"
             st = strength_score(r, pm)
-            sc_state = SCR_CN.get(s.get("state"), s.get("state") or "-")
+            rt, rsc = rs_tier_of(r)
+            rcls = "chip-3" if rt >= 3 else ("chip-2" if rt == 2 else "v-unknown")
             H.append("<tr><td class='rank'>%d</td><td><b>%.1f</b></td><td class='%s'>%s</td>"
                      "<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td class='%s'>%s</td><td>%s</td>"
                      "<td>%s</td><td class='lead'>%s</td><td>%s</td><td>%s</td><td>%s</td>"
-                     "<td class='scr-%s'>%s</td><td class='%s'>%s</td><td class='%s'>%s</td></tr>" % (
+                     "<td class='%s'>%s</td><td>%s</td>"
+                     "<td class='%s'>%s</td><td class='%s'>%s</td></tr>" % (
                          i, st, vcls, vt, r.get("code"), r.get("name"),
                          MODE_CN.get(r.get("mode"), r.get("mode")), num(r.get("spot")),
                          zc, zone(r), num(r.get("stop")), num(r.get("rr1"), "%.2f"),
                          "★" if r.get("leader") else "",
                          num(r.get("rs_slope"), "%.2f"), num(r.get("ma20_slope"), "%.2f"),
                          num(r.get("ret20"), "%.2f"),
-                         sc_state, sc_state, "star" if r.get("recommend") else "",
+                         rcls, rsc, wy_cn_of(r),
+                         "star" if r.get("recommend") else "",
                          "★" if r.get("recommend") else "", zc,
                          ("区内" if r.get("in_zone") else "区外")))
         H.append("</table>")
@@ -349,15 +396,18 @@ tr:hover td{background:#f7faff}
 
 def main():
     global TAG
-    ap = argparse.ArgumentParser(description="生成双通过名单（战法闸+筹码闸）")
+    ap = argparse.ArgumentParser(
+        description="生成双通过名单（战法闸 + 开仓闸门：板块RS+威科夫）")
     ap.add_argument("--date", default=date.today().strftime("%Y-%m-%d"),
                     help="扫描日期 YYYY-MM-DD（默认今天）；决定读 scr_<date>_close.jsonl")
     args = ap.parse_args()
     TAG = "%s_close" % args.date
     src = os.path.join(OUT, "scr_%s.jsonl" % TAG)
     rows = [json.loads(l) for l in open(src, encoding="utf-8") if l.strip()]
-    allow = [r for r in rows if (r.get("scr") or {}).get("allow_new")]
-    rej = [r for r in rows if not (r.get("scr") or {}).get("allow_new")]
+    # ⚑ 2026-11-25：闸门 = 板块RS + 威科夫（两条必要条件），**只认 pass**。
+    #   unknown（映射表未覆盖 / 威科夫过渡 / 数据滞后）不进「双通过」，单列一节标「未验证」
+    #   —— 未验证 ≠ 通过，宁可名单短，也不把没验证的票混进可上清单。
+    allow, rej, unk = GV.counts(rows)
     star = [r for r in allow if r.get("recommend")]
     # ⚑ 高位闸 + 赔率闸（老罗 2026-10-27）：双通过 ≠ 可上 —— 离主力成本区太远 / 赔率不足的都要剔出来
     judged = {r.get("code"): F.judge_row(r) for r in rows}
@@ -395,10 +445,16 @@ def main():
 
     # ── MD ──
     L = []
-    L.append("# 双通过名单 · 战法闸 + 筹码闸 · %s 收盘\n" % TAG.split("_")[0])
+    L.append("# 双通过名单 · 战法闸 + 开仓闸门（板块RS + 威科夫）· %s 收盘\n" % TAG.split("_")[0])
     L.append("> 基准日 **%s**（当日已收盘）｜ 信号 %d 只 → 双通过 **%d** 只（★引擎推荐 %d）｜ "
-             "被筹码否 %d 只｜ 🚦 **最终可上 %d 只**\n"
-             % (TAG.split("_")[0], len(rows), len(allow), len(star), len(rej), len(final)))
+             "被闸门否 %d 只｜ 未验证 %d 只｜ 🚦 **最终可上 %d 只**\n"
+             % (TAG.split("_")[0], len(rows), len(allow), len(star), len(rej), len(unk), len(final)))
+    L.append("> ⛔ **闸门 = 两条必要条件**：① 板块内 RS 不在后排（分位 <40% 否决，"
+             "`gates/sector_rs.py`）② 威科夫不是派发（`gates/wyckoff_stage.py`）。"
+             "两条都验证通过才算「双通过」；**未验证（映射表未覆盖 / 威科夫过渡 / 数据滞后）"
+             "不进本表**，单列在文末「未验证清单」——未验证 ≠ 通过。\n"
+             "> ⚑ 筹码已退出闸门（吸筹 −0.08% 噪音 / 锁仓 +0.82% 近无效 / 拉升 −1.72% 反向），"
+             "只作参考列。\n")
     L.append("> 🚦 闸门（screener/filters.py 单一真源）：**高位闸** 现价偏离主力成本 < %.0f%% ｜ "
              "**赔率闸** R(→t1) ≥ %.1f。双通过但被这两闸拦下的 **%d** 只标在「判定」列。\n"
              % (F.HIGH_DEV_LIMIT, F.MIN_RR, len(blocked)))
@@ -430,21 +486,34 @@ def main():
         g = sorted(by[m], key=lambda r: -(r.get("rr1") or 0))
         L.append("## %s（%d 只，★%d）\n"
                  % (MODE_CN.get(m, m), len(g), sum(1 for r in g if r.get("recommend"))))
-        L.append("| 代码 | 名称 | 现价 | 买区 | 止损 | t1 | R→t1 | 离主成本 | 报告 | 筹码 | 推 | 判定 |")
-        L.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
+        L.append("| 代码 | 名称 | 现价 | 买区 | 止损 | t1 | R→t1 | 离主成本 | 报告 | 板块RS | 威科夫 | 推 | 判定 |")
+        L.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         for r in g:
-            s = r.get("scr") or {}
             j = judged.get(r.get("code")) or {}
-            L.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+            _, rsc = rs_tier_of(r)
+            L.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
                 r.get("code"), r.get("name"), num(r.get("spot")), zone(r),
                 num(r.get("stop")), num(r.get("t1")), num(r.get("rr1"), "%.2f"),
                 F.fmt_dev(j.get("dev_main")), _rep_cell(r),
-                SCR_CN.get(s.get("state"), s.get("state") or "-"),
+                rsc, wy_cn_of(r),
                 "★" if r.get("recommend") else "",
                 ((("报告未出·盲区" if not r.get("_report_shown")
                     else ("晚出·质量弱" if r.get("_report_tier") == "晚" else "")) + "｜")
                  if win else "")
                 + (j.get("verdict_cn") or "—")))
+        L.append("")
+    if unk:
+        L.append("")
+        L.append("## ⚠ 未验证清单（%d 只，不进双通过、也不能当可上）\n" % len(unk))
+        L.append("> 未验证 = 映射表未覆盖 / 威科夫过渡或下跌 / 板块整体崩导致 RS 无意义 / 数据滞后。"
+                 "**不否决也不放行** —— 要纳入判据，先在 `references/sector_map.json` 收录该票所属炒作板块。\n")
+        L.append("| 代码 | 名称 | 战法 | 现价 | 买区 | R→t1 | 未验证原因 |")
+        L.append("|---|---|---|---|---|---|---|")
+        for r in sorted(unk, key=lambda x: -(x.get("rr1") or 0)):
+            L.append("| %s | %s | %s | %s | %s | %s | %s |" % (
+                r.get("code"), r.get("name"), MODE_CN.get(r.get("mode"), r.get("mode")),
+                num(r.get("spot")), zone(r), num(r.get("rr1"), "%.2f"),
+                GV.summary(r)))
         L.append("")
     md = os.path.join(OUT, "screener_%s_pass.md" % TAG)
     open(md, "w", encoding="utf-8").write("\n".join(L))
@@ -479,14 +548,14 @@ tr:hover td{background:#f7faff}
     H = []
     H.append("<!doctype html><meta charset='utf-8'><title>双通过名单 · %s 收盘</title>" % TAG.split("_")[0])
     H.append("<style>%s</style><div class='wrap'>" % CSS)
-    H.append("<h1>双通过名单 · 战法闸 + 筹码闸 · %s 收盘</h1>" % TAG.split("_")[0])
+    H.append("<h1>双通过名单 · 战法闸 + 开仓闸门（板块RS + 威科夫）· %s 收盘</h1>" % TAG.split("_")[0])
     H.append("<div class='mut'>基准日 <b>%s</b>（当日已收盘）｜ 排序：战法优先级 → 组内按 R 降序</div>"
              % TAG.split("_")[0])
     H.append("<div class='kv'>信号 <b>%d</b> 只 → 双通过 <b>%d</b> 只（★引擎推荐 <b>%d</b>）"
-             "｜ 被筹码否 <b>%d</b> 只｜ 🚦 <b>最终可上 %d</b> 只<br>"
+             "｜ 被闸门否 <b>%d</b> 只｜ 未验证 <b>%d</b> 只｜ 🚦 <b>最终可上 %d</b> 只<br>"
              "「区内/区外」= 现价相对买区的位置：<span class='zone-in'>区内</span> 现价就在买区，"
              "<span class='zone-out'>区外</span> 现价已离开买区、需等回踩。</div>"
-             % (len(rows), len(allow), len(star), len(rej), len(final)))
+             % (len(rows), len(allow), len(star), len(rej), len(unk), len(final)))
     if win:
         H.append("<div class='hint'>📅 <b>定期报告披露窗口内</b>（%s，报告期 %s；法定截止 %s ⇒ "
                  "实际截止交易日 <b>%s</b>；窗口交易日 %s）<br>"
@@ -499,6 +568,12 @@ tr:hover td{background:#f7faff}
     else:
         H.append("<div class='hint'>📅 当前<b>不在定期报告披露窗口</b>（各期法定截止日前 %d 天起才启用报告闸）"
                  "⇒ 「报告」列不适用。</div>" % RC.DEFAULT_BEFORE_DAYS)
+    H.append("<div class='hint'>⛔ <b>闸门 = 两条必要条件</b>：① 板块内 RS 不在后排"
+             "（分位 &lt;40% 否决）② 威科夫不是派发。两条都验证通过才算「双通过」；"
+             "<b>未验证</b>（映射表未覆盖 / 威科夫过渡 / 数据滞后）不进本表，列在文末清单 —— "
+             "未验证 ≠ 通过。<br>⚑ 筹码已退出闸门（吸筹 −0.08% 噪音 / 锁仓 +0.82% 近无效 / "
+             "拉升 −1.72% 反向），只作参考。</div>")
+
     H.append("<div class='hint'>🚦 <b>最终可上</b> = 双通过 + <b>高位闸</b>（现价偏离主力成本 &lt; %.0f%%）"
              " + <b>赔率闸</b>（R→t1 ≥ %.1f）。双通过但被这两闸拦下的 <b>%d</b> 只，"
              "「判定」列会写明原因（<span class='v-bad'>高位·脱离成本区</span> / "
@@ -509,13 +584,15 @@ tr:hover td{background:#f7faff}
     H.append("<h2>🚦 最终可上（%d 只）</h2>" % len(final))
     if final:
         H.append("<table><tr><th>代码</th><th>名称</th><th>战法</th><th>现价</th><th>买区</th><th>止损</th>"
-                 "<th>t1</th><th>R→t1</th><th>离主成本</th><th>报告</th><th>筹码</th><th>推</th></tr>")
+                 "<th>t1</th><th>R→t1</th><th>离主成本</th><th>报告</th><th>板块RS</th><th>威科夫</th>"
+                 "<th>推</th></tr>")
         for r in sorted(final, key=lambda x: -(x.get("rr1") or 0)):
-            s = r.get("scr") or {}
             j = judged.get(r.get("code")) or {}
+            rt, rsc = rs_tier_of(r)
+            rcls = "chip-3" if rt >= 3 else ("chip-2" if rt == 2 else "v-unknown")
             H.append("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td class='%s'>%s</td><td>%s</td>"
                      "<td>%s</td><td>%s</td><td class='v-ok'>%s</td><td class='%s'>%s</td>"
-                     "<td class='scr-%s'>%s</td>"
+                     "<td class='%s'>%s</td><td>%s</td>"
                      "<td class='%s'>%s</td></tr>" % (
                          r.get("code"), r.get("name"), MODE_CN.get(r.get("mode"), r.get("mode")),
                          num(r.get("spot")), "zone-in" if r.get("in_zone") else "zone-out", zone(r),
@@ -523,8 +600,7 @@ tr:hover td{background:#f7faff}
                          F.fmt_dev(j.get("dev_main")),
                          ("rep-ok" if r.get("_report_shown") else "rep-blind") if win else "",
                          _rep_cell(r),
-                         SCR_CN.get(s.get("state"), s.get("state") or "-"),
-                         SCR_CN.get(s.get("state"), s.get("state") or "-"),
+                         rcls, rsc, wy_cn_of(r),
                          "star" if r.get("recommend") else "", "★" if r.get("recommend") else ""))
         H.append("</table>")
     else:
@@ -535,34 +611,61 @@ tr:hover td{background:#f7faff}
                  % (MODE_CN.get(m, m), len(g), sum(1 for r in g if r.get("recommend")),
                     sum(1 for r in g if F.is_actionable(judged.get(r.get("code")) or {}))))
         H.append("<table><tr><th>代码</th><th>名称</th><th>现价</th><th>买区</th><th>止损</th>"
-                 "<th>t1</th><th>R→t1</th><th>离主成本</th><th>报告</th><th>筹码</th><th>推</th><th>判定</th></tr>")
+                 "<th>t1</th><th>R→t1</th><th>离主成本</th><th>报告</th><th>板块RS</th><th>威科夫</th>"
+                 "<th>推</th><th>判定</th></tr>")
         for r in g:
-            s = r.get("scr") or {}
-            lo, hi, iz = r.get("buy_lo"), r.get("buy_hi"), r.get("in_zone")
+            iz = r.get("in_zone")
             zc = "zone-in" if iz else "zone-out"
-            sc = SCR_CN.get(s.get("state"), s.get("state") or "-")
+            rt, rsc = rs_tier_of(r)
+            rcls = "chip-3" if rt >= 3 else ("chip-2" if rt == 2 else "v-unknown")
             j = judged.get(r.get("code")) or {}
             vc = F.VERDICT_COLOR.get(j.get("verdict") or "", "unknown")
             H.append("<tr><td>%s</td><td>%s</td><td>%s</td><td class='%s'>%s</td><td>%s</td>"
                      "<td>%s</td><td>%s</td><td>%s</td><td class='%s'>%s</td>"
-                     "<td class='scr-%s'>%s</td><td class='%s'>%s</td>"
+                     "<td class='%s'>%s</td><td>%s</td><td class='%s'>%s</td>"
                      "<td class='v-%s'>%s</td></tr>" % (
                          r.get("code"), r.get("name"), num(r.get("spot")), zc, zone(r),
                          num(r.get("stop")), num(r.get("t1")), num(r.get("rr1"), "%.2f"),
                          F.fmt_dev(j.get("dev_main")),
                          ("rep-ok" if r.get("_report_shown") else "rep-blind") if win else "",
                          _rep_cell(r),
-                         sc, sc, "star" if r.get("recommend") else "",
+                         rcls, rsc, wy_cn_of(r),
+                         "star" if r.get("recommend") else "",
                          "★" if r.get("recommend") else "",
                          vc, ((("报告未出·盲区｜" if win and not r.get("_report_shown")
                                  else ("晚出·质量弱｜" if win and r.get("_report_tier") == "晚" else "")))
                               + (j.get("verdict_cn") or "—"))))
+        H.append("</table>")
+
+    # ── ⚠ 未验证清单（不否决也不放行：未验证 ≠ 通过） ──
+    if unk:
+        H.append("<h2 style='border-left-color:#b8860b'>⚠ 未验证清单（%d 只，不进双通过、也不能当可上）</h2>"
+                 % len(unk))
+        H.append("<div class='hint'>未验证 = 映射表未覆盖 / 威科夫过渡或下跌 / 板块整体崩导致 RS 无意义 / "
+                 "数据滞后。**不否决也不放行** —— 要纳入判据，先在 "
+                 "<code>references/sector_map.json</code> 收录该票所属<b>实际炒作板块</b>"
+                 "（不是申万行业）。</div>")
+        H.append("<table><tr><th>代码</th><th>名称</th><th>战法</th><th>现价</th><th>买区</th>"
+                 "<th>R→t1</th><th>板块RS</th><th>威科夫</th><th>未验证原因</th></tr>")
+        for r in sorted(unk, key=lambda x: -(x.get("rr1") or 0)):
+            bt = r.get("sector_rs_brief") or {}
+            w = r.get("wyckoff") or {}
+            H.append("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td class='%s'>%s</td>"
+                     "<td>%s</td><td>%s</td><td>%s</td><td class='v-warn'>%s</td></tr>" % (
+                         r.get("code"), r.get("name"),
+                         MODE_CN.get(r.get("mode"), r.get("mode")), num(r.get("spot")),
+                         "zone-in" if r.get("in_zone") else "zone-out", zone(r),
+                         num(r.get("rr1"), "%.2f"),
+                         ("%s/%s" % (bt.get("rank"), bt.get("n_ranked"))) if bt.get("rank") else "—",
+                         w.get("stage_cn") or "—", GV.summary(r)))
         H.append("</table>")
     H.append("<div class='foot'>★ = 引擎额外推荐。R 为现价口径静态赔率；出水芙蓉（真触发价在昨高上方）、"
              "流星砸坑（回踩 MA5 买）两类 R 会系统性偏低，不代表机会差，不据此排序。<br>"
              "「离主成本」= 现价相对主力成本（低位带均价退化口径）的偏离度；偏离越大＝离成本区越远＝"
              "止损越宽、赔率被吃光。⚠ R 在高位票上会失真（t1 是「涨多了自然远」而止损没跟着走）"
              "⇒ 高位闸与赔率闸必须并看。闸门单一真源：<code>screener/filters.py</code>。<br>"
+             "「双通过」的闸门 = <b>板块RS + 威科夫</b>（<code>gates/entry_gate.py</code>）；"
+             "RS 排位实证见 <code>research/bt_sector_rs_2026-11-25.py</code>。<br>"
              "「报告」列 = 该期定期报告是否已披露（<b>仅在法定披露截止日前 %d 天起的窗口内有效</b>，"
              "窗口外不适用）。报告期日历单一真源：<code>screener/report_calendar.py</code>。</div>"
              % RC.DEFAULT_BEFORE_DAYS)
@@ -572,7 +675,8 @@ tr:hover td{background:#f7faff}
 
     print("MD :", md)
     print("HTML:", hp)
-    print("双通过 %d 只（★%d）/ 被否 %d 只" % (len(allow), len(star), len(rej)))
+    print("双通过 %d 只（★%d）/ 被闸门否 %d 只 / 未验证 %d 只"
+          % (len(allow), len(star), len(rej), len(unk)))
     for m in order:
         g = by[m]
         print("  %-12s %3d 只  ★%d" % (MODE_CN.get(m, m), len(g),
@@ -587,14 +691,14 @@ tr:hover td{background:#f7faff}
     print("强度排序 HTML:", shp)
     print("强度档 STRONG %d / NEUTRAL %d" % (n_strong, n_neutral))
 
-    # ── 强度×筹码 最佳排序视角 ──
+    # ── 强度×板块RS 最佳排序视角 ──
     bmd, bhp = gen_best_view(allow, rows, rej)
-    n_abs = sum(1 for r in allow if CHIP_TIER.get((r.get("scr") or {}).get("state"), 1) == 3)
-    n_pull = sum(1 for r in allow if CHIP_TIER.get((r.get("scr") or {}).get("state"), 1) == 2)
+    n_lead = sum(1 for r in allow if rs_tier_of(r)[0] == 3)
+    n_frt = sum(1 for r in allow if rs_tier_of(r)[0] == 2)
     print("---")
-    print("强度×筹码 MD :", bmd)
-    print("强度×筹码 HTML:", bhp)
-    print("筹码档 吸筹/锁仓 %d / 拉升 %d" % (n_abs, n_pull))
+    print("强度×板块RS MD :", bmd)
+    print("强度×板块RS HTML:", bhp)
+    print("板块RS 档 龙头 %d / 前列 %d" % (n_lead, n_frt))
 
 
 if __name__ == "__main__":

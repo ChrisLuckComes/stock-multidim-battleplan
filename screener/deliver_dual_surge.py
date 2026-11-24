@@ -3,7 +3,8 @@
 """午盘/收盘战法扫描的交付主表：双通过 ∩ 飙股（高弹性）。
 
 老罗 2026-10-26 硬规则：禁止把引擎序前 20 当交付。交付必须是
-  集合B = 战法闸 + 筹码闸双通过（scr_<date>_<session>.jsonl 且 allow_new）
+  集合B = 战法闸 + 开仓闸门双通过（scr_<date>_<session>.jsonl 且 gate.verdict=pass）
+          ⚑ 2026-11-25 起闸门 = 板块RS + 威科夫（gates/entry_gate.py），筹码已退出闸门
   集合A = 高弹性（板块内弹性日数分位 ≥ 75）
   主表 = A ∩ B（screener/elastic_dual.py），按强度档 → 筹码档 → 强度分。
 
@@ -32,12 +33,13 @@ if _ROOT not in sys.path:
 from screener import continuity as CONT  # noqa: E402
 from screener import elastic_dual as ED  # noqa: E402
 from screener import gen_pass_list as GPL  # noqa: E402
+from screener import gate_view as GV  # noqa: E402  闸门结论统一读取
 import blacklist as BL  # noqa: E402
 
 # 交付口径只维护这一句。scan_warfare / DEPLOY / 短清单都指这里。
 DELIVERY_RULE = (
     "A股午盘/收盘战法扫描交付 = 双通过∩飙股"
-    "（高弹性 ∩ 战法闸+筹码 allow_new）。禁止只交引擎序前 20，也禁止把 scan 原表当交付。"
+    "（高弹性 ∩ 战法闸+开仓闸门 pass=板块RS+威科夫）。禁止只交引擎序前 20，也禁止把 scan 原表当交付。"
 )
 
 
@@ -112,7 +114,7 @@ def enrich(best, scr_rows, session, state_path):
     """按交集顺序出短清单。全量输出，不截成引擎序前 20。当日黑名单剔除。"""
     by = {}
     for r in scr_rows:
-        if (r.get("scr") or {}).get("allow_new"):
+        if GV.is_pass(r):                       # 只认闸门 pass；unknown 不进主表（未验证≠通过）
             by[r["code"]] = r
     out = []
     for r in best:
@@ -225,7 +227,7 @@ def main(argv=None):
             "as_of": args.date,
             "session": args.session,
             "rule": DELIVERY_RULE,
-            "definition": "高弹性∩双通过(战法+筹码allow_new)=飙股交集",
+            "definition": "高弹性∩双通过(战法闸+开仓闸门pass：板块RS+威科夫)=飙股交集",
             "n": len(rows),
             "minesweep": "本档未检",
             "stat": st,
