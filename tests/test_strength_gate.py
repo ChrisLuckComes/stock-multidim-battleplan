@@ -182,6 +182,55 @@ def test_gate_exception_fallback_neutral():
     assert any("异常" in x for x in out["reasons"])
 
 
+# ─────────────── 成交量量纲反解（2026-11-24 修：腾讯按板块给股/手） ───────────────
+def _qt_row(amount_wan):
+    """造一条 qt 行：只有 f[37]=成交额(万元) 有效，其余占位。"""
+    row = [""] * 40
+    row[37] = str(amount_wan)
+    return row
+
+
+def test_vol_mult_star_market_returns_shares():
+    """科创板：bar 的 v 已是「股」⇒ 乘数 1.0（688018 实测比值 1.02）。"""
+    # 乐鑫 11-24：v=7198380 股，close=150.10 ⇒ 成交额 10.80 亿 = 108000 万元
+    assert QS._resolve_vol_mult("688018", _qt_row(108000), 7198380, 150.10) == 1.0
+
+
+def test_vol_mult_main_board_returns_hand_multiplier():
+    """沪深主板/创业板：bar 的 v 是「手」⇒ 乘数 100（601138 实测比值 99.9）。"""
+    # 工业富联 11-24：v=1398598 手，close=42.12 ⇒ 成交额 58.9 亿 = 589000 万元
+    assert QS._resolve_vol_mult("601138", _qt_row(589000), 1398598, 42.12) == 100.0
+    # 胜宏科技 300476：v=333236 手，close=129.32 ⇒ 43.8 亿
+    assert QS._resolve_vol_mult("300476", _qt_row(438000), 333236, 129.32) == 100.0
+
+
+def test_vol_mult_fallback_by_prefix_when_qt_missing():
+    """qt 缺失/停牌 ⇒ 退回代码前缀显式口径，而不是静默假定。"""
+    assert QS._resolve_vol_mult("688018", None, 1e6, 150.0) == 1.0
+    assert QS._resolve_vol_mult("688018", [], 1e6, 150.0) == 1.0
+    assert QS._resolve_vol_mult("600183", None, 1e6, 50.0) == 100.0
+    assert QS._resolve_vol_mult("300476", _qt_row(0), 1e6, 50.0) == 100.0
+
+
+def test_vol_mult_normalized_amount_is_plausible():
+    """归一化契约：无论科创板还是主板，v*close 都必须等于接口成交额（误差<5%）。
+
+    这是防复发的核心断言 —— 只要有人再「假定单位」，这里立刻挂。
+    """
+    cases = [
+        ("688018", 7198380, 150.10, 108000),   # 股，比值≈1
+        ("601138", 1398598, 42.12, 589000),    # 手，比值≈100
+        ("300476", 333236, 129.32, 438000),
+    ]
+    for code, v, close, amt_wan in cases:
+        mult = QS._resolve_vol_mult(code, _qt_row(amt_wan), v, close)
+        got = v * mult * close
+        want = amt_wan * 1e4
+        assert abs(got / want - 1) < 0.05, (
+            "%s 归一化后成交额仍错位：得到 %.3f 亿，接口 %.3f 亿（mult=%s）"
+            % (code, got / 1e8, want / 1e8, mult))
+
+
 if __name__ == "__main__":
     _fns = [(k, v) for k, v in sorted(globals().items())
             if k.startswith("test_") and callable(v)]

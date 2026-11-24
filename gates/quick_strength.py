@@ -214,12 +214,56 @@ def _tencent_prefix(code):
     return ash_market.tx_prefix(code) + str(code).strip().zfill(6)
 
 
+# ── 成交量单位：不许假定，必须对拍反解（2026-11-24 实测修正） ───────────────────
+# ⚑ 腾讯 qfqday 的成交量单位**按板块不同**：
+#     科创板 688/689 → 「股」；沪深主板 / 创业板 → 「手」（两者差 100 倍）。
+#   而 bars_source（sina 源）与本地 db 一律是「股」。
+#   两者混用 ⇒ 跨源算成交额/量比会**静默错 100 倍**（2026-11-24 盘中算
+#   「今日成交额 / 昨日 bar 成交额」时踩到：胜宏科技算出 0.53 亿，实际 53 亿）。
+#   注：同源比值（v5/v20、today_vr）量纲会约掉，所以历史强度/威科夫判定未受污染。
+#   修法：用同一响应里的 qt 实时成交额 f[37]（单位「万元」）与最后一根 bar 对拍，
+#        比值≈1 ⇒ 原单位是股；比值≈100 ⇒ 原单位是手。判不了才退回代码前缀兜底。
+VOL_MULT_SHARE_PAIR = (0.6, 1.7)      # v*close / 成交额 ≈ 1   ⇒ 「股」
+VOL_MULT_HAND_PAIR = (55.0, 180.0)    # v*close / 成交额 ≈ 100 ⇒ 「手」
+
+
+def _resolve_vol_mult(code, qt_row, last_v, last_close):
+    """反解「成交量 → 股」的乘数：1.0（原单位已是股）或 100.0（原单位是手）。
+
+    对拍锚点：qt[37] = 当日成交额（万元），与 qfqday 最后一根同源同时点，
+    所以 last_v * last_close 与该值的比值能直接暴露单位（实测：300476≈101、
+    601138≈100、688018≈1.02）。
+    """
+    try:
+        amt_wan = float(qt_row[37]) if qt_row and len(qt_row) > 37 else 0.0
+    except (TypeError, ValueError, IndexError):
+        amt_wan = 0.0
+    if last_v and last_close and amt_wan > 0:
+        try:
+            k = (amt_wan * 1e4) / (float(last_v) * float(last_close))
+        except (TypeError, ValueError, ZeroDivisionError):
+            k = 0.0
+        lo, hi = VOL_MULT_SHARE_PAIR
+        if lo <= k <= hi:
+            return 1.0
+        lo, hi = VOL_MULT_HAND_PAIR
+        if lo <= k <= hi:
+            return 100.0
+    # 对拍不可用（停牌 / qt 缺字段）⇒ 退回代码前缀兜底，仍是显式口径而非假定
+    return 1.0 if str(code).strip().startswith(("688", "689")) else 100.0
+
+
 def fetch_stock_bars(code, n=140):
-    """个股日线 → [{d,o,h,l,c,v}]（旧→新），失败返回 []。
+    """个股日线 → [{d,o,h,l,c,v}]（旧→新），失败返回 []。★ v 单位统一为「股」。
 
     市场分流（老罗 2026-10-15 实测修正）：A 股走腾讯前复权日K；美股 ticker 走
     bars_source.us_quote 三级链路 —— 腾讯美股日K只回稀疏快照（实测 n=140 仅得
     1~2 根），强度判定要 25+ 根，只有项目既有美股链路能给满。
+
+    ⚑ 成交量量纲（2026-11-24 修）：腾讯 qfqday 对科创板返回「股」、对主板/创业板
+    返回「手」，**必须反解后统一乘成「股」**，才与 bars_source / 本地 db 同口径。
+    见 `_resolve_vol_mult`。下游若只用同源比值（如 today_vr）不受影响；跨源算
+    成交额的地方全靠这条归一化。
     """
     c = str(code).strip()
     if c.isalpha():                      # 美股 ticker（如 ALAB）
@@ -237,10 +281,29 @@ def fetch_stock_bars(code, n=140):
         txt = urllib.request.urlopen(req, timeout=15).read().decode("utf-8", "ignore")
         node = json.loads(txt)["data"][sym]
         rows = node.get("qfqday") or node.get("day") or []
+        if not rows:
+            return []
+        qt_map = node.get("qt") or {}
+        qt_row = qt_map.get(sym) if isinstance(qt_map, dict) else None
+        # ★ 用最后一根有效 bar 对拍反解单位（停牌当日 v=0 时往前找一根）
+        probe = None
+        for r in reversed(rows):
+            try:
+                if len(r) >= 6 and float(r[5]) > 0 and float(r[2]) > 0:
+                    probe = r
+                    break
+            except (ValueError, TypeError, IndexError):
+                continue
+        mult = _resolve_vol_mult(
+            c, qt_row,
+            float(probe[5]) if probe else 0.0,
+            float(probe[2]) if probe else 0.0,
+        )
         bars = []
         for r in rows:
             bars.append({"d": r[0], "o": float(r[1]), "c": float(r[2]),
-                         "h": float(r[3]), "l": float(r[4]), "v": float(r[5])})
+                         "h": float(r[3]), "l": float(r[4]),
+                         "v": float(r[5]) * mult})
         return bars
     except Exception:
         return []
