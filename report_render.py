@@ -1319,6 +1319,85 @@ def build_wyckoff(a, n):
     return "\n".join(parts)
 
 
+def build_combo_view(a, n):
+    """筹码面 × 威科夫 组合观点（老罗 2026-11-25 定：两个标注要合成一句结论）。
+
+    数据源 a["combo_view"]（battle_analyze 写，gates/chip_wy_combo.py 算）。
+    ⚑ 只把两路标注合成一句可执行观点并给出回测依据，**不改 recommend/仓位/止损**；
+      与「筹码面一致性闸门」的差异（单维值 vs 组合结论）在本卡明写。
+    """
+    r = a.get("combo_view")
+    if not isinstance(r, dict) or not r.get("computable"):
+        return ""
+    action = str(r.get("action") or "watch")
+    color = {"allow": "#2f855a", "allow_short": "#b7791f",
+             "deny": "#c53030", "watch": "#718096"}.get(action, "#718096")
+    dcn = {"bull": "看多", "bear": "看空", "neutral": "中性"}.get(
+        str(r.get("direction")), "—")
+    bcn = {"wyckoff": "威科夫主导", "chip": "筹码主导"}.get(
+        str(r.get("basis")), "无依据")
+    ccn = {"high": "高", "mid": "中", "low": "低"}.get(str(r.get("confidence")), "低")
+    parts = [
+        "<div class='card' style='border-left:5px solid %s'>" % color,
+        "<h3>筹码 × 威科夫 组合观点 <span class='sec-no'>%s</span></h3>"
+        % esc(str(r.get("action_cn") or "")),
+        "<p><b>%s</b></p>" % esc(str(r.get("headline") or "")),
+        "<div class='kpis'>",
+        "<div class='kpi'>筹码 <b>%s</b></div>" % esc(str(r.get("chip_state") or "缺失")),
+        "<div class='kpi'>威科夫 <b>%s</b></div>" % esc(str(r.get("wy_stage_cn") or "未知")),
+        "<div class='kpi'>依据 <b>%s</b></div>" % esc(bcn),
+        "<div class='kpi'>方向 <b>%s</b></div>" % esc(dcn),
+        "<div class='kpi'>置信 <b>%s</b></div>" % esc(ccn),
+    ]
+    if r.get("conflict"):
+        parts.append("<div class='kpi' style='color:#c53030'>两路<b>方向冲突</b></div>")
+    parts.append("</div>")
+
+    if r.get("override") == "release":
+        single = r.get("chip_allow_single")
+        parts.append(
+            "<p class='note'><b>本卡与首屏筹码闸门口径不同（这是有意的）</b>："
+            "单维表 <code>state_allow_new=%s</code> 只看筹码，判「不新开仓」；"
+            "组合层按趋势背景解除 ⇒ 以本卡为准。首屏那行是单维结论，不是最终结论。</p>"
+            % esc(str(single)))
+
+    reasons = r.get("reasons") or []
+    if reasons:
+        parts.append("<ul class='note'>")
+        for x in reasons:
+            parts.append("<li>%s</li>" % esc(str(x)))
+        parts.append("</ul>")
+
+    ev = r.get("evidence") or []
+    if ev:
+        parts.append("<table><tr><th>证据组</th><th>n</th><th>超额5日</th>"
+                     "<th>超额10日</th><th>胜率</th></tr>")
+        for item in ev:
+            try:
+                name, e = item
+            except Exception:                   # noqa: BLE001
+                continue
+            parts.append(
+                "<tr><td>%s</td><td>%s</td><td>%s%%</td><td>%s%%</td><td>%s%%</td></tr>"
+                % (esc(str(name)), num(e.get("n"), 0), num(e.get("exc5"), 2),
+                   num(e.get("exc10"), 2), num(e.get("win"), 0)))
+        parts.append("</table>")
+        parts.append(
+            "<p class='note'>超额 = 前向收益 − 同日全样本截面均值（已剥离大盘涨跌）。"
+            "样本 2376 条 / 297 只 / 18 个时点（2026-06~11）。"
+            "回测脚本 <code>research/bt_chip_drain_exempt_2026-11-25.py</code>。</p>")
+
+    parts.append(
+        "<p class='note'><b>筹码层只做否决，不做方向</b>：吸筹 −0.08%、锁仓 +0.82%、"
+        "拉升 −1.72%（方向反）都是噪音或反向 ⇒ 筹码「好状态」只表示<b>不否决</b>，"
+        "不是买入理由。正向依据 = <b>威科夫方向 + 均线（分步试仓第几步）+ 相对强度</b>。</p>")
+    parts.append(
+        "<p class='note'>本卡是<b>标注层</b>：不改 <code>recommend</code>、不改仓位与止损，"
+        "开仓仍需现役闸门（顶部确认 / 扫雷 / 分步试仓）+ 盘中扳机。</p>")
+    parts.append("</div>")
+    return "\n".join(parts)
+
+
 def build_staged_entry(a, n):
     """趋势转换分步试仓卡片（老罗 2026-11-24 定 L1：标注层，不是开仓闸）。
 
@@ -1637,8 +1716,15 @@ def build_scr_gate(a, n):
         return ("<span class='g-ok'>✔ 筹码面一致：%s</span> —— 允许新开仓，"
                 "本路径<b>构成推荐最高盈亏比路径</b>。<br><b>筹码面提示</b>：%s"
                 % (esc(st), note))
+    _cv = a.get("combo_view") if isinstance(a.get("combo_view"), dict) else {}
+    _rel = ""
+    if _cv.get("override") == "release":
+        _rel = ("<br><b>⚠ 组合层已解除此禁令</b>（威科夫 %s + 筹码 %s）："
+                "单维表只回答「只看筹码能不能开仓」，最终结论见下方"
+                "「筹码 × 威科夫 组合观点」卡。"
+                % (esc(str(_cv.get("wy_stage_cn") or "有方向")), esc(st)))
     return ("<span class='g-no'>✘ 筹码面不一致：%s</span> —— <b>本路径不构成推荐最高盈亏比路径</b>。"
-            "<br>%s" % (esc(st), note))
+            "<br>%s%s" % (esc(st), note, _rel))
 
 
 def build_activity(a, n):
@@ -2220,6 +2306,7 @@ def render(a, n, tmpl_path=DEFAULT_TMPL, vp_from=None, vp_to=None):
         "SCR_BLOCK": build_scr(a, n) + build_activity(a, n),
         # ★ 威科夫阶段（老罗 2026-11-23：重点买入参考）——紧跟筹码面之后
         "WYCKOFF_BLOCK": build_wyckoff(a, n),
+        "COMBO_VIEW_BLOCK": build_combo_view(a, n),
         # ★ 趋势转换分步试仓（老罗 2026-11-24 L1：标注层）——紧跟威科夫之后
         "STAGED_ENTRY_BLOCK": build_staged_entry(a, n),
         "TOP_SIGNAL_BLOCK": build_top_signal(a, n),

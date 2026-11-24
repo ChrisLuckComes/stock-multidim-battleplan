@@ -2221,6 +2221,20 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
             "stage_n": 0, "gate": "unknown", "steps": [], "tranches": [],
             "is_annotation_only": True,
         }
+    # ★ 筹码面 × 威科夫 组合观点（老罗 2026-11-25 定：两个标注要合成一句结论）。
+    #   依据：2376 样本交叉回测 —— 同一筹码状态在不同趋势背景下含义相反
+    #   （破位下行：威多 +1.36% / 威中性 −1.63%），单看任一维度都会双向错。
+    #   与威科夫同纪律：只写 out["combo_view"] 一个软键，不改 recommend/odds/
+    #   仓位/止损/任何阈值；失败降级 computable=False，不打断报告。
+    try:
+        from gates.chip_wy_combo import combine as _cw_combine
+        out["combo_view"] = _cw_combine(chip=out.get("scr"), wyckoff=out.get("wyckoff"))
+    except Exception as e:                      # noqa: BLE001
+        out["combo_view"] = {
+            "computable": False, "action": "watch",
+            "headline": "组合观点计算失败：%s" % e,
+            "reasons": [], "evidence": [], "is_annotation_only": True,
+        }
     return out
 
 
