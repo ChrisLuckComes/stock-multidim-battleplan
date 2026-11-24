@@ -1319,12 +1319,13 @@ def build_wyckoff(a, n):
     return "\n".join(parts)
 
 
-def build_combo_view(a, n):
+def build_combo_view(a, n, embed=False):
     """筹码面 × 威科夫 组合观点（老罗 2026-11-25 定：两个标注要合成一句结论）。
 
     数据源 a["combo_view"]（battle_analyze 写，gates/chip_wy_combo.py 算）。
-    ⚑ 只把两路标注合成一句可执行观点并给出回测依据，**不改 recommend/仓位/止损**；
-      与「筹码面一致性闸门」的差异（单维值 vs 组合结论）在本卡明写。
+    ⚑ 只把两路标注合成一句可执行观点并给出回测依据，**不改 recommend/仓位/止损**。
+    ⚑ embed=True ⇒ 不套外层 card，供 build_wy_combo 并入威科夫章节（老罗 2026-11-25：
+      「威科夫和筹码×威科夫融合在一个章节」）。
     """
     r = a.get("combo_view")
     if not isinstance(r, dict) or not r.get("computable"):
@@ -1337,10 +1338,13 @@ def build_combo_view(a, n):
     bcn = {"wyckoff": "威科夫主导", "chip": "筹码主导"}.get(
         str(r.get("basis")), "无依据")
     ccn = {"high": "高", "mid": "中", "low": "低"}.get(str(r.get("confidence")), "低")
-    parts = [
-        "<div class='card' style='border-left:5px solid %s'>" % color,
-        "<h3>筹码 × 威科夫 组合观点 <span class='sec-no'>%s</span></h3>"
-        % esc(str(r.get("action_cn") or "")),
+    parts = []
+    if not embed:
+        parts.append("<div class='card' style='border-left:5px solid %s'>" % color)
+    parts += [
+        "<h3%s>筹码 × 威科夫 组合观点 <span class='sec-no'>%s</span></h3>"
+        % (" style='margin-top:18px;border-top:1px dashed #cbd5e0;padding-top:14px'"
+           if embed else "", esc(str(r.get("action_cn") or ""))),
         "<p><b>%s</b></p>" % esc(str(r.get("headline") or "")),
         "<div class='kpis'>",
         "<div class='kpi'>筹码 <b>%s</b></div>" % esc(str(r.get("chip_state") or "缺失")),
@@ -1356,9 +1360,10 @@ def build_combo_view(a, n):
     if r.get("override") == "release":
         single = r.get("chip_allow_single")
         parts.append(
-            "<p class='note'><b>本卡与首屏筹码闸门口径不同（这是有意的）</b>："
-            "单维表 <code>state_allow_new=%s</code> 只看筹码，判「不新开仓」；"
-            "组合层按趋势背景解除 ⇒ 以本卡为准。首屏那行是单维结论，不是最终结论。</p>"
+            "<p class='note'><b>单维筹码表判「不新开仓」，组合层按趋势背景解除</b>："
+            "单维 <code>state_allow_new=%s</code> 只回答「只看筹码能不能开仓」；"
+            "组合层按威科夫方向解除 ⇒ 以本卡为准。⚑ 筹码<b>已不作闸门</b>"
+            "（老罗 2026-11-25 定），开仓条件 = <b>板块 RS + 威科夫</b>。</p>"
             % esc(str(single)))
 
     reasons = r.get("reasons") or []
@@ -1393,9 +1398,30 @@ def build_combo_view(a, n):
         "不是买入理由。正向依据 = <b>威科夫方向 + 均线（分步试仓第几步）+ 相对强度</b>。</p>")
     parts.append(
         "<p class='note'>本卡是<b>标注层</b>：不改 <code>recommend</code>、不改仓位与止损，"
-        "开仓仍需现役闸门（顶部确认 / 扫雷 / 分步试仓）+ 盘中扳机。</p>")
-    parts.append("</div>")
+        "开仓仍需现役闸门（板块 RS 必要条件 / 顶部确认 / 扫雷 / 分步试仓）+ 盘中扳机。</p>")
+    if not embed:
+        parts.append("</div>")
     return "\n".join(parts)
+
+
+def build_wy_combo(a, n):
+    """★ 威科夫阶段 × 筹码组合观点（融合成一章，老罗 2026-11-25 定）。
+
+    「威科夫和筹码×威科夫融合在一个章节」⇒ 一张卡里：
+    上半 = 威科夫阶段标注（build_wyckoff），下半 = 组合观点（build_combo_view embed）。
+    两路都没算出来时返回空串（与各卡原行为一致）。
+    """
+    wy = build_wyckoff(a, n)
+    cv = build_combo_view(a, n, embed=True)
+    if not cv:
+        return wy
+    if not wy:
+        return build_combo_view(a, n)
+    body = wy.rstrip()
+    i = body.rfind("</div>")
+    if i < 0:                                  # 结构异常：退化为并列两块
+        return wy + build_combo_view(a, n)
+    return body[:i] + cv + body[i:]
 
 
 def build_staged_entry(a, n):
@@ -1725,6 +1751,138 @@ def build_scr_gate(a, n):
                 % (esc(str(_cv.get("wy_stage_cn") or "有方向")), esc(st)))
     return ("<span class='g-no'>✘ 筹码面不一致：%s</span> —— <b>本路径不构成推荐最高盈亏比路径</b>。"
             "<br>%s%s" % (esc(st), note, _rel))
+
+
+def build_entry_gate(a, n):
+    """★ 开仓闸门（老罗 2026-11-25 定：筹码退出闸门，换成「板块 RS + 威科夫」）。
+
+    两个**必要条件**都过才放行：
+      ① 板块内 RS 不属后排 —— `gates/sector_rs.py`，deny 线 = 分位 0.40
+         （实测：板块内后 40% 组超额 −0.58%/−0.68%，前 60% 非负）
+      ② 威科夫不是派发 —— distribution 单维 −15.30%/胜率 0%（所有背景全负）
+    筹码只作附注，**不参与判定**（吸筹 −0.08%、锁仓 +0.82%、拉升 −1.72% 皆噪音或反向）。
+
+    `unknown` 一律「不否决、也不放行」：明写未验证，不假装通过。
+    """
+    rs = a.get("sector_rs") if isinstance(a.get("sector_rs"), dict) else {}
+    wy = a.get("wyckoff") if isinstance(a.get("wyckoff"), dict) else {}
+    rs_v = str(rs.get("verdict") or "unknown")
+    wy_stage = str(wy.get("stage") or "")
+    wy_cn = str(wy.get("stage_cn") or "未知")
+    fails, oks, unk = [], [], []
+
+    # ① 板块 RS
+    if rs_v == "deny":
+        fails.append(
+            "**板块 RS 后排**：%s 内第 %s/%s 名（分位 %s%%）⇒ 后排杂毛不做"
+            % (esc(str(rs.get("sector") or "板块")), rs.get("rank"), rs.get("n_ranked"),
+               num((rs.get("pct") or 0) * 100, 0)))
+    elif rs_v == "pass":
+        oks.append("板块 RS %s（%s 第 %s/%s 名）"
+                   % (esc(str(rs.get("tier_cn") or "")), esc(str(rs.get("sector") or "")),
+                      rs.get("rank"), rs.get("n_ranked")))
+    else:
+        unk.append("板块 RS 未验证（%s）" % esc(str(rs.get("action_cn") or "无法定位")))
+
+    # ② 威科夫
+    if wy_stage == "distribution":
+        fails.append("**威科夫派发**（%s）：单维 −15.30%%/胜率 0%%，任何趋势背景都负" % esc(wy_cn))
+    elif wy_stage in ("accumulation", "markup"):
+        oks.append("威科夫 %s" % esc(wy_cn))
+    elif wy_stage == "markdown":
+        unk.append("威科夫 %s（只有短线反抽 alpha，中期 −0.56%%）" % esc(wy_cn))
+    else:
+        unk.append("威科夫 %s（无方向）" % esc(wy_cn))
+
+    # ⚑ 老罗 2026-11-25：筹码已退出闸门，首屏不再留任何筹码入口
+    #   （筹码只出现在「威科夫 × 筹码」融合章节里）。
+    chip_note = ""
+
+    if fails:
+        head = "<span class='g-no'>✘ 开仓闸门不通过</span>"
+    elif unk:
+        head = "<span class='g-warn'>⚠ 开仓闸门未完全验证</span>"
+    else:
+        head = "<span class='g-ok'>✔ 开仓闸门通过</span>"
+
+    tail = " ｜ ".join(["<b>必要条件</b>：" + "、".join(oks)] if oks else [])
+    tail2 = " ｜ ".join(["<b>未验证</b>：" + "、".join(unk)] if unk else [])
+    body = "；".join(fails)
+    line = head + (" —— " + body if body else "")
+    if tail or tail2:
+        line += "<br>" + " ｜ ".join(x for x in (tail, tail2) if x)
+    if not rs and not wy:
+        line += "<br>两路数据都没算出来 ⇒ 本闸门未生效（重跑 battle_analyze.py 即自动带上）"
+    return line + chip_note
+
+
+def _rs_weak_rel():
+    """板块崩塌阈值（pt）。report_render 不硬依赖 gates/，导入失败回落到 -8.0。"""
+    try:
+        from gates.sector_rs import WEAK_REL
+        return abs(float(WEAK_REL))
+    except Exception:                           # noqa: BLE001
+        return 8.0
+
+
+def build_sector_rs(a, n):
+    """板块内 RS 排位卡（老罗 2026-11-25：RS 排前列是选股必要条件）。"""
+    r = a.get("sector_rs")
+    head = "<h3>板块内 RS 排位（必要条件闸门 · <code>gates/sector_rs.py</code>）</h3>"
+    if not isinstance(r, dict):
+        return ("<div class='card'>" + head +
+                "<p class='note'>本次未算板块 RS（旧 analysis.json 无该键）。"
+                "重跑 <code>battle_analyze.py</code> 即自动带上。</p></div>")
+    if r.get("market") == "US":
+        return ("<div class='card'>" + head +
+                "<p class='note'>美股暂不覆盖：板块映射表只覆盖 A 股。"
+                "不以「算不出」否决美股。</p></div>")
+
+    v = str(r.get("verdict") or "unknown")
+    cls = {"pass": "b-ok", "deny": "b-no", "unknown": "b-warn"}.get(v, "b-warn")
+    color = {"pass": "#2f855a", "deny": "#c53030"}.get(v, "#718096")
+    rows = []
+    if r.get("computable"):
+        rows.append("<tr><td>本票 <b>%s</b></td><td>%+.2f%%</td><td><b>%s/%s</b>（分位 %s%%）</td></tr>"
+                    % (esc(str(r.get("name") or r.get("code"))), (r.get("rs_self") or 0),
+                       r.get("rank"), r.get("n_ranked"), num((r.get("pct") or 0) * 100, 0)))
+        for i, t in enumerate(r.get("top3") or [], 1):
+            if t.get("code") == r.get("code"):
+                continue
+            rows.append("<tr><td>板块第 %d 名 %s</td><td>%+.2f%%</td><td>—</td></tr>"
+                        % (i, esc(str(t.get("code"))), t.get("rs") or 0))
+
+    kpis = [
+        "<div class='kpi'>板块 <b>%s</b></div>" % esc(str(r.get("sector") or "未定位")),
+        "<div class='kpi'>有效样本 <b>%s</b> 只</div>" % (r.get("n_ranked") or 0),
+        "<div class='kpi'>板块20日中位 <b>%s%%</b></div>" % num(r.get("sector_avg20"), 2),
+        "<div class='kpi'>全市场中位 <b>%s%%</b></div>" % num(r.get("mkt_avg20"), 2),
+        "<div class='kpi'>数据 asof <b>%s</b></div>" % esc(str(r.get("asof") or "—")),
+    ]
+    parts = [
+        "<div class='card' style='border-left:5px solid %s'>" % color + head,
+        "<p><span class='badge %s'>%s</span> <b>%s</b></p>"
+        % (cls, esc(str(r.get("tier_cn") or "未定位")), esc(str(r.get("action_cn") or ""))),
+        "<div class='kpis'>" + "".join(kpis) + "</div>",
+    ]
+    if rows:
+        parts.append("<table><tr><th>对象</th><th>20日涨幅</th><th>板块内名次</th></tr>"
+                     + "".join(rows) + "</table>")
+    reasons = r.get("reasons") or []
+    if reasons:
+        parts.append("<ul class='note'>" + "".join("<li>%s</li>" % esc(str(x)) for x in reasons)
+                     + "</ul>")
+    parts.append(
+        "<p class='note'><b>判据来源</b>：57 板块 807 只 / 296 交易日 / 每 5 日截面，"
+        "超额 = 前向收益 − 同日同板块截面均值。趋势票池内 RS 后 20% 组 −0.58%/−0.68%、"
+        "20~40% 组 −0.19%/−0.18%；前 20% 组 +0.10%/−0.04% ≈ 0 ⇒ "
+        "<b>前排没有正 alpha，只能用来剔除后排</b>（必要条件、不是加分项）。"
+        "脚本 <code>research/bt_sector_rs_2026-11-25.py</code>。</p>")
+    parts.append(
+        "<p class='note'>⚑ 板块整体崩（相对市场 &lt; %.0fpt）时内部排名无意义 ⇒ 判 unknown，"
+        "不否决也不放行；方向交给 20 周线 / 威科夫 / 强度闸门。</p>" % _rs_weak_rel())
+    parts.append("</div>")
+    return "\n".join(parts)
 
 
 def build_activity(a, n):
@@ -2294,8 +2452,8 @@ def render(a, n, tmpl_path=DEFAULT_TMPL, vp_from=None, vp_to=None):
         "BEST_TITLE": esc(best_title),
         "BEST_KPIS": best_kpis,
         "BEST_NOTE": best_note,
-        # ★ 筹码面 × 最高盈亏比路径 一致性闸门（老罗 2026-10-14）：不一致 ⇒ 不构成推荐
-        "SCR_GATE": build_scr_gate(a, n) + build_breakout_hold_gate(a, n),
+        # ★ 开仓闸门（老罗 2026-11-25：筹码退出闸门，换成「板块 RS + 威科夫」必要条件）
+        "ENTRY_GATE": build_entry_gate(a, n) + build_breakout_hold_gate(a, n),
         "BASIS_DATE": esc(m["basis_date"]),
         "MODE_ROWS": build_mode_rows(a),
         "MODE_NOTE": note(n.get("mode_note"), ""),
@@ -2303,15 +2461,18 @@ def render(a, n, tmpl_path=DEFAULT_TMPL, vp_from=None, vp_to=None):
         "PLAN_NOTE": note(n.get("plan_note"), ""),
         "TWO_WAYS_BLOCK": build_two_ways(a, n),
         "CALIBER_NOTES": "".join("<p>%s</p>" % _caliber_html(x) for x in caliber),
-        "SCR_BLOCK": build_scr(a, n) + build_activity(a, n),
-        # ★ 威科夫阶段（老罗 2026-11-23：重点买入参考）——紧跟筹码面之后
-        "WYCKOFF_BLOCK": build_wyckoff(a, n),
-        "COMBO_VIEW_BLOCK": build_combo_view(a, n),
+        # ⚑ 2026-11-25 老罗定：筹码面章节整章移除（「有了组合观点之后」），
+        #   股性活跃度是另一维、保留独立成块。
+        "ACTIVITY_BLOCK": build_activity(a, n),
+        # ★ 板块内 RS 排位（必要条件闸门）——紧跟首屏闸门，先给「选谁」的依据
+        "SECTOR_RS_BLOCK": build_sector_rs(a, n),
+        # ★ 威科夫阶段 × 筹码组合观点（融合成一章，老罗 2026-11-25）
+        "WY_COMBO_BLOCK": build_wy_combo(a, n),
         # ★ 趋势转换分步试仓（老罗 2026-11-24 L1：标注层）——紧跟威科夫之后
         "STAGED_ENTRY_BLOCK": build_staged_entry(a, n),
         "TOP_SIGNAL_BLOCK": build_top_signal(a, n),
         "CONFLUENCE_BLOCK": build_confluence(a, n),
-        "RANKING_BONUS_BLOCK": build_ranking_bonus(a, n),
+        # ⚑ 2026-11-25 老罗定：形态质量章节移除（「没有用」）；函数保留供旧 json 兼容
         "OPEN_PLAYBOOK_BLOCK": build_open_playbook(a, n),
         "TIER_RANKING_BLOCK": build_tier_ranking(a, n),
         "SECTOR_RISK_BLOCK": build_sector_risk(a, n),

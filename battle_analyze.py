@@ -1829,15 +1829,54 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
     #   手工给的优先级更高 —— 自动结果永远不覆盖人工选择。
     auto_theme = None
     if not peer_list and auto_peers and not is_us:
-        auto_theme, _acodes = auto_peer_codes(code, limit=auto_peer_n)
-        if _acodes:
-            peer_list = [{"code": c, "name": nm} for c, nm in _acodes]
-            for c, nm in _acodes:
-                peer_names.setdefault(c, nm)
-            notes_all.append("同行对照自动补：板块[%s] 取 %d 只"
-                             % (auto_theme, len(_acodes)))
+        # ★ 老罗 2026-11-25：同行/板块一律取「市场实际炒作概念」（自维护映射表），
+        #   不用东财行业。反例：宝丽迪 300905 申万行业是「其他化学纤维」⇒ 东财同行
+        #   给的是中复神鹰/吉林碳谷（碳纤维），而市场炒的是光刻胶 ⇒ 整张对照表取错。
+        _sec_m, _mem_m = None, []
+        try:
+            from gates.sector_rs import sector_of as _sector_of_m
+            from gates.sector_rs import fetch_closes as _fetch_closes_m
+            _sec_m, _mem_m = _sector_of_m(code)
+        except Exception:                       # noqa: BLE001
+            _sec_m, _mem_m = None, []
+        if _sec_m and len(_mem_m) > 1:
+            auto_theme = _sec_m
+            _cl_m, _ = _fetch_closes_m([c for c in _mem_m if c != code])
+            _sl = {}
+            for _c, _seq in _cl_m.items():
+                if len(_seq) >= 21 and _seq[-21][1] > 0:
+                    _sl[_c] = _seq[-1][1] / _seq[-21][1] - 1.0
+            _pick = sorted(_sl.items(), key=lambda kv: -kv[1])[:auto_peer_n]
+            _names = {}
+            _db = os.path.join(HERE, "data", "screener.db")
+            if _pick and os.path.exists(_db):
+                try:
+                    import sqlite3 as _sq
+                    _con = _sq.connect(_db)
+                    _q = ",".join("?" * len(_pick))
+                    for _c, _n in _con.execute(
+                            "select code,name from stocks where code in (%s)" % _q,
+                            [x[0] for x in _pick]):
+                        _names[_c] = _n
+                    _con.close()
+                except Exception:               # noqa: BLE001
+                    _names = {}
+            peer_list = [{"code": c, "name": _names.get(c, c)} for c, _ in _pick]
+            for c, _ in _pick:
+                peer_names.setdefault(c, _names.get(c, c))
+            notes_all.append(
+                "同行对照自动补：按炒作板块[%s] 取 20 日最强 %d 只（映射表口径，非东财行业）"
+                % (auto_theme, len(peer_list)))
         else:
-            notes_all.append("同行对照自动补失败（板块成分取不到），对照表为空")
+            auto_theme, _acodes = auto_peer_codes(code, limit=auto_peer_n)
+            if _acodes:
+                peer_list = [{"code": c, "name": nm} for c, nm in _acodes]
+                for c, nm in _acodes:
+                    peer_names.setdefault(c, nm)
+                notes_all.append("同行对照自动补：板块[%s] 取 %d 只（东财行业口径：映射表未覆盖本票）"
+                                 % (auto_theme, len(_acodes)))
+            else:
+                notes_all.append("同行对照自动补失败（板块成分取不到），对照表为空")
     peer_rows = []
     if peer_list:
         workers = min(PEER_WORKERS, len(peer_list))
@@ -1877,6 +1916,17 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
 
     vp20 = volprice_20d(bars)
 
+    # ★ 板块名取「市场实际炒作概念」优先（老罗 2026-11-25：宝丽迪炒光刻胶，报告却取化学纤维）。
+    #   优先级：--theme（人工）> 自维护映射表（按炒作概念归集）> 东财板块（行业口径，易取错）。
+    #   理由：申万行业「化学纤维」不是可交易主线，用它判板块 D0 / RS 排位会整体失真。
+    _map_theme = None
+    if not is_us:
+        try:
+            from gates.sector_rs import sector_of as _sector_of
+            _map_theme = _sector_of(code)[0]
+        except Exception:                       # noqa: BLE001
+            _map_theme = None
+
     out = {
         "meta": {
             "generator": "battle_analyze.py v%s" % VERSION,
@@ -1884,8 +1934,12 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
             "code": code, "sym": sym, "market": "US" if is_us else "CN",
             "name": name or market_data.get("name") or code,
             # 板块名：显式 --theme 优先；否则用自动对照查到的板块（供叠加概率板块层用）
-            "theme": theme or auto_theme,
+            "theme": theme or _map_theme or auto_theme,
             "theme_auto": (None if theme else auto_theme),
+            "theme_map": _map_theme,
+            "theme_source": ("manual" if theme
+                             else ("sector_map" if _map_theme
+                                   else ("em" if auto_theme else None))),
             "basis_date": last["d"],
             "basis_close": _f(last_c),
             "prev_close": _f(bars[-2]["c"]) if len(bars) > 1 else None,
@@ -1945,6 +1999,10 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
     if _sector_avoid:
         if rec is not None:
             notes_all.append("⛔ 板块龙头退潮（虎口夺食）硬闸门：后排禁买，recommend 已置空")
+        # 闸门前原值留档：报告仍要能显示「为什么不做 + 原可挂档在哪」，
+        # 回归测试也用它验证赔率链本身没被闸门改动（老罗 2026-11-25）。
+        out.setdefault("odds_recommend_pre_gate", rec)
+        out.setdefault("rec_up_pre_gate", rec_up)
         rec = None
         rec_up = None
         out["odds_recommend"] = None
@@ -1952,6 +2010,35 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
         # 清掉已写的「仓位口径不一致」提示（已不交易，提示无意义）
         notes_all = [x for x in notes_all if "仓位口径不一致" not in x]
     out["sector_risk"] = _sector
+    # ★ 板块内 RS 排位 —— 老罗 2026-11-25 定：「RS 需要在同板块/概念排前列，是选股必要条件，
+    #   后排杂毛不做」。实测依据见 gates/sector_rs.py docstring（57 板块 807 只 / 296 交易日）：
+    #   板块内后 40% 组超额 −0.58%/−0.68%（趋势票池内）⇒ 后排硬否决；前排无正 alpha ⇒ 只放行不加分。
+    #   与虎口夺食同一范式：deny ⇒ 撤 odds_recommend（不删买价分层表，只撤「推荐」）。
+    try:
+        from gates.sector_rs import assess as _rs_assess
+        out["sector_rs"] = _rs_assess(
+            code, name=name or market_data.get("name"),
+            market=("US" if is_us else "CN"),
+            asof=(out.get("meta") or {}).get("basis_date"))
+    except Exception as e:                      # noqa: BLE001
+        out["sector_rs"] = {
+            "code": code, "computable": False, "verdict": "unknown",
+            "tier": "unknown", "tier_cn": "未定位",
+            "action_cn": "RS 计算失败：%s" % e,
+            "reasons": ["RS 计算失败，不因此否决（与算不出的数据同纪律）"],
+            "is_gate": True,
+        }
+    _rs_block = (out["sector_rs"].get("verdict") == "deny")
+    if _rs_block:
+        if rec is not None or rec_up is not None:
+            notes_all.append("⛔ 板块内 RS 后排（必要条件不满足）⇒ 不做，odds_recommend 已置空")
+        out.setdefault("odds_recommend_pre_gate", rec)
+        out.setdefault("rec_up_pre_gate", rec_up)
+        rec = None
+        rec_up = None
+        out["odds_recommend"] = None
+        out["rec_up"] = None
+        notes_all = [x for x in notes_all if "仓位口径不一致" not in x]
     # ★ 2026-10-14 筹码面（scr_chip.py）：SCR 集中度 / 底部锁仓 / 主力成本。
     #   老罗要求「完整报告必须带筹码面结论、且放最前」⇒ 在引擎层就落地，报告只负责渲染。
     #   ⚠ 只支持 A 股（东财换手率口径）；美股与 --no-scr 一律记 None，报告层据此出占位说明。
@@ -1969,8 +2056,9 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
         if not is_us:
             out["scr_skipped"] = True
     # ★ 2026-10-16 交付层（Grok 建议4 + 盟固利 301487 教训）：最终「等/不做」
-    #   必须写明来源 —— probe 可买但被筹码闸拦下，与 probe 本身给 wait 是两回事；
-    #   不写清楚，读者会以为引擎漏判（当天下午盟固利 +5.97% 的争议正源于此）。
+    #   必须写明来源 —— 同一句「不做」可能来自 probe、可能来自闸门，不写清就以为引擎漏判。
+    #   ⚑ 2026-11-25 老罗定：筹码退出闸门 ⇒ 这里改挂**新闸门两条必要条件**
+    #   （板块 RS / 威科夫），不再出现「筹码闸」字样。
     _vsrc = []
     _po = out.get("probe") or {}
     _po_pre = _po.get("pre_order") or {}
@@ -1988,12 +2076,17 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
     _ia_act, _ia_src = intraday_action_from_probe(_po)
     if _ia_src:
         _vsrc.insert(1, _ia_src)
+    # ★ 新闸门来源（老罗 2026-11-25）：板块 RS + 威科夫，取代原「筹码闸」那一行。
+    _rs_d = out.get("sector_rs") or {}
+    if _rs_d:
+        _rk = ("（%s 第 %s/%s 名）" % (_rs_d.get("sector"), _rs_d.get("rank"),
+                                    _rs_d.get("n_ranked"))) if _rs_d.get("rank") else ""
+        _vsrc.append("板块RS：%s%s" % (_rs_d.get("tier_cn") or "未定位", _rk))
+    _wy_d = out.get("wyckoff") or {}
+    if _wy_d.get("stage_cn"):
+        _vsrc.append("威科夫：%s" % _wy_d["stage_cn"])
     _scr_d = out.get("scr") or {}
     if _scr_d and not _scr_d.get("error"):
-        _vsrc.append("筹码闸：%s ⇒ %s（%s）"
-                     % (_scr_d.get("state"), _scr_d.get("state_trade"),
-                        "✅允许新开仓" if _scr_d.get("state_allow_new")
-                        else "⛔不允许新开仓"))
         # ⚑ 位置闸（老罗 2026-10-27）：现价离主力成本区太远 ⇒ 追高、赔率被吃光。
         #   提示级（**不改 recommend**）；闸门单一真源 screener/filters.py。
         #   与 gen_pass_list / q3_filter 同一口径 ⇒ 报告层与名单层不会打架。
@@ -2200,6 +2293,11 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
             "why": "威科夫阶段计算失败：%s" % e, "anchors": [], "metrics": {},
             "computable": False, "is_annotation_only": True,
         }
+    # ★ 威科夫结论补进 verdict_source（老罗 2026-11-25：筹码闸换成「板块RS + 威科夫」）。
+    #   威科夫在 verdict_source 之后才算 ⇒ 这里补挂，否则结论来源只剩 RS 一条腿。
+    if isinstance(out.get("wyckoff"), dict) and out["wyckoff"].get("stage_cn"):
+        out.setdefault("verdict_source", []).append(
+            "威科夫：%s" % out["wyckoff"]["stage_cn"])
     # ★ 趋势转换分步试仓（老罗 2026-11-24 定 L1：标注层，不是闸）。
     #   与威科夫同纪律：只写 out["staged_entry"] 一个软键，绝不改 recommend/odds/
     #   仓位/止损/任何阈值；复用威科夫已取的前复权 640 根，不额外联网取数。
@@ -2210,7 +2308,7 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
         _se_plan["code"] = code
         # ★ 推荐档在 out 顶层（odds_recommend），不在 plan 内 ⇒ 显式并入，
         #   否则分档试仓拿不到可执行买价/止损，股数全算不出来（端到端踩过）。
-        _se_rec = out.get("odds_recommend")
+        _se_rec = out.get("odds_recommend") or out.get("odds_recommend_pre_gate")
         if isinstance(_se_rec, dict):
             _se_plan["odds_recommend"] = _se_rec
         out["staged_entry"] = _se_assess(

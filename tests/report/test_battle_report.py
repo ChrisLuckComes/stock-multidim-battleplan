@@ -603,7 +603,12 @@ class TestAnalyzeOffline(unittest.TestCase):
         self.assertAlmostEqual(prim[52.24]["r1"], 2.06, places=2)
         self.assertAlmostEqual(prim[52.68]["r1"], 1.42, places=2)
         # A 股推荐档必须高于硬止损、不高于买区上沿
-        rec = res["odds_recommend"]
+        # ⚑ 2026-11-25：板块内 RS 必要条件闸门会把后排票的 odds_recommend 置空
+        #   （601208 在「半导体·设备与材料」42 只里第 38 名、20 日 -23.4% ⇒ 后排）。
+        #   本用例验证的是**赔率链本身**，故读闸门前原值；闸门结论由
+        #   test_sector_rs_gate_clears_recommend 单独验证。
+        self.assertIsNone(res["odds_recommend"], "后排票应被 RS 闸门撤推荐")
+        rec = res.get("odds_recommend_pre_gate")
         self.assertIsNotNone(rec)
         self.assertGreater(rec["entry"], z["hard_stop"])
         self.assertLessEqual(rec["entry"], z["primary_hi"])
@@ -747,7 +752,9 @@ class TestTieLineAndCash(unittest.TestCase):
         capped = BA.analyze("601208", account=50000, cash=6000,
                             data_file=self.SNAP, intraday=False,
                             strength_gate=False)
-        b, c = base["odds_recommend"], capped["odds_recommend"]
+        # 同上：601208 被 RS 闸门撤推荐，现金封顶逻辑读闸门前原值
+        b = base.get("odds_recommend_pre_gate") or base["odds_recommend"]
+        c = capped.get("odds_recommend_pre_gate") or capped["odds_recommend"]
         # ⚑ cash=6000 时本票 1 手（5201）本来就装得下 ⇒ 封顶不触发，两者相等是
         #   **正确行为**，旧断言 `b > c` 过严（2026-10-10 修正；与同步无关，
         #   HEAD 版同样红）。真正验证「封顶生效」要用装不下 1 手的现金。
@@ -758,7 +765,7 @@ class TestTieLineAndCash(unittest.TestCase):
         tight = BA.analyze("601208", account=50000, cash=3000,
                            data_file=self.SNAP, intraday=False,
                            strength_gate=False)
-        t = tight["odds_recommend"]
+        t = tight.get("odds_recommend_pre_gate") or tight["odds_recommend"]
         self.assertLess(t["amount"], b["amount"])
         self.assertLessEqual(t["amount"], 3000)
         self.assertIsNone(base["meta"]["cash"])
