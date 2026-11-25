@@ -32,6 +32,9 @@ from gates.us_session_decide import (decide_us, plan_from_us,  # noqa: E402
                                      summarize as us_summarize)
 from gates.us_short_watch import actionable, line  # noqa: E402
 from report_render import build_two_ways, check_html  # noqa: E402
+from tests.us_wyckoff_fixtures import with_verified_markup
+decide_us = with_verified_markup(decide_us)
+
 
 
 # ─────────────────────── 夹具 ───────────────────────

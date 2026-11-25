@@ -331,6 +331,10 @@ def test_from_analysis_reads_knife_edge_from_plan():
          "meta": {"code": "ILMN", "market": "US", "basis_close": 208.21},
          "odds_recommend": {"entry": 231.81, "stop": 227.22, "qty": 0},
          "struct": {"atr14": 8.44}}
+    # This test isolates plan propagation; satisfy the US daily-stage prerequisite.
+    from gates.wyckoff_stage import stage_of
+    from tests.us_wyckoff_fixtures import markup_bars
+    a["wyckoff"] = stage_of(markup_bars())
     pb = OP.from_analysis(a, {})
     assert pb["bands"][0]["key"] == "knife_edge"
     assert pb["knife_edge"]["level"] == pytest.approx(207.69, abs=0.01)

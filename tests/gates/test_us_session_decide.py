@@ -21,6 +21,9 @@ from gates.us_session_decide import (decide_us, size_for_us, resolve_cap_us,
                                      dip_basis,
                                      hang_already_tested, evaluate_session_second_look)
 from open_playbook import long_rr, max_entry_for_rr
+from tests.us_wyckoff_fixtures import with_verified_markup
+decide_us = with_verified_markup(decide_us)
+
 
 FAILS = []
 

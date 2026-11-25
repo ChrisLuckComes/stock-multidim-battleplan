@@ -2127,7 +2127,7 @@ def us_lots(account, entry, stop, risk_pct=None):
 SNAP_DIRS = None            # None = 用 bars_source 默认目录（data/tdx、data/）
 USE_SNAP = True
 USE_CACHE = True
-US_MIN_BARS = 140           # 日线复用门槛：与扫描器/结构判定同口径
+US_MIN_BARS = 260           # 威科夫最低样本；不可用旧 140 根缓存假装验证通过
 _SRC_TXT = {"snapshot": "本地快照", "cache": "缓存", "net": "网络", "file": "指定快照"}
 _WARN_MARKS = ("失败", "回退", "不可用", "过期", "早于", "空")
 
@@ -2314,6 +2314,14 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None,
            "src": src, "src_notes": src_notes,
            "top_signal": plan.get("top_signal"),
            "knife_edge": plan.get("knife_edge")}
+
+    # Collect complete evidence, but finalize every executable channel fail-closed.
+    from gates.us_wyckoff import assess_bars as _us_wy_assess, finalize_probe as _wy_finalize
+    _wy, _wg = _us_wy_assess(bars[:-1] if live_bar is not None else bars, code=sym)
+    out["wyckoff"], out["wyckoff_gate"] = _wy, _wg
+    print(" 威科夫     : " + _wg["reason_cn"])
+    if not _wg["allow_new_long"]:
+        print(" 以下通道仅作量价研究，最终执行闸门不放行，不得据此下单。")
 
     # ---------- 1) 预案单 ----------
     print()
@@ -2620,7 +2628,7 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None,
         print("  → 盘中通道不可用。Yahoo 直连 403 属正常；**不会自动探测本机代理端口**"
               "（避免干扰你正在用的代理客户端）——"
               "要用就设 WB_US_PROXY=http://127.0.0.1:<端口> 或写 us_proxy.txt")
-        return out
+        return _wy_finalize(out)
     print(f"  数据源 {src}")
     td = date or us_trade_date(raw[-1]["d"])
     mins = [b for b in raw if us_trade_date(b["d"]) == td]
@@ -2628,7 +2636,7 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None,
         mins = [b for b in mins if us_offset_min(b["d"], td) <= us_offset_min(until, td)]
     if not mins:
         print(f"  交易日 {td} 无分钟数据")
-        return out
+        return _wy_finalize(out)
     op = mins[0]["o"]
     off_now = us_offset_min(mins[-1]["d"], td)
     print(f"  交易日 {td}（北京 {mins[0]['d']} → {mins[-1]['d']}）  共 {len(mins)} 根")
@@ -2893,7 +2901,7 @@ def probe_us(sym, account=None, min_scale=5, until=None, date=None,
         print()
         _print_vp_regime(vp, "五")
         out["vp"] = vp
-    return out
+    return _wy_finalize(out)
 
 
 if __name__ == "__main__":

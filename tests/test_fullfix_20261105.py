@@ -28,6 +28,9 @@ from gates.us_session_decide import (normalize_asof, size_for_us,  # noqa: E402
                                      decide_us, summarize as us_summarize)
 from gates.session_decide import dynamic_structure  # noqa: E402
 from battle_analyze import odds_matrix  # noqa: E402
+from tests.us_wyckoff_fixtures import with_verified_markup
+decide_us = with_verified_markup(decide_us)
+
 
 
 # ────────────────────────────── ① RR 单一真源 ──────────────────────────────

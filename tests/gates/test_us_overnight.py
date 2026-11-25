@@ -208,7 +208,8 @@ def test_load_us_day_wires_gate(monkeypatch):
 # ───────────────────────── 决策闸 / 上屏 ─────────────────────────
 def _decide(**kw):
     day = _mkday()
-    return U.decide_us(day, {"last": day["minutes"][-1]},
+    from tests.us_wyckoff_fixtures import with_verified_markup
+    return with_verified_markup(U.decide_us)(day, {"last": day["minutes"][-1]},
                        99.0, 97.0, 105.0, pulse_enabled=False, **kw)
 
 

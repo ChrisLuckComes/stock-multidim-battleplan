@@ -86,12 +86,7 @@ def test_cli_end_to_end():
 
 
 def test_isolation_from_decision_chain():
-    """接线纪律（老罗 2026-11-23 更新）：接入**报告层**，但绝不进决策链。
-
-    接入 battle_analyze（出报告时写明阶段 = 重点买入参考）后，原「不被任何引擎
-    import」的断言作废；新口径：不进 rule123/session_decide 这些**开仓/否决**决策链，
-    只允许被报告层调用，且 battle_analyze 只写 out["wyckoff"] 软键、不改 recommend。
-    """
+    """分类器保持纯标注；CN 原路径不改，US 由独立消费者落实必要条件。"""
     src = open(os.path.join(_ROOT, "gates", "wyckoff_stage.py"), encoding="utf-8").read()
     check("不 import rule123/session_decide",
           "import rule123" not in src and "from rule123" not in src
@@ -107,7 +102,7 @@ def test_isolation_from_decision_chain():
                 encoding="utf-8").read()
     check("已接入 battle_analyze 写软键",
           "from gates.wyckoff_stage import stage_of" in ba and 'out["wyckoff"] = _wy' in ba)
-    check("battle_analyze 不改 recommend（只标注）",
+    check("分类器不回写 recommend，US 消费者单独落实闸门",
           'out["wyckoff"]["recommend"]' not in ba and '_wy["recommend"]' not in ba)
     check("report_render 有 WYCKOFF_BLOCK 插槽",
           "build_wyckoff" in rr and "WYCKOFF_BLOCK" in rr and "{{WYCKOFF_BLOCK}}" in tmpl)

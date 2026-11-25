@@ -317,6 +317,10 @@ def pick_rec(a):
     拿这种档当首屏主推 = 同时给了一个「买不到的价」和一份「假赔率」。
     ⇒ 两道校验任一不过就回退 `odds_recommend`（引擎推荐的可执行档）。
     """
+    from gates.us_wyckoff import from_analysis as _us_wy_gate
+    _wg = _us_wy_gate(a)
+    if _wg is not None and not _wg["allow_new_long"]:
+        return None
     top = a.get("odds_top")
     rec = a.get("odds_recommend")
     # ★ 2026-11-19 修（伟测 688372）：`odds_recommend` 为空不代表「回落到 odds_top 更好」——
@@ -349,6 +353,10 @@ def _rec_identity_key(r):
 
 
 def build_best(a, n):
+    from gates.us_wyckoff import from_analysis as _us_wy_gate
+    _wg = _us_wy_gate(a)
+    if _wg is not None and not _wg["allow_new_long"]:
+        return ("威科夫必要条件未通过", "", esc(_wg["reason_cn"]))
     rec = pick_rec(a)
     if not rec:
         return ("（全档枚举为空）", "", "没有算出可执行档位 —— 请先确认结构与买区是否成立。")
@@ -884,6 +892,11 @@ def build_peers(a, n):
 
 
 def build_exec(a, n):
+    from gates.us_wyckoff import from_analysis as _us_wy_gate
+    _wg = _us_wy_gate(a)
+    if _wg is not None and not _wg["allow_new_long"]:
+        return rows([("动作", "<b>不出可执行新多单</b>"),
+                     ("威科夫必要条件", esc(_wg["reason_cn"]))])
     rec = pick_rec(a) or {}
     m, z = a["meta"], a["plan"].get("buy_zone") or {}
     # ★ 2026-11-19 修（伟测 688372）：无推荐档时原实现继续拼表 ⇒ 出现
@@ -1255,6 +1268,11 @@ def build_open_playbook(a, n):
         return ("<div class='card'><h3>开盘作战方案</h3>"
                 "<p class='note'>生成失败：%s</p></div>" % e)
     if pb is None:
+        from gates.us_wyckoff import from_analysis as _us_wy_gate
+        _wg = _us_wy_gate(a)
+        if _wg is not None and not _wg["allow_new_long"]:
+            return ("<div class='card'><h3>开盘作战方案</h3>"
+                    "<p>本票不出作战表：%s</p></div>" % esc(_wg["reason_cn"]))
         # ★ 2026-11-19：引擎判「突破已延伸·不追」且无推荐档 ⇒ 宁可明说不做，
         #   也不回落到 odds_primary 拼一份「挂 80.64 / 止损 77.97（0.39ATR）」的假方案。
         _v = (a.get("plan") or {}).get("verdict")
@@ -1310,11 +1328,19 @@ def build_wyckoff(a, n):
                              % (esc(str(a_.get("name", ""))), num(a_.get("value")),
                                 esc(str(a_.get("rule", "")))))
             parts.append("</table>")
-    parts.append("<p class='note'>⚑ 位置画像 + <b>重点买入参考</b>，"
-                 "不是开仓闸：开仓/否决仍认板块 D0 + 收盘站上 MA20 + 放量确认 + session_decide。"
-                 "「派发」不等于必卖、「吸筹」不等于必买。"
-                 "<b>重点用来排雷</b>：判派发/下跌的标的不参与（否决性参考）；"
-                 "判吸筹/上涨仅作加分项，仍待闸门扳机。</p>")
+    if str((a.get("meta") or {}).get("market") or "").upper() == "US":
+        parts.append("<p class='note'>阶段字段 <code>is_annotation_only</code> 只说明分类器"
+                     "本身不是闸，不能读成整套美股威科夫只是标注。"
+                     "美股新多已实际消费此阶段为必要条件："
+                     "有效吸筹/上涨仅通过本条件；派发禁开；过渡/下跌/缺数据未验证，不出新多执行单。"
+                     "仍须 VCP/结构、量价、赔率与原风控通过；不改止损，不是必买/必卖或做空信号。"
+                     "本接线不代表完成了美股收益回测验证。</p>")
+    else:
+        parts.append("<p class='note'>⚑ 位置画像 + <b>重点买入参考</b>，"
+                     "不是开仓闸：开仓/否决仍认板块 D0 + 收盘站上 MA20 + 放量确认 + session_decide。"
+                     "「派发」不等于必卖、「吸筹」不等于必买。"
+                     "<b>重点用来排雷</b>：判派发/下跌的标的不参与（否决性参考）；"
+                     "判吸筹/上涨仅作加分项，仍待闸门扳机。</p>")
     parts.append("</div>")
     return "\n".join(parts)
 
@@ -1764,6 +1790,11 @@ def build_entry_gate(a, n):
 
     `unknown` 一律「不否决、也不放行」：明写未验证，不假装通过。
     """
+    from gates.us_wyckoff import from_analysis as _us_wy_gate
+    _wg = _us_wy_gate(a)
+    if _wg is not None:
+        return "<b>美股威科夫必要条件 [%s]</b>：%s" % (
+            esc(_wg["verdict"]), esc(_wg["reason_cn"]))
     rs = a.get("sector_rs") if isinstance(a.get("sector_rs"), dict) else {}
     wy = a.get("wyckoff") if isinstance(a.get("wyckoff"), dict) else {}
     rs_v = str(rs.get("verdict") or "unknown")

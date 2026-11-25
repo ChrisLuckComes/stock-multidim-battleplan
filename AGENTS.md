@@ -663,6 +663,17 @@ P95 就被撑高，**明显在吸筹的票也会算出 SCR90 20%+ 被判「发�
 
 ---
 
+## 美股威科夫必要条件（2026-11-25）
+
+- `gates/wyckoff_stage.py` 仍是纯阶段分类器；`gates/us_wyckoff.py` 是美股新多的实际消费者，不移植 A股专有板块 RS 或筹码规则。
+- `accumulation/markup` 且有效日线指标可算才通过必要条件；`distribution` 禁开新多；`transition/markdown/unknown` 或样本不足（260 根）记未验证，不出可执行新多单。通过不等于推荐，VCP/结构、量价、赔率、ATR 延伸、夜盘新鲜度等既有风控继续独立生效。不是持仓卖出规则，也不是做空信号。
+- 接线：`battle_analyze.analyze` 撤推荐/向上档/盘中先手动作，保留原档、结构买区和止损以便解释；`probe_us` 与 `decide_us` 也不得绕过；`open_playbook.from_analysis` 和报告首推/执行表不得用 `odds_primary/top`、T0 或 notes 复活未获准的方案。
+- 日线只用已完成 K，缺日线或计算异常不能默认为通过。`decide_us` 调用方必须提供足量 `daily_bars`；CLI 已把日线 stats 的 bars 传入。不得为某只票改判据；A股回测收益数字不能当作美股验证结果。
+- 美股画像里的 `is_annotation_only` 与旧免责声明只描述阶段分类器；输出必须写明独立闸 `wyckoff_gate` 已生效，不得说整套美股威科夫只是标注。开盘方案分开写结构收盘止与硬止：硬止按即时价执行，不得写成起来再确认。
+- 回归：`python -m pytest tests/test_us_wyckoff.py tests/test_scan_gate.py tests/test_sector_rs.py tests/gates/test_us_session_decide.py -q`。旧美股执行规则测试显式提供合成上涨日线，闸门真值表/缺数据测试直接调用未包装主函数。
+
+---
+
 ## 4. 改代码的唯一正确流程（老罗 2026-10-19 定：取消双副本，路径不写死）
 
 **仓库根 = 本文件所在目录。** 不记录某台机器的盘符或用户名。

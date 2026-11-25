@@ -144,7 +144,7 @@ def fetch_intraday(symbol, ndays=1, retries=3):
     raise RuntimeError("东财分钟线取数失败：%s" % last_err)
 
 
-def fetch_daily_stats(symbol, n=60):
+def fetch_daily_stats(symbol, n=330):
     """sina 美股日线算 MA5/10/20 + ATR14 + 昨收。返回 dict。"""
     sym = symbol.upper()
     u = ("https://stock.finance.sina.com.cn/usstock/api/jsonp.php/var%20_"
@@ -169,7 +169,7 @@ def fetch_daily_stats(symbol, n=60):
     for x in trs[14:]:
         a = (a * 13 + x) / 14.0
     return {"ma5": ma(5), "ma10": ma(10), "ma20": ma(20),
-            "atr": a, "prev_close": cl[-1], "last": rows[-1]}
+            "atr": a, "prev_close": cl[-1], "last": rows[-1], "bars": rows[-n:]}
 
 
 def load_us_day(symbol, source="nasdaq", allow_night_quote=True):
@@ -1547,6 +1547,18 @@ def decide_us(day, summary, entry, stop, target, cap=None, atr=None,
     if _ext:
         out["atr_extension"] = _ext
 
+    # Necessary condition before any hang/second-look/authorized chase can emit.
+    from gates.us_wyckoff import assess_bars as _us_wy_assess
+    _wy, _wg = _us_wy_assess(daily_bars, code=day.get("code"))
+    out["wyckoff"], out["wyckoff_gate"] = _wy, _wg
+    if not _wg["allow_new_long"]:
+        return _reject(_wg["reason_cn"])
+
+    _sp = structure_plan if isinstance(structure_plan, dict) else {}
+    _struct_stop = (_sp.get("stop_plan") or {}).get("struct") or (_sp.get("buy_zone") or {}).get("struct_stop")
+    if _struct_stop is not None and price <= float(_struct_stop):
+        return _reject("现价 %.2f 已在结构线 %.2f 下方，不因硬止未破或赔率更高而新开。" % (price, float(_struct_stop)))
+
     if price <= plan_stop_orig:
         out["arm_price"] = entry
         out["arm_note"] = "回到 %.2f 以下再判（结构止损下方不接飞刀）" % entry
@@ -1952,6 +1964,7 @@ def main(argv=None):
                   pulse_enabled=not args.no_pulse,
                   chase_auth=(plan or {}).get("chase"),  # ★ 全修②
                   atr_extension=(plan or {}).get("atr_extension"),
+                  daily_bars=(stats or {}).get("bars"),
                   quote_fresh=_quote_fresh,
                   quote_note=day.get("quote_note") or "")
     d["plan_src"] = plan_src

@@ -2265,9 +2265,8 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
             "line": "ATR 延伸（atr_extension · 2026-11-06）：未知（%s）" % e,
             "skip_reason": "%s" % e,
         }
-    # ★ 威科夫阶段标注（老罗 2026-11-23 指令：完整报告要写明个股处于哪个阶段，
-    #   「是重点买入参考」）。⚑ 定位 = 位置画像 + 重点参考，**不是新闸**：
-    #   只写 out["wyckoff"] 一个软键，绝不改 recommend/odds/仓位/止损/任何阈值。
+    # ★ 威科夫阶段：分类器保持纯标注；美股新多由 us_wyckoff 消费为必要条件。
+    #   A股既有流程不变；不移植 A股板块RS，不改 VCP/赔率/止损阈值。
     #   ⚠ 取数口径：本函数上游 bars 来自 ash_bars 的**不复权缓存**（乐鑫 2026-06-05
     #   有 −29.7% 除权跳空，会把 MA200 虚高到 139.2、斜率算成 −1.76% 假值）。
     #   所以 A 股必须用 wyckoff_stage.fetch_bars 的**腾讯前复权**链重取（真实 MA200≈120、
@@ -2277,8 +2276,12 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
     try:
         from gates.wyckoff_stage import fetch_bars as _wyckoff_fetch
         from gates.wyckoff_stage import stage_of as _wyckoff_stage_of
-        _wy_bars = _wyckoff_fetch(code, n=640) if not is_us else bars
-        if not _wy_bars:                       # 前复权取数失败 ⇒ 回落传入 bars 并留痕
+        if is_us:
+            from gates.atr_extension import completed_bars as _wy_completed
+            _wy_bars = _wy_completed(bars, market="US")
+        else:
+            _wy_bars = _wyckoff_fetch(code, n=640)
+        if not _wy_bars and not is_us:         # A股前复权失败保留原兼容路径
             _wy_bars = bars
             notes_all.append("威科夫阶段：前复权取数失败，回落不复权 bars（均线可能受除权污染）")
         _se_bars = _wy_bars
@@ -2298,6 +2301,9 @@ def analyze(code, account=None, peers=None, data_file=None, n=330,
     if isinstance(out.get("wyckoff"), dict) and out["wyckoff"].get("stage_cn"):
         out.setdefault("verdict_source", []).append(
             "威科夫：%s" % out["wyckoff"]["stage_cn"])
+    if is_us:
+        from gates.us_wyckoff import apply_to_analysis as _apply_us_wyckoff
+        _apply_us_wyckoff(out, notes_all=notes_all)
     # ★ 趋势转换分步试仓（老罗 2026-11-24 定 L1：标注层，不是闸）。
     #   与威科夫同纪律：只写 out["staged_entry"] 一个软键，绝不改 recommend/odds/
     #   仓位/止损/任何阈值；复用威科夫已取的前复权 640 根，不额外联网取数。
@@ -2523,7 +2529,11 @@ def summarize(r):
         for _wa in (_wy.get("anchors") or [])[:2]:
             L.append("     证伪锚 %s=%s ⇒ %s" % (
                 _wa.get("name"), _wa.get("value"), _wa.get("rule")))
-        L.append("     ⚑ 重点买入参考（位置画像），非开仓闸；开仓仍认 D0+站上MA20+放量确认。")
+        if str((r.get("meta") or {}).get("market") or "").upper() == "US":
+            from gates.us_wyckoff import us_profile_footer as _us_wy_footer
+            L.append("     " + _us_wy_footer(r.get("wyckoff_gate")))
+        else:
+            L.append("     ⚑ 重点买入参考（位置画像），非开仓闸；开仓仍认 D0+站上MA20+放量确认。")
     L.append(" ATR %s (%s%%)   分位 60/120/250 = %s / %s / %s" % (
         s["atr14"], s["atr_pct"],
         s["percentile"].get("60", {}).get("pct"),

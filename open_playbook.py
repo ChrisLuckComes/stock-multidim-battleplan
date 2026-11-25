@@ -933,6 +933,10 @@ def from_analysis(a, n=None):
         struct.pivots_up[1]，再兜 entry + 6×ATR。
       * ★ 追价授权（锚点迁移规则，2026-09-27）：见下方 chase 块。
     """
+    from gates.us_wyckoff import from_analysis as _us_wy_gate
+    _wg = _us_wy_gate(a)
+    if _wg is not None and not _wg["allow_new_long"]:
+        return None  # never resurrect odds_primary/top, T0 or notes overrides
     n = n or {}
     plan = a.get("plan") or {}
     meta = a.get("meta") or {}
@@ -1093,6 +1097,66 @@ def from_analysis(a, n=None):
                knife_edge=_ke if isinstance(_ke, dict) else None,
                chase=chase, up_plan=_up)
     pb["up_plan"] = _up
+    if str(meta.get("market") or "").upper() == "US":
+        # Odds are not execution authorization; never rename the risk/hard leg
+        # as a structural close stop, or recommend a cheaper broken-platform fill.
+        sp = plan.get("stop_plan") or {}
+        struct_stop = sp.get("struct") or z.get("struct_stop")
+        hard_stop = sp.get("hard") or z.get("hard_stop")
+        pb["struct_stop"], pb["hard_stop"] = struct_stop, hard_stop
+        pb["is_execution_authorization"] = False
+        pb["note"] += " 本表仅是条件赔率，不是硬闸放行；须重跑主引擎和盘中量价。"
+        if struct_stop is not None:
+            floor = max(float(stop), float(struct_stop))
+            if float(entry) <= floor:
+                return None
+            pb["note"] += " 结构收盘止 %.2f；硬止 %s；赔率/仓位沿用风险止损 %.2f。" % (
+                float(struct_stop), hard_stop, float(stop))
+            # Intersect each mathematical RR band with the intact-structure region.
+            caps = {r["rr"]: r["entry"] for r in pb["ladder"]}
+            ranges = {"qualified": (caps.get(RR_RECOMMEND), caps.get(RR_QUALIFIED)),
+                      "recommend": (caps.get(RR_STRONG), caps.get(RR_RECOMMEND)),
+                      "strong": (floor, caps.get(RR_STRONG))}
+            bands = []
+            for band in pb["bands"]:
+                key = band.get("key")
+                if key in ranges:
+                    lo, hi = ranges[key]
+                    if lo is None or hi is None or hi <= floor:
+                        continue
+                    band["cond"] = "%.2f &lt; 价格 ≤ %.2f" % (max(float(lo), floor), hi)
+                    band["act"] = ("<b>仅赔率合格，非买入授权</b>；须结构未破、反弹/承接确认与原风控通过。")
+                elif key == "abandon":
+                    band["cond"] = "价格 ≤ %.2f" % floor
+                    band["act"] = "<b>不新开</b>；已到结构失效区，不因更低价/R更高而买入。"
+                bands.append(band)
+            pb["bands"] = bands
+            pb["directions"] = ["所有赔率档仅在价格 > %.2f 且结构/量价与风控通过时有效；到价不等于买入授权。" % floor]
+            pb["checkpoints"] = [
+                ("结构", "正规时段收盘破 %.2f 是结构止损；新多不得在结构线下机械接单。" % float(struct_stop)),
+                ("硬止", "硬止 %s 按即时价执行，不拖到起来再确认；不能把它当成结构收盘止。" % hard_stop),
+                ("执行", "本表仅赔率条件；主引擎/威科夫必要条件与当前量价均须通过。")]
+            hard_shown = hard_stop if hard_stop is not None else stop
+            hard_txt = ("%.2f" % float(hard_shown)) if hard_shown is not None else "未给出"
+            leg = ("结构止损只认正规时段收盘破 %.2f；硬止 %s 按即时价执行，不拖到起来再确认。"
+                   % (float(struct_stop), hard_txt))
+            split_keys = ("qualified", "recommend", "strong", "abandon", "no_ladder")
+            for band in bands:
+                shown = _strip(str(band.get("stop") or ""))
+                if band.get("key") in split_keys or "半夜" in shown or "起来" in shown:
+                    band["stop"] = leg
+            pb["t1_note"] = (
+                "结构止损 %.2f 只认正规时段收盘。硬止 %s 按即时价执行，不拖到起来再确认。"
+                "2 倍 ETF 睡觉之前无论盈亏都平仓，这不推迟正股硬止。"
+                "本表是条件赔率，不是买入授权。"
+                % (float(struct_stop), hard_txt))
+            pb["auction"]["reasons"] = [
+                "① 硬止 %s 按即时价执行，不因半夜没盯盘改成起来再确认。" % hard_txt,
+                "② 结构止损 %.2f 只认正规时段收盘，与硬止不是同一个价。" % float(struct_stop),
+                "③ 2 倍 ETF 睡觉之前无论盈亏都平仓；这不改变正股硬止的执行时点。",
+            ]
+            pb["auction"]["rules"] = ["价格必须高于 %.2f；低于结构线不接。" % floor,
+                                       "只显示条件赔率，不代表可挂/已触发；重跑主引擎与当前分时。"]
     return pb
 
 

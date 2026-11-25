@@ -241,6 +241,9 @@ def test_us_market_has_no_chase_bands():
     """美股走 _us_bands 价梯，不套 A 股追价档（ILMN 等既有测试的地盘）。"""
     a = _mk(market="US", code="ILMN", through_gate=231.81,
             chase={"limit": 231.81, "stop": 217.33, "size_ratio": 0.5})
+    from gates.wyckoff_stage import stage_of
+    from tests.us_wyckoff_fixtures import markup_bars
+    a["wyckoff"] = stage_of(markup_bars())
     pb = OP.from_analysis(a, {})
     assert pb["market"] == "US"
     assert pb["chase"] is None, "美股不得生成 A 股式追价授权"
