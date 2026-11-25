@@ -8,6 +8,7 @@
 """
 from __future__ import print_function
 
+import datetime
 import json
 import os
 import sys
@@ -30,7 +31,11 @@ def prefix_of(code):
 
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    snap_path = "out_cn/quotes_20261123.json"
+    # 快照默认取「今天」那一个；写死旧日期会把过期的报价当今天补进日线尾（2026-11-25 踩过）
+    _today = datetime.date.today().strftime("%Y%m%d")
+    snap_path = "out_cn/quotes_%s.json" % _today
+    if not os.path.exists(snap_path):
+        snap_path = ""
     if "--snap" in sys.argv:
         snap_path = sys.argv[sys.argv.index("--snap") + 1]
     snap = {}
