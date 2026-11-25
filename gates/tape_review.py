@@ -580,10 +580,11 @@ def summarize(day):
     main = flow["main"] if flow else None
     small = flow["small"] if flow else None
     chg = (day.get("quote") or {}).get("f170")
-    up = chg is not None and chg > 0
+    # 不能叫 up：L553 的 up 是分钟涨量，覆盖后 render/fact_rows 的涨量/跌量会变成 True/dn
+    is_up = chg is not None and chg > 0
     pullback_hi = (hi["h"] - last["c"]) / hi["h"] if hi.get("h") else 0.0
     key, text = reading(last["c"], last["avg"], pos, after_share, main, small,
-                        up=up, pullback_hi=pullback_hi)
+                        up=is_up, pullback_hi=pullback_hi)
     verdict = conclude(day, {
         "last": last, "flow": flow, "pos": pos, "after_share": after_share,
         "session_done": day["session_done"], "hi": hi,

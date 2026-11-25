@@ -10,7 +10,8 @@ sys.path.insert(0, ROOT)
 from gates.tape_review import (  # noqa: E402
     close_pos, conclude, cumulate_flow, dedupe, fact_rows, flow_after_high,
     flow_at, minute_up_down, norm_date, parse_flow, parse_minute, parse_tick,
-    reading, running_vwap, slice_by_date, verdict_window, _verdict_row,
+    reading, render, running_vwap, slice_by_date, summarize, verdict_window,
+    _verdict_row,
 )
 
 
@@ -67,6 +68,39 @@ def test_minute_up_down_and_position():
     assert up == 50
     assert dn == 80
     assert abs(close_pos(9, 11, 10) - 0.5) < 1e-9
+
+
+def test_summarize_keeps_minute_up_down():
+    """regression: L583 曾用 up 存「当日收涨」布尔，覆盖 L553 的分钟涨量，
+    导致 render/fact_rows 的涨量/跌量输出 True/dn ≈ 0.00（2026-11-25 天孚）。"""
+    day = {
+        "frame": "minute", "session_done": False, "bench_name": "创业板指",
+        "pre": 10.0, "name": "测试票", "code": "000000", "date": "2026-11-25",
+        "quote": {"f46": 10.0, "f47": 1000, "f48": 1e7, "f50": 2.0,
+                  "f161": 600, "f168": 3.0, "f170": 2.5},
+        "minutes": [
+            {"t": "09:31", "o": 10.0, "h": 10.2, "l": 9.9, "c": 10.1, "avg": 10.05, "v": 100, "amt": 1000},
+            {"t": "09:32", "o": 10.1, "h": 10.4, "l": 10.1, "c": 10.3, "avg": 10.15, "v": 200, "amt": 2000},
+            {"t": "09:33", "o": 10.3, "h": 10.35, "l": 10.2, "c": 10.2, "avg": 10.25, "v": 50, "amt": 500},
+        ],
+        "indexes": {"创业板指": 1.0},
+        "bench_minutes": [
+            {"t": "09:31", "o": 100, "c": 100},
+            {"t": "09:32", "o": 100, "c": 101},
+            {"t": "09:33", "o": 101, "c": 100.5},
+        ],
+        "bench_base": 100,
+        "ticks": [],
+        "flows": [
+            {"t": "09:31", "main": 1e6, "small": -1e6, "mid": 0, "large": 1e6, "super": 1e6},
+            {"t": "09:33", "main": 2e6, "small": -2e6, "mid": 0, "large": 2e6, "super": 2e6},
+        ],
+    }
+    s = summarize(day)
+    assert s["up"] == 200 and s["dn"] == 50
+    assert not isinstance(s["up"], bool)
+    assert dict(fact_rows(day, s))["分钟涨量/跌量"] == "4.00"
+    assert "分钟涨量/跌量 4.00" in render(day, s)
 
 
 def test_range_helpers():
@@ -174,6 +208,7 @@ if __name__ == "__main__":
     test_flow_partition_and_pullback()
     test_reading_labels()
     test_minute_up_down_and_position()
+    test_summarize_keeps_minute_up_down()
     test_range_helpers()
     test_fact_and_verdict_share_reading()
     test_conclude_four_ways()
