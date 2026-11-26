@@ -76,7 +76,13 @@ def load_history(dirpath):
         if w.get("adv_ratio") is None:
             continue
         asof = str(d.get("asof") or "")
-        day = asof[:10] or os.path.basename(p)[10:18]
+        # 归日以行情日（score_date）为准：asof 是「落盘时刻」，隔日清晨重跑会把
+        # 前一交易日的样本改归到当天，与当天样本撞键后丢失（2026-11-26 踩过）。
+        sd = str(d.get("score_date") or "")
+        if len(sd) == 8 and sd.isdigit():
+            day = "%s-%s-%s" % (sd[:4], sd[4:6], sd[6:])
+        else:
+            day = asof[:10] or os.path.basename(p)[10:18]
         rec = {
             "file": os.path.basename(p),
             "day": day,
